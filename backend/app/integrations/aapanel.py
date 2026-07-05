@@ -35,14 +35,24 @@ class AaPanelClient(BaseClient):
     def __init__(self):
         super().__init__(settings.AAPANEL_URL)
         self.api_sk = settings.AAPANEL_API_KEY
-        # aaPanel serves a self-signed cert on :8888, so default TLS verification
-        # fails. Preferred (docs/api/aapanel.md "Gotchas"): pin the panel's own cert —
-        # copy /www/server/panel/ssl/certificate.pem locally and set AAPANEL_CA_BUNDLE
-        # to its path; that keeps MITM protection. verify=False fallback is only
-        # acceptable for a same-host 127.0.0.1 panel, never a remote one.
-        # Single persistent client = single cookie jar, required by the panel auth.
-        verify: str | bool = getattr(settings, "AAPANEL_CA_BUNDLE", "") or False
-        self._client = httpx.Client(timeout=30, follow_redirects=True, verify=verify)
+        # aaPanel serves a self-signed cert on :8888. Pin it via AAPANEL_CA_BUNDLE (copy
+        # /www/server/panel/ssl/certificate.pem locally, set its path) to keep MITM
+        # protection. FAIL CLOSED: for any NON-loopback panel we refuse to silently fall
+        # back to verify=False — that's a MITM hole for a token-bearing client. verify=False
+        # is tolerated only for a same-host 127.0.0.1 panel. Single client = single cookie jar.
+        from urllib.parse import urlparse
+        host = (urlparse(settings.AAPANEL_URL).hostname or "").lower()
+        ca = getattr(settings, "AAPANEL_CA_BUNDLE", "") or ""
+        if ca:
+            verify: str | bool = ca
+        elif host in {"127.0.0.1", "localhost", "::1"}:
+            verify = False
+        else:
+            raise RuntimeError(
+                f"aaPanel {host!r} is not loopback and AAPANEL_CA_BUNDLE is unset — refusing "
+                "verify=False (MITM risk). Set AAPANEL_CA_BUNDLE to the panel's cert path.")
+        # follow_redirects=False: never let a redirect carry the auth token to another host.
+        self._client = httpx.Client(timeout=30, follow_redirects=False, verify=verify)
 
     # -- auth / transport ---------------------------------------------------
 

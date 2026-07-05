@@ -100,10 +100,14 @@ def test_edit_gate_and_publish(client, monkeypatch):
     pages = client.get(f"/sites/{site_id}/pages").json()
     home = next(p for p in pages if p["url_path"] == "/")
     assert client.post(f"/pages/{home['id']}/edit",
-                       json={"body": "<h2>Edited</h2>"}).json()["status"] == "edited"
+                       json={"body": "<h2>Edited</h2><script>alert('xss')</script>"}
+                       ).json()["status"] == "edited"
 
     # attach offer + publish (mock the aaPanel file write)
     client.post(f"/sites/{site_id}/offer", json={"offer_id": offer_id})
+    # aaPanel client fails closed for non-loopback URLs w/o a CA bundle — use loopback in the test
+    from app.config import settings
+    monkeypatch.setattr(settings, "AAPANEL_URL", "https://127.0.0.1:8888")
     writes = []
     monkeypatch.setattr("app.integrations.aapanel.AaPanelClient.write_file",
                         lambda self, path, content: (writes.append((path, content)), {"status": True})[1])
@@ -115,6 +119,7 @@ def test_edit_gate_and_publish(client, monkeypatch):
     path, page_html = writes[0]
     assert path.endswith("/index.html")
     assert "SAVE10" in page_html and 'rel="sponsored nofollow"' in page_html and "Раскрытие" in page_html
+    assert "<script" not in page_html.lower() and "xss" not in page_html   # sanitized on edit
     states = sorted(p["status"] for p in client.get(f"/sites/{site_id}/pages").json())
     assert states == ["draft", "draft", "published"]
 

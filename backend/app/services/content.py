@@ -7,8 +7,22 @@ editorial gate from PLAN §2. Content must be topically coherent with the offer.
 import html
 import re
 
+import nh3
+
 DISCLOSURE = ("Раскрытие: страница содержит партнёрские ссылки. Мы можем получить "
               "комиссию за покупки по ним — без доплаты для вас.")
+
+# Sanitize-on-write allowlist: published pages are public sites, so hostile HTML
+# (<script>/<iframe>/on*/style) must never reach the DB. Tags match what M4 emits.
+_ALLOWED_TAGS = {"h2", "h3", "h4", "p", "ul", "ol", "li", "a", "strong", "em", "b", "i",
+                 "br", "blockquote", "table", "thead", "tbody", "tr", "th", "td",
+                 "code", "pre", "figure", "figcaption"}
+_ALLOWED_ATTRS = {"a": {"href", "title"}}
+
+
+def _sanitize(body: str | None) -> str:
+    """Strip everything outside the allowlist (script/iframe/event-handlers/style)."""
+    return nh3.clean(body or "", tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS)
 
 
 def scaffold(brand: str, niche: str | None = None) -> list[dict]:
@@ -63,7 +77,8 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
                 Page.site_id == site_id, Page.url_path == spec["url_path"])).scalar_one_or_none()
             if exists:
                 continue  # idempotent — don't regenerate existing pages
-            body = _clean(llm.complete(_system_prompt(lang), _page_prompt(spec, brand, vertical_data)))
+            body = _sanitize(_clean(llm.complete(_system_prompt(lang),
+                                                 _page_prompt(spec, brand, vertical_data))))
             db.add(Page(site_id=site_id, url_path=spec["url_path"], title=spec["title"],
                         status="draft", body=body))
             created += 1
@@ -82,7 +97,7 @@ def mark_edited(page_id: int, body: str | None = None) -> dict:
         if p is None:
             raise ValueError(f"page {page_id} not found")
         if body is not None:
-            p.body = body
+            p.body = _sanitize(body)   # human-approved, but still allowlist it (defense-in-depth)
         p.status = "edited"
         db.commit()
         return {"page_id": page_id, "status": p.status}
@@ -114,4 +129,7 @@ if __name__ == "__main__":  # pure checks (no network/DB): disclosure + sponsore
     assert render_html(pg, None).count("offer") == 0  # no offer -> no offer block
     assert _clean("```html\n<h2>x</h2>\n```") == "<h2>x</h2>"  # fence stripped
     assert _clean("<p>plain</p>") == "<p>plain</p>"
-    print("content render_html + _clean ok")
+    dirty = _sanitize('<h2>ok</h2><script>alert(1)</script><a href="x" onclick="bad()">l</a>')
+    assert "script" not in dirty.lower() and "onclick" not in dirty.lower(), dirty
+    assert "<h2>ok</h2>" in dirty and "alert" not in dirty, dirty   # tag+content of <script> gone
+    print("content render_html + _clean + _sanitize ok")
