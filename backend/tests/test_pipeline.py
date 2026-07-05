@@ -132,6 +132,50 @@ def test_edit_gate_and_publish(client, monkeypatch):
     assert client.post(f"/api/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
 
 
+def test_acquisition_queue_and_gate():
+    """M2: очередь + денежный гейт — execute отказывает без подтверждения человеком."""
+    from app.services import acquisition
+    from app.models.domain import Domain, AcquisitionOrder
+    did = _add(Domain(domain="buy-me.ru", source="backorder", status="approved"))
+    oid = acquisition.create_order(did, "backorder")
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, oid)
+        assert o.status == "pending_confirm" and o.confirmed_by_human is False
+        assert s.get(Domain, did).status == "purchasing"          # видно в воронке
+    assert acquisition.create_order(did, "backorder") == oid       # идемпотентно, без дублей
+    # ГЕЙТ: execute до подтверждения отказывает, статус не меняется
+    r = acquisition.execute_confirmed_order(oid)
+    assert "gate" in (r.get("error") or "")
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).status == "pending_confirm"
+    # человек подтверждает -> гейт открыт
+    acquisition.confirm_order(oid)
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).confirmed_by_human is True
+    # execute идёт к провайдеру; транспорт не готов -> честный failed (не ложный успех)
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "implement" in (r.get("error") or "").lower()
+
+
+def test_queue_panel_actions(client):
+    """Экран /queue и действия: add из панели -> рендер -> гейт на execute -> confirm."""
+    from sqlalchemy import select
+    from app.models.domain import Domain, AcquisitionOrder
+    did = _add(Domain(domain="q-panel.ru", source="backorder", status="approved"))
+    assert client.post(f"/domains/{did}/queue", data={"provider": "backorder"},
+                       follow_redirects=False).status_code == 303
+    with db.SessionLocal() as s:
+        oid = s.execute(select(AcquisitionOrder.id)).scalar_one()
+    r = client.get("/queue")
+    assert r.status_code == 200 and "q-panel.ru" in r.text and "подтвердить выкуп" in r.text
+    # execute до подтверждения -> err-flash (гейт)
+    r = client.post(f"/queue/{oid}/execute", follow_redirects=False)
+    assert r.status_code == 303 and "err=" in r.headers["location"]
+    # confirm -> execute (провайдер не готов, но 303 без 500)
+    client.post(f"/queue/{oid}/confirm", follow_redirects=False)
+    assert client.post(f"/queue/{oid}/execute", follow_redirects=False).status_code == 303
+
+
 def test_panel_basic_auth(client, monkeypatch):
     """Basic-auth: выкл по умолчанию; включённый — 401 без кредов, 200 с верными, /health открыт."""
     from app.config import settings

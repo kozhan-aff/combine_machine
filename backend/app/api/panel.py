@@ -160,6 +160,16 @@ def offers_view(request: Request, db: Session = Depends(get_session)):
     return templates.TemplateResponse(request, "offers.html", {"active": "offers", "rows": rows})
 
 
+@router.get("/queue", response_class=HTMLResponse)
+def queue_view(request: Request):
+    from app.services import acquisition
+    orders = acquisition.list_orders()
+    return templates.TemplateResponse(request, "queue.html", {
+        "active": "queue", "orders": orders,
+        "n_pending": sum(1 for o in orders if o["status"] == "pending_confirm"),
+    })
+
+
 @router.get("/sites/{site_id}", response_class=HTMLResponse)
 def site_view(request: Request, site_id: int, db: Session = Depends(get_session)):
     site = db.get(Site, site_id)
@@ -244,6 +254,41 @@ def make_site_action(domain_id: int):
         return _back(f"/sites/{sid}", msg="Сайт создан. Дальше: привяжи оффер и запусти Provision.")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"создание сайта: {e}")
+
+
+# --- M2 очередь выкупа (структурный путь: очередь + подтверждение + отправка) ------
+@router.post("/domains/{domain_id}/queue")
+def queue_add_action(domain_id: int, provider: str = Form("backorder")):
+    from app.services import acquisition
+    try:
+        oid = acquisition.create_order(domain_id, provider)
+        return _back("/queue", msg=f"Домен в очереди выкупа (заказ #{oid}). Подтверди — тогда уйдёт провайдеру.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/domains", err=f"в очередь: {e}")
+
+
+@router.post("/queue/{order_id}/confirm")
+def queue_confirm_action(order_id: int):
+    from app.services import acquisition
+    try:
+        acquisition.confirm_order(order_id)
+        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт). Можно отправлять.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"подтверждение: {e}")
+
+
+@router.post("/queue/{order_id}/execute")
+def queue_execute_action(order_id: int):
+    from app.services import acquisition
+    try:
+        r = acquisition.execute_confirmed_order(order_id)
+        if r.get("error"):
+            return _back("/queue", err=r["error"])
+        if r.get("status") == "failed":
+            return _back("/queue", err=f"заказ #{order_id}: {r.get('error') or 'провайдер не готов (нужны login-креды)'}")
+        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус {r.get('status')}.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"отправка: {e}")
 
 
 @router.post("/offers/create")

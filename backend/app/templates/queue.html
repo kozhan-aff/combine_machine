@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Выкуп · M2{% endblock %}
+{% block content %}
+
+{% set _b = {'pending_confirm':'b-scored','ordered':'b-purchased','caught':'b-live','failed':'b-rejected'} %}
+
+<h2><span class="idx">M2</span> Очередь выкупа
+  <span class="hint">структурный путь: заявка → подтверждение человеком → отправка провайдеру</span></h2>
+
+<p class="hint" style="margin:0 0 16px; max-width:820px">
+  <b style="color:var(--ink)">Денежный гейт.</b> Заказ уходит провайдеру ТОЛЬКО после того, как ты
+  нажал «подтвердить выкуп» — система сама деньги не тратит. Быстрый путь без очереди
+  (отметить домен купленным руками) остался на экране <a href="/domains">Домены</a>; эта очередь —
+  когда выкуп идёт через API провайдера (backorder/optimizator).
+  {% if n_pending %}<br><b style="color:var(--amber2)">{{ n_pending }} заказов ждут твоего подтверждения.</b>{% endif %}
+</p>
+
+<div class="wrap">
+{% if orders %}
+<table>
+  <thead><tr>
+    <th>#</th><th>домен</th><th>провайдер</th><th>статус</th><th>гейт</th><th>действие</th><th>результат</th>
+  </tr></thead>
+  <tbody>
+  {% for o in orders %}
+    <tr>
+      <td class="num hint">{{ o.id }}</td>
+      <td class="dom">{{ o.domain }}</td>
+      <td class="hint">{{ o.provider }}</td>
+      <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
+            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов'}.get(o.status, o.status) }}">{{ o.status }}</span></td>
+      <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
+          {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
+      <td>
+        {% if o.status == 'pending_confirm' and not o.confirmed %}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
+                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }}? Это money-gate — дальше заказ можно отправить провайдеру.')">
+            <button class="btn-sm btn-buy" title="поднять денежный гейт: я готов оплатить этот домен">✓ подтвердить выкуп</button></form>
+        {% elif o.status == 'pending_confirm' and o.confirmed %}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
+            <button class="btn-sm btn-amber" title="отправить подтверждённый заказ провайдеру">▶ отправить провайдеру</button></form>
+        {% elif o.status == 'failed' and o.confirmed %}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
+            <button class="btn-sm" title="повторить отправку провайдеру">↻ повторить</button></form>
+        {% else %}<span class="hint">—</span>{% endif %}
+      </td>
+      <td class="hint" style="max-width:360px; overflow:hidden; text-overflow:ellipsis">
+        {{ o.result.error if o.result and o.result.error else (o.result if o.result else '') }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Очередь пуста. Одобренные домены (статус <span class="badge b-approved">approved</span>)
+  ставятся сюда кнопкой «＋ в очередь выкупа» на экране <a href="/domains?status=approved">Домены</a>.</div>
+{% endif %}
+</div>
+
+{% endblock %}

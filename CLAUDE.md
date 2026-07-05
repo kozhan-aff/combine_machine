@@ -48,12 +48,19 @@ Python 3.12 + FastAPI + SQLAlchemy 2.x + Pydantic v2; PostgreSQL 16; Alembic; ht
 или веб-панель — на твоё усмотрение, главное надёжность пайплайна.
 
 ## Текущее состояние (2026-07-05)
-**Панель работает, петля проверена на моках.** M1 целиком (discovery по фиду + скоринг + курация из панели);
-петля M3→M4→M5 прогнана end-to-end с моками CF/aaPanel (aaPanel проверен и вживую на VPS); оба гейта держат
-(тесты `backend/tests/`, 7/7). HTML-панель — `app/api/panel.py` + `app/templates/`; JSON-двойник под `/api`.
-`/diag` пингует все интеграции + кнопка «Обновить из git» (`POST /admin/pull`, нужен GITHUB_TOKEN).
-Деплой: **бокс = Windows + Docker Desktop**, репо в `D:\combine_machine`, панель на LAN
-`http://192.168.1.77:8000/` (без auth — в интернет НЕ выставлять; детали docs/DEPLOY.md).
+**Панель работает, петля проверена на моках; M2/M4 углублены.** M1 целиком (discovery + скоринг + курация);
+петля M3→M4→M5 прогнана end-to-end с моками CF/aaPanel (aaPanel проверен вживую); оба гейта держат
+(тесты `backend/tests/`, 10/10). Сверх MVP уже сделано и проверено вживую:
+- **M4 information gain (§2):** `services/vertical_data.py` — датасет реальных VPN-фактов (7 брендов),
+  подмешивается в генерацию; `services/competitor.py` — структура тем от топ-конкурента через **A-Parser**
+  (SE::Google → Net::HTTP, ходит через прокси; Browserless в рантайме НЕ используем). Проверено на LiteLLM/A-Parser бокса.
+- **M2 очередь выкупа:** `services/acquisition.py` + экран `/queue` — create→confirm(человек)→execute с
+  жёстким денежным гейтом; живой заказ у провайдера ждёт login-кредов (execute честно репортит failed).
+- **Auth:** Basic-auth на панель (`PANEL_USER`/`PANEL_PASS` в .env; пусто=выкл) — закрывает LAN-экспозицию.
+
+HTML-панель — `app/api/panel.py` + `app/templates/`; JSON-двойник под `/api`. `/diag` пингует интеграции +
+кнопка «Обновить из git» (`POST /admin/pull`, нужен GITHUB_TOKEN). Деплой: **бокс = Windows + Docker Desktop**,
+репо `D:\combine_machine`, панель на LAN `http://192.168.1.77:8000/` (защищать Basic-auth; детали docs/DEPLOY.md).
 
 ## Что делать дальше
 **Первый реальный домен через полную петлю:** купить одобренный дроп руками → карточка сайта, шаги 3→7.
