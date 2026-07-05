@@ -3,6 +3,7 @@
 __pycache__/
 .venv/
 /secrets/
+*.pem
 *.sqlite3
 *.db
 dist/
