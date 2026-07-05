@@ -77,6 +77,12 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
             offer = db.execute(select(Offer).where(Offer.active.is_(True)).limit(1)).scalar_one_or_none()
         brand = offer.brand if offer else (site.niche or "VPN")
 
+        # information gain (PLAN §2): подмешиваем реальные факты вертикали, если бренд знаком.
+        # Явно переданный vertical_data приоритетнее (напр. свежий фид). Неизвестный бренд -> None.
+        if vertical_data is None:
+            from app.services.vertical_data import vertical_block
+            vertical_data = vertical_block(brand)
+
         llm = LlmClient()
         created = 0
         for spec in scaffold(brand, site.niche):
