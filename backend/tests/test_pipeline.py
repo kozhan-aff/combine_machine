@@ -105,9 +105,12 @@ def test_edit_gate_and_publish(client, monkeypatch):
 
     # attach offer + publish (mock the aaPanel file write)
     client.post(f"/api/sites/{site_id}/offer", json={"offer_id": offer_id})
-    # aaPanel client fails closed for non-loopback URLs w/o a CA bundle — use loopback in the test
+    # aaPanel client fails closed for non-loopback URLs w/o a CA bundle — use loopback in the test.
+    # CA_BUNDLE тоже зануляем: в локальном .env может лежать контейнерный путь (/app/aapanel.pem),
+    # которого нет на этой машине, — тест не должен зависеть от .env.
     from app.config import settings
     monkeypatch.setattr(settings, "AAPANEL_URL", "https://127.0.0.1:8888")
+    monkeypatch.setattr(settings, "AAPANEL_CA_BUNDLE", "")
     writes = []
     monkeypatch.setattr("app.integrations.aapanel.AaPanelClient.write_file",
                         lambda self, path, content: (writes.append((path, content)), {"status": True})[1])

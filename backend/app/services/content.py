@@ -60,14 +60,21 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.site import Site, Page
-    from app.models.offer import Offer
+    from app.models.offer import Offer, SiteOffer
     from app.integrations.llm import LlmClient
 
     with SessionLocal() as db:
         site = db.get(Site, site_id)
         if site is None:
             raise ValueError(f"site {site_id} not found")
-        offer = db.execute(select(Offer).where(Offer.active.is_(True)).limit(1)).scalar_one_or_none()
+        # тематическая связность: бренд берём из оффера, ПРИВЯЗАННОГО к сайту (как в publish),
+        # иначе контент напишется про один бренд, а ссылка при публикации уйдёт на другой
+        offer = db.execute(
+            select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
+            .where(SiteOffer.site_id == site_id, Offer.active.is_(True)).limit(1)
+        ).scalar_one_or_none()
+        if offer is None:  # fall back to any active offer
+            offer = db.execute(select(Offer).where(Offer.active.is_(True)).limit(1)).scalar_one_or_none()
         brand = offer.brand if offer else (site.niche or "VPN")
 
         llm = LlmClient()

@@ -52,6 +52,13 @@ class AaPanelClient(BaseClient):
         host = (urlparse(settings.AAPANEL_URL).hostname or "").lower()
         ca = getattr(settings, "AAPANEL_CA_BUNDLE", "") or ""
         if ca:
+            # Fail fast with a readable error: load_verify_locations raises a bare
+            # FileNotFoundError without the path, useless in the /diag banner.
+            from pathlib import Path
+            if not Path(ca).is_file():
+                raise RuntimeError(
+                    f"AAPANEL_CA_BUNDLE={ca!r} — файл не найден на этом хосте "
+                    "(путь из контейнера? скопируй cert панели и поправь .env)")
             # Pin the panel's self-signed cert. check_hostname=False on purpose: the cert's
             # CN/SAN won't match a bare IP, so hostname matching would fail — and it buys
             # nothing here. Pinning to THIS exact cert is the real MITM defense (an attacker's

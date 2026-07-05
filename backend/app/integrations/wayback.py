@@ -3,7 +3,6 @@
 Reconstruct what a domain hosted over time -> prior_flags (adult/pharma/casino/gambling/spam),
 topic_switch, real age (first snapshot). Heavy — run only on pre-filtered candidates; cache.
 """
-import re
 import time
 from datetime import datetime, timezone
 from app.integrations.base import BaseClient
