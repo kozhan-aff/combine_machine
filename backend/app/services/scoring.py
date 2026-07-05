@@ -33,8 +33,9 @@ def compute_score(sig: dict) -> dict:
     # --- composite (Stage F) ---
     n = cfg.NORM
     comp = {
-        "history_cleanliness": (1.0 - (0.5 if pf.get("spam") else 0.0))
-                               if sig.get("wayback_checked") else 0.5,
+        # spam (как и остальная грязная история) уже отсеян hard-reject'ом выше —
+        # уцелевший домен чист: полный балл при проверенной истории, половина при непроверенной.
+        "history_cleanliness": 1.0 if sig.get("wayback_checked") else 0.5,
         "authority": _clamp((sig.get("dr") or 0.0) / n["DR_FULL"]),
         "age": _clamp((sig.get("age_years") or 0.0) / n["AGE_FULL"]),
         "rd_proxy": _clamp(math.log10((sig.get("referring_domains") or 0) + 1)
@@ -50,50 +51,68 @@ def compute_score(sig: dict) -> dict:
     # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
     if status == "approved" and not sig.get("wayback_checked"):
         status = "scored"
+    # risk-guard: если проверка RKN или blacklist упала (ключ сигнала отсутствует, ошибка
+    # осела в errors), нельзя подтверждать чистоту автоматом — уводим в ручной `scored`.
+    if status == "approved" and any(
+            e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
+        status = "scored"
     return {"score": score, "status": status,
             "breakdown": {"components": comp, "weights": cfg.WEIGHTS}}
 
 
-def _gather_signals(domain: str) -> dict:
-    """Run the free-stack enrichment for one domain. Each source degrades gracefully."""
+def _make_clients() -> dict:
+    """Собрать интеграционные клиенты один раз на прогон (переиспользуются между доменами)."""
     from app.config import settings
     from app.integrations.wayback import WaybackClient
     from app.integrations.rkn import RknClient
     from app.integrations.blacklist import BlacklistClient
     from app.integrations.searxng import SearxngClient
     from app.integrations.openpagerank import OpenPageRankClient
+    return {
+        "wayback": WaybackClient(),
+        "rkn": RknClient(),
+        "blacklist": BlacklistClient(),
+        "searxng": SearxngClient(),
+        "opr": OpenPageRankClient() if settings.OPENPAGERANK_API_KEY else None,
+    }
 
+
+def _gather_signals(domain: str, clients: dict | None = None) -> dict:
+    """Free-stack enrichment for one domain. Each source degrades gracefully.
+    Clients переиспользуются, если переданы (score_pending строит их раз на прогон);
+    иначе создаются на месте."""
+    c = clients or _make_clients()
     sig: dict = {"errors": []}
 
     try:  # history (heavy) — the core "clean history" signal
-        sig.update(WaybackClient().classify_history(domain))
+        sig.update(c["wayback"].classify_history(domain))
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
 
     try:
-        sig["rkn_listed"] = RknClient().is_listed(domain)
+        sig["rkn_listed"] = c["rkn"].is_listed(domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"rkn:{type(e).__name__}")
 
     try:
-        sig["blacklisted"] = BlacklistClient().is_blacklisted(domain)
+        sig["blacklisted"] = c["blacklist"].is_blacklisted(domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"blacklist:{type(e).__name__}")
 
     try:
-        sig["indexed_echo"] = SearxngClient().indexed_echo(domain)
+        sig["indexed_echo"] = c["searxng"].indexed_echo(domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
-    if settings.OPENPAGERANK_API_KEY:
+    if c["opr"] is not None:
         try:
-            sig["dr"] = OpenPageRankClient().get_page_rank([domain]).get(domain)
+            sig["dr"] = c["opr"].get_page_rank([domain]).get(domain)
         except Exception as e:  # noqa: BLE001
             sig["errors"].append(f"opr:{type(e).__name__}")
     return sig
 
 
-def score_domain(domain_id: int) -> dict:
+def score_domain(domain_id: int, clients: dict | None = None) -> dict:
     """Full funnel for one domain: enrich -> score -> persist. Returns the breakdown."""
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -103,7 +122,9 @@ def score_domain(domain_id: int) -> dict:
         if d is None:
             raise ValueError(f"domain {domain_id} not found")
 
-        sig = _gather_signals(d.domain)
+        # clients=None -> _gather_signals соберёт свои; вызов одним аргументом сохраняет
+        # совместимость с monkeypatch в тестах (там _gather_signals — функция от domain).
+        sig = _gather_signals(d.domain) if clients is None else _gather_signals(d.domain, clients)
         sig.setdefault("referring_domains", d.referring_domains)
         result = compute_score(sig)
 
@@ -137,8 +158,9 @@ def score_pending(limit: int = 100) -> int:
             .order_by(Domain.referring_domains.desc().nulls_last())  # лучшие кандидаты первыми
             .limit(limit)
         ).scalars().all()
+    clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
     for did in ids:
-        score_domain(did)
+        score_domain(did, clients)
     return len(ids)
 
 

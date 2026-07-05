@@ -2,29 +2,49 @@
 
 DNS-based domain lists: Spamhaus DBL, SURBL. Query <domain>.<zone> for an A record;
 NXDOMAIN = not listed, 127.0.x.y = listed, 127.255.255.x = lookup unavailable (public
-resolver blocked / over quota) -> return None (never treat as clean OR as a hit).
+resolver blocked / over quota) -> RAISE (never treat as clean OR as a hit).
 
-v1 uses stdlib socket (system resolver). For volume, run own unbound and set DNS_RESOLVER,
-or use SPAMHAUS_DQS_KEY.
-# ponytail: stdlib resolver; swap to dnspython+custom resolver when volume needs it.
+Spamhaus blocks public resolvers (8.8.8.8/1.1.1.1): set DNS_RESOLVER to your own unbound
+(then queries go through dnspython), or use SPAMHAUS_DQS_KEY. Without a private resolver
+the 127.255.255.x sentinel fires and this raises — the scoring risk-guard then routes the
+domain to manual `scored` instead of silently passing the blacklist gate.
 """
 import socket
+from app.config import settings
 
 _ZONES = ("dbl.spamhaus.org", "multi.surbl.org")
 
 
 class BlacklistClient:
+    def _resolve(self, host: str) -> str | None:
+        """A-record IP for host, or None on NXDOMAIN. Через свой DNS_RESOLVER, если задан
+        (dnspython), иначе системный резолвер (stdlib socket)."""
+        if settings.DNS_RESOLVER:
+            import dns.resolver  # dnspython нужен только на этом пути
+            resolver = dns.resolver.Resolver(configure=False)
+            resolver.nameservers = [settings.DNS_RESOLVER]
+            try:
+                return resolver.resolve(host, "A")[0].address
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                return None  # здесь не листнут
+        try:
+            return socket.gethostbyname(host)
+        except socket.gaierror:
+            return None  # NXDOMAIN on this zone = not listed here
+
     def is_blacklisted(self, domain: str) -> bool | None:
         """True = listed, False = clean on all zones, None = lookup unavailable."""
         for zone in _ZONES:
             try:
-                ip = socket.gethostbyname(f"{domain}.{zone}")
-            except socket.gaierror:
-                continue  # NXDOMAIN on this zone = not listed here
+                ip = self._resolve(f"{domain}.{zone}")
             except OSError:
-                return None  # resolver/network error -> unknown
-            if ip.startswith("127.255."):
-                return None  # error/blocked-resolver sentinel -> unknown, not a hit
+                return None  # системный резолвер/сеть отвалились -> unknown
+            if ip is None:
+                continue  # NXDOMAIN -> not listed on this zone
+            if ip.startswith("127.255.255."):
+                # sentinel «публичный резолвер заблокирован» — НЕ тихий None: пусть уйдёт
+                # в errors, чтобы risk-guard увёл домен в scored, а не мимо гейта.
+                raise RuntimeError("Spamhaus blocked public resolver — задай DNS_RESOLVER")
             if ip.startswith("127."):
                 return True
         return False  # all zones NXDOMAIN -> clean

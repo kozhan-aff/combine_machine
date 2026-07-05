@@ -9,6 +9,7 @@ from app.config import settings
 from app.integrations.base import BaseClient
 
 _REFRESH_SEC = 24 * 3600
+_MIN_DUMP_LINES = 1000   # реестр РКН — сотни тысяч доменов; меньше = пустой/обрезанный ответ
 
 
 def _normalize(domain: str) -> str:
@@ -39,8 +40,17 @@ class RknClient(BaseClient):
         now = time.monotonic()
         if RknClient._loaded_at is None or (now - RknClient._loaded_at) > _REFRESH_SEC:
             r = self.request("GET", self.source_url)
-            RknClient._blocked = {_normalize(ln) for ln in r.text.splitlines()
-                                  if ln.strip() and "." in ln}
+            blocked = {_normalize(ln) for ln in r.text.splitlines()
+                       if ln.strip() and "." in ln}
+            # sanity: пустой/обрезанный ответ (HTTP 200, но мало строк) НЕ кэшируем на сутки
+            # и не выключаем проверку молча. Есть валидный кэш — оставляем его; нет — падаем.
+            if len(blocked) < _MIN_DUMP_LINES:
+                if RknClient._loaded_at is None:
+                    raise RuntimeError(
+                        f"RKN dump подозрительно мал ({len(blocked)} строк) — не кэширую, "
+                        f"проверка не должна молча выключаться")
+                return  # оставляем прежний валидный кэш до следующего refresh
+            RknClient._blocked = blocked
             RknClient._loaded_at = now
 
     def is_listed(self, domain: str) -> bool:

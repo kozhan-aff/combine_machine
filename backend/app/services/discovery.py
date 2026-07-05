@@ -24,6 +24,7 @@ def normalize_row(row: dict) -> dict | None:
 def run_discovery(min_links: int = 1) -> int:
     """Fetch the drop feed, upsert new candidates, return count of newly inserted domains."""
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.integrations.backorder import BackorderClient
@@ -33,14 +34,24 @@ def run_discovery(min_links: int = 1) -> int:
     if not candidates:
         return 0
 
-    with SessionLocal() as db:
+    def _insert(db) -> int:
         existing = set(db.execute(
             select(Domain.domain).where(Domain.domain.in_(candidates))
         ).scalars().all())
-        new = [Domain(**c) for name, c in candidates.items() if name not in existing]
-        db.add_all(new)
+        fresh = [name for name in candidates if name not in existing]
+        db.add_all(Domain(**candidates[name]) for name in fresh)
         db.commit()
-        return len(new)
+        return len(fresh)
+
+    with SessionLocal() as db:
+        try:
+            return _insert(db)
+        except IntegrityError:
+            # гонка: параллельный запуск вставил часть кандидатов между нашим SELECT и COMMIT
+            # (unique на domain). Откатываемся, перечитываем existing и досыпаем остаток —
+            # одной повторной попытки достаточно (перечитанный existing уже включает их вставки).
+            db.rollback()
+            return _insert(db)
 
 
 if __name__ == "__main__":  # pure normalize self-check (no network)

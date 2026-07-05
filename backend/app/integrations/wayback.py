@@ -50,8 +50,9 @@ class WaybackClient(BaseClient):
         """Sample snapshots across the timeline, classify -> prior_flags + age + first_seen."""
         snaps = self.get_snapshots(domain)
         if not snaps:
+            # домен не архивировался — историю подтвердить нечем, НЕ выдаём «проверено»
             return {"prior_flags": {}, "first_seen": None, "age_years": None,
-                    "wayback_checked": True, "sampled": 0}
+                    "wayback_checked": False, "sampled": 0}
 
         first_ts = snaps[0]["timestamp"]
         first_seen = datetime.strptime(first_ts, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
@@ -60,12 +61,20 @@ class WaybackClient(BaseClient):
         # evenly sample across the timeline
         idxs = sorted({int(i * (len(snaps) - 1) / max(sample - 1, 1)) for i in range(sample)})
         cats_by_time: list[set[str]] = []
+        ok = 0  # реально скачанные и классифицированные снапшоты (не попытки)
         for i in idxs:
             try:
                 cats_by_time.append(_classify_text(self._fetch_raw(snaps[i]["timestamp"], snaps[i]["original"])))
+                ok += 1
             except Exception:  # noqa: BLE001  # one bad snapshot must not sink the check
                 cats_by_time.append(set())
             time.sleep(polite)
+
+        if ok == 0:
+            # CDX есть, но ни один снапшот не скачался (archive.org задросселен/недоступен) —
+            # историю НЕ проверили; нельзя выдавать чистый вердикт по нулю данных
+            return {"prior_flags": {}, "first_seen": first_seen, "age_years": age_years,
+                    "wayback_checked": False, "sampled": 0}
 
         all_cats = set().union(*cats_by_time) if cats_by_time else set()
         flags = {c: (c in all_cats) for c in STOPWORDS}
@@ -74,7 +83,7 @@ class WaybackClient(BaseClient):
         later = set().union(*cats_by_time[len(cats_by_time) // 2:]) if cats_by_time else set()
         flags["topic_switch"] = bool((later - early) & {"adult", "pharma", "casino", "gambling"})
         return {"prior_flags": flags, "first_seen": first_seen, "age_years": age_years,
-                "wayback_checked": True, "sampled": len(idxs)}
+                "wayback_checked": True, "sampled": ok}
 
     def ping(self) -> bool:
         r = self.request("GET", f"{self.base_url}/cdx/search/cdx",

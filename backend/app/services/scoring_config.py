@@ -22,7 +22,8 @@ PREFILTER = {
 }
 
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
-HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling")  # prior_flags categories
+# spam included: project invariant — ANY dirty-history flag rejects (see CLAUDE.md).
+HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling", "spam")  # prior_flags categories
 # also hard-reject on: rkn_listed, blacklisted is True, prior_flags.topic_switch
 
 # Stage F — composite weights (positives; sum = 1.0). Free-stack only.
