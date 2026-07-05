@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_session
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
@@ -138,6 +139,17 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
         "site_by_domain": site_by_domain,
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit,
+    })
+
+
+@router.get("/diag", response_class=HTMLResponse)
+def diag_view(request: Request):
+    from app.services.diagnostics import run_diagnostics
+    checks = run_diagnostics()
+    ok = sum(1 for c in checks if c["status"] == "ok")
+    return templates.TemplateResponse(request, "diag.html", {
+        "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
+        "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
     })
 
 
@@ -330,3 +342,32 @@ def check_index_action(site_id: int):
         return _back(f"/sites/{site_id}", msg=f"Индексация — {s}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"индексация: {e}")
+
+
+# --- self-update: git pull + миграции (панель localhost-only, POST-only) -----
+# ponytail: тянем по HTTPS с fine-grained PAT — не монтируем SSH-ключ в контейнер.
+# Требует volume `.:/repo` + git в образе (см. docker-compose/Dockerfile).
+@router.post("/admin/pull")
+def git_pull_action():
+    import subprocess
+    if not settings.GITHUB_TOKEN:
+        return _back("/diag", err="GITHUB_TOKEN не задан в .env — нечем авторизовать git pull")
+    tok = settings.GITHUB_TOKEN
+    url = f"https://x-access-token:{tok}@github.com/{settings.GITHUB_REPO}.git"
+    scrub = lambda s: s.replace(tok, "***")  # никогда не светить токен в баннере
+    try:
+        pull = subprocess.run(
+            ["git", "-C", "/repo", "-c", "safe.directory=/repo", "pull", "--ff-only", url, "main"],
+            capture_output=True, text=True, timeout=120)
+        if pull.returncode != 0:
+            return _back("/diag", err=f"git pull: {scrub((pull.stderr or pull.stdout).strip())[:300]}")
+        head = (pull.stdout.strip().splitlines() or ["ok"])[-1]
+        # миграции идемпотентны; код подхватит uvicorn --reload (следит за /app)
+        mig = subprocess.run(["alembic", "upgrade", "head"], cwd="/app",
+                             capture_output=True, text=True, timeout=120)
+        warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
+        return _back("/diag", msg=f"Обновлено: {scrub(head)[:200]}{warn}")
+    except FileNotFoundError:
+        return _back("/diag", err="git не установлен в контейнере — пересобери образ (docker compose build)")
+    except Exception as e:  # noqa: BLE001
+        return _back("/diag", err=f"update: {scrub(str(e))[:200]}")

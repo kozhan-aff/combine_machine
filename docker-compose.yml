@@ -28,6 +28,9 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
+      # весь репо (с .git) → /repo, чтобы кнопка «Обновить из git» в панели делала
+      # git pull прямо в смонтированные файлы (./backend == /app подхватит --reload).
+      - .:/repo
     # auto-migrate on start (alembic upgrade head is idempotent), then serve
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 

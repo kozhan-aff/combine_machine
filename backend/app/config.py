@@ -76,5 +76,10 @@ class Settings(BaseSettings):
     BROWSERLESS_URL: str = ""
     N8N_URL: str = ""
 
+    # self-update (кнопка «Обновить из git» в панели). Токен — fine-grained PAT,
+    # read-only Contents; тянем по HTTPS, чтобы не монтировать SSH-ключ в контейнер.
+    GITHUB_REPO: str = "kozhan-aff/combine_machine"
+    GITHUB_TOKEN: str = ""
+
 
 settings = Settings()
