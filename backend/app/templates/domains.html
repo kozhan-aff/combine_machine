@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Домены · M1{% endblock %}
+{% block content %}
+
+<h2><span class="idx">02</span> Домены · M1
+  <span class="hint">discovery → score → курация человеком → выкуп руками</span></h2>
+
+<div class="toolbar">
+  <form method="post" action="/run/discovery">
+    <button class="btn-amber" title="забрать свежие дропы из публичного фида backorder">↻ Discovery</button>
+  </form>
+  <form method="post" action="/run/score">
+    <label class="f">сколько
+      <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
+    <button class="btn-amber" title="скорит discovered-домены, лучшие по RD первыми; Wayback ~5с/домен">▶ Score</button>
+  </form>
+  <span class="hint">действия синхронны: Score ≈ 5с × N — страница ответит после завершения</span>
+</div>
+
+<div class="chips">
+  <a class="chip {{ 'on' if not f_status }}" href="/domains">все <b>{{ total }}</b></a>
+  {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
+    {% if counts.get(st) %}
+    <a class="chip {{ 'on' if f_status==st }}" href="/domains?status={{ st }}">{{ st }} <b>{{ counts[st] }}</b></a>
+    {% endif %}
+  {% endfor %}
+  <form method="get" action="/domains" style="display:flex; gap:6px; margin-left:12px">
+    <input type="hidden" name="status" value="{{ f_status }}">
+    <input type="number" name="min_score" step="0.05" min="0" max="1" value="{{ f_min_score }}"
+           placeholder="min score" style="width:92px; padding:2px 8px">
+    <input type="number" name="limit" min="1" max="1000" value="{{ f_limit }}" style="width:70px; padding:2px 8px">
+    <button class="btn-sm">фильтр</button>
+  </form>
+</div>
+
+<div class="wrap">
+{% if rows %}
+<table>
+  <thead><tr>
+    <th>домен</th><th>статус</th><th>score</th><th class="num">RD</th>
+    <th class="num">возраст</th><th>echo</th><th>флаги истории</th><th class="num">найден</th>
+    <th>действия</th>
+  </tr></thead>
+  <tbody>
+  {% for d in rows %}
+    <tr>
+      <td class="dom">{{ d.domain }}
+        <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
+           title="история в Wayback — глянуть глазами перед решением" style="opacity:.6">⌛</a></td>
+      <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status }}</span></td>
+      <td>
+        {% if d.score is not none %}{% set sc = d.score|float %}
+          <span class="meter"><i class="{{ 'm-ok' if sc>=0.6 else 'm-mid' if sc>=0.35 else 'm-low' }}"
+                style="width:{{ (sc*100)|round|int }}%"></i></span><span class="num">{{ '%.2f'|format(sc) }}</span>
+        {% else %}<span class="hint">—</span>{% endif %}
+      </td>
+      <td class="num">{{ d.referring_domains if d.referring_domains is not none else '—' }}</td>
+      <td class="num">{{ '%.1f'|format(d.age_years|float) if d.age_years is not none else '—' }}</td>
+      <td>{% if d.indexed_echo %}<span style="color:var(--ok)">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td>
+        {% set pf = d.prior_flags or {} %}
+        {% for k in ['adult','pharma','casino','gambling','spam','topic_switch'] %}
+          {% if pf.get(k) %}<span class="flag">{{ k }}</span>{% endif %}
+        {% endfor %}
+        {% if d.rkn_listed %}<span class="flag">РКН</span>{% endif %}
+        {% if d.blacklisted %}<span class="flag">blacklist</span>{% endif %}
+      </td>
+      <td class="num hint">{{ d.discovered_at.strftime('%m-%d') if d.discovered_at else '—' }}</td>
+      <td>
+        {# контекстные действия: на каждом статусе видно только осмысленный следующий шаг #}
+        {% if d.status == 'discovered' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="отскорить только этот домен (~5с)">▶ скор</button></form>
+        {% elif d.status == 'scored' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm btn-ok" title="одобрить к выкупу">✓</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="отклонить">✗</button></form>
+        {% elif d.status == 'approved' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="purchased">
+            <button class="btn-sm btn-buy" title="я купил домен руками у провайдера (money-gate: человек)">🛒 куплен</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="передумал">✗</button></form>
+        {% elif d.status == 'purchased' %}
+          {% if site_by_domain.get(d.id) %}
+            <a class="btn btn-sm btn-amber" href="/sites/{{ site_by_domain[d.id] }}">сайт →</a>
+          {% else %}
+            <form class="inline" method="post" action="/domains/{{ d.id }}/make-site">
+              <button class="btn-sm btn-amber" title="создать карточку сайта (M3)">＋ создать сайт</button></form>
+          {% endif %}
+        {% elif d.status == 'rejected' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm" title="вернуть в одобренные">↩</button></form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни с ↻ Discovery — фид принесёт свежие дропы, затем ▶ Score.</div>
+{% endif %}
+</div>
+
+{% endblock %}

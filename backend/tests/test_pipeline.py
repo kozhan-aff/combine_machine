@@ -78,40 +78,40 @@ def test_panel_actions(client, monkeypatch):
 
 
 def test_edit_gate_and_publish(client, monkeypatch):
-    # offer (the machine's input)
-    offer_id = client.post("/offers", json={
+    # offer (the machine's input); JSON API lives under /api
+    offer_id = client.post("/api/offers", json={
         "brand": "NordVPN", "affiliate_link": "https://ex.com/aff", "promo_code": "SAVE10"
     }).json()["id"]
 
     # domain -> HUMAN purchase -> site
     did = _add(Domain(domain="review-site.com", source="backorder", status="approved"))
-    assert client.post(f"/domains/{did}/purchase").json()["status"] == "purchased"
-    site_id = client.post(f"/domains/{did}/site").json()["site_id"]
+    assert client.post(f"/api/domains/{did}/purchase").json()["status"] == "purchased"
+    site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
 
     # M4 generate (mock LiteLLM) -> 3 DRAFT pages
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
                         lambda self, system, prompt, **kw: "<h2>Draft</h2><p>text</p>")
-    assert client.post(f"/sites/{site_id}/generate").json()["created"] == 3
+    assert client.post(f"/api/sites/{site_id}/generate").json()["created"] == 3
 
     # GATE 1: nothing is 'edited' yet -> publish refuses (no auto-publish of AI drafts)
-    assert client.post(f"/sites/{site_id}/publish").json()["status"] == "no_edited_pages"
+    assert client.post(f"/api/sites/{site_id}/publish").json()["status"] == "no_edited_pages"
 
     # human edits exactly ONE page (the '/' review)
-    pages = client.get(f"/sites/{site_id}/pages").json()
+    pages = client.get(f"/api/sites/{site_id}/pages").json()
     home = next(p for p in pages if p["url_path"] == "/")
-    assert client.post(f"/pages/{home['id']}/edit",
+    assert client.post(f"/api/pages/{home['id']}/edit",
                        json={"body": "<h2>Edited</h2><script>alert('xss')</script>"}
                        ).json()["status"] == "edited"
 
     # attach offer + publish (mock the aaPanel file write)
-    client.post(f"/sites/{site_id}/offer", json={"offer_id": offer_id})
+    client.post(f"/api/sites/{site_id}/offer", json={"offer_id": offer_id})
     # aaPanel client fails closed for non-loopback URLs w/o a CA bundle — use loopback in the test
     from app.config import settings
     monkeypatch.setattr(settings, "AAPANEL_URL", "https://127.0.0.1:8888")
     writes = []
     monkeypatch.setattr("app.integrations.aapanel.AaPanelClient.write_file",
                         lambda self, path, content: (writes.append((path, content)), {"status": True})[1])
-    pub = client.post(f"/sites/{site_id}/publish").json()
+    pub = client.post(f"/api/sites/{site_id}/publish").json()
 
     # only the edited page went out — the 2 drafts were left untouched
     assert pub["status"] == "published" and pub["pages"] == ["/"]
@@ -120,10 +120,62 @@ def test_edit_gate_and_publish(client, monkeypatch):
     assert path.endswith("/index.html")
     assert "SAVE10" in page_html and 'rel="sponsored nofollow"' in page_html and "Раскрытие" in page_html
     assert "<script" not in page_html.lower() and "xss" not in page_html   # sanitized on edit
-    states = sorted(p["status"] for p in client.get(f"/sites/{site_id}/pages").json())
+    states = sorted(p["status"] for p in client.get(f"/api/sites/{site_id}/pages").json())
     assert states == ["draft", "draft", "published"]
 
     # M5 index check (mock SearXNG -> no hits)
     monkeypatch.setattr("app.integrations.searxng.SearxngClient.search",
                         lambda self, q, **kw: [])
-    assert client.post(f"/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
+    assert client.post(f"/api/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
+
+
+def test_panel_screens_render(client, monkeypatch):
+    """Каждый HTML-экран панели отвечает 200 и содержит свои ключевые элементы."""
+    # data: domain in every interesting status + site + page
+    for i, st in enumerate(["discovered", "scored", "approved", "purchased"]):
+        _add(Domain(domain=f"screen-{st}.ru", source="backorder", status=st,
+                    referring_domains=10 + i))
+    offer_id = client.post("/api/offers", json={
+        "brand": "TestVPN", "affiliate_link": "https://ex.com/a", "promo_code": "T10"}).json()["id"]
+    with db.SessionLocal() as s:
+        from sqlalchemy import select
+        did = s.execute(select(Domain.id).where(Domain.status == "purchased")).scalar_one()
+    site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
+                        lambda self, system, prompt, **kw: "<h2>D</h2>")
+    client.post(f"/api/sites/{site_id}/generate")
+
+    r = client.get("/")                      # пульт: воронка + шаги + сайты
+    assert r.status_code == 200
+    assert "Воронка" in r.text and "Что дальше" in r.text and "screen-purchased.ru" in r.text
+
+    r = client.get("/domains")               # M1: тулбар + контекстные действия
+    assert r.status_code == 200
+    assert "Discovery" in r.text and "set-status" in r.text and "make-site" not in r.text
+    r = client.get("/domains?status=purchased")
+    assert f"/sites/{site_id}" in r.text     # purchased с сайтом -> ссылка на карточку
+
+    r = client.get("/offers")
+    assert r.status_code == 200 and "TestVPN" in r.text and "offers/create" in r.text
+
+    r = client.get(f"/sites/{site_id}")      # карточка: чеклист этапов
+    assert r.status_code == 200
+    assert "Provision" in r.text and "Редактура" in r.text and "publish" in r.text
+
+    with db.SessionLocal() as s:
+        from app.models.site import Page
+        from sqlalchemy import select
+        pid = s.execute(select(Page.id).limit(1)).scalar_one()
+    r = client.get(f"/pages/{pid}")          # редактор
+    assert r.status_code == 200 and "EDITED" in r.text
+
+    # form-действия панели: сохранение страницы через гейт + привязка оффера
+    r = client.post(f"/pages/{pid}/save", data={"body": "<h2>ок</h2><script>x</script>"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    with db.SessionLocal() as s:
+        from app.models.site import Page
+        p = s.get(Page, pid)
+        assert p.status == "edited" and "<script" not in p.body
+    assert client.post(f"/sites/{site_id}/attach-offer", data={"offer_id": offer_id},
+                       follow_redirects=False).status_code == 303

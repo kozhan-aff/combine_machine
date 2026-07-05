@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}✎ {{ domain }}{{ page.url_path }}{% endblock %}
+{% block content %}
+
+<h2><span class="idx">✎</span> {{ domain }}<span style="color:var(--amber)">{{ page.url_path }}</span>
+  <span class="badge b-{{ page.status if page.status in ['draft','edited','published'] else 'default' }}">{{ page.status }}</span>
+</h2>
+<p class="hint" style="margin:0 0 14px">{{ page.title }} — это гейт редактуры: правь HTML слева, смотри
+  превью справа. Кнопка внизу сохраняет и переводит страницу в <b>edited</b> — только после этого
+  публикация её возьмёт. Скрипты и мусорные теги вырежутся автоматически (sanitize).</p>
+
+<form method="post" action="/pages/{{ page.id }}/save">
+  <div class="edit-grid">
+    <label class="f">HTML страницы
+      <textarea class="body" name="body" id="src" spellcheck="false">{{ page.body or '' }}</textarea>
+    </label>
+    <label class="f">превью (как увидит читатель)
+      <div class="preview" id="pv"></div>
+    </label>
+  </div>
+  <div class="toolbar" style="margin-top:14px">
+    <button class="btn-amber">✓ Сохранить как EDITED — готово к публикации</button>
+    <a class="btn" href="/sites/{{ site.id }}">← к сайту без сохранения</a>
+  </div>
+</form>
+
+<script>
+  // живое превью: textarea -> innerHTML. Свой ввод в своей же панели; на сервере тело
+  // всё равно проходит nh3-sanitize при сохранении.
+  var src = document.getElementById('src'), pv = document.getElementById('pv');
+  function sync() { pv.innerHTML = src.value; }
+  src.addEventListener('input', sync); sync();
+</script>
+
+{% endblock %}

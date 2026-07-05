@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ domain }}{% endblock %}
+{% block content %}
+
+{% set prov_done = site.status in ['content', 'published'] %}
+{% set has_pages = pages|length > 0 %}
+{% set n_draft = pc.get('draft', 0) %}
+{% set n_edited = pc.get('edited', 0) %}
+{% set n_published = pc.get('published', 0) %}
+
+<h2><span class="idx">◈</span> {{ domain }}
+  <span class="badge b-{{ site.status if site.status in ['provisioning','content','published'] else 'default' }}">{{ site.status }}</span>
+  <span class="hint">сайт #{{ site.id }}{{ ' · zone ' + site.cf_zone_id if site.cf_zone_id }}</span>
+</h2>
+
+<div class="card" style="margin-bottom:24px">
+  <ul class="check">
+    <li>
+      <span class="st"><span class="led led-ok"></span></span>
+      <div class="body"><div class="t">1 · Домен куплен <small>M2</small></div>
+        <div class="h">Куплен руками, отмечен 🛒 в шортлисте — money-gate пройден человеком.</div></div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if attached else 'led-todo' }}"></span></span>
+      <div class="body"><div class="t">2 · Оффер привязан</div>
+        <div class="h">
+          {% if attached %}
+            {% for o in attached %}<span class="badge b-approved">{{ o.brand }}{{ ' · ' + o.promo_code if o.promo_code }}</span> {% endfor %}
+          {% else %}Выбери, какой оффер будет стоять на страницах этого сайта.{% endif %}
+        </div></div>
+      <div class="act">
+        {% if all_offers %}
+        <form class="inline" method="post" action="/sites/{{ site.id }}/attach-offer" style="display:flex; gap:8px">
+          <select name="offer_id">
+            {% for o in all_offers %}<option value="{{ o.id }}">{{ o.brand }}{{ ' (' + o.country + ')' if o.country }}</option>{% endfor %}
+          </select>
+          <button class="btn-sm">привязать</button>
+        </form>
+        {% else %}<a class="btn btn-sm btn-amber" href="/offers">＋ создать оффер</a>{% endif %}
+      </div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if prov_done else 'led-todo' }}"></span></span>
+      <div class="body"><div class="t">3 · Provision <small>M3 · Cloudflare + aaPanel</small></div>
+        <div class="h">Зона CF → NS у регистратора → proxied A-запись → vhost + SSL. Идемпотентно:
+          если зона ждёт NS — пропиши их у регистратора и нажми ещё раз.</div></div>
+      <div class="act">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/provision">
+          <button class="btn-sm {{ '' if prov_done else 'btn-amber' }}">{{ '↻ повторить' if prov_done else '▶ Provision' }}</button>
+        </form>
+      </div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if has_pages else ('led-todo' if prov_done else 'led-off') }}"></span></span>
+      <div class="body"><div class="t">4 · Генерация черновиков <small>M4 · LLM</small></div>
+        <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит недостающие, существующие не тронет.
+          {% else %}Обзор + сравнение + настройка под гео/язык оффера. Синхронно, ≈1–2 мин.{% endif %}</div></div>
+      <div class="act">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px">
+          <select name="lang"><option value="ru">ru</option><option value="en">en</option></select>
+          <button class="btn-sm {{ '' if has_pages else 'btn-amber' }}">▶ генерировать</button>
+        </form>
+      </div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if (n_edited or n_published) else ('led-todo' if n_draft else 'led-off') }}"></span></span>
+      <div class="body"><div class="t">5 · Редактура <small>ГЕЙТ · человек</small></div>
+        <div class="h">draft: {{ n_draft }} · edited: {{ n_edited }} · published: {{ n_published }}.
+          Публикуются ТОЛЬКО страницы, которые ты открыл, вычитал и сохранил как edited — по одной, в таблице ниже.</div></div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if n_published else ('led-todo' if n_edited else 'led-off') }}"></span></span>
+      <div class="body"><div class="t">6 · Публикация <small>M5</small></div>
+        <div class="h">Рендер с оффером + disclosure → файлы в docroot через aaPanel. Возьмёт только edited-страницы.</div></div>
+      <div class="act">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/publish">
+          <button class="btn-sm {{ 'btn-amber' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}>▶ опубликовать</button>
+        </form>
+      </div>
+    </li>
+
+    <li>
+      <span class="st"><span class="led {{ 'led-ok' if (pages | selectattr('index_status','equalto','indexed') | list) else ('led-todo' if n_published else 'led-off') }}"></span></span>
+      <div class="body"><div class="t">7 · Индексация <small>M5 · site: через SearXNG</small></div>
+        <div class="h">Проверка «страница в индексе?» по каждой опубликованной. Не мгновенно: индексация занимает дни.</div></div>
+      <div class="act">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/check-index">
+          <button class="btn-sm" {{ 'disabled' if not n_published }}>▶ проверить</button>
+        </form>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<h2><span class="idx">✎</span> Страницы</h2>
+<div class="wrap">
+{% if pages %}
+<table>
+  <thead><tr>
+    <th>путь</th><th>заголовок</th><th>статус</th><th>индекс</th><th>действия</th>
+  </tr></thead>
+  <tbody>
+  {% for p in pages %}
+    <tr>
+      <td class="dom">{{ p.url_path }}</td>
+      <td>{{ p.title or '—' }}</td>
+      <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}">{{ p.status }}</span></td>
+      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>indexed
+          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>нет
+          {% else %}<span class="led led-off"></span><span class="hint">—</span>{% endif %}</td>
+      <td><a class="btn btn-sm {{ 'btn-amber' if p.status == 'draft' }}" href="/pages/{{ p.id }}">
+        {{ '✎ вычитать' if p.status == 'draft' else '✎ открыть' }}</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Страниц нет — запусти шаг 4 «Генерация».</div>
+{% endif %}
+</div>
+
+<p style="margin-top:18px"><a href="/">← на пульт</a></p>
+
+{% endblock %}

@@ -10,6 +10,6 @@ def health():
 
 
 from app.api import domains, panel, pipeline  # noqa: E402
-app.include_router(panel.router)       # GET / -> shortlist panel
-app.include_router(domains.router)     # GET /domains -> JSON API
-app.include_router(pipeline.router)    # POST loop actions: provision/generate/edit/publish
+app.include_router(panel.router)                     # HTML-панель: / /domains /offers /sites/{id} ...
+app.include_router(domains.router, prefix="/api")    # JSON: GET /api/domains/
+app.include_router(pipeline.router, prefix="/api")   # JSON: /api/offers /api/sites/... (loop actions)

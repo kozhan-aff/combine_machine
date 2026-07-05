@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Офферы{% endblock %}
+{% block content %}
+
+<h2><span class="idx">01</span> Офферы
+  <span class="hint">вход машины: активный оффер подставляется в генерацию и публикацию</span></h2>
+
+<div class="wrap" style="margin-bottom:22px">
+{% if rows %}
+<table>
+  <thead><tr>
+    <th>#</th><th>бренд</th><th>промокод</th><th>ссылка</th><th>гео</th><th>язык</th>
+    <th>статус</th><th>действия</th>
+  </tr></thead>
+  <tbody>
+  {% for o in rows %}
+    <tr>
+      <td class="num hint">{{ o.id }}</td>
+      <td class="dom">{{ o.brand }}</td>
+      <td>{{ o.promo_code or '—' }}</td>
+      <td class="hint" style="max-width:340px; overflow:hidden; text-overflow:ellipsis">{{ o.affiliate_link }}</td>
+      <td>{{ o.country or '—' }}</td>
+      <td>{{ o.language or '—' }}</td>
+      <td>{% if o.active %}<span class="badge b-approved">активен</span>
+          {% else %}<span class="badge b-default">выключен</span>{% endif %}</td>
+      <td>
+        <form class="inline" method="post" action="/offers/{{ o.id }}/toggle">
+          <button class="btn-sm">{{ 'выключить' if o.active else 'включить' }}</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Офферов нет — добавь первый: без него контенту не на что ссылаться.</div>
+{% endif %}
+</div>
+
+<h2><span class="idx">＋</span> Новый оффер</h2>
+<div class="card">
+  <form method="post" action="/offers/create" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
+    <label class="f">бренд *<input name="brand" required placeholder="NordVPN" style="width:160px"></label>
+    <label class="f">партнёрская ссылка *<input name="affiliate_link" required
+           placeholder="https://…/?aff=…" style="width:320px"></label>
+    <label class="f">промокод<input name="promo_code" placeholder="SAVE65" style="width:110px"></label>
+    <label class="f">гео<input name="country" placeholder="RU" maxlength="8" style="width:64px"></label>
+    <label class="f">язык<input name="language" placeholder="ru" maxlength="8" style="width:64px"></label>
+    <button class="btn-amber">＋ Добавить</button>
+  </form>
+  <p class="hint" style="margin:12px 0 0">Один домен = одно гео/язык (чистый footprint). Ссылка попадёт в страницы с
+    <code>rel="sponsored nofollow"</code> и обязательным disclosure.</p>
+</div>
+
+{% endblock %}

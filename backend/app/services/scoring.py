@@ -133,7 +133,9 @@ def score_pending(limit: int = 100) -> int:
 
     with SessionLocal() as db:
         ids = db.execute(
-            select(Domain.id).where(Domain.status == "discovered").limit(limit)
+            select(Domain.id).where(Domain.status == "discovered")
+            .order_by(Domain.referring_domains.desc().nulls_last())  # лучшие кандидаты первыми
+            .limit(limit)
         ).scalars().all()
     for did in ids:
         score_domain(did)

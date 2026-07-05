@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Пульт{% endblock %}
+{% block content %}
+
+<h2><span class="idx">◈</span> Воронка конвейера</h2>
+<div class="funnel">
+  <div class="stat"><a href="/offers">
+    <div class="v {{ 'hot' if not offers_active }}">{{ offers_active }}</div>
+    <div class="k">офферы актив.</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/domains?status=discovered">
+    <div class="v">{{ dc.get('discovered', 0) }}</div><div class="k">найдено</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/domains?status=scored">
+    <div class="v {{ 'hot' if dc.get('scored') }}">{{ dc.get('scored', 0) }}</div>
+    <div class="k">отскорено</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/domains?status=approved">
+    <div class="v {{ 'hot' if dc.get('approved') }}">{{ dc.get('approved', 0) }}</div>
+    <div class="k">одобрено</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/domains?status=purchased">
+    <div class="v">{{ dc.get('purchased', 0) }}</div><div class="k">куплено 🛒</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/#sites">
+    <div class="v">{{ sites|length }}</div><div class="k">сайты</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat">
+    <div class="v {{ 'hot' if pc.get('draft') }}">{{ pc.get('draft', 0) }}</div>
+    <div class="k">черновики</div></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat">
+    <div class="v {{ 'hot' if pc.get('edited') }}">{{ pc.get('edited', 0) }}</div>
+    <div class="k">edited ✎</div></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat">
+    <div class="v">{{ pc.get('published', 0) }}</div><div class="k">опубликовано</div></div>
+</div>
+
+<h2><span class="idx">→</span> Что дальше</h2>
+<div class="card">
+  <ol class="steps">
+    {% for s in steps %}
+    <li><a href="{{ s.href }}">{{ s.text }}</a></li>
+    {% endfor %}
+  </ol>
+</div>
+
+<h2 id="sites"><span class="idx">03</span> Сайты <span class="hint">M3 провижн → M4 контент → M5 публикация</span></h2>
+{% if sites %}
+<div class="grid">
+  {% for s in sites %}
+  <div class="scard">
+    <div class="d">{{ s.domain }}</div>
+    <div class="row">
+      <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}">{{ s.site.status }}</span>
+      <span class="hint">
+        стр.: {{ s.pages.get('draft', 0) }} draft ·
+        {{ s.pages.get('edited', 0) }} edited ·
+        {{ s.pages.get('published', 0) }} publ ·
+        {{ s.indexed }} в индексе
+      </span>
+    </div>
+    <div class="row"><a class="btn btn-amber btn-sm" href="/sites/{{ s.site.id }}">Открыть карточку →</a></div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">purchased</span> → кнопка «создать сайт» на экране <a href="/domains">Домены</a>.</div>
+{% endif %}
+
+{% endblock %}
