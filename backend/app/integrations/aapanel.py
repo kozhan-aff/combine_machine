@@ -9,6 +9,14 @@ Auth (every request, per docs/api/aapanel.md — authoritative PDF, NOT the HTML
     POST both fields alongside the endpoint's own params; PERSIST COOKIES across requests
     (one httpx.Client per AaPanelClient instance = one cookie jar). Responses are JSON.
 
+    AAPANEL_API_KEY must be the RAW api_sk — on 7.x that's the `token_crypt` field of
+    /www/server/panel/config/api.json (verified: md5(token_crypt) == the `token` field).
+    Do NOT use the `token` field: it is already md5(api_sk), so our chained md5 would
+    hash it twice and the panel rejects it with "Secret key verification failed". The
+    panel verifies md5(request_time + token) where token == md5(api_sk). Also note the
+    panel port is NOT always 8888 (this box: 18839) and the API IP-whitelist (limit_addr)
+    is exact-match on the caller's public IP — a domain/DDNS entry is NOT resolved.
+
 We use aaPanel for the vhost + origin SSL only; DNS stays on Cloudflare.
 Endpoint styles: legacy `/data?action=...` and current `/v2/data?action=...` — see list_sites().
 """
@@ -177,25 +185,29 @@ class AaPanelClient(BaseClient):
             {"type": 1, "siteName": site_name, "key": key, "csr": cert},
         )
 
-    def delete_site(self, site_name: str, site_id: int) -> dict:
-        """Teardown (M6). Empty path/ftp/database => keep docroot files, FTP, DB."""
+    def delete_site(self, site_name: str, site_id: int, remove_dir: bool = True,
+                    remove_ftp: bool = True, remove_db: bool = True) -> dict:
+        """Teardown (M6). VERIFIED 7.x: DeleteSite validates id(int), webname, path(int) —
+        the flags MUST be integers (empty strings fail with 'path must be integer').
+        path=1 also deletes the docroot; pass remove_dir=False to keep files (301 migration)."""
         return self._post(
             "/site?action=DeleteSite",
-            {"webname": site_name, "id": site_id, "path": "", "ftp": "", "database": ""},
+            {"id": site_id, "webname": site_name, "path": int(remove_dir),
+             "ftp": int(remove_ftp), "database": int(remove_db)},
         )
 
     # -- files (M5 deploy) --------------------------------------------------
 
     def write_file(self, path: str, content: str) -> dict:
-        """Write a file to the VPS (creates the parent dir first). Deploys pages to docroot.
+        """Write a file to the VPS, creating it + parent dirs first. Deploys pages to docroot.
 
-        # UNVERIFIED: aaPanel files API (/files?action=CreateDir | SaveFileBody) is not in
-        # the researched spec — these are the standard endpoints; confirm on the live panel.
+        VERIFIED live (aaPanel 7.x, files.py): SaveFileBody EDITS ONLY — it refuses a
+        non-existent path with "Configuration file not exist". CreateFile makes the parent
+        dirs (os.makedirs) AND an empty file. So the order is CreateFile → SaveFileBody.
+        CreateFile is idempotent-for-our-purposes: on re-publish it returns "Requested file
+        exists!", which we ignore, and SaveFileBody then overwrites the body.
         """
-        import posixpath
-        parent = posixpath.dirname(path)
-        if parent:
-            self._post("/files?action=CreateDir", {"path": parent})
+        self._post("/files?action=CreateFile", {"path": path})  # +parent dirs, empty file
         return self._post("/files?action=SaveFileBody",
                           {"path": path, "data": content, "encoding": "utf-8"})
 
