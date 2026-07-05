@@ -81,5 +81,11 @@ class Settings(BaseSettings):
     GITHUB_REPO: str = "kozhan-aff/combine_machine"
     GITHUB_TOKEN: str = ""
 
+    # panel auth — Basic-auth на ВСЮ панель/API. Панель выставлена на LAN без иной
+    # защиты (см. docker-compose): задай оба, чтобы /admin/pull и пайплайн не были
+    # доступны любому в сети. Пусто = auth ВЫКЛ (только для локалхост-разработки).
+    PANEL_USER: str = ""
+    PANEL_PASS: str = ""
+
 
 settings = Settings()

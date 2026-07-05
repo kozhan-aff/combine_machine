@@ -25,9 +25,9 @@ services:
       # EXPOSED ON LAN (trusted home network). The panel/pipeline have NO auth, so this is
       # safe ONLY behind the home router's NAT — never port-forward :8000 to the internet.
       # Bound to the box's LAN IP (not 0.0.0.0) so a stray VPN/2nd interface can't expose it.
-      # SECURITY NOTE: with no auth, anyone on the LAN can drive the pipeline — including
-      #   POST /admin/pull, which git-pulls + reloads code. Add app auth (Basic-auth middleware
-      #   or an APIKey Depends) before trusting the LAN, or restrict source IPs in DOCKER-USER.
+      # SECURITY NOTE: без auth любой в LAN может гонять пайплайн, включая POST /admin/pull
+      #   (git-pull + reload). Закрой Basic-auth: задай PANEL_USER+PANEL_PASS в .env (см.
+      #   app/main.py) — тогда LAN-экспозиция безопасна. Или ограничь source-IP в DOCKER-USER.
       # NB: Docker publishes via the FORWARD/DOCKER chain, bypassing a host ufw INPUT drop.
       # Want it private again? revert to "127.0.0.1:8000:8000" and use an SSH tunnel (docs/DEPLOY.md).
       # If the box IP changes via DHCP this fails to bind — reserve 192.168.1.77 on the router.

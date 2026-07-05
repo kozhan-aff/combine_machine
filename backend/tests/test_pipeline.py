@@ -132,6 +132,20 @@ def test_edit_gate_and_publish(client, monkeypatch):
     assert client.post(f"/api/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
 
 
+def test_panel_basic_auth(client, monkeypatch):
+    """Basic-auth: выкл по умолчанию; включённый — 401 без кредов, 200 с верными, /health открыт."""
+    from app.config import settings
+    assert client.get("/health").status_code == 200          # auth off -> открыто
+    monkeypatch.setattr(settings, "PANEL_USER", "op")
+    monkeypatch.setattr(settings, "PANEL_PASS", "s3cret")
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 401 and "Basic" in r.headers.get("www-authenticate", "")
+    assert client.get("/health").status_code == 200          # /health всегда открыт (мониторинг)
+    assert client.get("/", auth=("op", "s3cret")).status_code == 200   # верные креды
+    assert client.get("/", auth=("op", "wrong")).status_code == 401    # неверный пароль
+    assert client.get("/", auth=("nope", "s3cret")).status_code == 401 # неверный логин
+
+
 def test_panel_screens_render(client, monkeypatch):
     """Каждый HTML-экран панели отвечает 200 и содержит свои ключевые элементы."""
     # data: domain in every interesting status + site + page

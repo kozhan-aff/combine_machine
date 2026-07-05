@@ -1,7 +1,38 @@
 """FastAPI entrypoint. Include routers from app.api as they are implemented."""
-from fastapi import FastAPI
+import base64
+import secrets
+
+from fastapi import FastAPI, Request
+from starlette.responses import Response
+
+from app.config import settings
 
 app = FastAPI(title="VPN Affiliate Portfolio")
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    """Basic-auth на всю панель/API, если заданы PANEL_USER+PANEL_PASS.
+
+    Панель выставлена на LAN без иной защиты (docker-compose), а /admin/pull дёргает
+    git-pull+reload — поэтому без кредов её мог бы дёрнуть любой в сети. Пусто = выкл
+    (локалхост-разработка). /health открыт всегда — для мониторинга/healthcheck.
+    """
+    if settings.PANEL_USER and settings.PANEL_PASS and request.url.path != "/health":
+        hdr = request.headers.get("authorization", "")
+        ok = False
+        if hdr.startswith("Basic "):
+            try:
+                user, _, pw = base64.b64decode(hdr[6:]).decode("utf-8").partition(":")
+                # обе проверки постоянного времени (защита от тайминг-атаки на логин/пароль)
+                ok = (secrets.compare_digest(user, settings.PANEL_USER)
+                      & secrets.compare_digest(pw, settings.PANEL_PASS))
+            except Exception:  # noqa: BLE001 — битый заголовок = не авторизован
+                ok = False
+        if not ok:
+            return Response("Требуется авторизация", status_code=401,
+                            headers={"WWW-Authenticate": 'Basic realm="Combine"'})
+    return await call_next(request)
 
 
 @app.get("/health")
