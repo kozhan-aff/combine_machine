@@ -14,6 +14,7 @@ router = APIRouter(prefix="/domains", tags=["domains"])
 @router.get("/")
 def list_domains(status: str | None = None, min_score: float | None = None,
                  limit: int = 100, db: Session = Depends(get_session)):
+    limit = max(1, min(limit, 1000))   # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
         stmt = stmt.where(Domain.status == status)

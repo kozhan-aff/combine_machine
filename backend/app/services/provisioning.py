@@ -25,6 +25,8 @@ def create_site_for(domain_id: int) -> int:
         d = db.get(Domain, domain_id)
         if d is None:
             raise ValueError(f"domain {domain_id} not found")
+        if d.status not in {"purchased", "live"}:    # только реально купленный домен
+            raise ValueError("сайт можно создать только для купленного домена")
         site = db.execute(select(Site).where(Site.domain_id == domain_id)).scalar_one_or_none()
         if site is None:
             site = Site(domain_id=domain_id, status="provisioning",
@@ -47,7 +49,10 @@ def provision(site_id: int) -> dict:
         site = db.get(Site, site_id)
         if site is None:
             raise ValueError(f"site {site_id} not found")
-        domain = db.get(Domain, site.domain_id).domain
+        d = db.get(Domain, site.domain_id)
+        if d is None:
+            raise ValueError(f"domain {site.domain_id} not found")
+        domain = d.domain
         cf = CloudflareClient()
 
         # 1. Cloudflare zone (idempotent: reuse if it already exists)

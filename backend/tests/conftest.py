@@ -15,10 +15,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 import app.db as db
 from app.db import Base
 # import models so their tables register on Base.metadata before create_all
-import app.models.domain  # noqa: F401
-import app.models.site    # noqa: F401
-import app.models.offer   # noqa: F401
-import app.models.monitoring  # noqa: F401
+import app.models.domain
+import app.models.site
+import app.models.offer
+import app.models.monitoring
+# reference the modules so their table-registration side effect (create_all needs
+# every table, incl. index_history from publish.check_index) isn't seen as a dead import
+_REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring)
 
 
 @compiles(JSONB, "sqlite")

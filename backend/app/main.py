@@ -1,6 +1,7 @@
 """FastAPI entrypoint. Include routers from app.api as they are implemented."""
 import base64
 import secrets
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
@@ -8,6 +9,26 @@ from starlette.responses import Response
 from app.config import settings
 
 app = FastAPI(title="VPN Affiliate Portfolio")
+
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@app.middleware("http")
+async def csrf_guard(request: Request, call_next):
+    """Same-origin guard на state-changing запросы (защита от CSRF).
+
+    Панель на LAN за опц. Basic-auth; браузер оператора авто-прикладывает закэшированные
+    креды к ЛЮБОМУ запросу на этот origin — поэтому враждебная интернет-страница могла бы
+    авто-сабмитом дёрнуть POST /admin/pull или подделать «человеческое» подтверждение
+    денежного гейта (/queue/{id}/confirm|execute); CORS «simple requests» это не блокирует.
+    Правило: если браузер прислал Origin (или Referer) — его хост обязан совпасть с Host
+    запроса, иначе 403. Без обоих заголовков (curl/скрипты/API-клиенты/healthcheck) — пропускаем.
+    """
+    if request.method in _UNSAFE_METHODS:
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source and urlsplit(source).netloc != request.headers.get("host", ""):
+            return Response("Cross-origin запрос отклонён", status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")

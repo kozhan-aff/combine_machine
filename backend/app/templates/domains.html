@@ -140,6 +140,9 @@
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
             <button class="btn-sm btn-bad" title="передумал: убрать из очереди на покупку">✗ отклонить</button></form>
+        {% elif d.status == 'purchasing' %}
+          <a class="btn btn-sm" href="/queue"
+             title="домен в очереди выкупа — управлять заказом там">→ в очереди выкупа</a>
         {% elif d.status == 'purchased' %}
           {% if site_by_domain.get(d.id) %}
             <a class="btn btn-sm btn-amber" href="/sites/{{ site_by_domain[d.id] }}"

@@ -42,6 +42,9 @@ def _make_token(api_sk: str, request_time: str) -> str:
 class AaPanelClient(BaseClient):
     def __init__(self):
         super().__init__(settings.AAPANEL_URL)
+        # BaseClient just opened a default httpx.Client; we replace it with a pinned one
+        # below, so close the throwaway to avoid leaking an unused connection pool.
+        self._client.close()
         self.api_sk = settings.AAPANEL_API_KEY
         # aaPanel serves a self-signed cert on :8888. Pin it via AAPANEL_CA_BUNDLE (copy
         # /www/server/panel/ssl/certificate.pem locally, set its path) to keep MITM

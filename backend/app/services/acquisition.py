@@ -10,7 +10,8 @@
 """
 _PROVIDERS = {"backorder", "optimizator"}
 # статусы, при которых по домену уже есть незакрытый заказ — второй не плодим
-_OPEN_STATUSES = {"pending_confirm", "ordered"}
+# ('ordering' — транзиентный claim во время отправки провайдеру, тоже «открыт»)
+_OPEN_STATUSES = {"pending_confirm", "ordering", "ordered"}
 
 
 def create_order(domain_id: int, provider: str = "backorder") -> int:
@@ -35,6 +36,9 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         ).scalar_one_or_none()
         if existing:
             return existing.id                      # уже в очереди — не дублируем
+        if d.status != "approved":                  # только одобренный скорингом домен
+            raise ValueError(
+                f"домен в статусе {d.status!r} — в очередь выкупа берём только approved")
         order = AcquisitionOrder(domain_id=domain_id, provider=provider,
                                  status="pending_confirm", confirmed_by_human=False)
         db.add(order)
@@ -68,6 +72,7 @@ def execute_confirmed_order(order_id: int) -> dict:
     Провайдерский транспорт .order() требует login-кредов и пока не реализован —
     в этом случае помечаем 'failed' с причиной, а не выдаём ложный успех."""
     from datetime import datetime, timezone
+    from sqlalchemy import update
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
 
@@ -78,8 +83,24 @@ def execute_confirmed_order(order_id: int) -> dict:
         if not o.confirmed_by_human:                 # ЖЁСТКИЙ ГЕЙТ — деньги не на автопилоте
             return {"order_id": order_id, "status": o.status,
                     "error": "gate: заказ не подтверждён человеком (confirmed_by_human=False)"}
-        if o.status != "pending_confirm":
-            return {"order_id": order_id, "status": o.status, "note": "уже обработан"}
+
+        # Атомарный claim: из двух параллельных кликов (sync-роуты в threadpool) в 'ordering'
+        # переведёт РОВНО один — второй увидит rowcount 0 и не пошлёт второй живой заказ.
+        # confirmed_by_human остаётся в SQL-условии — денежный гейт держится и здесь.
+        # Допуск 'failed' в claim = рабочий ретрай (кнопка «↻ повторить»).
+        claim = db.execute(
+            update(AcquisitionOrder)
+            .where(AcquisitionOrder.id == order_id,
+                   AcquisitionOrder.status.in_(("pending_confirm", "failed")),
+                   AcquisitionOrder.confirmed_by_human.is_(True))
+            .values(status="ordering")
+        )
+        db.commit()
+        if claim.rowcount != 1:                       # уже забрал другой клик / уже обработан
+            db.refresh(o)
+            return {"order_id": order_id, "status": o.status,
+                    "note": "заказ уже обрабатывается или обработан"}
+        db.refresh(o)
 
         d = db.get(Domain, o.domain_id)
         try:
@@ -106,6 +127,58 @@ def execute_confirmed_order(order_id: int) -> dict:
             o.result = {"error": f"{type(e).__name__}: {e}"[:200]}
             db.commit()
             return {"order_id": order_id, "status": "failed", **o.result}
+
+
+def mark_caught(order_id: int) -> dict:
+    """ЧЕЛОВЕК подтверждает факт поимки: заказ 'ordered' -> 'caught', домен -> 'purchased'.
+
+    Для backorder поимка дропа асинхронна (провайдер ловит домен на удалении), потому
+    факт фиксируем руками. С этого момента домен куплен — дальше M3 (создать сайт)."""
+    from app.db import SessionLocal
+    from app.models.domain import Domain, AcquisitionOrder
+
+    with SessionLocal() as db:
+        o = db.get(AcquisitionOrder, order_id)
+        if o is None:
+            raise ValueError(f"order {order_id} not found")
+        if o.status != "ordered":
+            return {"order_id": order_id, "status": o.status,
+                    "note": "пометить пойманным можно только заказ в статусе ordered"}
+        o.status = "caught"
+        d = db.get(Domain, o.domain_id)
+        if d is not None:
+            d.status = "purchased"                    # домен куплен — путь в M3
+        db.commit()
+        return {"order_id": order_id, "status": "caught", "domain_id": o.domain_id}
+
+
+def cancel_order(order_id: int) -> dict:
+    """Снять заявку (pending_confirm/failed -> cancelled). Домен возвращаем в 'approved',
+    если по нему не осталось других открытых заказов. Денег это не касается."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.domain import Domain, AcquisitionOrder
+
+    with SessionLocal() as db:
+        o = db.get(AcquisitionOrder, order_id)
+        if o is None:
+            raise ValueError(f"order {order_id} not found")
+        if o.status not in {"pending_confirm", "failed"}:
+            return {"order_id": order_id, "status": o.status,
+                    "note": "снять можно только заказ в статусе pending_confirm/failed"}
+        o.status = "cancelled"
+        d = db.get(Domain, o.domain_id)
+        if d is not None and d.status == "purchasing":
+            other_open = db.execute(
+                select(AcquisitionOrder.id).where(
+                    AcquisitionOrder.domain_id == o.domain_id,
+                    AcquisitionOrder.id != order_id,
+                    AcquisitionOrder.status.in_(_OPEN_STATUSES))
+            ).first()
+            if other_open is None:                    # больше ничего не держит домен в очереди
+                d.status = "approved"
+        db.commit()
+        return {"order_id": order_id, "status": "cancelled", "domain_id": o.domain_id}
 
 
 def list_orders() -> list[dict]:

@@ -2,7 +2,7 @@
 {% block title %}Выкуп · M2{% endblock %}
 {% block content %}
 
-{% set _b = {'pending_confirm':'b-scored','ordered':'b-purchased','caught':'b-live','failed':'b-rejected'} %}
+{% set _b = {'pending_confirm':'b-scored','ordered':'b-purchased','caught':'b-live','failed':'b-rejected','cancelled':'b-default'} %}
 
 <h2><span class="idx">M2</span> Очередь выкупа
   <span class="hint">структурный путь: заявка → подтверждение человеком → отправка провайдеру</span></h2>
@@ -28,7 +28,7 @@
       <td class="dom">{{ o.domain }}</td>
       <td class="hint">{{ o.provider }}</td>
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
-            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов'}.get(o.status, o.status) }}">{{ o.status }}</span></td>
+            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
       <td>
@@ -42,7 +42,16 @@
         {% elif o.status == 'failed' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
             <button class="btn-sm" title="повторить отправку провайдеру">↻ повторить</button></form>
-        {% else %}<span class="hint">—</span>{% endif %}
+        {% elif o.status == 'ordered' %}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/caught"
+                onsubmit="return confirm('Домен {{ o.domain }} пойман провайдером? Переведём его в purchased.')">
+            <button class="btn-sm btn-buy" title="домен пойман провайдером — перевести в purchased">✓ пойман</button></form>
+        {% endif %}
+        {% if o.status in ['pending_confirm', 'failed'] %}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/cancel"
+                onsubmit="return confirm('Снять заявку на {{ o.domain }}? Домен вернётся в approved.')">
+            <button class="btn-sm btn-bad" title="снять заявку, вернуть домен в approved">✗ отменить</button></form>
+        {% elif o.status not in ['ordered'] %}<span class="hint">—</span>{% endif %}
       </td>
       <td class="hint" style="max-width:360px; overflow:hidden; text-overflow:ellipsis">
         {{ o.result.error if o.result and o.result.error else (o.result if o.result else '') }}</td>

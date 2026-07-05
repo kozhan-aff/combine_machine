@@ -123,6 +123,7 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
 @router.get("/domains", response_class=HTMLResponse)
 def domains_view(request: Request, status: str | None = None, min_score: float | None = None,
                  limit: int = 200, db: Session = Depends(get_session)):
+    limit = max(1, min(limit, 1000))   # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
         stmt = stmt.where(Domain.status == status)
@@ -291,6 +292,26 @@ def queue_execute_action(order_id: int):
         return _back("/queue", err=f"отправка: {e}")
 
 
+@router.post("/queue/{order_id}/caught")
+def queue_caught_action(order_id: int):
+    from app.services import acquisition
+    try:
+        acquisition.mark_caught(order_id)
+        return _back("/queue", msg=f"Заказ #{order_id}: домен помечен пойманным (purchased) — можно создавать сайт.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"поймать: {e}")
+
+
+@router.post("/queue/{order_id}/cancel")
+def queue_cancel_action(order_id: int):
+    from app.services import acquisition
+    try:
+        acquisition.cancel_order(order_id)
+        return _back("/queue", msg=f"Заказ #{order_id} снят — домен возвращён в approved.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"отмена: {e}")
+
+
 @router.post("/offers/create")
 def offer_create_action(brand: str = Form(...), affiliate_link: str = Form(...),
                         promo_code: str = Form(""), country: str = Form(""),
@@ -396,25 +417,40 @@ def check_index_action(site_id: int):
 # Требует volume `.:/repo` + git в образе (см. docker-compose/Dockerfile).
 @router.post("/admin/pull")
 def git_pull_action():
+    import base64 as _b64
+    import os
     import subprocess
     if not settings.GITHUB_TOKEN:
         return _back("/diag", err="GITHUB_TOKEN не задан в .env — нечем авторизовать git pull")
     tok = settings.GITHUB_TOKEN
-    url = f"https://x-access-token:{tok}@github.com/{settings.GITHUB_REPO}.git"
     scrub = lambda s: s.replace(tok, "***")  # никогда не светить токен в баннере
+    # Токен НЕ в argv (виден в ps/procfs), а через http.extraheader в окружении git:
+    # чистый URL без креденшелов + Authorization: Basic base64(x-access-token:TOKEN).
+    clean_url = f"https://github.com/{settings.GITHUB_REPO}.git"
+    basic = _b64.b64encode(f"x-access-token:{tok}".encode()).decode()
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+    }
     try:
-        pull = subprocess.run(
-            ["git", "-C", "/repo", "-c", "safe.directory=/repo", "pull", "--ff-only", url, "main"],
-            capture_output=True, text=True, timeout=120)
+        try:
+            pull = subprocess.run(
+                ["git", "-C", "/repo", "-c", "safe.directory=/repo", "pull", "--ff-only", clean_url, "main"],
+                capture_output=True, text=True, timeout=120, env=git_env)
+        except FileNotFoundError:
+            return _back("/diag", err="git не установлен в контейнере — пересобери образ (docker compose build)")
         if pull.returncode != 0:
             return _back("/diag", err=f"git pull: {scrub((pull.stderr or pull.stdout).strip())[:300]}")
         head = (pull.stdout.strip().splitlines() or ["ok"])[-1]
         # миграции идемпотентны; код подхватит uvicorn --reload (следит за /app)
-        mig = subprocess.run(["alembic", "upgrade", "head"], cwd="/app",
-                             capture_output=True, text=True, timeout=120)
-        warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
+        try:
+            mig = subprocess.run(["alembic", "upgrade", "head"], cwd="/app",
+                                 capture_output=True, text=True, timeout=120)
+            warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
+        except FileNotFoundError:
+            warn = " ⚠ alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
         return _back("/diag", msg=f"Обновлено: {scrub(head)[:200]}{warn}")
-    except FileNotFoundError:
-        return _back("/diag", err="git не установлен в контейнере — пересобери образ (docker compose build)")
     except Exception as e:  # noqa: BLE001
         return _back("/diag", err=f"update: {scrub(str(e))[:200]}")

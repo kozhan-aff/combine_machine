@@ -111,14 +111,31 @@ class CloudflareClient(BaseClient):
         )
         return self._result(resp)
 
-    def ensure_a_record(self, zone_id: str, name: str, ip: str, proxied: bool = True) -> dict:
-        """Idempotent: return the existing A record for `name` or create one.
+    def update_a_record(self, zone_id: str, record_id: str, name: str, ip: str,
+                        proxied: bool = True) -> dict:
+        """PATCH an existing A record's content/proxied (re-provision to a new origin)."""
+        resp = self.request(
+            "PATCH",
+            f"{self.base_url}/zones/{zone_id}/dns_records/{record_id}",
+            headers=self._headers(),
+            json={"type": "A", "name": name, "content": ip, "proxied": proxied, "ttl": 1},
+        )
+        return self._result(resp)
 
-        A duplicate identical POST 400s, so check-then-act.
+    def ensure_a_record(self, zone_id: str, name: str, ip: str, proxied: bool = True) -> dict:
+        """Idempotent: create the A record for `name`, or reconcile an existing one.
+
+        A duplicate identical POST 400s, so check-then-act. If the record already exists
+        but points at a different origin (content) or has the wrong proxied flag — e.g. a
+        re-provision after VPS_ORIGIN_IP changed — PATCH it so the site doesn't silently
+        keep pointing at the old origin.
         """
         existing = self.list_dns(zone_id, type="A", name=name)
         if existing:
-            return existing[0]
+            rec = existing[0]
+            if rec.get("content") != ip or bool(rec.get("proxied")) != bool(proxied):
+                return self.update_a_record(zone_id, rec["id"], name, ip, proxied=proxied)
+            return rec
         return self.add_a_record(zone_id, name, ip, proxied=proxied)
 
     def add_txt_record(self, zone_id: str, name: str, content: str) -> dict:

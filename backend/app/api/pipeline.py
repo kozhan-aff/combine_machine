@@ -88,8 +88,11 @@ def do_edit(page_id: int, body: EditIn):
 
 @router.post("/sites/{site_id}/offer")
 def attach_offer(site_id: int, so: SiteOfferIn, db: Session = Depends(get_session)):
-    db.add(SiteOffer(site_id=site_id, **so.model_dump()))
-    db.commit()
+    exists = db.execute(select(SiteOffer).where(          # зеркало panel: без дублей SiteOffer
+        SiteOffer.site_id == site_id, SiteOffer.offer_id == so.offer_id)).scalar_one_or_none()
+    if not exists:
+        db.add(SiteOffer(site_id=site_id, **so.model_dump()))
+        db.commit()
     return {"site_id": site_id, "offer_id": so.offer_id}
 
 
