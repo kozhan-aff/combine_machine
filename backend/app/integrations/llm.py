@@ -9,7 +9,9 @@ from app.integrations.base import BaseClient
 
 class LlmClient(BaseClient):
     def __init__(self):
-        super().__init__(settings.LLM_BASE_URL)
+        # mistral-large generation blows past BaseClient's 30s default (ReadTimeout on /generate);
+        # a full page can take tens of seconds, cold model more. 120s is a safe ceiling.
+        super().__init__(settings.LLM_BASE_URL, timeout=120.0)
         self.model = settings.LLM_MODEL
         self.api_key = settings.LLM_API_KEY
 
