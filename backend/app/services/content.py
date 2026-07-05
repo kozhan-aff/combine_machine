@@ -80,12 +80,17 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
             raise ValueError(f"site {site_id} not found")
         # тематическая связность: бренд берём из оффера, ПРИВЯЗАННОГО к сайту (как в publish),
         # иначе контент напишется про один бренд, а ссылка при публикации уйдёт на другой
+        # deterministic order_by(Offer.id): publish (_pick_offer) MUST pick the same offer,
+        # else content is written about one brand and the sponsored link points at another.
         offer = db.execute(
             select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
-            .where(SiteOffer.site_id == site_id, Offer.active.is_(True)).limit(1)
+            .where(SiteOffer.site_id == site_id, Offer.active.is_(True))
+            .order_by(Offer.id).limit(1)
         ).scalar_one_or_none()
         if offer is None:  # fall back to any active offer
-            offer = db.execute(select(Offer).where(Offer.active.is_(True)).limit(1)).scalar_one_or_none()
+            offer = db.execute(
+                select(Offer).where(Offer.active.is_(True)).order_by(Offer.id).limit(1)
+            ).scalar_one_or_none()
         brand = offer.brand if offer else (site.niche or "VPN")
 
         # information gain (PLAN §2): подмешиваем реальные факты вертикали, если бренд знаком.
@@ -110,6 +115,8 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
                 continue  # idempotent — don't regenerate existing pages
             body = _sanitize(_clean(llm.complete(_system_prompt(lang),
                                                  _page_prompt(spec, brand, vertical_data, competitor))))
+            if not body.strip():
+                continue  # empty LLM output (null/blocked): skip page, don't crash the batch
             db.add(Page(site_id=site_id, url_path=spec["url_path"], title=spec["title"],
                         status="draft", body=body))
             created += 1
@@ -134,18 +141,22 @@ def mark_edited(page_id: int, body: str | None = None) -> dict:
         return {"page_id": page_id, "status": p.status}
 
 
-def render_html(page, offer=None) -> str:
-    """Wrap an edited page into a full HTML doc with offer link (sponsored) + disclosure. For M5."""
+def render_html(page, offer=None, lang: str = "ru") -> str:
+    """Wrap an edited page into a full HTML doc with offer link (sponsored) + disclosure. For M5.
+
+    lang: <html lang=...> for the generation language (publish passes it down). Body is
+    re-sanitized here (egress) so any writer that skipped _sanitize can't leak hostile HTML.
+    """
     offer_block = ""
     if offer is not None:
         promo = f" Промокод: <b>{html.escape(offer.promo_code)}</b>." if offer.promo_code else ""
         offer_block = (f'<p class="offer"><a href="{html.escape(offer.affiliate_link)}" '
                        f'rel="sponsored nofollow">Перейти к {html.escape(offer.brand)}</a>.{promo}</p>')
     return (
-        "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+        f"<!doctype html><html lang='{html.escape(lang or 'ru')}'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{html.escape(page.title or '')}</title></head><body>"
-        f"<article>{page.body or ''}</article>{offer_block}"
+        f"<article>{_sanitize(page.body)}</article>{offer_block}"
         f"<footer><small>{html.escape(DISCLOSURE)}</small></footer></body></html>"
     )
 

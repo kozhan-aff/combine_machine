@@ -2,8 +2,18 @@
 
 See docs/api/searxng.md. Used for M1 indexed_echo (site:) and M4 competitor SERP.
 """
+from urllib.parse import urlparse
+
 from app.config import settings
 from app.integrations.base import BaseClient
+
+
+def host_matches(url: str | None, domain: str) -> bool:
+    """True iff url's host IS domain or a subdomain of it. Substring match ('domain in url')
+    false-positives on hostile URLs like https://mydomain.ru.evil.com/, so compare hostnames."""
+    host = (urlparse(url or "").hostname or "").lower()
+    domain = domain.lower()
+    return host == domain or host.endswith("." + domain)
 
 
 class SearxngClient(BaseClient):
@@ -27,7 +37,7 @@ class SearxngClient(BaseClient):
         # IP and don't answer `site:`; Yandex indexes .ru best and doesn't block RU.
         """
         results = self.search(f"site:{domain}")
-        return any(domain in (r.get("url") or "") for r in results)
+        return any(host_matches(r.get("url"), domain) for r in results)
 
     def unresponsive_engines(self, probe: str = "test") -> list:
         """Which engines are currently blocked/erroring (e.g. [['duckduckgo','CAPTCHA']]).

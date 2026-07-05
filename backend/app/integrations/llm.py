@@ -31,7 +31,13 @@ class LlmClient(BaseClient):
         }
         r = self.request("POST", f"{self.base_url}/v1/chat/completions",
                          json=body, headers=self._headers())
-        return r.json()["choices"][0]["message"]["content"]
+        # content can be null (filtered/blocked) or the envelope may lack choices — return ""
+        # rather than raising, so one bad page doesn't abort a whole generation batch.
+        try:
+            content = r.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return ""
+        return content or ""
 
     def ping(self) -> bool:
         r = self.request("GET", f"{self.base_url}/v1/models", headers=self._headers())

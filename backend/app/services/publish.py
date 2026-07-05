@@ -15,12 +15,17 @@ def _target_path(doc_root: str, url_path: str) -> str:
 def _pick_offer(db, site_id: int):
     from sqlalchemy import select
     from app.models.offer import Offer, SiteOffer
+    # deterministic order_by(Offer.id): MUST match content.generate_site's pick, or the page
+    # is written about one brand and the sponsored link points at another.
     off = db.execute(
         select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
-        .where(SiteOffer.site_id == site_id, Offer.active.is_(True)).limit(1)
+        .where(SiteOffer.site_id == site_id, Offer.active.is_(True))
+        .order_by(Offer.id).limit(1)
     ).scalar_one_or_none()
     if off is None:  # fall back to any active offer
-        off = db.execute(select(Offer).where(Offer.active.is_(True)).limit(1)).scalar_one_or_none()
+        off = db.execute(
+            select(Offer).where(Offer.active.is_(True)).order_by(Offer.id).limit(1)
+        ).scalar_one_or_none()
     return off
 
 
@@ -45,11 +50,14 @@ def publish_site(site_id: int) -> dict:
                     "hint": "гейт: публикуются только страницы в статусе 'edited'"}
 
         offer = _pick_offer(db, site_id)
+        # <html lang=...>: offer carries the target ISO language (one domain = one geo/lang);
+        # no site.language column, so derive from the offer and default to 'ru'.
+        lang = (offer.language if offer and offer.language else "ru")
         ap = AaPanelClient()
         now = datetime.now(timezone.utc)
         published = []
         for p in pages:
-            ap.write_file(_target_path(site.doc_root, p.url_path), render_html(p, offer))
+            ap.write_file(_target_path(site.doc_root, p.url_path), render_html(p, offer, lang=lang))
             p.status = "published"
             p.published_at = now
             published.append(p.url_path)
@@ -67,7 +75,7 @@ def check_index(site_id: int) -> dict:
     from app.models.site import Site, Page
     from app.models.domain import Domain
     from app.models.monitoring import IndexHistory
-    from app.integrations.searxng import SearxngClient
+    from app.integrations.searxng import SearxngClient, host_matches
 
     with SessionLocal() as db:
         site = db.get(Site, site_id)
@@ -82,7 +90,7 @@ def check_index(site_id: int) -> dict:
         out = {}
         for p in pages:
             q = f"site:{domain}{p.url_path if p.url_path != '/' else ''}"
-            hit = any(domain in (r.get("url") or "") for r in sx.search(q))
+            hit = any(host_matches(r.get("url"), domain) for r in sx.search(q))
             p.index_status = "indexed" if hit else "not_indexed"
             p.index_checked_at = now
             db.add(IndexHistory(page_id=p.id, checked_at=now, index_status=p.index_status))
