@@ -8,12 +8,30 @@ from datetime import datetime, timezone
 from app.integrations.base import BaseClient
 
 # stop-words per category (EN + RU). Coarse but real; tune against data.
+# Высокосигнальные маркеры на категорию (EN + RU, упор на RU — дропы .ru). Держим
+# ДЛИННЫЕ/однозначные токены (фразы, бренды), а не короткие общие слова: список — это
+# hard-reject гейт, ложняк отбраковывает чистый домен. Подстрочный счёт (low.count),
+# порог _MIN_HITS на категорию.
 STOPWORDS = {
-    "adult": ["porn", "xxx", "escort", "camgirl", "sexcam", "порно", "эротик"],
-    "pharma": ["viagra", "cialis", "tadalafil", "pharmacy", "аптека", "таблетк"],
-    "casino": ["casino", "roulette", "slots", "казино", "рулетк", "слот"],
-    "gambling": ["betting", "poker", "bookmaker", "ставки", "букмекер", "покер"],
-    "spam": ["buy cheap", "replica watches", "seo backlinks", "порнуха", "займ онлайн"],
+    "adult": ["porn", "xxx", "escort", "camgirl", "sexcam", "webcam girl", "hentai",
+              "adult dating", "sex video", "brazzers",
+              "порно", "порнуха", "эротик", "интим услуг", "проститутк", "шлюх",
+              "вебкам", "секс знакомств"],
+    "pharma": ["viagra", "cialis", "tadalafil", "sildenafil", "pharmacy", "tramadol",
+               "xanax", "no prescription", "canadian pharmacy",
+               "аптека", "таблетк", "виагра", "сиалис", "дженерик", "без рецепта"],
+    "casino": ["casino", "roulette", "slots", "jackpot", "blackjack", "baccarat",
+               "free spins", "casino bonus",
+               "казино", "рулетк", "слот", "игровые автоматы", "джекпот",
+               "азартны", "игровой клуб"],
+    "gambling": ["betting", "poker", "bookmaker", "sportsbook", "betting odds", "wager",
+                 "1xbet", "melbet",
+                 "ставки на спорт", "букмекер", "покер", "тотализатор", "париматч",
+                 "фрибет"],
+    "spam": ["buy cheap", "replica watches", "seo backlinks", "payday loan",
+             "essay writing", "forex signals", "binary options", "crypto giveaway",
+             "займ онлайн", "займы без", "кредит без", "накрутк",
+             "прогон хрумер", "заработок в интернете"],
 }
 _MIN_HITS = 2  # stop-word hits in a snapshot to flag its category
 
@@ -96,4 +114,10 @@ if __name__ == "__main__":  # pure classifier self-check (no network)
     assert _classify_text("just one casino here") == set()        # 1 hit < _MIN_HITS
     assert _classify_text("clean vpn review, fast servers") == set()
     assert "adult" in _classify_text("porn xxx camgirl")          # multi-word category sums
+    # RU-маркеры истории (дропы backorder.ru — RU-heavy)
+    assert "casino" in _classify_text("Игровые автоматы и казино онлайн, джекпот")
+    assert "gambling" in _classify_text("Ставки на спорт, букмекер 1xbet и фрибет")
+    assert "pharma" in _classify_text("Виагра и сиалис без рецепта, аптека")
+    assert "adult" in _classify_text("Интим услуги, проститутки, вебкам")
+    assert _classify_text("Обзор лучших vpn для стриминга, быстрые серверы") == set()
     print("wayback _classify_text ok")

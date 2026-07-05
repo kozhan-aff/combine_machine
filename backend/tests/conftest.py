@@ -45,6 +45,18 @@ def sqlite_db():
     Base.metadata.drop_all(engine)
 
 
+@pytest.fixture(autouse=True)
+def _no_panel_auth():
+    """Тесты герметичны к .env оператора: Basic-auth панели выключен на время прогона
+    (иначе заданные в .env PANEL_USER/PANEL_PASS отдают 401 вместо 303/200 на панельных
+    роутах). CSRF-guard не трогаем — TestClient шлёт запросы без Origin, он их и так пускает."""
+    from app.config import settings
+    saved = settings.PANEL_USER, settings.PANEL_PASS
+    settings.PANEL_USER = settings.PANEL_PASS = ""
+    yield
+    settings.PANEL_USER, settings.PANEL_PASS = saved
+
+
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient
