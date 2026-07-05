@@ -3,14 +3,14 @@
 {% block content %}
 
 <h2><span class="idx">01</span> Офферы
-  <span class="hint">вход машины: активный оффер подставляется в генерацию и публикацию</span></h2>
+  <span class="hint">вход машины: активный оффер подставляется в генерацию контента и в публикацию</span></h2>
 
-<div class="wrap" style="margin-bottom:22px">
+<div class="wrap" style="margin-bottom:8px">
 {% if rows %}
 <table>
   <thead><tr>
     <th>#</th><th>бренд</th><th>промокод</th><th>ссылка</th><th>гео</th><th>язык</th>
-    <th>статус</th><th>действия</th>
+    <th>статус</th><th>действие</th>
   </tr></thead>
   <tbody>
   {% for o in rows %}
@@ -21,11 +21,15 @@
       <td class="hint" style="max-width:340px; overflow:hidden; text-overflow:ellipsis">{{ o.affiliate_link }}</td>
       <td>{{ o.country or '—' }}</td>
       <td>{{ o.language or '—' }}</td>
-      <td>{% if o.active %}<span class="badge b-approved">активен</span>
-          {% else %}<span class="badge b-default">выключен</span>{% endif %}</td>
+      <td>{% if o.active %}<span class="badge b-approved" title="подставляется в новые генерации и публикации">активен</span>
+          {% else %}<span class="badge b-default" title="не используется машиной, пока не включишь">выключен</span>{% endif %}</td>
       <td>
         <form class="inline" method="post" action="/offers/{{ o.id }}/toggle">
-          <button class="btn-sm">{{ 'выключить' if o.active else 'включить' }}</button>
+          {% if o.active %}
+          <button class="btn-sm" title="скрыть оффер от машины: перестанет подставляться в новые страницы; уже опубликованное не изменится">⏻ выключить</button>
+          {% else %}
+          <button class="btn-sm btn-ok" title="снова разрешить машине использовать этот оффер в генерации и публикации">⏻ включить</button>
+          {% endif %}
         </form>
       </td>
     </tr>
@@ -36,20 +40,30 @@
 <div class="empty">Офферов нет — добавь первый: без него контенту не на что ссылаться.</div>
 {% endif %}
 </div>
+<p class="hint" style="margin:0 0 22px">«активен» = машина подставляет этот оффер в новые страницы.
+  Выключение не трогает уже опубликованное — только останавливает использование дальше.</p>
 
-<h2><span class="idx">＋</span> Новый оффер</h2>
-<div class="card">
-  <form method="post" action="/offers/create" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
-    <label class="f">бренд *<input name="brand" required placeholder="NordVPN" style="width:160px"></label>
-    <label class="f">партнёрская ссылка *<input name="affiliate_link" required
-           placeholder="https://…/?aff=…" style="width:320px"></label>
-    <label class="f">промокод<input name="promo_code" placeholder="SAVE65" style="width:110px"></label>
-    <label class="f">гео<input name="country" placeholder="RU" maxlength="8" style="width:64px"></label>
-    <label class="f">язык<input name="language" placeholder="ru" maxlength="8" style="width:64px"></label>
-    <button class="btn-amber">＋ Добавить</button>
-  </form>
-  <p class="hint" style="margin:12px 0 0">Один домен = одно гео/язык (чистый footprint). Ссылка попадёт в страницы с
-    <code>rel="sponsored nofollow"</code> и обязательным disclosure.</p>
+<div class="station" style="max-width:920px">
+  <div class="plate">＋ Новый оффер — добавить бренд в машину <span class="mod">вход конвейера</span></div>
+  <div class="what">Оффер = что рекламируем и куда ведём. <b>Бренд</b> задаёт тему всего контента сайта;
+    <b>ссылка</b> встаёт в страницы как кнопка перехода (с <code>rel="sponsored nofollow"</code> и
+    обязательным disclosure); <b>промокод</b> печатается рядом со ссылкой; <b>гео/язык</b> помечают,
+    какому сайту оффер подходит — один домен = одно гео/один язык (чистый footprint).</div>
+  <div class="go">
+    <form method="post" action="/offers/create" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
+      <label class="f">бренд * <span class="note">тема контента: «обзор {бренда}», «как настроить …»</span>
+        <input name="brand" required placeholder="NordVPN" style="width:160px"></label>
+      <label class="f">партнёрская ссылка * <span class="note">куда ведут кнопки на страницах</span>
+        <input name="affiliate_link" required placeholder="https://…/?aff=…" style="width:300px"></label>
+      <label class="f">промокод <span class="note">покажется читателю рядом со ссылкой</span>
+        <input name="promo_code" placeholder="SAVE65" style="width:110px"></label>
+      <label class="f">гео <span class="note">страна аудитории</span>
+        <input name="country" placeholder="RU" maxlength="8" style="width:64px"></label>
+      <label class="f">язык <span class="note">язык контента</span>
+        <input name="language" placeholder="ru" maxlength="8" style="width:64px"></label>
+      <button class="btn-amber" title="сохранить оффер: сразу станет активным и доступным сайтам">＋ Добавить оффер</button>
+    </form>
+  </div>
 </div>
 
 {% endblock %}

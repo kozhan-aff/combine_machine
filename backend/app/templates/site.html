@@ -9,46 +9,55 @@
 {% set n_published = pc.get('published', 0) %}
 
 <h2><span class="idx">◈</span> {{ domain }}
-  <span class="badge b-{{ site.status if site.status in ['provisioning','content','published'] else 'default' }}">{{ site.status }}</span>
+  <span class="badge b-{{ site.status if site.status in ['provisioning','content','published'] else 'default' }}"
+        title="{{ {'provisioning':'ждёт провижна (шаг 3)','content':'инфраструктура готова — контент и редактура','published':'страницы опубликованы'}.get(site.status, site.status) }}">{{ site.status }}</span>
   <span class="hint">сайт #{{ site.id }}{{ ' · zone ' + site.cf_zone_id if site.cf_zone_id }}</span>
 </h2>
+<p class="hint" style="margin:0 0 14px">Карточка ведёт по шагам сверху вниз. Индикатор слева:
+  <span class="led led-ok"></span>сделано · <span class="led led-todo"></span>твой следующий шаг ·
+  <span class="led led-off"></span>ещё рано (заблокировано предыдущим).</p>
 
 <div class="card" style="margin-bottom:24px">
   <ul class="check">
     <li>
       <span class="st"><span class="led led-ok"></span></span>
-      <div class="body"><div class="t">1 · Домен куплен <small>M2</small></div>
-        <div class="h">Куплен руками, отмечен 🛒 в шортлисте — money-gate пройден человеком.</div></div>
+      <div class="body"><div class="t">1 · Домен куплен <small>M2 · money-gate</small></div>
+        <div class="h">Куплен руками и отмечен 🛒 в списке доменов — деньги потратил человек, не машина.</div></div>
     </li>
 
     <li>
       <span class="st"><span class="led {{ 'led-ok' if attached else 'led-todo' }}"></span></span>
-      <div class="body"><div class="t">2 · Оффер привязан</div>
+      <div class="body"><div class="t">2 · Оффер привязан <small>что рекламирует сайт</small></div>
         <div class="h">
           {% if attached %}
-            {% for o in attached %}<span class="badge b-approved">{{ o.brand }}{{ ' · ' + o.promo_code if o.promo_code }}</span> {% endfor %}
-          {% else %}Выбери, какой оффер будет стоять на страницах этого сайта.{% endif %}
+            Привязано: {% for o in attached %}<span class="badge b-approved">{{ o.brand }}{{ ' · ' + o.promo_code if o.promo_code }}</span> {% endfor %}
+            — генерация пишет про этот бренд, публикация ставит его ссылку.
+          {% else %}Выбери, какой бренд будет стоять на страницах: генерация напишет контент
+            про него, публикация вставит его ссылку и промокод.{% endif %}
         </div></div>
       <div class="act">
         {% if all_offers %}
-        <form class="inline" method="post" action="/sites/{{ site.id }}/attach-offer" style="display:flex; gap:8px">
-          <select name="offer_id">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/attach-offer" style="display:flex; gap:8px; align-items:center">
+          <select name="offer_id" title="активные офферы из экрана «Офферы»">
             {% for o in all_offers %}<option value="{{ o.id }}">{{ o.brand }}{{ ' (' + o.country + ')' if o.country }}</option>{% endfor %}
           </select>
-          <button class="btn-sm">привязать</button>
+          <button class="btn-sm" title="закрепить выбранный оффер за этим сайтом">привязать к сайту</button>
         </form>
-        {% else %}<a class="btn btn-sm btn-amber" href="/offers">＋ создать оффер</a>{% endif %}
+        {% else %}<a class="btn btn-sm btn-amber" href="/offers" title="сначала создай оффер на экране «Офферы»">＋ создать оффер</a>{% endif %}
       </div>
     </li>
 
     <li>
       <span class="st"><span class="led {{ 'led-ok' if prov_done else 'led-todo' }}"></span></span>
-      <div class="body"><div class="t">3 · Provision <small>M3 · Cloudflare + aaPanel</small></div>
-        <div class="h">Зона CF → NS у регистратора → proxied A-запись → vhost + SSL. Идемпотентно:
-          если зона ждёт NS — пропиши их у регистратора и нажми ещё раз.</div></div>
+      <div class="body"><div class="t">3 · Provision — инфраструктура <small>M3 · Cloudflare + aaPanel</small></div>
+        <div class="h">Одна кнопка делает всё по порядку: зона Cloudflare → проверка NS у регистратора →
+          proxied A-запись на VPS → vhost + SSL в aaPanel. Идемпотентно: если зона ждёт NS —
+          баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/provision">
-          <button class="btn-sm {{ '' if prov_done else 'btn-amber' }}">{{ '↻ повторить' if prov_done else '▶ Provision' }}</button>
+          <button class="btn-sm {{ '' if prov_done else 'btn-amber' }}"
+                  title="создать/проверить: CF-зона, NS, A-запись, vhost, SSL — безопасно жать повторно">
+            {{ '↻ Прогнать provision заново' if prov_done else '▶ Запустить provision' }}</button>
         </form>
       </div>
     </li>
@@ -56,30 +65,39 @@
     <li>
       <span class="st"><span class="led {{ 'led-ok' if has_pages else ('led-todo' if prov_done else 'led-off') }}"></span></span>
       <div class="body"><div class="t">4 · Генерация черновиков <small>M4 · LLM</small></div>
-        <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит недостающие, существующие не тронет.
-          {% else %}Обзор + сравнение + настройка под гео/язык оффера. Синхронно, ≈1–2 мин.{% endif %}</div></div>
+        <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит
+          недостающие, существующие не тронет.{% else %}Создаст 3 страницы про привязанный бренд:
+          обзор (/), сравнение (/vs), настройка (/setup) — все в статусе <b>draft</b>, наружу
+          не попадают до твоей редактуры. Синхронно, ≈1–2 мин.{% endif %}</div></div>
       <div class="act">
-        <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px">
-          <select name="lang"><option value="ru">ru</option><option value="en">en</option></select>
-          <button class="btn-sm {{ '' if has_pages else 'btn-amber' }}">▶ генерировать</button>
+        <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px; align-items:center">
+          <select name="lang" title="язык, на котором LLM напишет черновики"><option value="ru">ru</option><option value="en">en</option></select>
+          <button class="btn-sm {{ '' if has_pages else 'btn-amber' }}"
+                  title="сгенерировать AI-черновики страниц (публиковаться не будут до редактуры)">▶ Сгенерировать черновики</button>
         </form>
       </div>
     </li>
 
     <li>
       <span class="st"><span class="led {{ 'led-ok' if (n_edited or n_published) else ('led-todo' if n_draft else 'led-off') }}"></span></span>
-      <div class="body"><div class="t">5 · Редактура <small>ГЕЙТ · человек</small></div>
+      <div class="body"><div class="t">5 · Редактура <small>ГЕЙТ · только человек</small></div>
         <div class="h">draft: {{ n_draft }} · edited: {{ n_edited }} · published: {{ n_published }}.
-          Публикуются ТОЛЬКО страницы, которые ты открыл, вычитал и сохранил как edited — по одной, в таблице ниже.</div></div>
+          Открой каждую страницу в таблице ниже («✎ вычитать»), поправь текст и сохрани —
+          страница станет <b>edited</b>. Публикация возьмёт ТОЛЬКО такие страницы: неотредактированный
+          AI наружу не выходит.</div></div>
     </li>
 
     <li>
       <span class="st"><span class="led {{ 'led-ok' if n_published else ('led-todo' if n_edited else 'led-off') }}"></span></span>
-      <div class="body"><div class="t">6 · Публикация <small>M5</small></div>
-        <div class="h">Рендер с оффером + disclosure → файлы в docroot через aaPanel. Возьмёт только edited-страницы.</div></div>
+      <div class="body"><div class="t">6 · Публикация <small>M5 · деплой на VPS</small></div>
+        <div class="h">Каждая edited-страница рендерится в полный HTML (ссылка оффера +
+          промокод + disclosure) и кладётся файлом в docroot через aaPanel. Draft-страницы
+          кнопка не тронет.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/publish">
-          <button class="btn-sm {{ 'btn-amber' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}>▶ опубликовать</button>
+          <button class="btn-sm {{ 'btn-amber' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}
+                  title="задеплоить все edited-страницы на сайт{{ '' if n_edited else ' (нет edited-страниц — сначала шаг 5)' }}">
+            ▶ Опубликовать edited-страницы{{ ' (' ~ n_edited ~ ')' if n_edited }}</button>
         </form>
       </div>
     </li>
@@ -87,40 +105,46 @@
     <li>
       <span class="st"><span class="led {{ 'led-ok' if (pages | selectattr('index_status','equalto','indexed') | list) else ('led-todo' if n_published else 'led-off') }}"></span></span>
       <div class="body"><div class="t">7 · Индексация <small>M5 · site: через SearXNG</small></div>
-        <div class="h">Проверка «страница в индексе?» по каждой опубликованной. Не мгновенно: индексация занимает дни.</div></div>
+        <div class="h">Спрашивает у поисковиков «site:{{ domain }}…» по каждой опубликованной странице
+          и записывает результат в колонку «индекс». Не мгновенно: попадание в индекс занимает дни —
+          проверяй периодически.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/check-index">
-          <button class="btn-sm" {{ 'disabled' if not n_published }}>▶ проверить</button>
+          <button class="btn-sm" {{ 'disabled' if not n_published }}
+                  title="проверить попадание опубликованных страниц в поисковый индекс{{ '' if n_published else ' (нечего проверять — сначала шаг 6)' }}">▶ Проверить индексацию</button>
         </form>
       </div>
     </li>
   </ul>
 </div>
 
-<h2><span class="idx">✎</span> Страницы</h2>
+<h2><span class="idx">✎</span> Страницы
+  <span class="hint">draft = AI-черновик (не публикуется) · edited = вычитано тобой (уйдёт при публикации) · published = уже на сайте</span></h2>
 <div class="wrap">
 {% if pages %}
 <table>
   <thead><tr>
-    <th>путь</th><th>заголовок</th><th>статус</th><th>индекс</th><th>действия</th>
+    <th>путь</th><th>заголовок</th><th>статус</th><th>индекс</th><th>действие</th>
   </tr></thead>
   <tbody>
   {% for p in pages %}
     <tr>
       <td class="dom">{{ p.url_path }}</td>
       <td>{{ p.title or '—' }}</td>
-      <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}">{{ p.status }}</span></td>
-      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>indexed
-          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>нет
-          {% else %}<span class="led led-off"></span><span class="hint">—</span>{% endif %}</td>
-      <td><a class="btn btn-sm {{ 'btn-amber' if p.status == 'draft' }}" href="/pages/{{ p.id }}">
-        {{ '✎ вычитать' if p.status == 'draft' else '✎ открыть' }}</a></td>
+      <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}"
+            title="{{ {'draft':'AI-черновик — публикация его не возьмёт','edited':'вычитано человеком — готово к публикации','published':'опубликовано на сайте'}.get(p.status, p.status) }}">{{ p.status }}</span></td>
+      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>в индексе
+          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>не в индексе
+          {% else %}<span class="led led-off"></span><span class="hint">не проверялось</span>{% endif %}</td>
+      <td><a class="btn btn-sm {{ 'btn-amber' if p.status == 'draft' }}" href="/pages/{{ p.id }}"
+             title="{{ 'открыть редактор: вычитать черновик и сохранить как edited' if p.status == 'draft' else 'открыть страницу в редакторе' }}">
+        {{ '✎ вычитать черновик' if p.status == 'draft' else '✎ открыть в редакторе' }}</a></td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 {% else %}
-<div class="empty">Страниц нет — запусти шаг 4 «Генерация».</div>
+<div class="empty">Страниц нет — запусти шаг 4 «Генерация черновиков».</div>
 {% endif %}
 </div>
 

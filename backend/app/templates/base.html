@@ -38,12 +38,14 @@
   /* ---- рельса этапов (навигация = конвейер) ---- */
   nav.rail { display:flex; align-items:center; padding:12px 24px; gap:0; flex-wrap:wrap;
              border-bottom:1px solid var(--line); }
-  .rl { display:flex; align-items:baseline; gap:8px; padding:8px 14px;
+  .rl { display:flex; flex-direction:column; gap:1px; padding:7px 14px 6px;
         border:1px solid var(--line); background:var(--panel);
         font-family:var(--disp); font-size:13px; letter-spacing:2px; text-transform:uppercase;
         color:var(--mut); }
   .rl:hover { text-decoration:none; border-color:var(--line2); color:var(--ink); }
-  .rl .n { font-family:var(--mono); font-size:10px; color:var(--dim); }
+  .rl .n { font-family:var(--mono); font-size:10px; color:var(--dim); margin-right:6px; }
+  .rl .sub { font-size:8.5px; letter-spacing:1.2px; color:var(--dim); text-transform:none; }
+  .rl.on .sub { color:rgba(255,171,46,.65); }
   .rl.on { color:var(--amber); border-color:var(--amber);
            box-shadow:0 0 0 1px rgba(255,171,46,.25), inset 0 0 18px rgba(255,171,46,.05); }
   .rl.on .n { color:var(--amber); }
@@ -184,6 +186,37 @@
 
   .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
   .toolbar form { display:flex; gap:8px; align-items:end; }
+
+  /* ---- СТАНЦИИ: каждое действие = блок с шильдиком (имя + что именно делает) ---- */
+  .stations { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px;
+              margin-bottom:18px; }
+  .station { background:var(--panel); border:1px solid var(--line); display:flex;
+             flex-direction:column; }
+  .station .plate { font-family:var(--disp); font-size:11.5px; letter-spacing:2px;
+    text-transform:uppercase; color:var(--amber); padding:8px 14px 7px;
+    border-bottom:1px solid var(--line); background:var(--panel2);
+    display:flex; align-items:baseline; gap:10px; }
+  .station .plate .mod { margin-left:auto; color:var(--dim); font-size:9.5px; letter-spacing:1.5px; }
+  .station .what { color:var(--mut); font-size:11.5px; line-height:1.55; padding:10px 14px 4px; flex:1; }
+  .station .what b { color:var(--ink); font-weight:600; }
+  .station .go { display:flex; gap:10px; align-items:end; flex-wrap:wrap; padding:10px 14px 13px; }
+
+  /* ---- легенда статусов: бейдж → кто ставит → что означает ---- */
+  details.legend { border:1px solid var(--line); background:var(--panel); margin-bottom:16px; }
+  details.legend summary { cursor:pointer; padding:9px 14px; font-family:var(--disp); font-size:11px;
+    letter-spacing:2px; text-transform:uppercase; color:var(--mut); user-select:none; }
+  details.legend summary:hover { color:var(--ink); }
+  details.legend[open] summary { border-bottom:1px solid var(--line); color:var(--amber); }
+  .legend-grid { display:grid; grid-template-columns:max-content max-content 1fr; gap:8px 16px;
+                 padding:12px 16px; font-size:11.5px; align-items:baseline; }
+  .legend-grid .who { color:var(--dim); font-family:var(--disp); font-size:9.5px;
+                      letter-spacing:1.2px; text-transform:uppercase; white-space:nowrap; }
+  .legend-grid .desc { color:var(--mut); }
+  @media (max-width:720px) { .legend-grid { grid-template-columns:max-content 1fr; }
+    .legend-grid .who { display:none; } }
+
+  /* подпись под контролом: мелкое пояснение эффекта */
+  .note { display:block; color:var(--dim); font-size:10.5px; margin-top:4px; letter-spacing:.3px; }
   .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px; }
   .chip { font-size:11px; padding:3px 10px; border:1px solid var(--line2); color:var(--mut);
           font-family:var(--disp); letter-spacing:1.2px; text-transform:uppercase; }
@@ -199,15 +232,25 @@
 </header>
 <div class="hazard"></div>
 <nav class="rail">
-  <a class="rl {{ 'on' if active=='dash' }}" href="/"><span class="n">00</span> Пульт</a>
+  <a class="rl {{ 'on' if active=='dash' }}" href="/">
+    <span><span class="n">00</span>Пульт</span>
+    <span class="sub">сводка воронки + что делать дальше</span></a>
   <span class="seg"></span>
-  <a class="rl {{ 'on' if active=='offers' }}" href="/offers"><span class="n">01</span> Офферы</a>
+  <a class="rl {{ 'on' if active=='offers' }}" href="/offers">
+    <span><span class="n">01</span>Офферы</span>
+    <span class="sub">бренды и партнёрские ссылки — вход машины</span></a>
   <span class="seg"></span>
-  <a class="rl {{ 'on' if active=='domains' }}" href="/domains"><span class="n">02</span> Домены · M1</a>
+  <a class="rl {{ 'on' if active=='domains' }}" href="/domains">
+    <span><span class="n">02</span>Домены · M1</span>
+    <span class="sub">поиск дропов, скоринг, отбор, покупка</span></a>
   <span class="seg"></span>
-  <a class="rl" href="/#sites"><span class="n">03</span> Сайты · M3–M5</a>
+  <a class="rl" href="/#sites">
+    <span><span class="n">03</span>Сайты · M3–M5</span>
+    <span class="sub">провижн → контент → редактура → публикация</span></a>
   <span class="seg"></span>
-  <a class="rl {{ 'on' if active=='diag' }}" href="/diag"><span class="n">◉</span> Диагностика</a>
+  <a class="rl {{ 'on' if active=='diag' }}" href="/diag">
+    <span><span class="n">◉</span>Диагностика</span>
+    <span class="sub">связь с сервисами + обновление кода</span></a>
   <span class="spacer">ГЕЙТЫ: ВЫКУП — ЧЕЛОВЕК · ПУБЛИКАЦИЯ — ТОЛЬКО EDITED</span>
 </nav>
 

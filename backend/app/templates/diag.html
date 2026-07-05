@@ -3,17 +3,19 @@
 {% block content %}
 
 <h2><span class="idx">◉</span> Диагностика интеграций
-  <span class="hint">{{ ok }} / {{ total }} на связи</span></h2>
+  <span class="hint">{{ ok }} / {{ total }} на связи · страница пингует все сервисы при каждом открытии</span></h2>
 
 <div class="toolbar">
-  <form method="get" action="/diag"><button class="btn-amber">↻ Проверить снова</button></form>
-  <span class="hint">пингует каждый сервис параллельно (до 15с на самый медленный)</span>
+  <form method="get" action="/diag">
+    <button class="btn-amber" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
+  </form>
+  <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
 </div>
 
-<div class="wrap" style="margin-bottom:26px">
+<div class="wrap" style="margin-bottom:8px">
 <table>
   <thead><tr>
-    <th>сервис</th><th>роль</th><th>статус</th><th class="num">отклик</th><th>детали</th>
+    <th>сервис</th><th>зачем он конвейеру</th><th>статус</th><th class="num">отклик</th><th>детали ошибки</th>
   </tr></thead>
   <tbody>
   {% for c in checks %}
@@ -22,7 +24,7 @@
       <td class="hint">{{ c.role }}</td>
       <td>
         {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
-        {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint">пропущен</span>
+        {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="в .env нет кредов для этого сервиса — пинг бессмысленен">пропущен</span>
         {% else %}<span class="led led-bad"></span><span style="color:var(--bad)">FAIL</span>{% endif %}
       </td>
       <td class="num hint">{{ (c.ms ~ ' мс') if c.ms is not none else '—' }}</td>
@@ -32,18 +34,23 @@
   </tbody>
 </table>
 </div>
+<p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>OK — сервис отвечает и креды верны ·
+  <span class="led led-bad"></span>FAIL — не отвечает или отверг запрос (текст справа) ·
+  <span class="led led-off"></span>пропущен — заполни креды в <code>.env</code> и обнови страницу.</p>
 
-<h2><span class="idx">⇩</span> Обновление кода
-  <span class="hint">{{ repo }}</span></h2>
-<div class="card">
-  <div class="toolbar" style="margin:0">
+<div class="station" style="max-width:920px">
+  <div class="plate">⇩ Обновить из git — подтянуть свежий код <span class="mod">{{ repo }}</span></div>
+  <div class="what">Выполняет <b>git pull --ff-only</b> из ветки main прямо в контейнере и применяет
+    миграции БД (<b>alembic upgrade head</b>); работающий сервер подхватит код авто-релоадом —
+    консоль не нужна. Локальные правки не затрёт (не-fast-forward просто откажет с ошибкой
+    в баннере). Если менялись зависимости или Dockerfile — всё равно нужен ручной
+    <code>docker compose up -d --build</code>.</div>
+  <div class="go">
     {% if can_pull %}
     <form method="post" action="/admin/pull"
           onsubmit="return confirm('Забрать свежий код из git (main) и применить миграции?')">
-      <button class="btn-amber">⇩ Обновить из git</button>
+      <button class="btn-amber" title="git pull --ff-only + alembic upgrade head; результат покажется баннером сверху">⇩ Обновить из git</button>
     </form>
-    <span class="hint">git pull --ff-only + alembic upgrade; код подхватит авто-релоад.
-      Меняли зависимости/Dockerfile — нужен пересбор образа.</span>
     {% else %}
     <span class="hint">Кнопка выключена: задай <b>GITHUB_TOKEN</b> (fine-grained PAT, read-only Contents)
       в <code>.env</code> и смонтируй репозиторий (<code>.:/repo</code>) — см. docs/DEPLOY.md.</span>

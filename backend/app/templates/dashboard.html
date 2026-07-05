@@ -2,42 +2,53 @@
 {% block title %}Пульт{% endblock %}
 {% block content %}
 
-<h2><span class="idx">◈</span> Воронка конвейера</h2>
+<h2><span class="idx">◈</span> Воронка конвейера
+  <span class="hint">каждая плитка кликабельна — открывает список этой стадии</span></h2>
 <div class="funnel">
-  <div class="stat"><a href="/offers">
+  <div class="stat"><a href="/offers" title="офферы: бренды и партнёрские ссылки — вход машины">
     <div class="v {{ 'hot' if not offers_active }}">{{ offers_active }}</div>
-    <div class="k">офферы актив.</div></a></div>
+    <div class="k">офферы актив.</div>
+    <div class="k" style="color:var(--dim)">вход машины</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/domains?status=discovered">
-    <div class="v">{{ dc.get('discovered', 0) }}</div><div class="k">найдено</div></a></div>
+  <div class="stat"><a href="/domains?status=discovered" title="найдены в фиде, ещё не оценены">
+    <div class="v">{{ dc.get('discovered', 0) }}</div><div class="k">найдено</div>
+    <div class="k" style="color:var(--dim)">ждут ▶ Score</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/domains?status=scored">
+  <div class="stat"><a href="/domains?status=scored" title="оценены машиной, ждут твоего решения ✓/✗">
     <div class="v {{ 'hot' if dc.get('scored') }}">{{ dc.get('scored', 0) }}</div>
-    <div class="k">отскорено</div></a></div>
+    <div class="k">отскорено</div>
+    <div class="k" style="color:var(--dim)">ждут ✓ / ✗</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/domains?status=approved">
+  <div class="stat"><a href="/domains?status=approved" title="одобрены — купи руками у провайдера">
     <div class="v {{ 'hot' if dc.get('approved') }}">{{ dc.get('approved', 0) }}</div>
-    <div class="k">одобрено</div></a></div>
+    <div class="k">одобрено</div>
+    <div class="k" style="color:var(--dim)">купить руками</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/domains?status=purchased">
-    <div class="v">{{ dc.get('purchased', 0) }}</div><div class="k">куплено 🛒</div></a></div>
+  <div class="stat"><a href="/domains?status=purchased" title="куплены тобой — дальше создать сайт">
+    <div class="v">{{ dc.get('purchased', 0) }}</div><div class="k">куплено 🛒</div>
+    <div class="k" style="color:var(--dim)">→ создать сайт</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/#sites">
-    <div class="v">{{ sites|length }}</div><div class="k">сайты</div></a></div>
+  <div class="stat"><a href="/#sites" title="карточки сайтов: провижн → контент → публикация">
+    <div class="v">{{ sites|length }}</div><div class="k">сайты</div>
+    <div class="k" style="color:var(--dim)">M3–M5</div></a></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat">
+  <div class="stat" title="AI-черновики: не публикуются, пока ты их не вычитаешь">
     <div class="v {{ 'hot' if pc.get('draft') }}">{{ pc.get('draft', 0) }}</div>
-    <div class="k">черновики</div></div>
+    <div class="k">черновики</div>
+    <div class="k" style="color:var(--dim)">ждут редактуры</div></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat">
+  <div class="stat" title="вычитаны человеком — публикация возьмёт только их">
     <div class="v {{ 'hot' if pc.get('edited') }}">{{ pc.get('edited', 0) }}</div>
-    <div class="k">edited ✎</div></div>
+    <div class="k">edited ✎</div>
+    <div class="k" style="color:var(--dim)">готовы к публикации</div></div>
   <span class="fun-arrow">▸</span>
-  <div class="stat">
-    <div class="v">{{ pc.get('published', 0) }}</div><div class="k">опубликовано</div></div>
+  <div class="stat" title="лежат на сайте — проверяй попадание в индекс">
+    <div class="v">{{ pc.get('published', 0) }}</div><div class="k">опубликовано</div>
+    <div class="k" style="color:var(--dim)">следи за индексом</div></div>
 </div>
 
-<h2><span class="idx">→</span> Что дальше</h2>
+<h2><span class="idx">→</span> Что дальше
+  <span class="hint">живой чек-лист: пересчитывается по состоянию базы, кликни — попадёшь куда нужно</span></h2>
 <div class="card">
   <ol class="steps">
     {% for s in steps %}
@@ -53,7 +64,8 @@
   <div class="scard">
     <div class="d">{{ s.domain }}</div>
     <div class="row">
-      <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}">{{ s.site.status }}</span>
+      <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}"
+            title="{{ {'provisioning':'ждёт провижна: Cloudflare + vhost','content':'инфраструктура готова — этап контента','published':'страницы опубликованы'}.get(s.site.status, s.site.status) }}">{{ s.site.status }}</span>
       <span class="hint">
         стр.: {{ s.pages.get('draft', 0) }} draft ·
         {{ s.pages.get('edited', 0) }} edited ·
@@ -61,12 +73,13 @@
         {{ s.indexed }} в индексе
       </span>
     </div>
-    <div class="row"><a class="btn btn-amber btn-sm" href="/sites/{{ s.site.id }}">Открыть карточку →</a></div>
+    <div class="row"><a class="btn btn-amber btn-sm" href="/sites/{{ s.site.id }}"
+      title="чек-лист сайта: провижн, генерация, редактура, публикация, индексация">Открыть карточку →</a></div>
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">purchased</span> → кнопка «создать сайт» на экране <a href="/domains">Домены</a>.</div>
+<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">purchased</span> → кнопка «＋ создать сайт» на экране <a href="/domains">Домены</a>.</div>
 {% endif %}
 
 {% endblock %}

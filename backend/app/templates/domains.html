@@ -3,33 +3,86 @@
 {% block content %}
 
 <h2><span class="idx">02</span> Домены · M1
-  <span class="hint">discovery → score → курация человеком → выкуп руками</span></h2>
+  <span class="hint">конвейер отбора: discovery → score → твоё решение → покупка руками</span></h2>
 
-<div class="toolbar">
-  <form method="post" action="/run/discovery">
-    <button class="btn-amber" title="забрать свежие дропы из публичного фида backorder">↻ Discovery</button>
-  </form>
-  <form method="post" action="/run/score">
-    <label class="f">сколько
-      <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
-    <button class="btn-amber" title="скорит discovered-домены, лучшие по RD первыми; Wayback ~5с/домен">▶ Score</button>
-  </form>
-  <span class="hint">действия синхронны: Score ≈ 5с × N — страница ответит после завершения</span>
+{# ---- станции: каждое действие с шильдиком, что именно оно делает ---- #}
+<div class="stations">
+  <div class="station">
+    <div class="plate">↻ Discovery — найти кандидатов <span class="mod">M1a · фид backorder.ru</span></div>
+    <div class="what">Забирает список <b>освобождающихся доменов</b> из публичного фида и складывает
+      новые в таблицу со статусом <b>discovered</b>. Ничего не оценивает и не покупает —
+      только пополняет очередь. Повторный запуск дублей не создаёт.</div>
+    <div class="go">
+      <form method="post" action="/run/discovery">
+        <button class="btn-amber">↻ Запустить Discovery</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="station">
+    <div class="plate">▶ Score — оценить очередь <span class="mod">M1b · Wayback+РКН+блэклист+SERP</span></div>
+    <div class="what">Прогоняет <b>discovered</b>-домены через проверки: история Wayback (адалт/фарма/казино
+      в прошлом?) → реестр РКН → блэклисты → эхо в индексе. Выставляет <b>score 0–1</b> и статус:
+      чистые и сильные — <b>approved</b>, спорные — <b>scored</b> (решаешь ты), грязные — <b>rejected</b>.
+      Синхронно, ≈5 с на домен; лучшие по RD идут первыми.</div>
+    <div class="go">
+      <form method="post" action="/run/score" style="display:flex; gap:10px; align-items:end">
+        <label class="f">доменов за запуск
+          <input type="number" name="n" value="5" min="1" max="50" style="width:72px"></label>
+        <button class="btn-amber">▶ Запустить Score</button>
+      </form>
+    </div>
+  </div>
 </div>
 
+<details class="legend">
+  <summary>Легенда: статусы доменов и колонки таблицы</summary>
+  <div class="legend-grid">
+    <span class="badge b-discovered">discovered</span><span class="who">машина</span>
+      <span class="desc">найден в фиде, ещё не оценён — ждёт ▶ Score</span>
+    <span class="badge b-scored">scored</span><span class="who">машина</span>
+      <span class="desc">оценён, но не дотянул до авто-одобрения — реши сам: ✓ или ✗</span>
+    <span class="badge b-approved">approved</span><span class="who">машина / ты</span>
+      <span class="desc">чистый и годный к выкупу — купи руками у провайдера, потом отметь 🛒</span>
+    <span class="badge b-rejected">rejected</span><span class="who">машина / ты</span>
+      <span class="desc">отклонён (грязная история / РКН / блэклист / низкий score)</span>
+    <span class="badge b-purchased">purchased</span><span class="who">только ты</span>
+      <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
+    <span class="badge b-live">live</span><span class="who">машина</span>
+      <span class="desc">сайт на домене опубликован и работает</span>
+  </div>
+  <div class="legend-grid" style="border-top:1px dashed var(--line)">
+    <span class="hint">score</span><span class="who">0–1</span>
+      <span class="desc">сводная оценка качества: история + возраст + ссылки + индекс</span>
+    <span class="hint">RD</span><span class="who">из фида</span>
+      <span class="desc">referring domains — сколько доменов ссылается (авторитетность)</span>
+    <span class="hint">echo</span><span class="who">SearXNG</span>
+      <span class="desc">✓ = домен ещё встречается в поисковом индексе (был жив)</span>
+    <span class="hint">флаги</span><span class="who">Wayback/РКН</span>
+      <span class="desc">красные метки грязной истории — любой флаг = авто-reject</span>
+    <span class="hint">⌛</span><span class="who">ссылка</span>
+      <span class="desc">открыть историю домена в Wayback — глянуть глазами перед решением</span>
+  </div>
+</details>
+
 <div class="chips">
-  <a class="chip {{ 'on' if not f_status }}" href="/domains">все <b>{{ total }}</b></a>
+  <a class="chip {{ 'on' if not f_status }}" href="/domains"
+     title="показать домены во всех статусах">все <b>{{ total }}</b></a>
   {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
     {% if counts.get(st) %}
-    <a class="chip {{ 'on' if f_status==st }}" href="/domains?status={{ st }}">{{ st }} <b>{{ counts[st] }}</b></a>
+    <a class="chip {{ 'on' if f_status==st }}" href="/domains?status={{ st }}"
+       title="показать только домены в статусе {{ st }}">{{ st }} <b>{{ counts[st] }}</b></a>
     {% endif %}
   {% endfor %}
-  <form method="get" action="/domains" style="display:flex; gap:6px; margin-left:12px">
+  <form method="get" action="/domains" style="display:flex; gap:10px; margin-left:12px; align-items:end">
     <input type="hidden" name="status" value="{{ f_status }}">
-    <input type="number" name="min_score" step="0.05" min="0" max="1" value="{{ f_min_score }}"
-           placeholder="min score" style="width:92px; padding:2px 8px">
-    <input type="number" name="limit" min="1" max="1000" value="{{ f_limit }}" style="width:70px; padding:2px 8px">
-    <button class="btn-sm">фильтр</button>
+    <label class="f">score от (0–1)
+      <input type="number" name="min_score" step="0.05" min="0" max="1" value="{{ f_min_score }}"
+             style="width:92px; padding:2px 8px"></label>
+    <label class="f">показать строк
+      <input type="number" name="limit" min="1" max="1000" value="{{ f_limit }}"
+             style="width:80px; padding:2px 8px"></label>
+    <button class="btn-sm" title="применить фильтр по score и лимиту">применить фильтр</button>
   </form>
 </div>
 
@@ -39,14 +92,14 @@
   <thead><tr>
     <th>домен</th><th>статус</th><th>score</th><th class="num">RD</th>
     <th class="num">возраст</th><th>echo</th><th>флаги истории</th><th class="num">найден</th>
-    <th>действия</th>
+    <th>следующий шаг</th>
   </tr></thead>
   <tbody>
   {% for d in rows %}
     <tr>
       <td class="dom">{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
-           title="история в Wayback — глянуть глазами перед решением" style="opacity:.6">⌛</a></td>
+           title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
       <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status }}</span></td>
       <td>
         {% if d.score is not none %}{% set sc = d.score|float %}
@@ -56,7 +109,7 @@
       </td>
       <td class="num">{{ d.referring_domains if d.referring_domains is not none else '—' }}</td>
       <td class="num">{{ '%.1f'|format(d.age_years|float) if d.age_years is not none else '—' }}</td>
-      <td>{% if d.indexed_echo %}<span style="color:var(--ok)">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td>{% if d.indexed_echo %}<span style="color:var(--ok)" title="домен встречается в поисковом индексе">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
         {% set pf = d.prior_flags or {} %}
         {% for k in ['adult','pharma','casino','gambling','spam','topic_switch'] %}
@@ -70,32 +123,33 @@
         {# контекстные действия: на каждом статусе видно только осмысленный следующий шаг #}
         {% if d.status == 'discovered' %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-            <button class="btn-sm" title="отскорить только этот домен (~5с)">▶ скор</button></form>
+            <button class="btn-sm" title="прогнать проверки только для этого домена (≈5 с)">▶ отскорить</button></form>
         {% elif d.status == 'scored' %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
-            <button class="btn-sm btn-ok" title="одобрить к выкупу">✓</button></form>
+            <button class="btn-sm btn-ok" title="одобрить: домен годен, пойдёт в очередь на покупку">✓ одобрить</button></form>
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
-            <button class="btn-sm btn-bad" title="отклонить">✗</button></form>
+            <button class="btn-sm btn-bad" title="отклонить: домен не годится, убрать из воронки">✗ отклонить</button></form>
         {% elif d.status == 'approved' %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="purchased">
-            <button class="btn-sm btn-buy" title="я купил домен руками у провайдера (money-gate: человек)">🛒 куплен</button></form>
+            <button class="btn-sm btn-buy" title="отметить: я уже купил этот домен руками у провайдера (система деньги не тратит)">🛒 отметить купленным</button></form>
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
-            <button class="btn-sm btn-bad" title="передумал">✗</button></form>
+            <button class="btn-sm btn-bad" title="передумал: убрать из очереди на покупку">✗ отклонить</button></form>
         {% elif d.status == 'purchased' %}
           {% if site_by_domain.get(d.id) %}
-            <a class="btn btn-sm btn-amber" href="/sites/{{ site_by_domain[d.id] }}">сайт →</a>
+            <a class="btn btn-sm btn-amber" href="/sites/{{ site_by_domain[d.id] }}"
+               title="открыть карточку сайта этого домена">открыть сайт →</a>
           {% else %}
             <form class="inline" method="post" action="/domains/{{ d.id }}/make-site">
-              <button class="btn-sm btn-amber" title="создать карточку сайта (M3)">＋ создать сайт</button></form>
+              <button class="btn-sm btn-amber" title="завести карточку сайта: дальше провижн, контент, публикация">＋ создать сайт</button></form>
           {% endif %}
         {% elif d.status == 'rejected' %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
-            <button class="btn-sm" title="вернуть в одобренные">↩</button></form>
+            <button class="btn-sm" title="вернуть домен в статус approved (годен к покупке)">↩ вернуть в approved</button></form>
         {% endif %}
       </td>
     </tr>
@@ -103,7 +157,8 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни с ↻ Discovery — фид принесёт свежие дропы, затем ▶ Score.</div>
+<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни со станции
+  «↻ Discovery» — фид принесёт свежие дропы, затем «▶ Score» их оценит.</div>
 {% endif %}
 </div>
 

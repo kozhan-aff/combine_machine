@@ -144,11 +144,12 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
 
 @router.get("/diag", response_class=HTMLResponse)
 def diag_view(request: Request):
-    from app.services.diagnostics import run_diagnostics
+    from app.services.diagnostics import run_diagnostics, PING_TIMEOUT
     checks = run_diagnostics()
     ok = sum(1 for c in checks if c["status"] == "ok")
     return templates.TemplateResponse(request, "diag.html", {
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
+        "timeout": PING_TIMEOUT,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
     })
 
