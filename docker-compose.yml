@@ -22,10 +22,12 @@ services:
       db:
         condition: service_healthy
     ports:
-      # localhost-only: the panel/pipeline have NO auth — never expose to LAN/internet.
-      # access from the Mac via SSH tunnel: `ssh -L 8000:localhost:8000 box` (see docs/DEPLOY.md).
-      # trusted home LAN & want direct access? change to "192.168.1.77:8000:8000" AND add app auth.
-      - "127.0.0.1:8000:8000"
+      # EXPOSED ON LAN (trusted home network). The panel/pipeline have NO auth, so this is
+      # safe ONLY behind the home router's NAT — never port-forward :8000 to the internet.
+      # NB: Docker publishes through the FORWARD/DOCKER chain, bypassing a host ufw/iptables
+      # INPUT drop — so this reaches the LAN even with the box firewall's default-deny.
+      # Want it private again? revert to "127.0.0.1:8000:8000" and use an SSH tunnel (docs/DEPLOY.md).
+      - "0.0.0.0:8000:8000"
     volumes:
       - ./backend:/app
       # весь репо (с .git) → /repo, чтобы кнопка «Обновить из git» в панели делала
