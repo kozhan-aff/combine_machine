@@ -24,10 +24,14 @@ services:
     ports:
       # EXPOSED ON LAN (trusted home network). The panel/pipeline have NO auth, so this is
       # safe ONLY behind the home router's NAT — never port-forward :8000 to the internet.
-      # NB: Docker publishes through the FORWARD/DOCKER chain, bypassing a host ufw/iptables
-      # INPUT drop — so this reaches the LAN even with the box firewall's default-deny.
+      # Bound to the box's LAN IP (not 0.0.0.0) so a stray VPN/2nd interface can't expose it.
+      # SECURITY NOTE: with no auth, anyone on the LAN can drive the pipeline — including
+      #   POST /admin/pull, which git-pulls + reloads code. Add app auth (Basic-auth middleware
+      #   or an APIKey Depends) before trusting the LAN, or restrict source IPs in DOCKER-USER.
+      # NB: Docker publishes via the FORWARD/DOCKER chain, bypassing a host ufw INPUT drop.
       # Want it private again? revert to "127.0.0.1:8000:8000" and use an SSH tunnel (docs/DEPLOY.md).
-      - "0.0.0.0:8000:8000"
+      # If the box IP changes via DHCP this fails to bind — reserve 192.168.1.77 on the router.
+      - "192.168.1.77:8000:8000"
     volumes:
       - ./backend:/app
       # весь репо (с .git) → /repo, чтобы кнопка «Обновить из git» в панели делала
