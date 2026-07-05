@@ -8,7 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"                      # localhost-only; reach from Mac via SSH tunnel
     healthcheck:                                   # gate backend/worker until PG accepts connections
       test: ["CMD-SHELL", "pg_isready -U portfolio"]
       interval: 5s
@@ -22,7 +22,10 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # localhost-only: the panel/pipeline have NO auth — never expose to LAN/internet.
+      # access from the Mac via SSH tunnel: `ssh -L 8000:localhost:8000 box` (see docs/DEPLOY.md).
+      # trusted home LAN & want direct access? change to "192.168.1.77:8000:8000" AND add app auth.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
     # auto-migrate on start (alembic upgrade head is idempotent), then serve
