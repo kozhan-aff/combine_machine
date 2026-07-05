@@ -299,7 +299,8 @@ def provision_action(site_id: int):
 def generate_action(site_id: int, lang: str = Form("ru")):
     from app.services import content
     try:
-        n = content.generate_site(site_id, lang=lang)
+        # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
+        n = content.generate_site(site_id, lang=lang, use_competitor=True)
         return _back(f"/sites/{site_id}",
                      msg=f"Сгенерировано {n} черновиков. Дальше — редактура (гейт: publish берёт только edited).")
     except Exception as e:  # noqa: BLE001

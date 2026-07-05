@@ -41,10 +41,16 @@ def _system_prompt(lang: str) -> str:
             "Это ЧЕРНОВИК для последующей человеческой редактуры.")
 
 
-def _page_prompt(spec: dict, brand: str, vertical_data: str | None) -> str:
+def _page_prompt(spec: dict, brand: str, vertical_data: str | None,
+                 competitor: list[str] | None = None) -> str:
     data = f"\n\nРеальные данные вертикали (использовать):\n{vertical_data}" if vertical_data else ""
+    comp = ""
+    if competitor:
+        topics = "\n".join(f"- {h}" for h in competitor)
+        comp = ("\n\nТемы, которые покрывает топ-конкурент (для полноты охвата; НЕ копировать "
+                f"формулировки дословно, отбирай релевантное теме страницы):\n{topics}")
     return (f"Тема: {spec['title']} (тип: {spec['kind']}). Бренд: {brand}. "
-            f"Сделай связный черновик со структурой заголовков.{data}")
+            f"Сделай связный черновик со структурой заголовков.{data}{comp}")
 
 
 def _clean(body: str) -> str:
@@ -55,8 +61,13 @@ def _clean(body: str) -> str:
     return b.strip()
 
 
-def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = None) -> int:
-    """Generate draft pages for a site via LiteLLM. Returns count created. status stays 'draft'."""
+def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = None,
+                  use_competitor: bool = False) -> int:
+    """Generate draft pages for a site via LiteLLM. Returns count created. status stays 'draft'.
+
+    use_competitor: подмешать структуру тем от топ-конкурента (A-Parser, best-effort).
+    По умолчанию off — сеть не дёргается в тестах/скриптах; панель включает явно.
+    """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.site import Site, Page
@@ -83,6 +94,13 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
             from app.services.vertical_data import vertical_block
             vertical_data = vertical_block(brand)
 
+        # опц. карта тем от топ-конкурента (best-effort: осечка -> None, генерация идёт без неё)
+        competitor = None
+        if use_competitor:
+            from app.services.competitor import outline_for
+            got = outline_for(brand, lang=lang)
+            competitor = got["headings"] if got else None
+
         llm = LlmClient()
         created = 0
         for spec in scaffold(brand, site.niche):
@@ -91,7 +109,7 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
             if exists:
                 continue  # idempotent — don't regenerate existing pages
             body = _sanitize(_clean(llm.complete(_system_prompt(lang),
-                                                 _page_prompt(spec, brand, vertical_data))))
+                                                 _page_prompt(spec, brand, vertical_data, competitor))))
             db.add(Page(site_id=site_id, url_path=spec["url_path"], title=spec["title"],
                         status="draft", body=body))
             created += 1

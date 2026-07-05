@@ -25,3 +25,39 @@ class AParserClient(BaseClient):
 
     def ping(self) -> bool:
         return self._call("ping").get("data") == "pong"
+
+    @staticmethod
+    def _result_string(res: dict) -> str:
+        """oneRequest envelope -> data.resultString ('' если формат иной)."""
+        data = res.get("data")
+        if isinstance(data, dict):
+            return data.get("resultString") or ""
+        return ""
+
+    def serp_urls(self, query: str, limit: int = 10) -> list[str]:
+        """Топ органической выдачи по ключу (SE::Google), URL в порядке ранга, деду́п.
+
+        A-Parser ходит через ротируемые прокси — пробивает антибот там, где сырой GET
+        падает. resultString — URL по строкам. См. docs/api/aparser.md."""
+        res = self._call("oneRequest", {"query": query, "parser": "SE::Google",
+                                        "configPreset": "default", "preset": "default"})
+        seen: set[str] = set()
+        out: list[str] = []
+        for ln in self._result_string(res).splitlines():
+            u = ln.strip()
+            if u.startswith("http") and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out[:limit]
+
+    def fetch_html(self, url: str) -> str | None:
+        """Скачать страницу по URL (Net::HTTP через прокси). Возвращает HTML или None.
+
+        resultString = 'СТАТУС\\nзаголовки\\n\\nHTML' — режем по первой пустой строке,
+        проверяем 200. JS не рендерит (сырой GET), но для структуры H2/H3 хватает."""
+        res = self._call("oneRequest", {"query": url, "parser": "Net::HTTP",
+                                        "configPreset": "default", "preset": "default"})
+        head, sep, body = self._result_string(res).partition("\n\n")
+        if not sep or not head.lstrip().startswith("200"):
+            return None
+        return body or None
