@@ -1,0 +1,66 @@
+"""Domain candidates, their scoring, and acquisition orders. See BUILD_SPEC.md §5 + docs/DONORS.md."""
+from datetime import datetime
+from sqlalchemy import String, Integer, Numeric, Boolean, Text, ForeignKey, DateTime, func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db import Base
+
+
+class Domain(Base):
+    __tablename__ = "domains"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    source: Mapped[str | None] = mapped_column(String(32))          # backorder | optimizator | list
+    status: Mapped[str] = mapped_column(String(32), default="discovered", index=True)
+    # discovered | scored | approved | rejected | purchasing | purchased | live | dropped
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # metrics (Stage B)
+    dr: Mapped[float | None] = mapped_column(Numeric)
+    referring_domains: Mapped[int | None] = mapped_column(Integer)
+    backlinks: Mapped[int | None] = mapped_column(Integer)
+    organic_traffic: Mapped[int | None] = mapped_column(Integer)
+
+    # donor quality (Stage C)
+    live_referring_domains: Mapped[int | None] = mapped_column(Integer)
+    anchors: Mapped[dict | None] = mapped_column(JSONB)             # anchor distribution
+    spam_anchor_ratio: Mapped[float | None] = mapped_column(Numeric)
+    topical_relevance: Mapped[float | None] = mapped_column(Numeric)  # 0..1
+
+    # history (Stage D)
+    age_years: Mapped[float | None] = mapped_column(Numeric)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    wayback_checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    prior_flags: Mapped[dict | None] = mapped_column(JSONB)          # {adult, pharma, casino, spam, gambling, topic_switch}
+    indexed_echo: Mapped[bool | None] = mapped_column(Boolean)       # old content still indexed
+
+    # risk (Stage E)
+    rkn_listed: Mapped[bool | None] = mapped_column(Boolean)
+    blacklisted: Mapped[bool | None] = mapped_column(Boolean)        # Spamhaus DBL / SURBL
+    trademark_risk: Mapped[bool | None] = mapped_column(Boolean)
+
+    # decision (Stage F)
+    clean: Mapped[bool | None] = mapped_column(Boolean)
+    score: Mapped[float | None] = mapped_column(Numeric)
+    score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    orders: Mapped[list["AcquisitionOrder"]] = relationship(back_populates="domain")
+
+
+class AcquisitionOrder(Base):
+    __tablename__ = "acquisition_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain_id: Mapped[int] = mapped_column(ForeignKey("domains.id"))
+    provider: Mapped[str] = mapped_column(String(32))               # backorder | optimizator
+    provider_order_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="pending_confirm")
+    # pending_confirm | ordered | caught | failed
+    cost: Mapped[float | None] = mapped_column(Numeric)
+    confirmed_by_human: Mapped[bool] = mapped_column(Boolean, default=False)  # HARD GATE
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict | None] = mapped_column(JSONB)
+
+    domain: Mapped["Domain"] = relationship(back_populates="orders")

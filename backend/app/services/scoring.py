@@ -1,0 +1,166 @@
+"""M1b — Domain/donor scoring. Implements the funnel in docs/DONORS.md on the FREE stack.
+
+Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo (SearXNG)
+-> composite score + breakdown -> status approved | scored(manual) | rejected.
+`compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
+"""
+import math
+from app.services import scoring_config as cfg
+
+
+def _clamp(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def compute_score(sig: dict) -> dict:
+    """Pure: signals -> {score, status, breakdown}. No I/O. See scoring_config for knobs."""
+    pf = sig.get("prior_flags") or {}
+
+    # --- hard rejects (Stage E) ---
+    reasons = []
+    if sig.get("rkn_listed"):
+        reasons.append("rkn_listed")
+    if sig.get("blacklisted") is True:
+        reasons.append("blacklisted")
+    if sig.get("trademark_risk"):
+        reasons.append("trademark_risk")
+    reasons += [f"prior_{c}" for c in cfg.HARD_REJECT_FLAGS if pf.get(c)]
+    if pf.get("topic_switch"):
+        reasons.append("topic_switch")
+    if reasons:
+        return {"score": 0.0, "status": "rejected", "breakdown": {"hard_reject": reasons}}
+
+    # --- composite (Stage F) ---
+    n = cfg.NORM
+    comp = {
+        "history_cleanliness": (1.0 - (0.5 if pf.get("spam") else 0.0))
+                               if sig.get("wayback_checked") else 0.5,
+        "authority": _clamp((sig.get("dr") or 0.0) / n["DR_FULL"]),
+        "age": _clamp((sig.get("age_years") or 0.0) / n["AGE_FULL"]),
+        "rd_proxy": _clamp(math.log10((sig.get("referring_domains") or 0) + 1)
+                           / math.log10(n["RD_FULL"] + 1)),
+        "indexed_echo": 1.0 if sig.get("indexed_echo") else 0.0,
+    }
+    score = round(_clamp(sum(cfg.WEIGHTS[k] * comp[k] for k in cfg.WEIGHTS)), 4)
+    status = ("approved" if score >= cfg.DECISION["approve_at"]
+              else "scored" if score >= cfg.DECISION["manual_review_at"]
+              else "rejected")
+    # core invariant (CLAUDE.md): never AUTO-approve a domain whose history we could not
+    # verify — a successful Wayback pass is mandatory. If it failed/absent, downgrade to
+    # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
+    if status == "approved" and not sig.get("wayback_checked"):
+        status = "scored"
+    return {"score": score, "status": status,
+            "breakdown": {"components": comp, "weights": cfg.WEIGHTS}}
+
+
+def _gather_signals(domain: str) -> dict:
+    """Run the free-stack enrichment for one domain. Each source degrades gracefully."""
+    from app.config import settings
+    from app.integrations.wayback import WaybackClient
+    from app.integrations.rkn import RknClient
+    from app.integrations.blacklist import BlacklistClient
+    from app.integrations.searxng import SearxngClient
+    from app.integrations.openpagerank import OpenPageRankClient
+
+    sig: dict = {"errors": []}
+
+    try:  # history (heavy) — the core "clean history" signal
+        sig.update(WaybackClient().classify_history(domain))
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"wayback:{type(e).__name__}")
+
+    try:
+        sig["rkn_listed"] = RknClient().is_listed(domain)
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"rkn:{type(e).__name__}")
+
+    try:
+        sig["blacklisted"] = BlacklistClient().is_blacklisted(domain)
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"blacklist:{type(e).__name__}")
+
+    try:
+        sig["indexed_echo"] = SearxngClient().indexed_echo(domain)
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"searxng:{type(e).__name__}")
+
+    if settings.OPENPAGERANK_API_KEY:
+        try:
+            sig["dr"] = OpenPageRankClient().get_page_rank([domain]).get(domain)
+        except Exception as e:  # noqa: BLE001
+            sig["errors"].append(f"opr:{type(e).__name__}")
+    return sig
+
+
+def score_domain(domain_id: int) -> dict:
+    """Full funnel for one domain: enrich -> score -> persist. Returns the breakdown."""
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+
+    with SessionLocal() as db:
+        d = db.get(Domain, domain_id)
+        if d is None:
+            raise ValueError(f"domain {domain_id} not found")
+
+        sig = _gather_signals(d.domain)
+        sig.setdefault("referring_domains", d.referring_domains)
+        result = compute_score(sig)
+
+        # persist enrichment + decision
+        d.prior_flags = sig.get("prior_flags")
+        d.wayback_checked = bool(sig.get("wayback_checked"))
+        d.first_seen = sig.get("first_seen")
+        d.age_years = sig.get("age_years")
+        d.rkn_listed = sig.get("rkn_listed")
+        d.blacklisted = sig.get("blacklisted")
+        d.indexed_echo = sig.get("indexed_echo")
+        if sig.get("dr") is not None:
+            d.dr = sig["dr"]
+        d.clean = result["status"] != "rejected"
+        d.score = result["score"]
+        d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", [])}
+        d.status = result["status"]
+        db.commit()
+        return {"domain": d.domain, **result, "errors": sig.get("errors", [])}
+
+
+def score_pending(limit: int = 100) -> int:
+    """Score all `discovered` domains; return count processed."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+
+    with SessionLocal() as db:
+        ids = db.execute(
+            select(Domain.id).where(Domain.status == "discovered").limit(limit)
+        ).scalars().all()
+    for did in ids:
+        score_domain(did)
+    return len(ids)
+
+
+if __name__ == "__main__":  # pure-function self-check (no I/O)
+    # clean old domain -> manual review at least
+    clean = compute_score({"wayback_checked": True, "prior_flags": {},
+                           "dr": 4.0, "age_years": 10, "referring_domains": 30,
+                           "indexed_echo": True})
+    assert clean["status"] in ("approved", "scored"), clean
+    # casino history -> hard reject
+    dirty = compute_score({"wayback_checked": True, "prior_flags": {"casino": True},
+                           "dr": 9.0, "age_years": 15, "referring_domains": 500})
+    assert dirty["status"] == "rejected" and dirty["score"] == 0.0, dirty
+    # RKN -> hard reject regardless of quality
+    rkn = compute_score({"rkn_listed": True, "dr": 6, "age_years": 12,
+                         "referring_domains": 200, "wayback_checked": True, "prior_flags": {}})
+    assert rkn["status"] == "rejected", rkn
+    # empty/unknown -> low score, rejected
+    empty = compute_score({})
+    assert empty["status"] == "rejected", empty
+    # INVARIANT: unverified history never auto-approves, even with huge RD
+    unverified = compute_score({"referring_domains": 5000, "wayback_checked": False,
+                                "prior_flags": {}})
+    assert unverified["status"] != "approved", unverified
+    # weights sum to 1.0
+    assert abs(sum(cfg.WEIGHTS.values()) - 1.0) < 1e-9
+    print("scoring compute_score ok:", clean["score"], dirty["score"], rkn["score"], empty["score"])

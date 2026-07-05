@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+/secrets/
+*.sqlite3
+*.db
+dist/
+.pytest_cache/
+.DS_Store

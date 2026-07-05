@@ -1,0 +1,9 @@
+# keep the image lean + avoid leaking local artifacts into it (Dockerfile does COPY . .)
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+dist/
+.pytest_cache/
+.DS_Store

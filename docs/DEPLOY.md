@@ -1,0 +1,99 @@
+# DEPLOY — Docker, обновление через git, канал управления/дебага
+
+Три вещи: (1) как поднять в Docker, (2) как обновлять через git, (3) через что Claude
+подключается к живому приложению — управляет, дебажит, катит фичи.
+
+---
+
+## 1. Docker — поднять стек
+
+Стек в `docker-compose.yml`: `db` (postgres:16) + `backend` (FastAPI :8000) + `worker`
+(шедулер M1). Миграции применяются автоматически при старте backend
+(`alembic upgrade head` идемпотентен), БД гейтится healthcheck'ом.
+
+```bash
+cp .env.example .env          # заполнить креды (LLM/searxng уже на дефолтах бокса)
+docker compose up --build     # db -> (ждём healthy) -> migrate -> uvicorn + worker
+# панель:   http://<host>:8000/
+# health:   http://<host>:8000/health
+```
+
+Полезное:
+```bash
+docker compose logs -f backend          # логи API
+docker compose ps                        # статус контейнеров
+docker compose run --rm backend pytest -q          # тесты в контейнере
+docker compose run --rm backend alembic upgrade head   # миграции вручную
+docker compose exec db psql -U portfolio             # SQL-консоль
+docker compose down            # стоп (данные в volume pgdata сохраняются)
+```
+
+**Где поднимать: на боксе `192.168.1.77`.** Там уже LiteLLM/SearXNG → приложение
+ходит к ним по localhost (быстрее, дефолты в `.env` совпадают), бокс всегда включён,
+и он в той же LAN, что и Mac → Claude достаёт его напрямую (см. §3). Порты 8000/5432
+держать **только в LAN** (панель без авторизации — наружу не выставлять).
+
+---
+
+## 2. Обновление через git
+
+Репо ещё не в git. Инициализация (локально, one-time):
+```bash
+git init && git add -A && git commit -m "init: VPN affiliate portfolio (M1 + MVP loop)"
+gh repo create vpn-portfolio --private --source=. --push    # или вручную добавить remote
+```
+`.env` в `.gitignore` (секреты не коммитим) — на хосте кладётся отдельно из `.env.example`.
+
+**Цикл обновления (dev на Mac → деплой на бокс):**
+```
+[Mac] правим код -> commit -> push
+[box] git pull -> docker compose up -d --build   # migrate прогонится сам
+```
+Одной строкой с Mac (когда есть SSH, §3):
+```bash
+ssh box 'cd ~/vpn-portfolio && git pull && docker compose up -d --build'
+```
+
+Заметки:
+- backend монтирует `./backend` volume + `--reload` → в dev правки кода подхватываются
+  без пересборки; пересборка (`--build`) нужна только при смене `requirements.txt`.
+- Миграции: создаём на Mac (`alembic revision --autogenerate -m "..."`), коммитим файл;
+  на боксе применяются автоматически при рестарте backend.
+- Откат: `git revert` + `up -d --build`. Данные БД в volume, миграции — только вперёд
+  (для отката данных — `alembic downgrade`).
+
+---
+
+## 3. Канал управления / дебага для Claude
+
+Claude работает как CLI на Mac и управляет через инструмент Bash. Значит «подключиться к
+приложению» = дотянуться до него из Mac. Приложение на боксе (§1), бокс в LAN → достаётся
+напрямую. Четыре канала, каждый под свою задачу:
+
+| Канал | Порт/инструмент | Для чего | Что нужно настроить |
+|---|---|---|---|
+| **HTTP API** | `192.168.1.77:8000` | гонять пайплайн (offers/purchase/site/generate/edit/publish/check-index), панель, /health | ничего — уже слушает |
+| **SSH** | `ssh user@192.168.1.77` (22) | **главный debug-канал**: `docker compose logs/exec/ps`, `alembic`, `psql`, рестарт, деплой | включить SSH на боксе + `ssh-copy-id` ключ Mac'а |
+| **Git** | remote + `ssh box git pull` | катить новые фичи (правлю на Mac → пуш → pull+rebuild на боксе) | §2 |
+| **Postgres** | `192.168.1.77:5432` (или `ssh box … psql`) | смотреть/чинить данные напрямую при дебаге | LAN-only, не наружу |
+
+**Единственная настройка, которую надо сделать руками:** включить SSH на боксе и залить
+ключ Mac'а —
+```bash
+ssh-copy-id user@192.168.1.77          # с Mac, один раз
+echo "Host box" >> ~/.ssh/config; echo "  HostName 192.168.1.77" >> ~/.ssh/config; echo "  User <user>" >> ~/.ssh/config
+```
+После этого Claude из Bash делает всё: `ssh box 'docker compose logs -f backend'`,
+`curl 192.168.1.77:8000/...`, деплой, миграции, SQL.
+
+**Безопасность:**
+- 8000/5432 — только LAN (firewall бокса). Панель без авторизации — в интернет НЕ выставлять.
+- Нужен доступ не из LAN (Claude в облаке/другая сеть)? Не открывать порт, а туннель:
+  `ssh -L 8000:localhost:8000 box` → работать через `localhost:8000`.
+- Прод-выкладка сайтов идёт на отдельный VPS (Cloudflare origin) — это не тот бокс;
+  бокс = движок машины (оркестратор + LLM/SERP), VPS = где живут сами affiliate-сайты.
+
+**Дебаг-петля Claude на боксе:** `ssh box docker compose logs -f backend` (смотрю ошибку)
+→ правлю на Mac → `git push` → `ssh box 'git pull && docker compose up -d --build'` →
+`curl 192.168.1.77:8000/...` (проверяю) → повтор. Для быстрых итераций без пересборки
+хватает volume+`--reload`: `git pull` подхватится сам.
