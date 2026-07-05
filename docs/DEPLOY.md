@@ -56,11 +56,24 @@ ssh box 'cd ~/vpn-portfolio && git pull && docker compose up -d --build'
 
 Заметки:
 - backend монтирует `./backend` volume + `--reload` → в dev правки кода подхватываются
-  без пересборки; пересборка (`--build`) нужна только при смене `requirements.txt`.
+  без пересборки; пересборка (`--build`) нужна только при смене `requirements.txt`/Dockerfile.
 - Миграции: создаём на Mac (`alembic revision --autogenerate -m "..."`), коммитим файл;
   на боксе применяются автоматически при рестарте backend.
 - Откат: `git revert` + `up -d --build`. Данные БД в volume, миграции — только вперёд
   (для отката данных — `alembic downgrade`).
+
+### Кнопка «Обновить из git» в панели (без консоли)
+Панель → **Диагностика** → «⇩ Обновить из git» делает `git pull --ff-only` + `alembic
+upgrade head` прямо из контейнера; код подхватывает `--reload`. Работает так:
+- `docker-compose.yml` монтирует весь репо `.:/repo` (с `.git`), в образе стоит `git`.
+- Тянем по **HTTPS с fine-grained PAT** (не монтируем SSH-ключ в контейнер). Настройка:
+  1. github.com → Settings → Developer settings → Fine-grained tokens → Generate:
+     доступ только к репо `combine_machine`, права **Contents: Read-only**.
+  2. Вписать в `.env` бокса: `GITHUB_TOKEN=github_pat_...` (и `GITHUB_REPO=kozhan-aff/combine_machine`).
+  3. `docker compose up -d --build` (Dockerfile изменился — нужен пересбор).
+- Ограничения: `--ff-only` (не затрёт локальные правки — упадёт с сообщением в баннере);
+  смена `requirements.txt`/Dockerfile всё равно требует `--build` руками. Токен в баннер не попадает.
+- Безопасность: эндпойнт POST-only, панель слушает только `127.0.0.1` (§3).
 
 ---
 
