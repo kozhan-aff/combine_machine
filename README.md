@@ -1,29 +1,43 @@
-# VPN Affiliate Portfolio
+# VPN Affiliate Portfolio · КОМБАЙН
 
 Машина полного цикла для портфеля VPN affiliate-сайтов: поиск и скоринг доменов →
 выкуп → провижн (Cloudflare + aaPanel) → генерация и публикация контента → мониторинг.
+Управляется веб-панелью (FastAPI + Jinja, светлая CMS-тема, каждый контрол подписан).
 
 **Агенту (Claude Code):** читай `CLAUDE.md`, затем `BUILD_SPEC.md`, `PLAN.md`, и `docs/api/README.md` (референсы интеграций + локальная инфра).
 
 ## Быстрый старт
 ```bash
 cp .env.example .env      # заполнить ключи
-docker compose up --build # поднимет db + backend
-# backend: http://localhost:8000/health
-docker compose run --rm backend python scripts/smoke.py  # проверка коннективности к внешним API
+docker compose up --build # поднимет db + backend + worker
+# панель:  http://192.168.1.77:8000/   (бокс; LAN-only, без auth — не выставлять в интернет)
+# health:  http://192.168.1.77:8000/health
+docker compose run --rm backend pytest -q   # тесты пайплайна (SQLite, сеть замокана)
 ```
+Панель сама ведёт по шагам: Пульт → Офферы → Домены (M1) → карточка сайта (M3–M5).
+Диагностика (`/diag`) пингует все интеграции и умеет обновлять код кнопкой «Обновить из git».
 
 ## Что где
+- `backend/app/api/panel.py` + `backend/app/templates/` — HTML-панель (экраны + действия).
+- `backend/app/api/` (остальное) — JSON API под `/api` (та же логика, для скриптов).
 - `backend/app/models/` — модель данных (домены, сайты, страницы, офферы, ...).
-- `backend/app/integrations/` — клиенты внешних API (транспорт).
-- `backend/app/services/` — бизнес-логика по модулям M1–M6.
+- `backend/app/integrations/` — клиенты внешних API (только транспорт).
+- `backend/app/services/` — бизнес-логика по модулям M1–M6 (+ `diagnostics.py` для /diag).
+- `backend/tests/` — пайплайн-тесты на SQLite (гейты, скоринг, публикация, экраны).
 - `scripts/smoke.py` — smoke-тест доступа к сервисам.
-- `docs/api/` — референсы всех интеграций (endpoints/auth/примеры) + `README.md`-индекс с локальной инфрой.
+- `docs/api/` — референсы всех интеграций (endpoints/auth/примеры) + `README.md`-индекс.
+- `docs/DEPLOY.md` — деплой на бокс, обновление через git, каналы доступа.
 
 ## Ресурсы (сводка — детали в `docs/api/README.md`)
-- **Метрики доменов** — бесплатный стек (Wayback / РКН / SearXNG / OpenPageRank); платного Ahrefs API нет.
+- **Метрики доменов** — бесплатный стек (Wayback / РКН / Spamhaus / RD из фида); DR-прокси OpenPageRank отпал (free-регистрация закрыта), платные API — опция позже.
 - **Контент** — LiteLLM `192.168.1.77:4000` (mistral-large + ollama, без ключа).
 - **SERP** — SearXNG `192.168.1.77:8080` (free); **whois/keywords** — A-Parser `:9091`.
 - **Discovery** — backorder.ru (публичный фид, без auth). **GSC** исключён из v1 (индексация — ручной `site:`).
+- **Прод-VPS** (origin для сайтов) — aaPanel, проверен вживую; Cloudflare — DNS + маскировка origin.
 
-Состояние: скелет + разведанные интеграции; бизнес-логика в TODO. Порядок сборки — в `CLAUDE.md`.
+## Два жёстких правила (зашиты в код, не обходить)
+1. **Гейт редактуры:** публикуются только страницы `edited` — черновик AI наружу не выходит.
+2. **Гейт выкупа:** деньги тратит только человек (`confirmed_by_human` / кнопка «куплен» в панели).
+
+Состояние: панель работает (M1 + петля M3→M5 на моках проверена), интеграции разведаны
+и задокументированы; впереди — первый реальный домен через полную петлю. Порядок — в `CLAUDE.md`.
