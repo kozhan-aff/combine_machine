@@ -19,6 +19,10 @@ def _add(obj):
 
 def test_discovery_upsert_idempotent(monkeypatch):
     from app.services import discovery
+    from app.services.settings import update_settings
+    # мультиисточник (Task 4): офлайн-тест бьёт только backorder, остальные — реальные
+    # HTTP/A-Parser клиенты, их нужно выключить, иначе _collect уйдёт в сеть.
+    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
     rows = [
         {"domainname": "Clean-Drop.com", "links": "12"},
         {"domainname": "second.ru", "links": 3},

@@ -19,3 +19,28 @@ def test_whois_created_gtld():
 def test_whois_created_junk_is_none():
     assert _parse_whois_created("no date here at all") is None
     assert _parse_whois_created("") is None
+
+
+def test_parse_domains_extracts_ru():
+    from app.integrations.cctld import _parse_domains
+    html = "<tr><td>Example-1.RU</td></tr><tr><td>второй.рф</td></tr> мусор foo.com bar"
+    got = _parse_domains(html)
+    assert "example-1.ru" in got and "второй.рф" in got
+    assert "foo.com" not in got          # берём только .ru/.рф/.su
+
+
+def test_run_discovery_dedups_across_sources(monkeypatch):
+    from app.services import discovery
+    import app.db as db
+    from sqlalchemy import select
+    from app.models.domain import Domain
+    monkeypatch.setattr("app.services.discovery._collect", lambda enabled: [
+        {"domain": "dup.ru", "source": "cctld", "referring_domains": None},
+        {"domain": "dup.ru", "source": "backorder", "referring_domains": 42, "feed_flags": {"rkn": False}},
+        {"domain": "solo.ru", "source": "cctld", "referring_domains": None},
+    ])
+    n = discovery.run_discovery()
+    assert n == 2
+    with db.SessionLocal() as s:
+        rows = {d.domain: d for d in s.execute(select(Domain)).scalars().all()}
+    assert rows["dup.ru"].referring_domains == 42     # выиграла строка с бо́льшим RD (backorder)

@@ -159,8 +159,15 @@ def test_discovery_survives_insert_race(monkeypatch):
     from sqlalchemy import select
     from sqlalchemy.orm import Session
     from app.services import discovery
+    from app.services.settings import update_settings
     import app.db as db
     from app.models.domain import Domain
+
+    # мультиисточник (Task 4): офлайн-тест бьёт только backorder — остальные источники
+    # выключаем, иначе _collect уйдёт в реальную сеть (cctld/reg.ru/sweb через A-Parser).
+    # Прогреваем settings ДО патча Session.execute, чтобы get_settings() внутри
+    # run_discovery() не занял "первый" перехваченный вызов случайной строкой настроек.
+    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
 
     # как будто параллельный запуск уже вставил race.ru (до нашего COMMIT)
     with db.SessionLocal() as s:
@@ -172,10 +179,11 @@ def test_discovery_survives_insert_race(monkeypatch):
     monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
                         lambda self, min_links=1: rows)
 
-    # ПЕРВЫЙ SELECT existing отдаём пустым (устаревшее чтение) -> код попробует вставить
-    # дубль race.ru -> IntegrityError; последующие SELECT'ы — настоящие.
+    # ПЕРВЫЙ SELECT именно по domains (existing) отдаём пустым (устаревшее чтение) ->
+    # код попробует вставить дубль race.ru -> IntegrityError; остальные (включая
+    # get_settings() внутри run_discovery и повторное чтение existing) — настоящие.
     real_execute = Session.execute
-    state = {"n": 0}
+    state = {"fired": False}
 
     class _EmptyResult:
         def scalars(self):
@@ -185,8 +193,9 @@ def test_discovery_survives_insert_race(monkeypatch):
             return []
 
     def flaky_execute(self, statement, *a, **k):
-        state["n"] += 1
-        if state["n"] == 1:
+        is_domains_select = "FROM domains" in str(statement)
+        if is_domains_select and not state["fired"]:
+            state["fired"] = True
             return _EmptyResult()
         return real_execute(self, statement, *a, **k)
 

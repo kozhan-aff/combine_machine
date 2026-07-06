@@ -21,16 +21,53 @@ def normalize_row(row: dict) -> dict | None:
     return {"domain": domain, "source": "backorder", "referring_domains": links}
 
 
+def _sources():
+    from app.integrations.backorder import BackorderClient
+    from app.integrations.cctld import CctldClient
+    from app.integrations.regru_drops import RegruDropsClient
+    from app.integrations.sweb_drops import SwebDropsClient
+    return {"backorder": BackorderClient, "cctld": CctldClient,
+            "reg_ru": RegruDropsClient, "sweb": SwebDropsClient}
+
+
+def _collect(enabled: dict) -> list[dict]:
+    """Собрать строки со всех включённых источников. Сбой одного источника не топит остальные."""
+    rows: list[dict] = []
+    for name, Client in _sources().items():
+        if not enabled.get(name):
+            continue
+        try:
+            if name == "backorder":                         # даёт RD + фид-флаги
+                for r in Client().list_dropping():
+                    nr = normalize_row(r)
+                    if nr:
+                        nr["feed_flags"] = {k: bool(r.get(k)) for k in ("rkn", "judicial", "block")}
+                        rows.append(nr)
+            else:
+                rows.extend(Client().list_dropping())
+        except Exception:  # noqa: BLE001 — один источник упал, остальные идут
+            continue
+    return rows
+
+
 def run_discovery(min_links: int = 1) -> int:
-    """Fetch the drop feed, upsert new candidates, return count of newly inserted domains."""
+    """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain
-    from app.integrations.backorder import BackorderClient
+    from app.services.settings import get_settings
 
-    rows = BackorderClient().list_dropping(min_links=min_links)
-    candidates = {c["domain"]: c for c in (normalize_row(r) for r in rows) if c}
+    rows = _collect(get_settings()["sources_enabled"])
+    best: dict[str, dict] = {}
+    for r in rows:
+        d = r.get("domain")
+        if not d:
+            continue
+        cur = best.get(d)
+        if cur is None or (r.get("referring_domains") or 0) > (cur.get("referring_domains") or 0):
+            best[d] = r
+    candidates = best
     if not candidates:
         return 0
 
@@ -38,8 +75,10 @@ def run_discovery(min_links: int = 1) -> int:
         existing = set(db.execute(
             select(Domain.domain).where(Domain.domain.in_(candidates))
         ).scalars().all())
-        fresh = [name for name in candidates if name not in existing]
-        db.add_all(Domain(**candidates[name]) for name in fresh)
+        fresh = [n for n in candidates if n not in existing]
+        db.add_all(Domain(domain=candidates[n]["domain"], source=candidates[n]["source"],
+                          referring_domains=candidates[n].get("referring_domains"),
+                          feed_flags=candidates[n].get("feed_flags")) for n in fresh)
         db.commit()
         return len(fresh)
 
