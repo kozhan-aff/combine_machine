@@ -29,6 +29,7 @@ def list_domains(status: str | None = None, min_score: float | None = None,
             "dr": float(d.dr) if d.dr is not None else None,
             "referring_domains": d.referring_domains,
             "clean": d.clean,
+            "reject_reason": d.reject_reason,
         }
         for d in rows
     ]

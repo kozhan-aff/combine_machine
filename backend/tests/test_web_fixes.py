@@ -81,6 +81,27 @@ def test_panel_limit_clamped_high(client):
     assert r.status_code == 200 and 'value="1000"' in r.text
 
 
+# --- Finding 2 (final review): reject_reason surfaced to the operator ------------
+def test_api_domains_exposes_reject_reason(client):
+    """JSON /api/domains/ теперь отдаёт reject_reason — раньше писался в БД, но нигде не отдавался."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="why-rejected.ru", source="backorder", status="rejected",
+                     reject_reason="low_score"))
+        s.commit()
+    rows = client.get("/api/domains/?status=rejected").json()
+    assert rows and rows[0]["reject_reason"] == "low_score"
+
+
+def test_panel_domains_renders_reject_reason_badge(client):
+    """Панель /domains: причина отклонения видна оператору прямо в таблице, не только в БД."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="why-rejected-panel.ru", source="backorder", status="rejected",
+                     reject_reason="history_dirty"))
+        s.commit()
+    r = client.get("/domains?status=rejected")
+    assert r.status_code == 200 and "history_dirty" in r.text
+
+
 # --- JSON attach-offer dedup (mirror of panel.attach_offer_action) -----------
 def test_api_attach_offer_no_duplicate(client):
     """Повторный attach через /api не создаёт второй SiteOffer."""
