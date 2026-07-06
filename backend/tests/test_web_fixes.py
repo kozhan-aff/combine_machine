@@ -157,3 +157,31 @@ def test_settings_preview_rd_null_passes(client):
     c = client.get("/settings/preview?min_rd=1&min_age=3&approve=0.7&manual=0.4").json()
     assert c["total"] == 3
     assert c["rd"] == 2  # null-rd (неизвестный) + ok-rd проходят; low-rd=0 режется
+
+
+# --- Task 7: бейдж лейна, дефолт-фильтр not_acquirable, refresh цен, кап-слайдер ---
+def test_domains_hides_not_acquirable_by_default(client, sqlite_db):
+    import app.db as db
+    from app.models.domain import Domain
+    with db.SessionLocal() as s:
+        s.add_all([
+            Domain(domain="ok.ru", source="backorder", status="approved", lane="bid"),
+            Domain(domain="no.ru", source="cctld", status="rejected", reject_reason="not_acquirable"),
+        ]); s.commit()
+    body = client.get("/domains").text
+    assert "ok.ru" in body and "no.ru" not in body            # по умолчанию скрыт
+    assert "no.ru" in client.get("/domains?show_all=1").text   # под фильтром виден
+
+
+def test_refresh_prices_route(client, monkeypatch):
+    monkeypatch.setattr("app.services.pricing.refresh_backorder_prices", lambda: 3)
+    r = client.post("/admin/refresh-prices", follow_redirects=False)
+    assert r.status_code == 303 and "3" in r.headers["location"]
+
+
+def test_settings_save_accepts_max_whois(client, sqlite_db):
+    from app.services.settings import get_settings
+    client.post("/settings/save", data={
+        "min_referring_domains": 1, "min_age_years": 3, "approve_at": 0.7,
+        "manual_review_at": 0.4, "max_whois_per_run": 77, "backorder": "on"})
+    assert get_settings()["max_whois_per_run"] == 77

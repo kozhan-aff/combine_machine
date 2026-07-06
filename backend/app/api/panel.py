@@ -144,11 +144,14 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
 
 @router.get("/domains", response_class=HTMLResponse)
 def domains_view(request: Request, status: str | None = None, min_score: float | None = None,
-                 limit: int = 200, db: Session = Depends(get_session)):
+                 limit: int = 200, show_all: bool = False, db: Session = Depends(get_session)):
     limit = max(1, min(limit, 1000))   # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
         stmt = stmt.where(Domain.status == status)
+    elif not show_all:                          # по умолчанию только приобретаемые
+        stmt = stmt.where(or_(Domain.reject_reason.is_(None),
+                              Domain.reject_reason != "not_acquirable"))
     if min_score is not None:
         stmt = stmt.where(Domain.score >= min_score)
     stmt = stmt.order_by(Domain.score.desc().nulls_last(),
@@ -161,7 +164,7 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
         "rows": rows, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": site_by_domain,
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
-        "f_limit": limit,
+        "f_limit": limit, "show_all": show_all,
     })
 
 
@@ -295,6 +298,14 @@ def set_status_action(domain_id: int, status: str = Form(...), db: Session = Dep
             d.status = status
             db.commit()
     return _back("/domains")
+
+
+@router.post("/admin/refresh-prices")
+def refresh_prices_action():
+    from app.services.pricing import refresh_backorder_prices
+    n = refresh_backorder_prices()
+    return _back("/domains", msg=f"Цены бэкордера обновлены: {n} доменов"
+                 if n else "Цена бэкордера недоступна (тариф не прочитан)")
 
 
 @router.post("/domains/{domain_id}/make-site")
@@ -551,11 +562,13 @@ def check_updates_action():
 @router.post("/settings/save")
 def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
+                  max_whois_per_run: int = Form(200),
                   backorder: str = Form(""), cctld: str = Form(""),
                   reg_ru: str = Form(""), sweb: str = Form("")):
     from app.services import settings as st
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
+                       max_whois_per_run=max_whois_per_run,
                        sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
                                         "reg_ru": bool(reg_ru), "sweb": bool(sweb)})
     return _back("/settings", msg="Настройки сохранены")

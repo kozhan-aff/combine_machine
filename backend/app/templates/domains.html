@@ -18,6 +18,9 @@
       <form method="post" action="/run/discovery">
         <button class="btn-amber">↻ Запустить Discovery</button>
       </form>
+      <form method="post" action="/admin/refresh-prices" style="margin-top:6px">
+        <button class="btn" title="перечитать базовую цену бэкордера и проставить приобретаемым">Обновить цены бэкордера</button>
+      </form>
     </div>
   </div>
 
@@ -34,6 +37,11 @@
         <label class="f">доменов за запуск
           <input type="number" name="n" value="5" min="1" max="50" style="width:72px"></label>
         <button class="btn-amber">▶ Запустить Score</button>
+      </form>
+      <form method="post" action="/run/score" style="margin-left:10px">
+        <input type="hidden" name="n" value="100000">
+        <button class="btn-amber"
+          title="прогнать проверку по всему пулу discovered (бюджет — max_whois_per_run на /settings)">Проверить весь пул</button>
       </form>
     </div>
   </div>
@@ -82,7 +90,8 @@ function poll(job) {
       <span class="desc">отклонён — причина в колонке «статус» (<code>reject_reason</code>):
       <code>low_rd</code> мало доноров, <code>feed_flag</code> флаг источника, <code>too_young</code>
       моложе порога, <code>rkn</code> реестр РКН, <code>blacklist</code> блэклист,
-      <code>history_dirty</code> грязная история, <code>low_score</code> низкий скор</span>
+      <code>history_dirty</code> грязная история, <code>low_score</code> низкий скор,
+      <code>not_acquirable</code> нельзя купить (занят, не на бэкордере)</span>
     <span class="badge b-purchased">purchased</span><span class="who">только ты</span>
       <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
     <span class="badge b-live">live</span><span class="who">машина</span>
@@ -105,6 +114,8 @@ function poll(job) {
 <div class="chips">
   <a class="chip {{ 'on' if not f_status }}" href="/domains"
      title="показать домены во всех статусах">все <b>{{ total }}</b></a>
+  <a class="chip {{ 'on' if show_all }}" href="/domains?show_all=1"
+     title="показать в том числе непокупаемые (not_acquirable)">+ непокупаемые</a>
   {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
     {% if counts.get(st) %}
     <a class="chip {{ 'on' if f_status==st }}" href="/domains?status={{ st }}"
@@ -127,18 +138,23 @@ function poll(job) {
 {% if rows %}
 <table>
   <thead><tr>
-    <th>домен</th><th>статус</th><th>score</th><th class="num">RD</th>
+    <th>домен</th><th>статус</th><th>лейн</th><th class="num">цена</th><th>score</th><th class="num">RD</th>
     <th class="num">возраст</th><th>echo</th><th>флаги истории</th><th class="num">найден</th>
     <th>следующий шаг</th>
   </tr></thead>
   <tbody>
   {% for d in rows %}
     <tr>
-      <td class="dom">{{ d.domain }}
+      <td class="dom">
+        <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
+          title="источник: {{ d.source or '—' }} · лейн: {{ 'ставка' if d.lane=='bid' else 'свободный' if d.lane=='free' else '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}"
+          >{{ {'backorder':'bo','cctld':'cc','reg_ru':'rg','sweb':'sw'}.get(d.source, (d.source or '?')[:2]) }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
            title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
       <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status }}</span>
         {% if d.reject_reason %}<code title="причина отклонения (reject_reason) — расшифровка в легенде">{{ d.reject_reason }}</code>{% endif %}</td>
+      <td><span class="hint">{{ 'ставка' if d.lane=='bid' else 'свободный' if d.lane=='free' else '—' }}</span></td>
+      <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td>
         {% if d.score is not none %}{% set sc = d.score|float %}
           <span class="meter"><i class="{{ 'm-ok' if sc>=0.6 else 'm-mid' if sc>=0.35 else 'm-low' }}"

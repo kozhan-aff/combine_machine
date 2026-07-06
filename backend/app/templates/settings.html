@@ -48,6 +48,18 @@
     </div>
   </div>
   <div class="station">
+    <div class="plate">Кап whois за прогон — <b>защита от сырого cctld</b></div>
+    <div class="what">За один запуск проверки пробьём whois не более этого числа доменов
+      (лучшие по RD — первыми). Остальные подождут следующего прогона.</div>
+    <div class="go">
+      <input type="range" name="max_whois_per_run" min="0" max="2000" step="50"
+             value="{{ s.max_whois_per_run }}"
+             oninput="document.getElementById('v_whois').textContent=this.value" style="flex:1 1 200px">
+      <b id="v_whois">{{ s.max_whois_per_run }}</b>
+      <span class="hint">whois-вызовов за прогон максимум</span>
+    </div>
+  </div>
+  <div class="station">
     <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
     <div class="what">Выключенный источник просто не опрашивается при ↻ Discovery;
       уже найденные с него домены остаются в пуле.</div>
