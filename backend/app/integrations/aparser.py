@@ -3,8 +3,27 @@
 See docs/api/aparser.md. Local box :9091. Request: POST /API {password, action, data}.
 Useful parsers: Net::Whois (M2 free-check), SE::Google/Yandex (M1/M4), WordStat (M4).
 """
+import re
+from datetime import datetime, timezone
+
 from app.config import settings
 from app.integrations.base import BaseClient
+
+# .ru/.рф (TCI): 'created: 2010.11.15'; gTLD: 'Creation Date: 2004-03-15T...'
+_RE_RU = re.compile(r"created:\s*(\d{4})\.(\d{2})\.(\d{2})", re.I)
+_RE_GTLD = re.compile(r"creation date:\s*(\d{4})-(\d{2})-(\d{2})", re.I)
+
+
+def _parse_whois_created(text: str) -> datetime | None:
+    """Дата регистрации из whois-ответа (.ru или gTLD). Самая ранняя найденная, UTC. None если нет."""
+    found = []
+    for rx in (_RE_RU, _RE_GTLD):
+        for y, mo, dy in rx.findall(text or ""):
+            try:
+                found.append(datetime(int(y), int(mo), int(dy), tzinfo=timezone.utc))
+            except ValueError:
+                pass
+    return min(found) if found else None
 
 
 class AParserClient(BaseClient):
@@ -61,3 +80,9 @@ class AParserClient(BaseClient):
         if not sep or not head.lstrip().startswith("200"):
             return None
         return body or None
+
+    def whois_created(self, domain: str) -> datetime | None:
+        """Дата регистрации домена через Net::Whois (дёшево). None если whois не отдал дату."""
+        res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
+                                        "configPreset": "default", "preset": "default"})
+        return _parse_whois_created(self._result_string(res))
