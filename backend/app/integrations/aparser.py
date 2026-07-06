@@ -26,6 +26,23 @@ def _parse_whois_created(text: str) -> datetime | None:
     return min(found) if found else None
 
 
+# маркеры «домен свободен» (нет регистрации). Список расширяемый — сверить с живым
+# ответом A-Parser Net::Whois на первом прогоне (см. спек §J).
+_FREE_MARKERS = ("no entries found", "not found", "no match", "no object found",
+                 "available for registration", "нет данных", "not registered")
+_REG_MARKERS = ("nserver", "registrar", "person:", "org:", "paid-till", "domain:")
+
+
+def _parse_whois_available(text: str) -> bool | None:
+    """True — домен свободен (нет записи); False — занят; None — не определить."""
+    low = (text or "").lower()
+    if any(m in low for m in _FREE_MARKERS):
+        return True
+    if _RE_RU.search(low) or _RE_GTLD.search(low) or any(m in low for m in _REG_MARKERS):
+        return False
+    return None
+
+
 class AParserClient(BaseClient):
     def __init__(self):
         super().__init__(settings.APARSER_URL)
@@ -81,8 +98,18 @@ class AParserClient(BaseClient):
             return None
         return body or None
 
+    def whois_probe(self, domain: str) -> dict:
+        """Один Net::Whois-вызов -> доступность + дата регистрации.
+        available: True свободен / False занят / None не определить. created: дата или None.
+        Сетевой/транспортный сбой не пробрасывается — {"available": None, "created": None}."""
+        try:
+            res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
+                                            "configPreset": "default", "preset": "default"})
+            text = self._result_string(res)
+        except Exception:  # noqa: BLE001 — whois не должен ронять вызывающий код
+            return {"available": None, "created": None}
+        return {"available": _parse_whois_available(text), "created": _parse_whois_created(text)}
+
     def whois_created(self, domain: str) -> datetime | None:
-        """Дата регистрации домена через Net::Whois (дёшево). None если whois не отдал дату."""
-        res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
-                                        "configPreset": "default", "preset": "default"})
-        return _parse_whois_created(self._result_string(res))
+        """Дата регистрации (обёртка над whois_probe для обратной совместимости)."""
+        return self.whois_probe(domain)["created"]

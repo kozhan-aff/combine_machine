@@ -21,6 +21,40 @@ def test_whois_created_junk_is_none():
     assert _parse_whois_created("") is None
 
 
+def test_parse_whois_available():
+    from app.integrations.aparser import _parse_whois_available
+    assert _parse_whois_available("No entries found for the selected source.") is True
+    assert _parse_whois_available("Not found") is True
+    assert _parse_whois_available(
+        "domain: EXAMPLE.RU\ncreated: 2010.11.15\nnserver: ns1.example.ru") is False
+    assert _parse_whois_available("registrar: RU-CENTER\nperson: Private") is False
+    assert _parse_whois_available("какой-то мусор без маркеров") is None
+    assert _parse_whois_available("") is None
+
+
+def test_whois_probe_shapes(monkeypatch):
+    from app.integrations import aparser
+    c = aparser.AParserClient()
+    monkeypatch.setattr(c, "_call", lambda *a, **k: {"data": {"resultString": "No entries found"}})
+    assert c.whois_probe("free.ru") == {"available": True, "created": None}
+    monkeypatch.setattr(c, "_call", lambda *a, **k: {
+        "data": {"resultString": "domain: X.RU\ncreated: 2010.11.15\nnserver: ns.x.ru"}})
+    pr = c.whois_probe("taken.ru")
+    assert pr["available"] is False and pr["created"] is not None
+
+
+def test_whois_probe_swallows_transport_errors(monkeypatch):
+    """M1 приобретаемость: сетевой сбой -> None/None, никогда не raise (контракт для T1)."""
+    from app.integrations import aparser
+    c = aparser.AParserClient()
+
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(c, "_call", _boom)
+    assert c.whois_probe("x.ru") == {"available": None, "created": None}
+    assert c.whois_created("x.ru") is None
+
+
 def test_parse_domains_extracts_ru():
     from app.integrations.cctld import _parse_domains
     html = "<tr><td>Example-1.RU</td></tr><tr><td>второй.рф</td></tr> мусор foo.com bar"
