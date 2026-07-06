@@ -88,10 +88,12 @@ def _funnel(d, c, st, sig) -> str | None:
         return "low_rd"
 
     # T1 — whois (дёшево): возраст
+    age_known = False
     try:
         wc = c["aparser"].whois_created(d.domain)
         sig["whois_created"] = wc
         if wc is not None:
+            age_known = True
             age = (datetime.now(timezone.utc) - wc).days / 365.25
             sig["age_years"] = round(age, 2)
             if age < st["min_age_years"]:
@@ -131,6 +133,13 @@ def _funnel(d, c, st, sig) -> str | None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
+
+    # whois недоступен (упал/None) -> возраст добираем из Wayback first_seen (см. T3 выше).
+    # Консервативно: непроверяемый по whois возраст всё равно должен пройти гейт молодости —
+    # если фолбэк-возраст из Wayback < порога, отклоняем здесь (ПОСЛЕ history_dirty, чтобы
+    # грязная история репортилась как history_dirty, а не задним числом как too_young).
+    if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
+        return "too_young"
 
     if c["opr"] is not None:
         try:
