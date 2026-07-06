@@ -502,8 +502,11 @@ def git_pull_action():
             warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
         except FileNotFoundError:
             warn = " ⚠ alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
-        new = current_version().get("hash", "")
-        return _back("/diag", msg=f"Обновлено: {old}→{new} «{current_version().get('subject','')}»{warn}")
+        cur = current_version()   # один вызов: hash + subject для баннера
+        new = cur.get("hash", "")
+        if old == new:            # ff-only no-op: HEAD не сдвинулся — не врать «Обновлено»
+            return _back("/diag", msg=f"Уже свежая версия: {new} «{cur.get('subject', '')}»{warn}")
+        return _back("/diag", msg=f"Обновлено: {old}→{new} «{cur.get('subject', '')}»{warn}")
     except Exception as e:  # noqa: BLE001
         return _back("/diag", err=f"update: {scrub(str(e))[:200]}")
 
@@ -530,8 +533,10 @@ def check_updates_action():
                            capture_output=True, text=True, timeout=20, env=git_env)
         remote = (r.stdout.split() or [""])[0][:7]
         cur = current_version().get("hash", "")
-        if not remote:
-            return _back("/diag", err="не удалось прочитать удалёнку")
+        if r.returncode != 0 or not remote:
+            # как в /admin/pull: детали в баннер, но токен никогда не светим
+            detail = (r.stderr or "").strip().replace(settings.GITHUB_TOKEN, "***")[:200]
+            return _back("/diag", err="не удалось прочитать удалёнку" + (f": {detail}" if detail else ""))
         same = remote.startswith(cur) or cur.startswith(remote)
         return _back("/diag", msg=f"Текущая {cur} — {'актуально' if same else 'доступна новее ' + remote}")
     except Exception as e:  # noqa: BLE001
