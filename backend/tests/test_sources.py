@@ -1,5 +1,6 @@
 """Парсеры источников дропов + whois-даты. Оффлайн, на фикстурах-строках."""
 from datetime import timezone
+import pytest
 from app.integrations.aparser import _parse_whois_created
 
 
@@ -43,16 +44,19 @@ def test_whois_probe_shapes(monkeypatch):
     assert pr["available"] is False and pr["created"] is not None
 
 
-def test_whois_probe_swallows_transport_errors(monkeypatch):
-    """M1 приобретаемость: сетевой сбой -> None/None, никогда не raise (контракт для T1)."""
+def test_whois_probe_propagates_transport_error(monkeypatch):
+    """M1 приобретаемость: сетевой сбой пробрасывается наружу — ловит _funnel (sig["errors"]),
+    транспортный слой не глотает исключения (контракт как у остальных методов клиента)."""
     from app.integrations import aparser
     c = aparser.AParserClient()
 
     def _boom(*a, **k):
         raise RuntimeError("network down")
     monkeypatch.setattr(c, "_call", _boom)
-    assert c.whois_probe("x.ru") == {"available": None, "created": None}
-    assert c.whois_created("x.ru") is None
+    with pytest.raises(RuntimeError, match="network down"):
+        c.whois_probe("x.ru")
+    with pytest.raises(RuntimeError, match="network down"):
+        c.whois_created("x.ru")
 
 
 def test_parse_domains_extracts_ru():

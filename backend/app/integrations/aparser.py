@@ -101,13 +101,10 @@ class AParserClient(BaseClient):
     def whois_probe(self, domain: str) -> dict:
         """Один Net::Whois-вызов -> доступность + дата регистрации.
         available: True свободен / False занят / None не определить. created: дата или None.
-        Сетевой/транспортный сбой не пробрасывается — {"available": None, "created": None}."""
-        try:
-            res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
-                                            "configPreset": "default", "preset": "default"})
-            text = self._result_string(res)
-        except Exception:  # noqa: BLE001 — whois не должен ронять вызывающий код
-            return {"available": None, "created": None}
+        Сетевой/транспортный сбой пробрасывается — ловит вызывающий код (_funnel -> sig["errors"])."""
+        res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
+                                        "configPreset": "default", "preset": "default"})
+        text = self._result_string(res)
         return {"available": _parse_whois_available(text), "created": _parse_whois_created(text)}
 
     def whois_created(self, domain: str) -> datetime | None:
