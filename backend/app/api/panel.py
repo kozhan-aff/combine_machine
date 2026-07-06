@@ -14,7 +14,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request, Depends, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -104,11 +104,16 @@ def _next_steps(db: Session) -> list[dict]:
 
 
 def _pool_counts(db: Session, s: dict) -> dict:
-    """Сколько доменов пула проходит каждый гейт при текущих порогах (превью эффекта)."""
+    """Сколько доменов пула проходит каждый гейт при текущих порогах (превью эффекта).
+
+    Правила счёта зеркалят воронку (scoring._funnel), иначе превью врёт:
+    T0 режет только ИЗВЕСТНЫЙ RD < порога — NULL (сырой список без RD) проходит.
+    """
     from datetime import datetime, timezone, timedelta
     total = db.scalar(select(func.count()).select_from(Domain)) or 0
     rd = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.referring_domains >= s["min_referring_domains"])) or 0
+        or_(Domain.referring_domains.is_(None),
+            Domain.referring_domains >= s["min_referring_domains"]))) or 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=365.25 * s["min_age_years"])
     age = db.scalar(select(func.count()).select_from(Domain).where(
         Domain.whois_created.is_not(None), Domain.whois_created <= cutoff)) or 0
@@ -183,8 +188,9 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
 def settings_preview(min_rd: int = 1, min_age: float = 3.0, approve: float = 0.7,
                      manual: float = 0.4, db: Session = Depends(get_session)):
     from fastapi.responses import JSONResponse
+    clamp01 = lambda v: max(0.0, min(1.0, v))
     s = {"min_referring_domains": max(0, min_rd), "min_age_years": max(0.0, min_age),
-         "approve_at": approve, "manual_review_at": manual}
+         "approve_at": clamp01(approve), "manual_review_at": clamp01(manual)}
     return JSONResponse(_pool_counts(db, s))
 
 

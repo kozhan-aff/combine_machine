@@ -4,57 +4,80 @@
 <h2><span class="idx">⚙</span> Настройки воронки
   <span class="hint">пороги скоринга · пул: {{ counts.total }} доменов · счётчики обновляются при сдвиге</span></h2>
 
-<form method="post" action="/settings/save" class="card" style="max-width:760px">
+<form method="post" action="/settings/save" style="max-width:760px; display:grid; gap:14px">
   <div class="station">
     <div class="plate">T0 · min доноров (RD) — <b>отсекает пустышки</b></div>
     <div class="what">Домены с RD ниже порога отбраковываются на входе (0 = не резать по RD).
       Сырые списки без RD проходят на T1.</div>
-    <input type="range" name="min_referring_domains" min="0" max="50" step="1" value="{{ s.min_referring_domains }}"
-           oninput="pv()"> <b id="v_rd">{{ s.min_referring_domains }}</b>
-    <span class="hint">проходит: <b id="c_rd">{{ counts.rd }}</b> / {{ counts.total }}</span>
+    <div class="go">
+      <input type="range" name="min_referring_domains" min="0" max="50" step="1"
+             value="{{ s.min_referring_domains }}" oninput="pv()" style="flex:1 1 200px">
+      <b id="v_rd">{{ s.min_referring_domains }}</b>
+      <span class="hint">проходит гейт RD (неизвестный RD пропускается, как в воронке):
+        <b id="c_rd">{{ counts.rd }}</b> / {{ counts.total }}</span>
+    </div>
   </div>
   <div class="station">
     <div class="plate">T1 · min возраст, лет — <b>отсекает молодые до дорогой истории</b></div>
     <div class="what">Возраст из whois (дата регистрации). Моложе порога → reject, не доходя до Wayback.</div>
-    <input type="range" name="min_age_years" min="0" max="15" step="0.5" value="{{ s.min_age_years }}"
-           oninput="pv()"> <b id="v_age">{{ s.min_age_years }}</b>
-    <span class="hint">с известным возрастом проходит: <b id="c_age">{{ counts.age }}</b> / {{ counts.total }}</span>
+    <div class="go">
+      <input type="range" name="min_age_years" min="0" max="15" step="0.5"
+             value="{{ s.min_age_years }}" oninput="pv()" style="flex:1 1 200px">
+      <b id="v_age">{{ s.min_age_years }}</b>
+      <span class="hint">с известным возрастом проходит: <b id="c_age">{{ counts.age }}</b> / {{ counts.total }}</span>
+    </div>
   </div>
   <div class="station">
-    <div class="plate">T3 · порог approve — <b>выше = авто-одобрение</b></div>
+    <div class="plate">Финальный скор · порог approve — <b>выше = авто-одобрение</b></div>
     <div class="what">Итоговый скор ≥ порога → домен одобряется автоматически.</div>
-    <input type="range" name="approve_at" min="0" max="1" step="0.05" value="{{ s.approve_at }}"
-           oninput="pv()"> <b id="v_approve">{{ s.approve_at }}</b>
-    <span class="hint">уже approved: <b id="c_approve">{{ counts.approve }}</b></span>
+    <div class="go">
+      <input type="range" name="approve_at" min="0" max="1" step="0.05"
+             value="{{ s.approve_at }}" oninput="pv()" style="flex:1 1 200px">
+      <b id="v_approve">{{ s.approve_at }}</b>
+      <span class="hint">уже approved: <b id="c_approve">{{ counts.approve }}</b></span>
+    </div>
   </div>
   <div class="station">
-    <div class="plate">T3 · порог manual — <b>ниже = reject</b></div>
+    <div class="plate">Финальный скор · порог manual — <b>ниже = reject</b></div>
     <div class="what">Скор между manual и approve → ручной разбор (scored); ниже manual → reject.</div>
-    <input type="range" name="manual_review_at" min="0" max="1" step="0.05" value="{{ s.manual_review_at }}"
-           oninput="pv()"> <b id="v_manual">{{ s.manual_review_at }}</b>
-    <span class="hint">в вилке ручного разбора: <b id="c_manual">{{ counts.manual }}</b></span>
+    <div class="go">
+      <input type="range" name="manual_review_at" min="0" max="1" step="0.05"
+             value="{{ s.manual_review_at }}" oninput="pv()" style="flex:1 1 200px">
+      <b id="v_manual">{{ s.manual_review_at }}</b>
+      <span class="hint">в вилке ручного разбора: <b id="c_manual">{{ counts.manual }}</b></span>
+    </div>
   </div>
   <div class="station">
     <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
-    <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
-    <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
-    <label><input type="checkbox" name="reg_ru" {{ 'checked' if s.sources_enabled.reg_ru }}> reg.ru</label>
-    <label><input type="checkbox" name="sweb" {{ 'checked' if s.sources_enabled.sweb }}> sweb</label>
+    <div class="what">Выключенный источник просто не опрашивается при ↻ Discovery;
+      уже найденные с него домены остаются в пуле.</div>
+    <div class="go">
+      <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
+      <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
+      <label><input type="checkbox" name="reg_ru" {{ 'checked' if s.sources_enabled.reg_ru }}> reg.ru</label>
+      <label><input type="checkbox" name="sweb" {{ 'checked' if s.sources_enabled.sweb }}> sweb</label>
+    </div>
   </div>
-  <div class="go">
-    <button class="btn-amber" title="сохранить пороги и включённые источники">Сохранить</button>
+  <div class="station">
+    <div class="plate">Применить — <b>записать пороги в конвейер</b></div>
+    <div class="what">«Сохранить» записывает пороги и источники в настройки — действовать начнут
+      со следующего запуска ▶ Score / ↻ Discovery (уже отскоренные домены не пересчитываются).
+      «Сбросить» возвращает стартовые значения из scoring_config.</div>
+    <div class="go">
+      <button class="btn-amber" title="сохранить пороги и включённые источники">Сохранить</button>
+      <button class="btn" form="settings-reset"
+              title="вернуть стартовые значения из scoring_config">Сбросить к дефолтам</button>
+    </div>
   </div>
 </form>
-<form method="post" action="/settings/reset" style="margin-top:10px"
-      onsubmit="return confirm('Сбросить все пороги к дефолтам?')">
-  <button class="btn" title="вернуть стартовые значения из scoring_config">Сбросить к дефолтам</button>
-</form>
+<form id="settings-reset" method="post" action="/settings/reset"
+      onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
 
 <script>
+const PV_MAP = {rd:'min_referring_domains', age:'min_age_years', approve:'approve_at', manual:'manual_review_at'};
 function pv() {
   for (const k of ['rd','age','approve','manual']) {
-    const map = {rd:'min_referring_domains',age:'min_age_years',approve:'approve_at',manual:'manual_review_at'};
-    document.getElementById('v_'+k).textContent = document.querySelector('[name='+map[k]+']').value;
+    document.getElementById('v_'+k).textContent = document.querySelector('[name='+PV_MAP[k]+']').value;
   }
   const q = new URLSearchParams({
     min_rd: document.querySelector('[name=min_referring_domains]').value,

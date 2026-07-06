@@ -117,3 +117,15 @@ def test_settings_render_and_save(client):
 def test_settings_preview_json(client):
     r = client.get("/settings/preview?min_rd=1&min_age=3&approve=0.7&manual=0.4")
     assert r.status_code == 200 and "total" in r.json()
+
+
+def test_settings_preview_rd_null_passes(client):
+    """NULL RD проходит гейт RD в превью — зеркало воронки (T0 режет только известный RD < порога)."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="null-rd.ru", source="cctld", referring_domains=None))
+        s.add(Domain(domain="low-rd.ru", source="backorder", referring_domains=0))
+        s.add(Domain(domain="ok-rd.ru", source="backorder", referring_domains=10))
+        s.commit()
+    c = client.get("/settings/preview?min_rd=1&min_age=3&approve=0.7&manual=0.4").json()
+    assert c["total"] == 3
+    assert c["rd"] == 2  # null-rd (неизвестный) + ok-rd проходят; low-rd=0 режется
