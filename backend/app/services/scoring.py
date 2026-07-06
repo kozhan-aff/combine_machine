@@ -12,6 +12,27 @@ def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
+    """Pure: score threshold -> status, plus the two invariant downgrade guards below.
+    Factored out (2026-07 review, Finding 1) so BOTH `compute_score` (static cfg.DECISION)
+    and `score_domain` (runtime /settings thresholds) decide through the same logic — the
+    live sliders used to only move preview counters, never the actual stored status."""
+    status = ("approved" if score >= approve_at
+              else "scored" if score >= manual_review_at
+              else "rejected")
+    # core invariant (CLAUDE.md): never AUTO-approve a domain whose history we could not
+    # verify — a successful Wayback pass is mandatory. If it failed/absent, downgrade to
+    # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
+    if status == "approved" and not sig.get("wayback_checked"):
+        status = "scored"
+    # risk-guard: если проверка RKN или blacklist упала (ключ сигнала отсутствует, ошибка
+    # осела в errors), нельзя подтверждать чистоту автоматом — уводим в ручной `scored`.
+    if status == "approved" and any(
+            e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
+        status = "scored"
+    return status
+
+
 def compute_score(sig: dict) -> dict:
     """Pure: signals -> {score, status, breakdown}. No I/O. See scoring_config for knobs."""
     pf = sig.get("prior_flags") or {}
@@ -43,19 +64,7 @@ def compute_score(sig: dict) -> dict:
         "indexed_echo": 1.0 if sig.get("indexed_echo") else 0.0,
     }
     score = round(_clamp(sum(cfg.WEIGHTS[k] * comp[k] for k in cfg.WEIGHTS)), 4)
-    status = ("approved" if score >= cfg.DECISION["approve_at"]
-              else "scored" if score >= cfg.DECISION["manual_review_at"]
-              else "rejected")
-    # core invariant (CLAUDE.md): never AUTO-approve a domain whose history we could not
-    # verify — a successful Wayback pass is mandatory. If it failed/absent, downgrade to
-    # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
-    if status == "approved" and not sig.get("wayback_checked"):
-        status = "scored"
-    # risk-guard: если проверка RKN или blacklist упала (ключ сигнала отсутствует, ошибка
-    # осела в errors), нельзя подтверждать чистоту автоматом — уводим в ручной `scored`.
-    if status == "approved" and any(
-            e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
-        status = "scored"
+    status = _decide(score, sig, cfg.DECISION["approve_at"], cfg.DECISION["manual_review_at"])
     return {"score": score, "status": status,
             "breakdown": {"components": comp, "weights": cfg.WEIGHTS}}
 
@@ -169,6 +178,13 @@ def score_domain(domain_id: int, clients: dict | None = None) -> dict:
         else:
             sig.setdefault("referring_domains", d.referring_domains)
             result = compute_score(sig)
+            if "hard_reject" not in result["breakdown"]:
+                # Finding 1 (2026-07 review): re-decide with the RUNTIME /settings thresholds
+                # (not just cfg.DECISION) so the approve/manual-review sliders actually govern
+                # the stored status, not only the /settings preview counters. Hard-rejects
+                # (score 0.0) are excluded — they must never be "rescued" by a low threshold.
+                result = {**result, "status": _decide(result["score"], sig,
+                                                      st["approve_at"], st["manual_review_at"])}
 
         d.whois_created = sig.get("whois_created")
         d.prior_flags = sig.get("prior_flags")

@@ -156,6 +156,44 @@ def test_low_score_reject():
     assert wb.calls == 1            # дошли до compute_score — отклонил composite score, не воронка
 
 
+def test_runtime_approve_at_downgrades_high_scorer_to_scored():
+    """Finding 1 (2026-07 review): рантайм /settings approve_at (не только cfg.DECISION)
+    должен реально управлять статусом, а не только превью-счётчиками на /settings."""
+    from app.services import settings as st
+    did = _mk(domain="runtime-approve.ru", referring_domains=100)
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    st.update_settings(approve_at=0.99)
+    out = scoring.score_domain(did, clients=_clients(old, wb))
+    assert 0.40 < out["score"] < 0.99             # ~0.87 — сильный, но не «approve по-новому»
+    assert out["status"] == "scored" and out["reject_reason"] is None
+
+
+def test_runtime_thresholds_can_reject_previously_approved_score():
+    """Тот же сильный домен: подняв ОБА порога выше его score, получаем rejected/low_score —
+    не «застрявший approved» из статических cfg.DECISION."""
+    from app.services import settings as st
+    did = _mk(domain="runtime-reject.ru", referring_domains=100)
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    st.update_settings(manual_review_at=0.9, approve_at=0.95)
+    out = scoring.score_domain(did, clients=_clients(old, wb))
+    assert out["status"] == "rejected" and out["reject_reason"] == "low_score"
+
+
+def test_runtime_min_age_years_rejects_too_young():
+    """Spec §G (был пропущен): рантайм min_age_years из /settings уже используется в _funnel
+    (T1) — 4-летний домен отклоняется too_young при поднятом пороге в 5 лет."""
+    from app.services import settings as st
+    did = _mk(domain="four-years.ru", referring_domains=50)
+    wb = _Wayback()
+    st.update_settings(min_age_years=5.0)
+    four_years = datetime.now(timezone.utc) - timedelta(days=365 * 4)
+    out = scoring.score_domain(did, clients=_clients(four_years, wb))
+    assert out["status"] == "rejected" and out["reject_reason"] == "too_young"
+    assert wb.calls == 0                          # too_young — T1, дешёвый Wayback не вызван
+
+
 def test_too_young_fallback_from_wayback_when_whois_fails():
     """Finding 1: whois упал (T1 без даты) -> возраст добираем из Wayback (T3); если
     фолбэк-возраст < порога — reject too_young, а не тихий проскок в compute_score."""
