@@ -167,6 +167,7 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
 
 @router.get("/diag", response_class=HTMLResponse)
 def diag_view(request: Request):
+    from app.services import version as _version
     from app.services.diagnostics import run_diagnostics, PING_TIMEOUT
     checks = run_diagnostics()
     ok = sum(1 for c in checks if c["status"] == "ok")
@@ -174,6 +175,7 @@ def diag_view(request: Request):
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
         "timeout": PING_TIMEOUT,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
+        "version": _version.current_version(),
     })
 
 
@@ -468,8 +470,10 @@ def git_pull_action():
     import base64 as _b64
     import os
     import subprocess
+    from app.services.version import current_version
     if not settings.GITHUB_TOKEN:
         return _back("/diag", err="GITHUB_TOKEN не задан в .env — нечем авторизовать git pull")
+    old = current_version().get("hash", "")
     tok = settings.GITHUB_TOKEN
     scrub = lambda s: s.replace(tok, "***")  # никогда не светить токен в баннере
     # Токен НЕ в argv (виден в ps/procfs), а через http.extraheader в окружении git:
@@ -491,7 +495,6 @@ def git_pull_action():
             return _back("/diag", err="git не установлен в контейнере — пересобери образ (docker compose build)")
         if pull.returncode != 0:
             return _back("/diag", err=f"git pull: {scrub((pull.stderr or pull.stdout).strip())[:300]}")
-        head = (pull.stdout.strip().splitlines() or ["ok"])[-1]
         # миграции идемпотентны; код подхватит uvicorn --reload (следит за /app)
         try:
             mig = subprocess.run(["alembic", "upgrade", "head"], cwd="/app",
@@ -499,9 +502,40 @@ def git_pull_action():
             warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
         except FileNotFoundError:
             warn = " ⚠ alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
-        return _back("/diag", msg=f"Обновлено: {scrub(head)[:200]}{warn}")
+        new = current_version().get("hash", "")
+        return _back("/diag", msg=f"Обновлено: {old}→{new} «{current_version().get('subject','')}»{warn}")
     except Exception as e:  # noqa: BLE001
         return _back("/diag", err=f"update: {scrub(str(e))[:200]}")
+
+
+@router.post("/admin/check-updates")
+def check_updates_action():
+    import base64 as _b64
+    import os
+    import subprocess
+    from app.services.version import current_version
+    if not settings.GITHUB_TOKEN:
+        return _back("/diag", err="GITHUB_TOKEN не задан — нечем проверить удалёнку")
+    # тот же паттерн, что и /admin/pull: токен НЕ в argv, а через http.extraheader в env git.
+    basic = _b64.b64encode(f"x-access-token:{settings.GITHUB_TOKEN}".encode()).decode()
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+    }
+    try:
+        r = subprocess.run(["git", "-C", "/repo", "ls-remote",
+                            f"https://github.com/{settings.GITHUB_REPO}.git", "main"],
+                           capture_output=True, text=True, timeout=20, env=git_env)
+        remote = (r.stdout.split() or [""])[0][:7]
+        cur = current_version().get("hash", "")
+        if not remote:
+            return _back("/diag", err="не удалось прочитать удалёнку")
+        same = remote.startswith(cur) or cur.startswith(remote)
+        return _back("/diag", msg=f"Текущая {cur} — {'актуально' if same else 'доступна новее ' + remote}")
+    except Exception as e:  # noqa: BLE001
+        return _back("/diag", err=f"check-updates: {type(e).__name__}")
 
 
 @router.post("/settings/save")

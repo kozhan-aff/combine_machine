@@ -5,6 +5,16 @@
 <h2><span class="idx">◉</span> Диагностика интеграций
   <span class="hint">{{ ok }} / {{ total }} на связи · страница пингует все сервисы при каждом открытии</span></h2>
 
+<div class="card" style="max-width:920px; margin-bottom:14px">
+  <b>Версия кода:</b>
+  {% if version.error %}<span style="color:var(--bad)">git недоступен — {{ version.error }}</span>
+  {% else %}<code>{{ version.hash }}</code> · {{ version.subject }} · <span class="hint">{{ version.date }}</span>{% endif %}
+  {% if can_pull %}
+  <form method="post" action="/admin/check-updates" style="display:inline; margin-left:12px">
+    <button class="btn" title="git ls-remote — сравнить с origin/main">проверить обновления</button>
+  </form>{% endif %}
+</div>
+
 <div class="toolbar">
   <form method="get" action="/diag">
     <button class="btn-amber" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
