@@ -46,6 +46,11 @@ class Domain(Base):
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
     notes: Mapped[str | None] = mapped_column(Text)
 
+    # funnel bookkeeping
+    reject_reason: Mapped[str | None] = mapped_column(String(32))    # low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|low_score
+    whois_created: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дата регистрации (первичный возраст)
+    feed_flags: Mapped[dict | None] = mapped_column(JSONB)           # сырые флаги источника: {rkn, judicial, block}
+
     orders: Mapped[list["AcquisitionOrder"]] = relationship(back_populates="domain")
 
 

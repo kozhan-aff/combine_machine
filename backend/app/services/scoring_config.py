@@ -48,3 +48,7 @@ DECISION = {
     "approve_at": 0.70,
     "manual_review_at": 0.40,   # below this -> reject
 }
+
+# Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
+MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт: моложе — reject too_young
+SOURCES_ENABLED = {"backorder": True, "cctld": True, "reg_ru": True, "sweb": True}
