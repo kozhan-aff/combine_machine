@@ -12,6 +12,13 @@ from app.config import settings
 PING_TIMEOUT = 20.0  # сек на один пинг; Wayback стабильно ~15с — даём запас, чтобы не мигал
 
 
+def _db_ping() -> bool:
+    from sqlalchemy import text
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        return db.execute(text("SELECT 1")).scalar() == 1
+
+
 def _spec():
     """Список проверок: (key, label, role, need_cred, factory→ping-callable).
 
@@ -34,6 +41,9 @@ def _spec():
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("rkn", "РКН (antizapret)", "M1 · блок-лист", settings.RKN_SOURCE_URL,
          lambda: __import__("app.integrations.rkn", fromlist=["x"]).RknClient().ping()),
+        ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY,
+         lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
+        ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, _db_ping),
     ]
 
 

@@ -140,6 +140,13 @@ def test_settings_preview_json(client):
     assert r.status_code == 200 and "total" in r.json()
 
 
+def test_diag_includes_aparser_and_db():
+    from app.services.diagnostics import _spec, _db_ping
+    keys = {s[0] for s in _spec()}
+    assert "aparser" in keys and "db" in keys
+    assert _db_ping() is True            # SELECT 1 на тестовой SQLite отвечает
+
+
 def test_settings_preview_rd_null_passes(client):
     """NULL RD проходит гейт RD в превью — зеркало воронки (T0 режет только известный RD < порога)."""
     with db.SessionLocal() as s:
