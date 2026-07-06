@@ -47,9 +47,17 @@ class Domain(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     # funnel bookkeeping
-    reject_reason: Mapped[str | None] = mapped_column(String(32))    # low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|low_score
+    reject_reason: Mapped[str | None] = mapped_column(String(32))    # low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|low_score|not_acquirable
     whois_created: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дата регистрации (первичный возраст)
     feed_flags: Mapped[dict | None] = mapped_column(JSONB)           # сырые флаги источника: {rkn, judicial, block}
+
+    # приобретаемость (Мозг M1)
+    lane: Mapped[str | None] = mapped_column(String(8))              # bid | free | null
+    acquire_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дедлайн ловли (backorder delete_date)
+    acquire_price: Mapped[float | None] = mapped_column(Numeric)     # базовая цена выкупа (backorder тариф)
+    price_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    visitors: Mapped[int | None] = mapped_column(Integer)            # инфо-сигнал из фида (вес 0)
+    tic: Mapped[int | None] = mapped_column(Integer)                 # Яндекс ТИЦ из фида (вес 0)
 
     orders: Mapped[list["AcquisitionOrder"]] = relationship(back_populates="domain")
 

@@ -35,3 +35,11 @@ def test_default_test_sources_are_backorder_only_offline_guard():
     s = st.get_settings()
     assert s["sources_enabled"] == {"backorder": True, "cctld": False,
                                     "reg_ru": False, "sweb": False}
+
+
+def test_max_whois_per_run_default_and_clamp():
+    from app.services.settings import get_settings, update_settings
+    assert get_settings()["max_whois_per_run"] == 200          # дефолт
+    assert update_settings(max_whois_per_run=50)["max_whois_per_run"] == 50
+    assert update_settings(max_whois_per_run=999999)["max_whois_per_run"] == 5000  # верхний кламп
+    assert update_settings(max_whois_per_run=-5)["max_whois_per_run"] == 0         # нижний кламп
