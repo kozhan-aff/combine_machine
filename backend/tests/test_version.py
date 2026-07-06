@@ -73,3 +73,22 @@ def test_check_updates_failure_surfaces_scrubbed_stderr(client, monkeypatch):
     loc = _flash(client.post("/admin/check-updates", follow_redirects=False))
     assert "не удалось прочитать удалёнку: fatal: Authentication failed" in loc
     assert tok not in loc
+
+
+def test_check_updates_unknown_current_version_does_not_claim_fresh(client, monkeypatch):
+    """Ревью-минор #10: current_version() упал (git в контейнере недоступен) -> cur == "" —
+    без гварда remote.startswith("") тривиально True для ЛЮБОГО remote, и код лгал «актуально».
+    Теперь честный err-баннер вместо ложного «актуально»."""
+    monkeypatch.setattr(settings, "GITHUB_TOKEN", "TESTTOKEN123")
+
+    def run(argv, **kw):
+        if "log" in argv:
+            return _R(128, "", "fatal: not a git repository")   # current_version() errors
+        if "ls-remote" in argv:
+            return _R(0, "deadbee1\trefs/heads/main\n", "")
+        raise AssertionError(f"неожиданный вызов subprocess: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    loc = _flash(client.post("/admin/check-updates", follow_redirects=False))
+    assert "не удалось определить текущую версию" in loc
+    assert "актуально" not in loc

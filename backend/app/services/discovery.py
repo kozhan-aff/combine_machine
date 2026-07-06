@@ -4,7 +4,10 @@ Pull candidates from the backorder public feed (no auth) and upsert into `domain
 with status='discovered'. Feed `links` (donor count) rides straight into referring_domains
 as a free RD signal. Transport lives in integrations; this is the business logic.
 """
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 
@@ -45,12 +48,13 @@ def _collect(enabled: dict) -> list[dict]:
                         rows.append(nr)
             else:
                 rows.extend(Client().list_dropping())
-        except Exception:  # noqa: BLE001 — один источник упал, остальные идут
+        except Exception as e:  # noqa: BLE001 — один источник упал, остальные идут
+            logger.warning("discovery source %s failed: %s", name, e)
             continue
     return rows
 
 
-def run_discovery(min_links: int = 1, on_progress=None) -> int:
+def run_discovery(on_progress=None) -> int:
     """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых.
     on_progress(done, total, current) — discovery одноразовый (не по-доменный): зовётся один
     раз после успешной вставки, (1, 1, "собрано N")."""

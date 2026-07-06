@@ -33,7 +33,7 @@ Base.metadata.create_all(db.engine)
 
 sample = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 
-n = discovery.run_discovery(min_links=1)
+n = discovery.run_discovery()
 print(f"discovery: +{n} new candidates from the live backorder feed\n")
 
 with db.SessionLocal() as s:

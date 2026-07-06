@@ -537,6 +537,11 @@ def check_updates_action():
             # как в /admin/pull: детали в баннер, но токен никогда не светим
             detail = (r.stderr or "").strip().replace(settings.GITHUB_TOKEN, "***")[:200]
             return _back("/diag", err="не удалось прочитать удалёнку" + (f": {detail}" if detail else ""))
+        if not cur:
+            # current_version() упал (git в контейнере недоступен) — пустая cur делает
+            # remote.startswith(cur) тривиально True для ЛЮБОГО remote: без этой ветки
+            # мы бы соврали «актуально», хотя текущую версию не смогли определить вовсе.
+            return _back("/diag", err="не удалось определить текущую версию (git в контейнере недоступен)")
         same = remote.startswith(cur) or cur.startswith(remote)
         return _back("/diag", msg=f"Текущая {cur} — {'актуально' if same else 'доступна новее ' + remote}")
     except Exception as e:  # noqa: BLE001

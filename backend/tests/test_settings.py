@@ -24,3 +24,14 @@ def test_update_clamps_out_of_range():
     st.update_settings(approve_at=9.9, min_age_years=-4)
     s = st.get_settings()
     assert s["approve_at"] == 1.0 and s["min_age_years"] == 0.0
+
+
+def test_default_test_sources_are_backorder_only_offline_guard():
+    """Finding 4 (финальное ревью, структурный офлайн-гвард в conftest): без единого явного
+    update_settings() дефолт, который видят тесты, — только backorder; cctld/reg_ru/sweb
+    (A-Parser) выключены, чтобы будущий тест discovery.run_discovery() не мог тихо уйти
+    в живую сеть. Ожидание захардкожено (не сверяется с cfg.SOURCES_ENABLED), чтобы тест
+    реально проверял конкретный безопасный дефолт, а не совпадение с самим патчем."""
+    s = st.get_settings()
+    assert s["sources_enabled"] == {"backorder": True, "cctld": False,
+                                    "reg_ru": False, "sweb": False}

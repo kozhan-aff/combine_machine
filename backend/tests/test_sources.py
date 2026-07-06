@@ -44,3 +44,24 @@ def test_run_discovery_dedups_across_sources(monkeypatch):
     with db.SessionLocal() as s:
         rows = {d.domain: d for d in s.execute(select(Domain)).scalars().all()}
     assert rows["dup.ru"].referring_domains == 42     # выиграла строка с бо́льшим RD (backorder)
+
+
+def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
+    """Finding 5 (финальное ревью): падение одного источника не должно тонуть молча —
+    остальные источники всё равно собираются (continue-семантика), но в лог уходит warning
+    с именем источника, иначе первый прод-инцидент недебажим."""
+    from app.services import discovery
+
+    class _Boom:
+        def list_dropping(self):
+            raise RuntimeError("feed timeout")
+
+    class _Ok:
+        def list_dropping(self):
+            return [{"domain": "alive.ru", "source": "cctld", "referring_domains": None}]
+
+    monkeypatch.setattr(discovery, "_sources", lambda: {"backorder": _Boom, "cctld": _Ok})
+    with caplog.at_level("WARNING", logger="app.services.discovery"):
+        rows = discovery._collect({"backorder": True, "cctld": True})
+    assert rows == [{"domain": "alive.ru", "source": "cctld", "referring_domains": None}]
+    assert any("backorder" in r.message and "feed timeout" in r.message for r in caplog.records)

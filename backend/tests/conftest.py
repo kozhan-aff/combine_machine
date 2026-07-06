@@ -47,6 +47,23 @@ def sqlite_db():
 
 
 @pytest.fixture(autouse=True)
+def _default_sources_backorder_only(sqlite_db, monkeypatch):
+    """Структурный офлайн-гвард (финальное ревью, Finding 4): по умолчанию сид настроек
+    воронки видит только backorder включённым — многоисточниковые cctld/reg_ru/sweb (A-Parser)
+    выключены, чтобы будущий тест run_discovery() не мог тихо уйти в живую сеть. Достигается
+    монки-патчем самого дефолта в scoring_config (не отдельным update_settings-вызовом), поэтому
+    test_settings.py::test_get_settings_seeds_defaults (сверяет seed с cfg.SOURCES_ENABLED)
+    остаётся верным — обе стороны сравнения видят один и тот же патченный дефолт. Тесты,
+    которым нужны другие источники, сами зовут update_settings(sources_enabled=...) и
+    переопределяют это явно (несколько уже так делают — их вызов становится избыточным, но
+    безвредным). Зависимость от sqlite_db — только порядок фикстур, самого патча она не требует."""
+    from app.services import scoring_config as cfg
+    monkeypatch.setattr(cfg, "SOURCES_ENABLED",
+                        {"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_panel_auth():
     """Тесты герметичны к .env оператора: Basic-auth панели выключен на время прогона
     (иначе заданные в .env PANEL_USER/PANEL_PASS отдают 401 вместо 303/200 на панельных
