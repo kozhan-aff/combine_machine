@@ -68,67 +68,100 @@ def _make_clients() -> dict:
     from app.integrations.blacklist import BlacklistClient
     from app.integrations.searxng import SearxngClient
     from app.integrations.openpagerank import OpenPageRankClient
+    from app.integrations.aparser import AParserClient
     return {
-        "wayback": WaybackClient(),
-        "rkn": RknClient(),
-        "blacklist": BlacklistClient(),
-        "searxng": SearxngClient(),
+        "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
+        "searxng": SearxngClient(), "aparser": AParserClient(),
         "opr": OpenPageRankClient() if settings.OPENPAGERANK_API_KEY else None,
     }
 
 
-def _gather_signals(domain: str, clients: dict | None = None) -> dict:
-    """Free-stack enrichment for one domain. Each source degrades gracefully.
-    Clients переиспользуются, если переданы (score_pending строит их раз на прогон);
-    иначе создаются на месте."""
-    c = clients or _make_clients()
-    sig: dict = {"errors": []}
+def _funnel(d, c, st, sig) -> str | None:
+    """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
+    попутно наполняя sig посчитанными сигналами. Дорогой Wayback (T3) — только для выживших."""
+    from datetime import datetime, timezone
 
-    try:  # history (heavy) — the core "clean history" signal
-        sig.update(c["wayback"].classify_history(domain))
-    except Exception as e:  # noqa: BLE001
-        sig["errors"].append(f"wayback:{type(e).__name__}")
+    # T0 — фид (0 стоимости): сохранённые флаги источника + RD
+    if d.feed_flags and any(d.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
+        return "feed_flag"
+    if d.referring_domains is not None and d.referring_domains < st["min_referring_domains"]:
+        return "low_rd"
 
+    # T1 — whois (дёшево): возраст
     try:
-        sig["rkn_listed"] = c["rkn"].is_listed(domain)
+        wc = c["aparser"].whois_created(d.domain)
+        sig["whois_created"] = wc
+        if wc is not None:
+            age = (datetime.now(timezone.utc) - wc).days / 365.25
+            sig["age_years"] = round(age, 2)
+            if age < st["min_age_years"]:
+                return "too_young"
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"whois:{type(e).__name__}")
+
+    # T2 — риск (средне): РКН + Spamhaus + indexed_echo (lookups)
+    try:
+        sig["rkn_listed"] = c["rkn"].is_listed(d.domain)
+        if sig["rkn_listed"]:
+            return "rkn"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"rkn:{type(e).__name__}")
-
     try:
-        sig["blacklisted"] = c["blacklist"].is_blacklisted(domain)
+        sig["blacklisted"] = c["blacklist"].is_blacklisted(d.domain)
+        if sig["blacklisted"] is True:
+            return "blacklist"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"blacklist:{type(e).__name__}")
-
     try:
-        sig["indexed_echo"] = c["searxng"].indexed_echo(domain)
+        sig["indexed_echo"] = c["searxng"].indexed_echo(d.domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
+    # T3 — история (дорого): Wayback + DR, только для выживших
+    try:
+        hist = c["wayback"].classify_history(d.domain)
+        pf = hist.get("prior_flags") or {}
+        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+            sig["prior_flags"] = pf
+            return "history_dirty"
+        sig["prior_flags"] = pf
+        sig["wayback_checked"] = hist.get("wayback_checked")
+        sig["first_seen"] = hist.get("first_seen")
+        if sig.get("whois_created") is None and hist.get("age_years") is not None:
+            sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"wayback:{type(e).__name__}")
+
     if c["opr"] is not None:
         try:
-            sig["dr"] = c["opr"].get_page_rank([domain]).get(domain)
+            sig["dr"] = c["opr"].get_page_rank([d.domain]).get(d.domain)
         except Exception as e:  # noqa: BLE001
             sig["errors"].append(f"opr:{type(e).__name__}")
-    return sig
+    return None
 
 
 def score_domain(domain_id: int, clients: dict | None = None) -> dict:
-    """Full funnel for one domain: enrich -> score -> persist. Returns the breakdown."""
+    """Полная воронка для одного домена: ступени -> скор/reject -> запись. Возвращает разбор."""
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.services.settings import get_settings
 
+    st = get_settings()
     with SessionLocal() as db:
         d = db.get(Domain, domain_id)
         if d is None:
             raise ValueError(f"domain {domain_id} not found")
+        c = clients or _make_clients()
+        sig: dict = {"errors": []}
+        reject = _funnel(d, c, st, sig)
 
-        # clients=None -> _gather_signals соберёт свои; вызов одним аргументом сохраняет
-        # совместимость с monkeypatch в тестах (там _gather_signals — функция от domain).
-        sig = _gather_signals(d.domain) if clients is None else _gather_signals(d.domain, clients)
-        sig.setdefault("referring_domains", d.referring_domains)
-        result = compute_score(sig)
+        if reject:
+            result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
+        else:
+            sig.setdefault("referring_domains", d.referring_domains)
+            result = compute_score(sig)
 
-        # persist enrichment + decision
+        d.whois_created = sig.get("whois_created")
         d.prior_flags = sig.get("prior_flags")
         d.wayback_checked = bool(sig.get("wayback_checked"))
         d.first_seen = sig.get("first_seen")
@@ -142,8 +175,10 @@ def score_domain(domain_id: int, clients: dict | None = None) -> dict:
         d.score = result["score"]
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", [])}
         d.status = result["status"]
+        d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()
-        return {"domain": d.domain, **result, "errors": sig.get("errors", [])}
+        return {"domain": d.domain, **result, "reject_reason": d.reject_reason,
+                "errors": sig.get("errors", [])}
 
 
 def score_pending(limit: int = 100) -> int:

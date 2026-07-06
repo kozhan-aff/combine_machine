@@ -30,14 +30,33 @@ def test_discovery_upsert_idempotent(monkeypatch):
     assert discovery.run_discovery() == 0   # re-run inserts nothing (idempotent)
 
 
-def test_scoring_persists_and_jsonb_roundtrips(monkeypatch):
+def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
+    """Мок-клиенты в форме, которую ждёт scoring._funnel (см. test_funnel.py::_clients).
+    _gather_signals больше нет — воронка теперь ступенчатая, поэтому мокаем клиенты, а
+    не внутреннюю функцию сбора сигналов."""
+    class _W:  # aparser
+        def whois_created(self, dom): return whois_dt
+    class _R:
+        def is_listed(self, dom): return rkn
+    class _Bl:
+        def is_blacklisted(self, dom): return False
+    class _S:
+        def indexed_echo(self, dom): return True
+    class _Wb:
+        def classify_history(self, dom):
+            return wb_flags or {"prior_flags": {}, "wayback_checked": True,
+                                "first_seen": None, "age_years": 10.0}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _Bl(), "searxng": _S(),
+            "wayback": _Wb(), "opr": None}
+
+
+def test_scoring_persists_and_jsonb_roundtrips():
     from app.services import scoring
     did = _add(Domain(domain="oldclean.com", source="backorder",
                       referring_domains=30, status="discovered"))
-    monkeypatch.setattr(scoring, "_gather_signals", lambda domain: {
-        "wayback_checked": True, "prior_flags": {}, "age_years": 10.0,
-        "indexed_echo": True, "rkn_listed": False, "blacklisted": False, "errors": []})
-    out = scoring.score_domain(did)
+    from datetime import datetime, timezone, timedelta
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 10)   # старше min_age_years -> проходит T1
+    out = scoring.score_domain(did, clients=_funnel_clients(old))
     assert out["status"] in ("approved", "scored")
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
@@ -46,13 +65,13 @@ def test_scoring_persists_and_jsonb_roundtrips(monkeypatch):
         assert d.prior_flags == {}
 
 
-def test_scoring_hard_reject_on_rkn(monkeypatch):
+def test_scoring_hard_reject_on_rkn():
     from app.services import scoring
     did = _add(Domain(domain="blocked.ru", source="backorder", status="discovered"))
-    monkeypatch.setattr(scoring, "_gather_signals", lambda domain: {
-        "wayback_checked": True, "prior_flags": {}, "rkn_listed": True, "errors": []})
-    out = scoring.score_domain(did)
+    # whois=None -> T1 пропущен без возраста; RKN=True рубит на T2, Wayback не вызывается
+    out = scoring.score_domain(did, clients=_funnel_clients(None, rkn=True))
     assert out["status"] == "rejected" and out["score"] == 0.0
+    assert out["reject_reason"] == "rkn"
     with db.SessionLocal() as s:
         assert s.get(Domain, did).clean is False
 
