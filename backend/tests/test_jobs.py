@@ -40,3 +40,29 @@ def test_error_is_captured():
             break
         time.sleep(0.02)
     assert "kaboom" in (jobs.progress("score")["error"] or "")
+
+
+def test_zero_candidates_discovery_reaches_terminal(monkeypatch):
+    """Регрессия Fix 3: пустой фид — run_discovery всё равно репортит терминальную форму
+    (0, 0, «нет кандидатов»), а джоб в реестре доходит до running=False без error —
+    JS-полоса по контракту jobs.py покажет «готово (0)», а не вечный running."""
+    from app.services import discovery
+    from app.services.settings import update_settings
+    jobs._reset()
+    update_settings(sources_enabled={"backorder": True, "cctld": False,
+                                     "reg_ru": False, "sweb": False})
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
+                        lambda self, min_links=1: [])          # фид пуст -> ноль кандидатов
+    calls = []
+    assert discovery.run_discovery(
+        on_progress=lambda d, t, c: calls.append((d, t, c))) == 0
+    assert calls == [(0, 0, "нет кандидатов")]                 # терминальный репорт был
+
+    jobs.start("discovery", lambda: discovery.run_discovery(
+        on_progress=lambda d, t, c: jobs.report("discovery", d, t, c)))
+    for _ in range(50):
+        if not jobs.is_running("discovery"):
+            break
+        time.sleep(0.02)
+    p = jobs.progress("discovery")
+    assert p["running"] is False and p["error"] is None and p["done"] == 0

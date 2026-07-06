@@ -98,6 +98,7 @@ def test_panel_actions(client, monkeypatch):
     # a "запущен" flash; the actual scoring runs on jobs' worker thread. Mock the service (no
     # live Wayback in the test) and wait for the job to finish before asserting it ran with n=7.
     from app.services import jobs
+    jobs._reset()                     # изоляция: реестр глобальный, чистим от соседних тестов
     called = {}
     monkeypatch.setattr("app.services.scoring.score_pending",
                         lambda limit=5, on_progress=None: called.setdefault("n", limit))
@@ -108,6 +109,34 @@ def test_panel_actions(client, monkeypatch):
             break
         time.sleep(0.02)
     assert called["n"] == 7
+
+
+def test_run_score_double_start_and_progress_route(client, monkeypatch):
+    """Роут-уровень Task 6: второй POST /run/score при живом джобе -> err-флэш «уже идёт»;
+    GET /run/score/progress отдаёт форму реестра; неизвестный джоб -> 404.
+    Детерминизм: воркер держится на threading.Event, не на sleep."""
+    import threading
+    from urllib.parse import unquote
+    from app.services import jobs
+    jobs._reset()
+    gate = threading.Event()
+    monkeypatch.setattr("app.services.scoring.score_pending",
+                        lambda limit=5, on_progress=None: gate.wait(5))  # 5с — предохранитель
+    r1 = client.post("/run/score", data={"n": "3"}, follow_redirects=False)
+    assert r1.status_code == 303 and "msg=" in r1.headers["location"]
+    # джоб гарантированно жив (гейт не отпущен) -> двойной старт отклонён с err-флэшем
+    r2 = client.post("/run/score", data={"n": "3"}, follow_redirects=False)
+    assert r2.status_code == 303 and "Score уже идёт" in unquote(r2.headers["location"])
+    p = client.get("/run/score/progress").json()
+    assert set(p) == {"running", "done", "total", "current", "message", "error"}
+    assert p["running"] is True and p["error"] is None
+    gate.set()                                             # отпускаем воркер
+    for _ in range(50):
+        if not jobs.is_running("score"):
+            break
+        time.sleep(0.02)
+    assert client.get("/run/score/progress").json()["running"] is False
+    assert client.get("/run/nope/progress").status_code == 404   # только известные джобы
 
 
 def test_edit_gate_and_publish(client, monkeypatch):

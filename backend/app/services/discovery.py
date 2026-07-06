@@ -71,6 +71,11 @@ def run_discovery(min_links: int = 1, on_progress=None) -> int:
             best[d] = r
     candidates = best
     if not candidates:
+        # ноль кандидатов (фид пуст / источники выключены) — тоже честный терминал:
+        # репортим 0/0 «нет кандидатов»; JS считает джоб завершённым по running=False
+        # (терминальный контракт в services/jobs.py), done/total — только отображение.
+        if on_progress:
+            on_progress(0, 0, "нет кандидатов")
         return 0
 
     def _insert(db) -> int:

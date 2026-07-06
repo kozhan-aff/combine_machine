@@ -3,6 +3,14 @@
 start(name, target) гоняет target в фоне (ThreadPoolExecutor на 1 воркер), запрещает
 двойной старт одного имени, ловит исключение в error. Панель поллит progress(name).
 Джоб живёт в памяти — рестарт контейнера его теряет (допустимо).
+
+ТЕРМИНАЛЬНЫЙ КОНТРАКТ (JS-полоса в domains.html держится ровно его же):
+  running == True                  -> идёт; done/total/current — прогресс;
+  running == False, error != None  -> упал; error — текст. Проверять ПЕРВЫМ, до «готово»,
+                                      иначе частичный прогресс замаскирует падение;
+  running == False, error == None  -> завершился успешно, ДАЖЕ если done == total == 0
+                                      (напр. discovery без кандидатов). done/total —
+                                      только отображение, не признак терминала.
 """
 import threading
 from concurrent.futures import ThreadPoolExecutor

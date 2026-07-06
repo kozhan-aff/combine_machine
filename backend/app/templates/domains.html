@@ -37,20 +37,28 @@
 
 <div id="prog" class="hint" style="margin:8px 0"></div>
 <script>
+// Терминальный контракт — см. docstring services/jobs.py: error проверяем ПЕРВЫМ
+// (иначе частичный done/total маскирует падение под «готово»); терминал = running==false;
+// done/total — только отображение («готово (0)» — валидный исход: нет кандидатов).
 function poll(job) {
   fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
     const el = document.getElementById('prog');
-    if (p.running) {
+    if (p.error) {
+      el.textContent = job+': ошибка — '+p.error;          // стоп: без reload, оператор видит
+    } else if (p.running) {
       el.textContent = job+': '+p.done+'/'+p.total+(p.current ? ' — '+p.current : '');
       setTimeout(()=>poll(job), 1500);
-    } else if (p.done && p.total) {
+    } else {                                               // терминал без ошибки — успех
       el.textContent = job+': готово ('+p.done+')'; setTimeout(()=>location.reload(), 800);
-    } else if (p.error) { el.textContent = job+': ошибка — '+p.error; }
+    }
+  }).catch(()=>{                                           // сеть моргнула — не молчим, повторяем
+    document.getElementById('prog').textContent = job+': нет связи с панелью, повторяю…';
+    setTimeout(()=>poll(job), 1500);
   });
 }
 // стартуем опрос, если джоб уже идёт (после сабмита формы)
 ['discovery','score'].forEach(j => fetch('/run/'+j+'/progress').then(r=>r.json())
-  .then(p=>{ if (p.running) poll(j); }));
+  .then(p=>{ if (p.running) poll(j); }).catch(()=>{}));    // старт-проверка: тихий скип, без поллинга
 </script>
 
 <details class="legend">

@@ -1,8 +1,9 @@
 """HTML-панель — пошаговый пульт конвейера (оффер → M1 → выкуп → M3 → M4 → M5).
 
 Server-rendered Jinja, формы POST -> redirect (no-JS friendly). Результат действия
-передаётся назад через ?msg=/?err= (без сессий). Тяжёлые действия синхронны —
-нормально для одного оператора; при батчах уводить в worker.
+передаётся назад через ?msg=/?err= (без сессий). Длинные прогоны (Discovery/Score)
+уходят в фон через services.jobs — роут отвечает 303 сразу, панель поллит
+GET /run/{job}/progress; остальные действия синхронны (норм для одного оператора).
 
 Гейты (PLAN §2) живут в сервисах; панель их только отражает:
   - деньги: 'purchased' ставит ЧЕЛОВЕК кнопкой (никакого авто-заказа);
@@ -265,8 +266,11 @@ def run_score_action(n: int = Form(5)):
 
 @router.get("/run/{job}/progress")
 def run_progress(job: str):
+    from fastapi import HTTPException
     from fastapi.responses import JSONResponse
     from app.services import jobs
+    if job not in ("discovery", "score"):        # только известные джобы, не эхо любого пути
+        raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
     return JSONResponse(jobs.progress(job))
 
 
