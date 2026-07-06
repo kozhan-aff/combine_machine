@@ -28,7 +28,22 @@ class BackorderClient(BaseClient):
         self.contact_id = settings.BACKORDER_CONTACT_ID
 
     def get_tariffs(self) -> dict:
-        raise NotImplementedError
+        """Базовая цена бэкордера .ru из публичного тарифного JSON (без auth).
+        price_id=id, period_id=period[0].id, price — базовая стоимость. Поля цены сверить
+        на живом ответе (спек §J): пробуем cost/price/sum."""
+        r = self.request("GET", f"{self.base_url}/manimg/userdata/json/price_ru_backorder.ru.json")
+        d = r.json() if hasattr(r, "json") else {}
+        d = d[0] if isinstance(d, list) and d else d
+        if not isinstance(d, dict):
+            return {"price": None, "price_id": None, "period_id": None}
+        period = d.get("period") or []
+        price_raw = d.get("cost") or d.get("price") or d.get("sum")
+        try:
+            price = float(price_raw) if price_raw is not None else None
+        except (TypeError, ValueError):
+            price = None
+        return {"price": price, "price_id": str(d.get("id") or "") or None,
+                "period_id": str(period[0]["id"]) if period and isinstance(period[0], dict) else None}
 
     def list_dropping(self, min_links: int = 1, limit: int = 5000) -> list[dict]:
         """Domains freeing tomorrow with >=min_links donors (discovery source for M1).

@@ -119,6 +119,8 @@ def run_discovery(on_progress=None) -> int:
             lane=candidates[n].get("lane"),
             acquire_deadline=candidates[n].get("acquire_deadline"),
             visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
+            acquire_price=(__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
+                           if candidates[n].get("source") == "backorder" else None),
         ) for n in fresh)
         db.commit()
         return len(fresh)
