@@ -33,12 +33,17 @@ def _sources():
             "reg_ru": RegruDropsClient, "sweb": SwebDropsClient}
 
 
-def _collect(enabled: dict) -> list[dict]:
-    """Собрать строки со всех включённых источников. Сбой одного источника не топит остальные."""
+def _collect(enabled: dict, on_progress=None) -> list[dict]:
+    """Собрать строки со всех включённых источников. Сбой одного источника не топит остальные.
+
+    on_progress(done, total, current) — чтобы бар не висел в 0/0 во время опроса источников:
+    репортим «собираю: <источник>» перед каждым (total=1, discovery не по-доменный)."""
     rows: list[dict] = []
     for name, Client in _sources().items():
         if not enabled.get(name):
             continue
+        if on_progress:
+            on_progress(0, 1, f"собираю: {name}")
         try:
             if name == "backorder":                         # даёт RD + фид-флаги
                 for r in Client().list_dropping():
@@ -56,15 +61,15 @@ def _collect(enabled: dict) -> list[dict]:
 
 def run_discovery(on_progress=None) -> int:
     """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых.
-    on_progress(done, total, current) — discovery одноразовый (не по-доменный): зовётся один
-    раз после успешной вставки, (1, 1, "собрано N")."""
+    on_progress(done, total, current) — discovery не по-доменный: во время сбора репортит
+    «собираю: <источник>» по каждому, в конце (1, 1, "собрано N")."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
 
-    rows = _collect(get_settings()["sources_enabled"])
+    rows = _collect(get_settings()["sources_enabled"], on_progress)
     best: dict[str, dict] = {}
     for r in rows:
         d = r.get("domain")

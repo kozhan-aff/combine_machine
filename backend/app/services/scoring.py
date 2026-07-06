@@ -213,17 +213,21 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
     from app.models.domain import Domain
 
     with SessionLocal() as db:
-        ids = db.execute(
-            select(Domain.id).where(Domain.status == "discovered")
+        rows = db.execute(
+            select(Domain.id, Domain.domain).where(Domain.status == "discovered")
             .order_by(Domain.referring_domains.desc().nulls_last())  # лучшие кандидаты первыми
             .limit(limit)
-        ).scalars().all()
+        ).all()
     clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
-    total = len(ids)
-    for i, did in enumerate(ids, 1):
-        out = score_domain(did, clients)
+    total = len(rows)
+    for i, (did, name) in enumerate(rows, 1):
+        # репорт ДО скоринга: total известен сразу (бар не висит в 0/0), а current —
+        # домен, который сейчас в работе (whois/Wayback идут секунды, оператор видит кого).
         if on_progress:
-            on_progress(i, total, out.get("domain", ""))
+            on_progress(i - 1, total, name)
+        score_domain(did, clients)
+    if on_progress:
+        on_progress(total, total, "")   # все готовы
     return total
 
 

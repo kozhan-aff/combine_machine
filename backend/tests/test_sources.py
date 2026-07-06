@@ -34,7 +34,7 @@ def test_run_discovery_dedups_across_sources(monkeypatch):
     import app.db as db
     from sqlalchemy import select
     from app.models.domain import Domain
-    monkeypatch.setattr("app.services.discovery._collect", lambda enabled: [
+    monkeypatch.setattr("app.services.discovery._collect", lambda enabled, on_progress=None: [
         {"domain": "dup.ru", "source": "cctld", "referring_domains": None},
         {"domain": "dup.ru", "source": "backorder", "referring_domains": 42, "feed_flags": {"rkn": False}},
         {"domain": "solo.ru", "source": "cctld", "referring_domains": None},

@@ -56,7 +56,8 @@ def test_zero_candidates_discovery_reaches_terminal(monkeypatch):
     calls = []
     assert discovery.run_discovery(
         on_progress=lambda d, t, c: calls.append((d, t, c))) == 0
-    assert calls == [(0, 0, "нет кандидатов")]                 # терминальный репорт был
+    assert calls[-1] == (0, 0, "нет кандидатов")               # терминальный репорт — последним
+    assert (0, 1, "собираю: backorder") in calls              # по источнику отчитались во время сбора
 
     jobs.start("discovery", lambda: discovery.run_discovery(
         on_progress=lambda d, t, c: jobs.report("discovery", d, t, c)))
@@ -66,3 +67,24 @@ def test_zero_candidates_discovery_reaches_terminal(monkeypatch):
         time.sleep(0.02)
     p = jobs.progress("discovery")
     assert p["running"] is False and p["error"] is None and p["done"] == 0
+
+
+def test_score_pending_reports_total_upfront(monkeypatch):
+    """Регрессия бага «score: 0/0»: total и текущий домен сообщаются с ПЕРВОГО репорта,
+    а не после того, как доскорится первый домен (whois/Wayback идут секунды — раньше всё
+    это время бар висел в 0/0). score_domain замокан — тест про тайминг прогресса, не про сеть."""
+    from app.services import scoring
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    with SessionLocal() as db:
+        db.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
+                           referring_domains=i) for i in range(3)])
+        db.commit()
+    monkeypatch.setattr(scoring, "score_domain", lambda did, clients=None: {"domain": "x"})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    calls = []
+    n = scoring.score_pending(limit=10, on_progress=lambda d, t, c: calls.append((d, t, c)))
+    assert n == 3
+    assert calls[0][1] == 3 and calls[0][0] == 0       # total известен сразу, done=0 на старте
+    assert calls[0][2]                                  # current непустой — видно, кого скорим
+    assert calls[-1] == (3, 3, "")                      # финальный терминальный репорт
