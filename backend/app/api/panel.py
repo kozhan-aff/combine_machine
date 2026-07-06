@@ -247,22 +247,27 @@ def page_edit_view(request: Request, page_id: int, db: Session = Depends(get_ses
 # ============================================================================
 @router.post("/run/discovery")
 def run_discovery_action():
-    from app.services import discovery
-    try:
-        n = discovery.run_discovery()
-        return _back("/domains", msg=f"Discovery: +{n} новых доменов из фида")
-    except Exception as e:  # noqa: BLE001 — любая ошибка интеграции -> баннер, не 500
-        return _back("/domains", err=f"discovery: {e}")
+    from app.services import discovery, jobs
+    ok = jobs.start("discovery", lambda: discovery.run_discovery(
+        on_progress=lambda d, t, c: jobs.report("discovery", d, t, c)))
+    return _back("/domains", msg="Discovery запущен…" if ok else None,
+                 err=None if ok else "Discovery уже идёт")
 
 
 @router.post("/run/score")
 def run_score_action(n: int = Form(5)):
-    from app.services import scoring
-    try:
-        k = scoring.score_pending(limit=n)
-        return _back("/domains", msg=f"Score: обработано {k} доменов")
-    except Exception as e:  # noqa: BLE001
-        return _back("/domains", err=f"score: {e}")
+    from app.services import scoring, jobs
+    ok = jobs.start("score", lambda: scoring.score_pending(
+        limit=n, on_progress=lambda d, t, c: jobs.report("score", d, t, c)))
+    return _back("/domains", msg="Score запущен…" if ok else None,
+                 err=None if ok else "Score уже идёт")
+
+
+@router.get("/run/{job}/progress")
+def run_progress(job: str):
+    from fastapi.responses import JSONResponse
+    from app.services import jobs
+    return JSONResponse(jobs.progress(job))
 
 
 @router.post("/domains/{domain_id}/score")

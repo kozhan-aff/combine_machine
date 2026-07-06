@@ -5,6 +5,8 @@ Proves the two HARD GATES from PLAN §2 hold in the real code paths:
   2. Purchase is a human action (status flips only via the explicit endpoint).
 Plus discovery idempotency and scoring persistence (JSONB round-trip on SQLite).
 """
+import time
+
 import app.db as db
 from app.models.domain import Domain
 
@@ -92,11 +94,19 @@ def test_panel_actions(client, monkeypatch):
     client.post(f"/domains/{did}/set-status", data={"status": "live"}, follow_redirects=False)
     with db.SessionLocal() as s:
         assert s.get(Domain, did).status == "approved"   # unchanged
-    # Score button triggers the service (mock it — no live Wayback in the test)
+    # Score button starts a BACKGROUND job now (Task 6) — route returns 303 immediately with
+    # a "запущен" flash; the actual scoring runs on jobs' worker thread. Mock the service (no
+    # live Wayback in the test) and wait for the job to finish before asserting it ran with n=7.
+    from app.services import jobs
     called = {}
     monkeypatch.setattr("app.services.scoring.score_pending",
-                        lambda limit=5: called.setdefault("n", limit))
-    assert client.post("/run/score", data={"n": "7"}, follow_redirects=False).status_code == 303
+                        lambda limit=5, on_progress=None: called.setdefault("n", limit))
+    r = client.post("/run/score", data={"n": "7"}, follow_redirects=False)
+    assert r.status_code == 303 and "msg=" in r.headers["location"]
+    for _ in range(50):
+        if not jobs.is_running("score"):
+            break
+        time.sleep(0.02)
     assert called["n"] == 7
 
 

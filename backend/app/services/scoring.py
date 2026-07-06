@@ -190,8 +190,8 @@ def score_domain(domain_id: int, clients: dict | None = None) -> dict:
                 "errors": sig.get("errors", [])}
 
 
-def score_pending(limit: int = 100) -> int:
-    """Score all `discovered` domains; return count processed."""
+def score_pending(limit: int = 100, on_progress=None) -> int:
+    """Score all `discovered` domains; return count processed. on_progress(done,total,current)."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -203,9 +203,12 @@ def score_pending(limit: int = 100) -> int:
             .limit(limit)
         ).scalars().all()
     clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
-    for did in ids:
-        score_domain(did, clients)
-    return len(ids)
+    total = len(ids)
+    for i, did in enumerate(ids, 1):
+        out = score_domain(did, clients)
+        if on_progress:
+            on_progress(i, total, out.get("domain", ""))
+    return total
 
 
 if __name__ == "__main__":  # pure-function self-check (no I/O)

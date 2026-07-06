@@ -50,8 +50,10 @@ def _collect(enabled: dict) -> list[dict]:
     return rows
 
 
-def run_discovery(min_links: int = 1) -> int:
-    """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых."""
+def run_discovery(min_links: int = 1, on_progress=None) -> int:
+    """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых.
+    on_progress(done, total, current) — discovery одноразовый (не по-доменный): зовётся один
+    раз после успешной вставки, (1, 1, "собрано N")."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
@@ -84,13 +86,16 @@ def run_discovery(min_links: int = 1) -> int:
 
     with SessionLocal() as db:
         try:
-            return _insert(db)
+            n = _insert(db)
         except IntegrityError:
             # гонка: параллельный запуск вставил часть кандидатов между нашим SELECT и COMMIT
             # (unique на domain). Откатываемся, перечитываем existing и досыпаем остаток —
             # одной повторной попытки достаточно (перечитанный existing уже включает их вставки).
             db.rollback()
-            return _insert(db)
+            n = _insert(db)
+    if on_progress:
+        on_progress(1, 1, f"собрано {n}")
+    return n
 
 
 if __name__ == "__main__":  # pure normalize self-check (no network)
