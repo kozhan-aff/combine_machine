@@ -80,7 +80,8 @@ def test_score_pending_reports_total_upfront(monkeypatch):
         db.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
                            referring_domains=i) for i in range(3)])
         db.commit()
-    monkeypatch.setattr(scoring, "score_domain", lambda did, clients=None: {"domain": "x"})
+    monkeypatch.setattr(scoring, "score_domain",
+                        lambda did, clients=None, whois_budget=None: {"domain": "x"})
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     calls = []
     n = scoring.score_pending(limit=10, on_progress=lambda d, t, c: calls.append((d, t, c)))

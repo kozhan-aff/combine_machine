@@ -85,32 +85,58 @@ def _make_clients() -> dict:
     }
 
 
-def _funnel(d, c, st, sig) -> str | None:
+def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
-    попутно наполняя sig посчитанными сигналами. Дорогой Wayback (T3) — только для выживших."""
+    наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
+    источников (backorder объявляет lane=bid сам). Дорогой Wayback (T3) — только для
+    приобретаемых выживших. sig['acquirability_unresolved']=True → оставить domain discovered."""
     from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
 
-    # T0 — фид (0 стоимости): сохранённые флаги источника + RD
+    # T0 — фид (0 стоимости)
     if d.feed_flags and any(d.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
         return "feed_flag"
     if d.referring_domains is not None and d.referring_domains < st["min_referring_domains"]:
         return "low_rd"
 
-    # T1 — whois (дёшево): возраст
+    # T1 — приобретаемость + возраст (ОДИН whois-вызов, под бюджетом)
+    if whois_budget is not None and whois_budget[0] <= 0:
+        sig["acquirability_unresolved"] = True     # бюджет whois на прогон исчерпан — оставить discovered
+        return None
     age_known = False
     try:
-        wc = c["aparser"].whois_created(d.domain)
-        sig["whois_created"] = wc
-        if wc is not None:
-            age_known = True
-            age = (datetime.now(timezone.utc) - wc).days / 365.25
-            sig["age_years"] = round(age, 2)
-            if age < st["min_age_years"]:
-                return "too_young"
+        if whois_budget is not None:
+            whois_budget[0] -= 1
+        pr = c["aparser"].whois_probe(d.domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"whois:{type(e).__name__}")
+        if d.lane != "bid":                         # сырому источнику whois нужен для лейна
+            sig["acquirability_unresolved"] = True
+            return None
+        pr = {"available": None, "created": None}   # bid: лейн из источника, продолжаем без возраста
 
-    # T2 — риск (средне): РКН + Spamhaus + indexed_echo (lookups)
+    wc = pr.get("created")
+    sig["whois_created"] = wc
+    if wc is not None:
+        age_known = True
+        age = (now - wc).days / 365.25
+        sig["age_years"] = round(age, 2)
+        if age < st["min_age_years"]:
+            return "too_young"
+
+    if d.lane == "bid":
+        sig["lane"] = "bid"
+    else:
+        av = pr.get("available")
+        if av is True:
+            sig["lane"] = "free"                    # свободен к регистрации
+        elif av is False:
+            return "not_acquirable"                 # занят, не на backorder — купить нельзя
+        else:                                       # av is None — не определили
+            sig["acquirability_unresolved"] = True
+            return None
+
+    # T2 — риск (средне): РКН + Spamhaus + indexed_echo
     try:
         sig["rkn_listed"] = c["rkn"].is_listed(d.domain)
         if sig["rkn_listed"]:
@@ -128,7 +154,7 @@ def _funnel(d, c, st, sig) -> str | None:
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
-    # T3 — история (дорого): Wayback + DR, только для выживших
+    # T3 — история (дорого): только для приобретаемых выживших
     try:
         hist = c["wayback"].classify_history(d.domain)
         pf = hist.get("prior_flags") or {}
@@ -143,10 +169,7 @@ def _funnel(d, c, st, sig) -> str | None:
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
 
-    # whois недоступен (упал/None) -> возраст добираем из Wayback first_seen (см. T3 выше).
-    # Консервативно: непроверяемый по whois возраст всё равно должен пройти гейт молодости —
-    # если фолбэк-возраст из Wayback < порога, отклоняем здесь (ПОСЛЕ history_dirty, чтобы
-    # грязная история репортилась как history_dirty, а не задним числом как too_young).
+    # непроверяемый по whois возраст всё равно проходит гейт молодости (ПОСЛЕ history_dirty)
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
         return "too_young"
 
@@ -158,8 +181,8 @@ def _funnel(d, c, st, sig) -> str | None:
     return None
 
 
-def score_domain(domain_id: int, clients: dict | None = None) -> dict:
-    """Полная воронка для одного домена: ступени -> скор/reject -> запись. Возвращает разбор."""
+def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None) -> dict:
+    """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита)."""
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
@@ -171,7 +194,13 @@ def score_domain(domain_id: int, clients: dict | None = None) -> dict:
             raise ValueError(f"domain {domain_id} not found")
         c = clients or _make_clients()
         sig: dict = {"errors": []}
-        reject = _funnel(d, c, st, sig)
+        reject = _funnel(d, c, st, sig, whois_budget)
+
+        if sig.get("acquirability_unresolved"):
+            # приобретаемость не определена (whois сбой/непонятно/бюджет) — НЕ пишем,
+            # домен остаётся discovered, следующий прогон перепробьёт (см. спек §D).
+            return {"domain": d.domain, "status": d.status, "unresolved": True,
+                    "errors": sig.get("errors", [])}
 
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
@@ -186,6 +215,7 @@ def score_domain(domain_id: int, clients: dict | None = None) -> dict:
                 result = {**result, "status": _decide(result["score"], sig,
                                                       st["approve_at"], st["manual_review_at"])}
 
+        d.lane = sig.get("lane") or d.lane
         d.whois_created = sig.get("whois_created")
         d.prior_flags = sig.get("prior_flags")
         d.wayback_checked = bool(sig.get("wayback_checked"))
@@ -211,7 +241,9 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.services.settings import get_settings
 
+    st = get_settings()
     with SessionLocal() as db:
         rows = db.execute(
             select(Domain.id, Domain.domain).where(Domain.status == "discovered")
@@ -219,13 +251,14 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
             .limit(limit)
         ).all()
     clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
+    whois_budget = [int(st["max_whois_per_run"])]   # общий на прогон: cctld (RD=null) идёт последним
     total = len(rows)
     for i, (did, name) in enumerate(rows, 1):
         # репорт ДО скоринга: total известен сразу (бар не висит в 0/0), а current —
         # домен, который сейчас в работе (whois/Wayback идут секунды, оператор видит кого).
         if on_progress:
             on_progress(i - 1, total, name)
-        score_domain(did, clients)
+        score_domain(did, clients, whois_budget)
     if on_progress:
         on_progress(total, total, "")   # все готовы
     return total

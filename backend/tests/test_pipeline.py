@@ -39,9 +39,11 @@ def test_discovery_upsert_idempotent(monkeypatch):
 def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
     """Мок-клиенты в форме, которую ждёт scoring._funnel (см. test_funnel.py::_clients).
     _gather_signals больше нет — воронка теперь ступенчатая, поэтому мокаем клиенты, а
-    не внутреннюю функцию сбора сигналов."""
+    не внутреннюю функцию сбора сигналов. whois_probe отдаёт «занят, но с датой» —
+    домен-заглушка получает lane="bid" (см. вызовы ниже), чтобы приобретаемость
+    (Task 4) не блокировала гейт T1 до RKN/Wayback."""
     class _W:  # aparser
-        def whois_created(self, dom): return whois_dt
+        def whois_probe(self, dom): return {"available": False, "created": whois_dt}
     class _R:
         def is_listed(self, dom): return rkn
     class _Bl:
@@ -59,7 +61,7 @@ def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
 def test_scoring_persists_and_jsonb_roundtrips():
     from app.services import scoring
     did = _add(Domain(domain="oldclean.com", source="backorder",
-                      referring_domains=30, status="discovered"))
+                      referring_domains=30, status="discovered", lane="bid"))
     from datetime import datetime, timezone, timedelta
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)   # старше min_age_years -> проходит T1
     out = scoring.score_domain(did, clients=_funnel_clients(old))
@@ -73,7 +75,7 @@ def test_scoring_persists_and_jsonb_roundtrips():
 
 def test_scoring_hard_reject_on_rkn():
     from app.services import scoring
-    did = _add(Domain(domain="blocked.ru", source="backorder", status="discovered"))
+    did = _add(Domain(domain="blocked.ru", source="backorder", status="discovered", lane="bid"))
     # whois=None -> T1 пропущен без возраста; RKN=True рубит на T2, Wayback не вызывается
     out = scoring.score_domain(did, clients=_funnel_clients(None, rkn=True))
     assert out["status"] == "rejected" and out["score"] == 0.0
