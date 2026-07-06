@@ -6,22 +6,42 @@ as a free RD signal. Transport lives in integrations; this is the business logic
 """
 import logging
 import re
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 
 
+def _parse_deadline(val) -> datetime | None:
+    """backorder delete_date -> datetime UTC. Формат выверить на живом фиде (спек §J);
+    парсим устойчиво: ISO-дата/дату-время, иначе None."""
+    s = str(val or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(s[:19], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def normalize_row(row: dict) -> dict | None:
-    """One feed row -> {domain, source, referring_domains} or None if junk."""
+    """Одна строка фида backorder -> нормализованный кандидат (или None если мусор).
+    backorder — bid-лейн из источника; тянем дедлайн/visitors/tic (раньше выбрасывались)."""
     domain = (row.get("domainname") or "").strip().lower().rstrip(".")
     if not domain or len(domain) > 253 or not _DOMAIN_RE.match(domain):
         return None
-    try:
-        links = int(row.get("links") or 0)
-    except (TypeError, ValueError):
-        links = 0
-    return {"domain": domain, "source": "backorder", "referring_domains": links}
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    return {"domain": domain, "source": "backorder", "referring_domains": _int(row.get("links")) or 0,
+            "lane": "bid", "acquire_deadline": _parse_deadline(row.get("delete_date")),
+            "visitors": _int(row.get("visitors")), "tic": _int(row.get("yandex_tic"))}
 
 
 def _sources():
@@ -92,9 +112,14 @@ def run_discovery(on_progress=None) -> int:
             select(Domain.domain).where(Domain.domain.in_(candidates))
         ).scalars().all())
         fresh = [n for n in candidates if n not in existing]
-        db.add_all(Domain(domain=candidates[n]["domain"], source=candidates[n]["source"],
-                          referring_domains=candidates[n].get("referring_domains"),
-                          feed_flags=candidates[n].get("feed_flags")) for n in fresh)
+        db.add_all(Domain(
+            domain=candidates[n]["domain"], source=candidates[n]["source"],
+            referring_domains=candidates[n].get("referring_domains"),
+            feed_flags=candidates[n].get("feed_flags"),
+            lane=candidates[n].get("lane"),
+            acquire_deadline=candidates[n].get("acquire_deadline"),
+            visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
+        ) for n in fresh)
         db.commit()
         return len(fresh)
 
@@ -113,8 +138,9 @@ def run_discovery(on_progress=None) -> int:
 
 
 if __name__ == "__main__":  # pure normalize self-check (no network)
-    assert normalize_row({"domainname": "Example.COM.", "links": "12"}) == {
-        "domain": "example.com", "source": "backorder", "referring_domains": 12}
+    nr = normalize_row({"domainname": "Example.COM.", "links": "12"})
+    assert nr["domain"] == "example.com" and nr["source"] == "backorder"
+    assert nr["referring_domains"] == 12 and nr["lane"] == "bid"
     assert normalize_row({"domainname": "under_score.ru", "links": 1}) is None  # junk char
     assert normalize_row({"domainname": "", "links": 5}) is None
     assert normalize_row({"domainname": "sub.dropzone.ru"})["referring_domains"] == 0

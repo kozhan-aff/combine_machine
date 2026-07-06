@@ -84,6 +84,30 @@ def test_run_discovery_dedups_across_sources(monkeypatch):
     assert rows["dup.ru"].referring_domains == 42     # выиграла строка с бо́льшим RD (backorder)
 
 
+def test_normalize_row_captures_acquirability():
+    from app.services.discovery import normalize_row
+    nr = normalize_row({"domainname": "drop.ru", "links": "7",
+                        "delete_date": "2026-07-10", "visitors": "120", "yandex_tic": "30"})
+    assert nr["lane"] == "bid" and nr["referring_domains"] == 7
+    assert nr["acquire_deadline"] is not None and nr["visitors"] == 120 and nr["tic"] == 30
+    # мусорный дедлайн не роняет строку
+    assert normalize_row({"domainname": "d2.ru", "delete_date": "нет"})["acquire_deadline"] is None
+
+
+def test_run_discovery_persists_acquirability(monkeypatch):
+    from app.services import discovery
+    import app.db as db
+    from app.models.domain import Domain
+    from sqlalchemy import select
+    monkeypatch.setattr("app.services.discovery._collect", lambda enabled, on_progress=None: [
+        {"domain": "bo.ru", "source": "backorder", "referring_domains": 5, "lane": "bid",
+         "acquire_deadline": None, "visitors": 10, "tic": 20, "feed_flags": {"rkn": False}}])
+    assert discovery.run_discovery() == 1
+    with db.SessionLocal() as s:
+        d = s.execute(select(Domain).where(Domain.domain == "bo.ru")).scalar_one()
+        assert d.lane == "bid" and d.visitors == 10 and d.tic == 20
+
+
 def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
     """Finding 5 (финальное ревью): падение одного источника не должно тонуть молча —
     остальные источники всё равно собираются (continue-семантика), но в лог уходит warning
