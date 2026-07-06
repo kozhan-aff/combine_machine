@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Настройки{% endblock %}
+{% block content %}
+<h2><span class="idx">⚙</span> Настройки воронки
+  <span class="hint">пороги скоринга · пул: {{ counts.total }} доменов · счётчики обновляются при сдвиге</span></h2>
+
+<form method="post" action="/settings/save" class="card" style="max-width:760px">
+  <div class="station">
+    <div class="plate">T0 · min доноров (RD) — <b>отсекает пустышки</b></div>
+    <div class="what">Домены с RD ниже порога отбраковываются на входе (0 = не резать по RD).
+      Сырые списки без RD проходят на T1.</div>
+    <input type="range" name="min_referring_domains" min="0" max="50" step="1" value="{{ s.min_referring_domains }}"
+           oninput="pv()"> <b id="v_rd">{{ s.min_referring_domains }}</b>
+    <span class="hint">проходит: <b id="c_rd">{{ counts.rd }}</b> / {{ counts.total }}</span>
+  </div>
+  <div class="station">
+    <div class="plate">T1 · min возраст, лет — <b>отсекает молодые до дорогой истории</b></div>
+    <div class="what">Возраст из whois (дата регистрации). Моложе порога → reject, не доходя до Wayback.</div>
+    <input type="range" name="min_age_years" min="0" max="15" step="0.5" value="{{ s.min_age_years }}"
+           oninput="pv()"> <b id="v_age">{{ s.min_age_years }}</b>
+    <span class="hint">с известным возрастом проходит: <b id="c_age">{{ counts.age }}</b> / {{ counts.total }}</span>
+  </div>
+  <div class="station">
+    <div class="plate">T3 · порог approve — <b>выше = авто-одобрение</b></div>
+    <div class="what">Итоговый скор ≥ порога → домен одобряется автоматически.</div>
+    <input type="range" name="approve_at" min="0" max="1" step="0.05" value="{{ s.approve_at }}"
+           oninput="pv()"> <b id="v_approve">{{ s.approve_at }}</b>
+    <span class="hint">уже approved: <b id="c_approve">{{ counts.approve }}</b></span>
+  </div>
+  <div class="station">
+    <div class="plate">T3 · порог manual — <b>ниже = reject</b></div>
+    <div class="what">Скор между manual и approve → ручной разбор (scored); ниже manual → reject.</div>
+    <input type="range" name="manual_review_at" min="0" max="1" step="0.05" value="{{ s.manual_review_at }}"
+           oninput="pv()"> <b id="v_manual">{{ s.manual_review_at }}</b>
+    <span class="hint">в вилке ручного разбора: <b id="c_manual">{{ counts.manual }}</b></span>
+  </div>
+  <div class="station">
+    <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
+    <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
+    <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
+    <label><input type="checkbox" name="reg_ru" {{ 'checked' if s.sources_enabled.reg_ru }}> reg.ru</label>
+    <label><input type="checkbox" name="sweb" {{ 'checked' if s.sources_enabled.sweb }}> sweb</label>
+  </div>
+  <div class="go">
+    <button class="btn-amber" title="сохранить пороги и включённые источники">Сохранить</button>
+  </div>
+</form>
+<form method="post" action="/settings/reset" style="margin-top:10px"
+      onsubmit="return confirm('Сбросить все пороги к дефолтам?')">
+  <button class="btn" title="вернуть стартовые значения из scoring_config">Сбросить к дефолтам</button>
+</form>
+
+<script>
+function pv() {
+  for (const k of ['rd','age','approve','manual']) {
+    const map = {rd:'min_referring_domains',age:'min_age_years',approve:'approve_at',manual:'manual_review_at'};
+    document.getElementById('v_'+k).textContent = document.querySelector('[name='+map[k]+']').value;
+  }
+  const q = new URLSearchParams({
+    min_rd: document.querySelector('[name=min_referring_domains]').value,
+    min_age: document.querySelector('[name=min_age_years]').value,
+    approve: document.querySelector('[name=approve_at]').value,
+    manual: document.querySelector('[name=manual_review_at]').value});
+  fetch('/settings/preview?'+q).then(r=>r.json()).then(c=>{
+    document.getElementById('c_rd').textContent = c.rd;
+    document.getElementById('c_age').textContent = c.age;
+    document.getElementById('c_approve').textContent = c.approve;
+    document.getElementById('c_manual').textContent = c.manual;
+  });
+}
+</script>
+{% endblock %}

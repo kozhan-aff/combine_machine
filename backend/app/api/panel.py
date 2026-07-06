@@ -103,6 +103,22 @@ def _next_steps(db: Session) -> list[dict]:
     return steps
 
 
+def _pool_counts(db: Session, s: dict) -> dict:
+    """Сколько доменов пула проходит каждый гейт при текущих порогах (превью эффекта)."""
+    from datetime import datetime, timezone, timedelta
+    total = db.scalar(select(func.count()).select_from(Domain)) or 0
+    rd = db.scalar(select(func.count()).select_from(Domain).where(
+        Domain.referring_domains >= s["min_referring_domains"])) or 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=365.25 * s["min_age_years"])
+    age = db.scalar(select(func.count()).select_from(Domain).where(
+        Domain.whois_created.is_not(None), Domain.whois_created <= cutoff)) or 0
+    approve = db.scalar(select(func.count()).select_from(Domain).where(
+        Domain.score >= s["approve_at"])) or 0
+    manual = db.scalar(select(func.count()).select_from(Domain).where(
+        Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])) or 0
+    return {"total": total, "rd": rd, "age": age, "approve": approve, "manual": manual}
+
+
 # ============================================================================
 # ЭКРАНЫ
 # ============================================================================
@@ -153,6 +169,23 @@ def diag_view(request: Request):
         "timeout": PING_TIMEOUT,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
     })
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_view(request: Request, db: Session = Depends(get_session)):
+    from app.services import settings as st
+    s = st.get_settings()
+    return templates.TemplateResponse(request, "settings.html", {
+        "active": "settings", "s": s, "counts": _pool_counts(db, s)})
+
+
+@router.get("/settings/preview")
+def settings_preview(min_rd: int = 1, min_age: float = 3.0, approve: float = 0.7,
+                     manual: float = 0.4, db: Session = Depends(get_session)):
+    from fastapi.responses import JSONResponse
+    s = {"min_referring_domains": max(0, min_rd), "min_age_years": max(0.0, min_age),
+         "approve_at": approve, "manual_review_at": manual}
+    return JSONResponse(_pool_counts(db, s))
 
 
 @router.get("/offers", response_class=HTMLResponse)
@@ -454,3 +487,23 @@ def git_pull_action():
         return _back("/diag", msg=f"Обновлено: {scrub(head)[:200]}{warn}")
     except Exception as e:  # noqa: BLE001
         return _back("/diag", err=f"update: {scrub(str(e))[:200]}")
+
+
+@router.post("/settings/save")
+def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
+                  approve_at: float = Form(...), manual_review_at: float = Form(...),
+                  backorder: str = Form(""), cctld: str = Form(""),
+                  reg_ru: str = Form(""), sweb: str = Form("")):
+    from app.services import settings as st
+    st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
+                       approve_at=approve_at, manual_review_at=manual_review_at,
+                       sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
+                                        "reg_ru": bool(reg_ru), "sweb": bool(sweb)})
+    return _back("/settings", msg="Настройки сохранены")
+
+
+@router.post("/settings/reset")
+def settings_reset():
+    from app.services import settings as st
+    st.reset_settings()
+    return _back("/settings", msg="Настройки сброшены к дефолтам")

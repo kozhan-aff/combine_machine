@@ -100,3 +100,20 @@ def test_api_attach_offer_no_duplicate(client):
         n = s.scalar(select(func.count()).select_from(SiteOffer).where(
             SiteOffer.site_id == site_id, SiteOffer.offer_id == offer_id))
     assert n == 1
+
+
+# --- /settings: рендер, сохранение (клампится сервисом), live-превью счётчиков ----
+def test_settings_render_and_save(client):
+    assert client.get("/settings").status_code == 200
+    r = client.post("/settings/save", data={
+        "min_referring_domains": 2, "min_age_years": 4, "approve_at": 0.75,
+        "manual_review_at": 0.4, "cctld": "on"}, follow_redirects=False)
+    assert r.status_code == 303
+    from app.services import settings as st
+    s = st.get_settings()
+    assert s["min_age_years"] == 4.0 and s["sources_enabled"]["backorder"] is False
+
+
+def test_settings_preview_json(client):
+    r = client.get("/settings/preview?min_rd=1&min_age=3&approve=0.7&manual=0.4")
+    assert r.status_code == 200 and "total" in r.json()
