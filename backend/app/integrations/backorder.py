@@ -43,7 +43,8 @@ class BackorderClient(BaseClient):
         except (TypeError, ValueError):
             price = None
         return {"price": price, "price_id": str(d.get("id") or "") or None,
-                "period_id": str(period[0]["id"]) if period and isinstance(period[0], dict) else None}
+                "period_id": (str(period[0].get("id")) if period and isinstance(period[0], dict)
+                              and period[0].get("id") is not None else None)}
 
     def list_dropping(self, min_links: int = 1, limit: int = 5000) -> list[dict]:
         """Domains freeing tomorrow with >=min_links donors (discovery source for M1).

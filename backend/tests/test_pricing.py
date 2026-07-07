@@ -26,6 +26,19 @@ def test_refresh_prices_only_backorder(monkeypatch, sqlite_db):
     assert fr.acquire_price is None                              # сырой не трогаем
 
 
+def test_get_tariffs_survives_period_without_id(monkeypatch):
+    from app.integrations import backorder
+
+    class _Resp:
+        def json(self):
+            return {"id": 7, "price": 490, "period": [{"cost": 490}]}   # period без "id"
+
+    c = backorder.BackorderClient()
+    monkeypatch.setattr(c, "request", lambda *a, **k: _Resp())
+    out = c.get_tariffs()                 # не должно падать KeyError
+    assert out["period_id"] is None       # мягкий None вместо KeyError
+
+
 def _dom(name):
     from sqlalchemy import select
     from app.models.domain import Domain

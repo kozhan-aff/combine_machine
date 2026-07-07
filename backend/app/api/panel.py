@@ -289,6 +289,9 @@ def score_one_action(domain_id: int):
     from app.services import scoring
     try:
         out = scoring.score_domain(domain_id)
+        if out.get("unresolved"):
+            return _back("/domains", msg=f"{out.get('domain', domain_id)}: whois не определил — "
+                                         "домен остался в поиске, перепроверю на следующем прогоне")
         return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
                                      f"{out.get('status')} ({out.get('score')})")
     except Exception as e:  # noqa: BLE001

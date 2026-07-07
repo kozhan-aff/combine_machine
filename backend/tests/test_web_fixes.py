@@ -232,3 +232,19 @@ def test_domains_localized_labels(client, sqlite_db):
     assert '<span class="hint">ставка</span>' in html                    # лейн-ячейка по-русски
     assert "нельзя купить <code>not_acquirable</code>" in html           # reject: фраза + код
     assert 'b-approved">approved' not in html                            # сырое значение НЕ в тексте бейджа
+
+
+# --- Task 5 (спек 2 лицо): unresolved single-score флеш — не "(None)" ------------
+def test_single_score_unresolved_flash(client, monkeypatch):
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="unres.ru", source="cctld", status="discovered", lane=None)); s.commit()
+        did = s.execute(__import__("sqlalchemy").select(Domain.id).where(Domain.domain=="unres.ru")).scalar_one()
+    monkeypatch.setattr(scoring, "score_domain",
+                        lambda domain_id: {"domain": "unres.ru", "status": "discovered", "unresolved": True})
+    r = client.post(f"/domains/{did}/score", follow_redirects=False)
+    assert r.status_code in (302, 303)
+    loc = r.headers["location"]
+    assert "None" not in loc and ("whois" in loc or "%" in loc)   # русский флеш, без "(None)"
