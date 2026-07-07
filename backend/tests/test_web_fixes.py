@@ -198,6 +198,10 @@ def test_domains_localized_labels(client, sqlite_db):
                      reject_reason="not_acquirable"))
         s.commit()
     html = client.get("/domains?show_all=1").text
-    assert "одобрен" in html and "отклонён" in html       # статусы по-русски
-    assert "ставка" in html                                # лейн по-русски
-    assert "нельзя купить" in html and "not_acquirable" in html  # reject: фраза + код
+    # бейдж: класс на СЫРОМ значении, текст локализован — проверяем именно разметку
+    # бейджа/лейна/reject, а не «слово где-то на странице» (иначе тест не отличит
+    # локализацию от совпадения со старой прозой).
+    assert 'b-approved">одобрен' in html and 'b-rejected">отклонён' in html
+    assert '<span class="hint">ставка</span>' in html                    # лейн-ячейка по-русски
+    assert "нельзя купить <code>not_acquirable</code>" in html           # reject: фраза + код
+    assert 'b-approved">approved' not in html                            # сырое значение НЕ в тексте бейджа
