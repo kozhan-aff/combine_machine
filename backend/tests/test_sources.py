@@ -22,6 +22,34 @@ def test_whois_created_junk_is_none():
     assert _parse_whois_created("") is None
 
 
+def test_whois_svertka_taken():
+    from app.integrations.aparser import _parse_whois_available, _parse_whois_created
+    txt = "python.org - registered: 1, expire: 28.03.2033, creation: 27.03.1995\n"
+    assert _parse_whois_available(txt) is False
+    d = _parse_whois_created(txt)
+    assert (d.year, d.month, d.day) == (1995, 3, 27) and d.tzinfo is not None
+
+
+def test_whois_svertka_free():
+    from app.integrations.aparser import _parse_whois_available, _parse_whois_created
+    txt = "free-drop-nonexistent-2026.ru - registered: 0, expire: none, creation: none\n"
+    assert _parse_whois_available(txt) is True
+    assert _parse_whois_created(txt) is None
+
+
+def test_whois_svertka_free_rf():
+    from app.integrations.aparser import _parse_whois_available
+    assert _parse_whois_available("пример.рф - registered: 0, expire: none, creation: none\n") is True
+
+
+def test_whois_old_format_still_works():
+    # старый сырой whois — фолбэк (пресет A-Parser может отдать иное)
+    from app.integrations.aparser import _parse_whois_available, _parse_whois_created
+    txt = "domain: X.RU\ncreated: 2010.11.15\nnserver: ns.x.ru"
+    assert _parse_whois_available(txt) is False
+    assert _parse_whois_created(txt).year == 2010
+
+
 def test_parse_whois_available():
     from app.integrations.aparser import _parse_whois_available
     assert _parse_whois_available("No entries found for the selected source.") is True

@@ -9,15 +9,25 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.integrations.base import BaseClient
 
-# .ru/.рф (TCI): 'created: 2010.11.15'; gTLD: 'Creation Date: 2004-03-15T...'
+# .ru/.рф/gTLD сырой whois (фолбэк): 'created: 2010.11.15' / 'Creation Date: 2004-03-15T...'
 _RE_RU = re.compile(r"created:\s*(\d{4})\.(\d{2})\.(\d{2})", re.I)
 _RE_GTLD = re.compile(r"creation date:\s*(\d{4})-(\d{2})-(\d{2})", re.I)
+# свёртка A-Parser Net::Whois (основной формат, снят вживую 2026-07-07):
+#   '<domain> - registered: 0|1, expire: ..., creation: DD.MM.YYYY|none'
+_RE_SVERTKA_REG = re.compile(r"registered:\s*([01])\b", re.I)
+_RE_SVERTKA_CREATION = re.compile(r"creation:\s*(\d{2})\.(\d{2})\.(\d{4})", re.I)
 
 
 def _parse_whois_created(text: str) -> datetime | None:
-    """Дата регистрации из whois-ответа (.ru или gTLD). Самая ранняя найденная, UTC. None если нет."""
+    """Дата регистрации из whois-ответа. Свёртка A-Parser (DD.MM.YYYY) или сырой whois
+    (.ru YYYY.MM.DD / gTLD YYYY-MM-DD). Самая ранняя найденная, UTC. None если нет."""
     found = []
-    for rx in (_RE_RU, _RE_GTLD):
+    for dy, mo, y in _RE_SVERTKA_CREATION.findall(text or ""):           # DD.MM.YYYY
+        try:
+            found.append(datetime(int(y), int(mo), int(dy), tzinfo=timezone.utc))
+        except ValueError:
+            pass
+    for rx in (_RE_RU, _RE_GTLD):                                        # YYYY.MM.DD / YYYY-MM-DD
         for y, mo, dy in rx.findall(text or ""):
             try:
                 found.append(datetime(int(y), int(mo), int(dy), tzinfo=timezone.utc))
@@ -26,19 +36,22 @@ def _parse_whois_created(text: str) -> datetime | None:
     return min(found) if found else None
 
 
-# маркеры «домен свободен» (нет регистрации). Список расширяемый — сверить с живым
-# ответом A-Parser Net::Whois на первом прогоне (см. спек §J).
+# маркеры сырого whois (фолбэк, если пресет отдаёт не свёртку)
 _FREE_MARKERS = ("no entries found", "not found", "no match", "no object found",
                  "available for registration", "нет данных", "not registered")
 _REG_MARKERS = ("nserver", "registrar", "person:", "org:", "paid-till", "domain:")
 
 
 def _parse_whois_available(text: str) -> bool | None:
-    """True — домен свободен (нет записи); False — занят; None — не определить."""
+    """True — свободен, False — занят, None — не определить.
+    Свёртка A-Parser 'registered: 0|1' приоритетна; иначе — маркеры сырого whois."""
     low = (text or "").lower()
-    if any(m in low for m in _FREE_MARKERS):
+    m = _RE_SVERTKA_REG.search(low)
+    if m:
+        return m.group(1) == "0"                     # 0 = свободен, 1 = занят
+    if any(w in low for w in _FREE_MARKERS):
         return True
-    if _RE_RU.search(low) or _RE_GTLD.search(low) or any(m in low for m in _REG_MARKERS):
+    if _RE_RU.search(low) or _RE_GTLD.search(low) or any(w in low for w in _REG_MARKERS):
         return False
     return None
 
@@ -110,3 +123,14 @@ class AParserClient(BaseClient):
     def whois_created(self, domain: str) -> datetime | None:
         """Дата регистрации (обёртка над whois_probe для обратной совместимости)."""
         return self.whois_probe(domain)["created"]
+
+
+if __name__ == "__main__":  # pure whois-parse self-check (no network)
+    assert _parse_whois_available("x.ru - registered: 1, expire: none, creation: 01.02.2020") is False
+    assert _parse_whois_available("x.ru - registered: 0, expire: none, creation: none") is True
+    assert _parse_whois_created("x.ru - registered: 1, expire: none, creation: 01.02.2020").year == 2020
+    assert _parse_whois_created("x.ru - registered: 0, expire: none, creation: none") is None
+    assert _parse_whois_available("No entries found") is True                      # фолбэк
+    assert _parse_whois_available("nserver: ns1.x.ru") is False                    # фолбэк
+    assert _parse_whois_available("мусор без маркеров") is None
+    print("aparser whois-parse ok")
