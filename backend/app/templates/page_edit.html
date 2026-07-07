@@ -4,7 +4,7 @@
 
 <h2><span class="idx">✎</span> {{ domain }}<span style="color:var(--amber)">{{ page.url_path }}</span>
   <span class="badge b-{{ page.status if page.status in ['draft','edited','published'] else 'default' }}"
-        title="{{ {'draft':'AI-черновик — публикация его не возьмёт, пока не сохранишь здесь','edited':'вычитано — публикация возьмёт эту страницу','published':'уже опубликовано; сохранение вернёт в edited для повторной публикации'}.get(page.status, page.status) }}">{{ page.status }}</span>
+        title="{{ {'draft':'AI-черновик — публикация его не возьмёт, пока не сохранишь здесь','edited':'вычитано — публикация возьмёт эту страницу','published':'уже опубликовано; сохранение вернёт в edited для повторной публикации'}.get(page.status, page.status) }}">{{ page.status|status_ru }}</span>
 </h2>
 <p class="hint" style="margin:0 0 14px">{{ page.title }} — это гейт редактуры: правь HTML слева, справа
   живое превью. Кнопка внизу сохраняет текст и переводит страницу в <b>edited</b> — только такие
