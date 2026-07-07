@@ -311,6 +311,17 @@ def test_raw_source_no_deadline_taken_is_not_acquirable():
     assert wb.calls == 0
 
 
+def test_raw_source_past_deadline_is_not_acquirable():
+    # сырой домен, whois «занят», дедлайн дропа УЖЕ ПРОШЁЛ -> реально занят, не ждём
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    did = _mk(domain="expired.ru", lane=None, source="cctld",
+              referring_domains=10, acquire_deadline=past)
+    wb = _Wayback()
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
+    assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
+    assert wb.calls == 0
+
+
 def test_whois_budget_caps_run(monkeypatch, sqlite_db):
     """max_whois_per_run=1 + 2 сырых домена → whois только у одного, второй остаётся discovered."""
     from app.services import scoring
