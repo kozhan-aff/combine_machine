@@ -100,14 +100,21 @@ class AParserClient(BaseClient):
         return out[:limit]
 
     def fetch_html(self, url: str) -> str | None:
-        """Скачать страницу по URL (Net::HTTP через прокси). Возвращает HTML или None.
+        """Скачать страницу по URL (Net::HTTP через прокси). Возвращает HTML или None (с логом статуса).
 
         resultString = 'СТАТУС\\nзаголовки\\n\\nHTML' — режем по первой пустой строке,
-        проверяем 200. JS не рендерит (сырой GET), но для структуры H2/H3 хватает."""
+        проверяем 200 (в т.ч. форму 'HTTP/1.1 200 OK'). JS не рендерит (сырой GET), но
+        для структуры H2/H3 хватает. Не-200/пустой ответ — не тихий None, а warning в лог
+        со статусом (иначе первый прод-сбой источника недебажим)."""
+        import logging
         res = self._call("oneRequest", {"query": url, "parser": "Net::HTTP",
                                         "configPreset": "default", "preset": "default"})
         head, sep, body = self._result_string(res).partition("\n\n")
-        if not sep or not head.lstrip().startswith("200"):
+        head_norm = head.replace("\r\n", "\n").strip()
+        first_line = head_norm.splitlines()[0] if head_norm else ""
+        ok = first_line.startswith("200") or (first_line.upper().startswith("HTTP/") and " 200" in first_line)
+        if not sep or not ok:
+            logging.getLogger(__name__).warning("fetch_html %s: не-200 (%r)", url, first_line[:80])
             return None
         return body or None
 

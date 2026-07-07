@@ -54,9 +54,20 @@ def normalize_row(row: dict) -> dict | None:
             return int(v)
         except (TypeError, ValueError):
             return None
+
+    def _pos(v):                    # сентинелы фида (-1 = «нет данных») -> None
+        n = _int(v)
+        return n if n is not None and n >= 0 else None
+
+    def _price(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
     return {"domain": domain, "source": "backorder", "referring_domains": _int(row.get("links")) or 0,
             "lane": "bid", "acquire_deadline": _parse_deadline(row.get("delete_date")),
-            "visitors": _int(row.get("visitors")), "tic": _int(row.get("yandex_tic"))}
+            "visitors": _pos(row.get("visitors")), "tic": _pos(row.get("yandex_tic")),
+            "price": _price(row.get("price"))}
 
 
 def _sources():
@@ -79,6 +90,7 @@ def _collect(enabled: dict, on_progress=None) -> list[dict]:
             continue
         if on_progress:
             on_progress(0, 1, f"собираю: {name}")
+        before = len(rows)
         try:
             if name == "backorder":                         # даёт RD + фид-флаги
                 for r in Client().list_dropping():
@@ -91,13 +103,19 @@ def _collect(enabled: dict, on_progress=None) -> list[dict]:
         except Exception as e:  # noqa: BLE001 — один источник упал, остальные идут
             logger.warning("discovery source %s failed: %s", name, e)
             continue
+        got = len(rows) - before
+        logger.info("discovery source %s: %d строк", name, got)
+        if got == 0:
+            # тихое пусто источника невидимо в логах (I6) — теперь явный warning
+            logger.warning("discovery source %s дал 0 строк (пусто/сломана разметка?)", name)
     return rows
 
 
 def run_discovery(on_progress=None) -> int:
-    """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых.
-    on_progress(done, total, current) — discovery не по-доменный: во время сбора репортит
-    «собираю: <источник>» по каждому, в конце (1, 1, "собрано N")."""
+    """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых +
+    обогащение уже известных discovered-строк (I5: повторная встреча дозаполняет NULL-поля и
+    повышает RD, а не пропускается молча). on_progress(done, total, current) — discovery не
+    по-доменный: во время сбора репортит «собираю: <источник>» по каждому, в конце (1, 1, "собрано N")."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
@@ -124,10 +142,24 @@ def run_discovery(on_progress=None) -> int:
         return 0
 
     def _insert(db) -> int:
-        existing = set(db.execute(
-            select(Domain.domain).where(Domain.domain.in_(candidates))
-        ).scalars().all())
+        existing = {d.domain: d for d in db.execute(
+            select(Domain).where(Domain.domain.in_(candidates))
+        ).scalars().all()}
         fresh = [n for n in candidates if n not in existing]
+        # обогащение уже известных, но ещё НЕ обработанных (discovered) строк (I5): дозаполняем
+        # NULL-поля и повышаем RD, если повторная встреча принесла больше данных (например,
+        # домен сперва увиден на "сыром" реестре, потом — на backorder с RD/lane/дедлайном).
+        # Статус/reject_reason не трогаем — re-run не откатывает уже отсканированные домены.
+        for name, d in existing.items():
+            if d.status != "discovered":
+                continue
+            c = candidates[name]
+            new_rd = c.get("referring_domains") or 0
+            if new_rd > (d.referring_domains or 0):
+                d.referring_domains = new_rd
+            for attr in ("lane", "acquire_deadline", "feed_flags", "visitors", "tic"):
+                if getattr(d, attr, None) is None and c.get(attr) is not None:
+                    setattr(d, attr, c.get(attr))
         db.add_all(Domain(
             domain=candidates[n]["domain"], source=candidates[n]["source"],
             referring_domains=candidates[n].get("referring_domains"),
@@ -135,8 +167,9 @@ def run_discovery(on_progress=None) -> int:
             lane=candidates[n].get("lane"),
             acquire_deadline=candidates[n].get("acquire_deadline"),
             visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
-            acquire_price=(__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
-                           if candidates[n].get("source") == "backorder" else None),
+            acquire_price=(candidates[n].get("price")
+                           or (__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
+                               if candidates[n].get("source") == "backorder" else None)),
         ) for n in fresh)
         db.commit()
         return len(fresh)
@@ -161,5 +194,7 @@ if __name__ == "__main__":  # pure normalize self-check (no network)
     assert normalize_row({"domainname": "пример.рф", "links": 3})["domain"] == "xn--e1afmkfd.xn--p1ai"
     assert normalize_row({"domainname": "under_score.ru", "links": 1}) is None
     assert normalize_row({"domainname": "", "links": 5}) is None
+    sentinel = normalize_row({"domainname": "x.ru", "links": 5, "visitors": -1, "yandex_tic": -1, "price": 190})
+    assert sentinel["visitors"] is None and sentinel["tic"] is None and sentinel["price"] == 190.0
     assert canonical_domain("www.a.ru") == "a.ru" and canonical_domain("x@y.ru") is None
     print("discovery normalize_row ok")

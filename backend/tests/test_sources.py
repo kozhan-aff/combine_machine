@@ -152,6 +152,30 @@ def test_normalize_row_keeps_rf():
     assert nr is not None and nr["domain"] == "xn--e1afmkfd.xn--p1ai"
 
 
+def test_existing_discovered_row_enriched_on_rediscovery(monkeypatch):
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import discovery
+    # день 1: домен без RD/lane (как из сырого источника)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="drop.ru", source="cctld", status="discovered",
+                     referring_domains=None, lane=None)); s.commit()
+    # день 2: тот же домен пришёл из backorder с RD и lane
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, on_progress=None: [
+        {"domain": "drop.ru", "source": "backorder", "referring_domains": 42, "lane": "bid",
+         "acquire_deadline": None, "visitors": None, "tic": None, "feed_flags": {}}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.referring_domains == 42 and d.lane == "bid"     # обогатилось, не пропущено
+
+
+def test_normalize_row_sentinels_and_price():
+    from app.services.discovery import normalize_row
+    nr = normalize_row({"domainname": "x.ru", "links": 5, "visitors": -1, "yandex_tic": -1, "price": 190})
+    assert nr["visitors"] is None and nr["tic"] is None and nr["price"] == 190.0
+
+
 def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
     """Finding 5 (финальное ревью): падение одного источника не должно тонуть молча —
     остальные источники всё равно собираются (continue-семантика), но в лог уходит warning

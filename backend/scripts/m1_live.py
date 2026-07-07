@@ -26,6 +26,8 @@ import app.models.domain  # noqa: F401  (register tables)
 import app.models.site    # noqa: F401
 import app.models.offer   # noqa: F401
 import app.models.monitoring  # noqa: F401
+import app.models.settings   # noqa: F401  (scoring_settings — иначе get_settings падает)
+import app.models.autonomy   # noqa: F401
 from app.models.domain import Domain
 from app.services import discovery, scoring
 
@@ -54,4 +56,4 @@ for did in ids:
     age = f"{float(d.age_years):.1f}" if d.age_years is not None else "  ?"
     print(f"{d.domain:34} {d.referring_domains or 0:>5} {age:>5}  "
           f"{str(d.rkn_listed):>5} {str(d.indexed_echo):>5}  {bad} "
-          f"-> {r['score']:.4f} {r['status']}{err}")
+          f"-> {r['score']:.4f} {d.status} {d.reject_reason or ''}{err}")
