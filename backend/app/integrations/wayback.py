@@ -21,9 +21,9 @@ STOPWORDS = {
                "xanax", "no prescription", "canadian pharmacy",
                "аптека", "таблетк", "виагра", "сиалис", "дженерик", "без рецепта"],
     "casino": ["casino", "roulette", "slots", "jackpot", "blackjack", "baccarat",
-               "free spins", "casino bonus",
+               "free spins", "casino bonus", "azino", "joycasino", "vulkan casino",
                "казино", "рулетк", "слот", "игровые автоматы", "джекпот",
-               "азартны", "игровой клуб"],
+               "азартны", "игровой клуб", "вулкан", "азино", "пинап", "пин ап"],
     "gambling": ["betting", "poker", "bookmaker", "sportsbook", "betting odds", "wager",
                  "1xbet", "melbet",
                  "ставки на спорт", "букмекер", "покер", "тотализатор", "париматч",
@@ -88,11 +88,12 @@ class WaybackClient(BaseClient):
                 cats_by_time.append(set())
             time.sleep(polite)
 
-        if ok == 0:
-            # CDX есть, но ни один снапшот не скачался (archive.org задросселен/недоступен) —
-            # историю НЕ проверили; нельзя выдавать чистый вердикт по нулю данных
+        checked = ok >= (sample // 2 + 1)      # «проверено» только при покрытии большинства
+        if not checked:
+            # мало данных (систематический троттлинг archive.org) — нельзя выдавать чистый
+            # вердикт по паре снапшотов; sig-гард в scoring уведёт в manual
             return {"prior_flags": {}, "first_seen": first_seen, "age_years": age_years,
-                    "wayback_checked": False, "sampled": 0}
+                    "wayback_checked": False, "sampled": ok}
 
         all_cats = set().union(*cats_by_time) if cats_by_time else set()
         flags = {c: (c in all_cats) for c in STOPWORDS}
@@ -120,4 +121,5 @@ if __name__ == "__main__":  # pure classifier self-check (no network)
     assert "pharma" in _classify_text("Виагра и сиалис без рецепта, аптека")
     assert "adult" in _classify_text("Интим услуги, проститутки, вебкам")
     assert _classify_text("Обзор лучших vpn для стриминга, быстрые серверы") == set()
+    assert "casino" in _classify_text("Вулкан казино, азино777 бонусы")
     print("wayback _classify_text ok")

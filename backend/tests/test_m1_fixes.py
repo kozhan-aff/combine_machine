@@ -55,9 +55,34 @@ def test_wayback_checked_when_a_fetch_succeeds(monkeypatch):
              {"timestamp": "20200101000000", "original": "http://x.com/"}]
     monkeypatch.setattr(w, "get_snapshots", lambda domain, **k: snaps)
     monkeypatch.setattr(w, "_fetch_raw", lambda ts, orig: "clean vpn review, fast servers")
-    out = w.classify_history("ok.com", polite=0.0)
+    # sample=2: покрытие считается от запрошенного sample (Task 5, I4) — с дефолтным
+    # sample=5 при 2 реальных снапшотах порог покрытия недостижим даже при 100% успехе.
+    out = w.classify_history("ok.com", sample=2, polite=0.0)
     assert out["wayback_checked"] is True and out["sampled"] >= 1
     assert out["prior_flags"]["spam"] is False
+
+
+def test_wayback_partial_coverage_not_checked(monkeypatch):
+    # 5 снапшотов в CDX, но скачался лишь 1 (остальные 429) -> НЕ «проверено»
+    from app.integrations import wayback
+    c = wayback.WaybackClient()
+    monkeypatch.setattr(c, "get_snapshots", lambda dom, limit=400: [
+        {"timestamp": "20150101000000", "original": f"http://x/{i}"} for i in range(5)])
+    calls = {"n": 0}
+    def _fetch(ts, orig):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "clean vpn review"
+        raise RuntimeError("429")
+    monkeypatch.setattr(c, "_fetch_raw", _fetch)
+    h = c.classify_history("x.ru", sample=5, polite=0)
+    assert h["sampled"] == 1 and h["wayback_checked"] is False
+
+
+def test_wayback_ru_casino_brands():
+    from app.integrations.wayback import _classify_text
+    assert "casino" in _classify_text("Вулкан казино играть онлайн")   # бренд + слово
+    assert "casino" in _classify_text("Azino777 и joycasino бонусы")
 
 
 # ---------- I1: ошибка RKN/blacklist не даёт auto-approve ----------

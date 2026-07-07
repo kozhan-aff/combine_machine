@@ -169,14 +169,13 @@ def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
     try:
         hist = c["wayback"].classify_history(d.domain)
         pf = hist.get("prior_flags") or {}
-        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
-            sig["prior_flags"] = pf
-            return "history_dirty"
         sig["prior_flags"] = pf
-        sig["wayback_checked"] = hist.get("wayback_checked")
+        sig["wayback_checked"] = hist.get("wayback_checked")     # сохраняем ДО возможного выхода
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
+        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+            return "history_dirty"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
 
