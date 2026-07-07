@@ -72,3 +72,186 @@ def last_finished_sweep_at() -> datetime | None:
         if result.tzinfo is None:
             result = result.replace(tzinfo=timezone.utc)
         return result
+
+
+# --- стадии: каждая = запрос кандидатов + вызов существующего сервиса + учёт ---------
+# handler(cap) -> (сделано:int, ошибки:list[str]). cap=None только у discovery.
+
+def _stage_discovery(cap):
+    from app.services import discovery
+    return discovery.run_discovery(), []
+
+
+def _stage_score(cap):
+    from app.services import scoring
+    return scoring.score_pending(limit=cap), []
+
+
+def _stage_queue(cap):
+    """approved-домены (у них по определению нет открытого заказа) -> create_order, до капа."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    from app.services import acquisition
+
+    done, errs = 0, []
+    with SessionLocal() as db:
+        ids = [r[0] for r in db.execute(
+            select(Domain.id).where(Domain.status == "approved").order_by(Domain.id).limit(cap)).all()]
+    for did in ids:
+        try:
+            acquisition.create_order(did)      # деньги НЕ тратит — только заявка pending_confirm
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"domain#{did}: {type(e).__name__}: {e}")
+    return done, errs
+
+
+def _stage_provision(cap):
+    """Две под-операции под общим капом: (а) purchased без сайта -> create_site_for;
+    (б) сайт в provisioning -> provision (идемпотентен, awaiting_ns = норм, повторим)."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    from app.models.site import Site
+    from app.services import provisioning
+
+    done, errs = 0, []
+    with SessionLocal() as db:
+        purchased = [r[0] for r in db.execute(
+            select(Domain.id).where(Domain.status == "purchased",
+                                    ~Domain.id.in_(select(Site.domain_id)))
+            .order_by(Domain.id).limit(cap)).all()]
+        prov_ids = [r[0] for r in db.execute(
+            select(Site.id).where(Site.status == "provisioning").order_by(Site.id).limit(cap)).all()]
+    for did in purchased:
+        if done >= cap:
+            break
+        try:
+            provisioning.create_site_for(did)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"domain#{did}: {type(e).__name__}: {e}")
+    for sid in prov_ids:
+        if done >= cap:
+            break
+        try:
+            provisioning.provision(sid)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+    return done, errs
+
+
+def _stage_generate(cap):
+    """Сайты status=content без страниц -> generate_site(use_competitor=True)."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.site import Site, Page
+    from app.services import content
+
+    done, errs = 0, []
+    with SessionLocal() as db:
+        ids = [r[0] for r in db.execute(
+            select(Site.id).where(Site.status == "content",
+                                  ~Site.id.in_(select(Page.site_id)))
+            .order_by(Site.id).limit(cap)).all()]
+    for sid in ids:
+        try:
+            content.generate_site(sid, use_competitor=True)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+    return done, errs
+
+
+def _stage_publish(cap):
+    """Сайты с ≥1 edited-страницей -> publish_site (публикует все edited; гейт держится в сервисе)."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.site import Site, Page
+    from app.services import publish
+
+    done, errs = 0, []
+    with SessionLocal() as db:
+        ids = [r[0] for r in db.execute(
+            select(Site.id).where(Site.id.in_(
+                select(Page.site_id).where(Page.status == "edited")))
+            .order_by(Site.id).limit(cap)).all()]
+    for sid in ids:
+        try:
+            publish.publish_site(sid)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+    return done, errs
+
+
+def _stage_check_index(cap):
+    """Сайты с published-страницами -> check_index (site: через SearXNG)."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.site import Site, Page
+    from app.services import publish
+
+    done, errs = 0, []
+    with SessionLocal() as db:
+        ids = [r[0] for r in db.execute(
+            select(Site.id).where(Site.id.in_(
+                select(Page.site_id).where(Page.status == "published")))
+            .order_by(Site.id).limit(cap)).all()]
+    for sid in ids:
+        try:
+            publish.check_index(sid)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+    return done, errs
+
+
+# порядок конвейера — единственный источник истины оркестратора
+STAGES = [
+    ("discovery", "auto_discovery", None, _stage_discovery),
+    ("score", "auto_score", "cap_score", _stage_score),
+    ("queue", "auto_queue", "cap_queue", _stage_queue),
+    ("provision", "auto_provision", "cap_provision", _stage_provision),
+    ("generate", "auto_generate", "cap_generate", _stage_generate),
+    ("publish", "auto_publish", "cap_publish", _stage_publish),
+    ("check_index", "auto_check_index", "cap_check_index", _stage_check_index),
+]
+
+
+def run_sweep(trigger: str = "cron", on_progress=None, respect_master: bool = True) -> dict:
+    """Прогнать включённые авто-стадии до гейтов. respect_master=False у ручного запуска.
+
+    ЖЁСТКО: зовёт ТОЛЬКО безопасные сервисы из STAGES. НИКОГДА — confirm_order/
+    execute_confirmed_order/mark_caught (деньги) и mark_edited (редактура): эти три гейта
+    двигает только человек через роуты панели. Ошибка одной сущности не топит стадию/свип.
+    """
+    from app.services.autonomy import get_autonomy
+
+    cfg = get_autonomy()
+    if respect_master and not cfg["autopilot_on"]:
+        return {"skipped": "autopilot_off"}
+    run_id = _acquire_lock(trigger)
+    if run_id is None:
+        return {"skipped": "already_running"}
+
+    enabled = [s for s in STAGES if cfg[s[1]]]
+    total = len(enabled)
+    counts, errors, status = {}, [], "done"
+    for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
+        if on_progress:
+            on_progress(i, total, key)
+        cap = cfg[cap_attr] if cap_attr else None
+        try:
+            n, errs = handler(cap)
+            counts[key] = n
+            errors += [f"{key}: {e}" for e in errs]
+        except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
+            errors.append(f"{key}: {type(e).__name__}: {e}")
+            status = "failed"
+    if on_progress:
+        on_progress(total, total, "")
+    _finish_run(run_id, status, counts, errors)
+    return {"run_id": run_id, "status": status, "counts": counts, "errors": errors}
