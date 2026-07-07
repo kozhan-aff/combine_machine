@@ -146,7 +146,10 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
     monkeypatch.setattr("app.services.content.generate_site", lambda site_id, use_competitor=False: 0)
     monkeypatch.setattr("app.services.publish.publish_site", lambda sid: {})
     monkeypatch.setattr("app.services.publish.check_index", lambda sid: {})
-    orch.run_sweep(trigger="cron")   # не бросает (гейт-функции не вызваны)
+    out = orch.run_sweep(trigger="cron")
+    # хендлеры ловят Exception — проглоченный AssertionError гейт-заглушки осел бы в errors.
+    # Пустые errors + done доказывают: ни одна гейт-функция не была вызвана нигде в свипе.
+    assert out["errors"] == [] and out["status"] == "done", out
     with db.SessionLocal() as s:
         from sqlalchemy import select, func
         scored = s.scalar(select(Domain.status).where(Domain.domain == "scored.ru"))
