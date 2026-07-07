@@ -149,6 +149,8 @@ def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
             return "blacklist"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"blacklist:{type(e).__name__}")
+    if sig.get("blacklisted") is None and "blacklisted" in sig:
+        sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
     try:
         sig["indexed_echo"] = c["searxng"].indexed_echo(d.domain)
     except Exception as e:  # noqa: BLE001

@@ -43,6 +43,8 @@ def _spec():
          lambda: __import__("app.integrations.rkn", fromlist=["x"]).RknClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
+        ("blacklist", "Spamhaus/SURBL", "M1 · спам-лист", "1", "M1", False,
+         lambda: __import__("app.integrations.blacklist", fromlist=["x"]).BlacklistClient().ping()),
         ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
     ]
 

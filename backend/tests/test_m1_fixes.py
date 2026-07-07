@@ -80,6 +80,7 @@ def test_rkn_or_blacklist_error_caps_at_scored():
 def test_blacklist_sentinel_raises(monkeypatch):
     from app.config import settings
     from app.integrations.blacklist import BlacklistClient
+    monkeypatch.setattr(BlacklistClient, "_control_ok", None)  # без этого исход зависит от порядка тестов
     monkeypatch.setattr(settings, "DNS_RESOLVER", "")   # системный путь
     monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.255.255.254")
     with pytest.raises(RuntimeError):
@@ -89,12 +90,13 @@ def test_blacklist_sentinel_raises(monkeypatch):
 def test_blacklist_listed_and_clean(monkeypatch):
     from app.config import settings
     from app.integrations.blacklist import BlacklistClient
+    monkeypatch.setattr(BlacklistClient, "_control_ok", None)
     monkeypatch.setattr(settings, "DNS_RESOLVER", "")
     monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.1.2")
     assert BlacklistClient().is_blacklisted("spammy.com") is True
 
     def nx(host):
-        raise socket.gaierror("nxdomain")
+        raise socket.gaierror(socket.EAI_NONAME, "nxdomain")  # реальный NXDOMAIN несёт errno
     monkeypatch.setattr(socket, "gethostbyname", nx)
     assert BlacklistClient().is_blacklisted("clean.com") is False
 
@@ -103,6 +105,7 @@ def test_blacklist_uses_custom_resolver(monkeypatch):
     from app.config import settings
     from app.integrations.blacklist import BlacklistClient
     import dns.resolver
+    monkeypatch.setattr(BlacklistClient, "_control_ok", None)
     monkeypatch.setattr(settings, "DNS_RESOLVER", "9.9.9.9")
     used = {}
 
@@ -238,3 +241,27 @@ def test_request_does_not_retry_4xx(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):   # исходное исключение, не RetryError
         c.request("GET", "http://x/y")
     assert calls["n"] == 1   # ровно одна попытка — 4xx не ретраится
+
+
+# ---------- C2 (Critical): blacklist fail-closed — контроль тест-поинта ----------
+# _control_ok — кэш на ПРОЦЕСС (класс BlacklistClient), общий между тестами этого файла.
+# Сбрасываем его monkeypatch'ем в каждом тесте, трогающем реальный BlacklistClient, —
+# иначе исход зависит от порядка запуска (предыдущий тест мог закэшировать True/False).
+
+def test_blacklist_raises_when_resolver_cannot_reach_spamhaus(monkeypatch):
+    from app.integrations import blacklist
+    c = blacklist.BlacklistClient()
+    monkeypatch.setattr(blacklist.BlacklistClient, "_control_ok", None)
+    # резолвер отдаёт NXDOMAIN даже на тест-поинт (публичный резолвер заблокирован Spamhaus)
+    monkeypatch.setattr(c, "_resolve", lambda host: None)
+    import pytest
+    with pytest.raises(RuntimeError):
+        c.is_blacklisted("example.com")
+
+
+def test_blacklist_none_goes_to_errors_and_downgrades(monkeypatch):
+    # is_blacklisted вернул None (транзиент) -> в sig.errors -> risk-guard -> manual scored
+    from app.services import scoring
+    # прямой юнит на _decide: approved + blacklist-ошибка -> scored
+    sig_err = {"errors": ["blacklist:unavailable"]}
+    assert scoring._decide(0.9, sig_err, 0.7, 0.4) == "scored"
