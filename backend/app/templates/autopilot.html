@@ -126,7 +126,11 @@ function poll(job){
     if (p.error) return;
     if (p.running){ setTimeout(()=>poll(job), 1500); }
     else { setTimeout(()=>location.reload(), 800); }
-  }).catch(()=>{ setTimeout(()=>poll(job), 1500); });
+  }).catch(()=>{                                        // сеть моргнула — не молчим, повторяем
+    var el=bar(); el.className='progress show';
+    setLabel(el.querySelector('.lbl'), JOB_RU[job]||job, 'нет связи, повторяю…');
+    setTimeout(()=>poll(job), 1500);
+  });
 }
 fetch('/run/sweep/progress').then(r=>r.json())
   .then(p=>{ if (p.running) poll('sweep'); else if (p.error) render('sweep', p); }).catch(()=>{});

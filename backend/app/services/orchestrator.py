@@ -12,12 +12,10 @@ STALE_MIN = 15   # «running»-строка старше этого — краш
 def _acquire_lock(trigger: str) -> int | None:
     """Single-flight: атомарно вставить running-строку, если нет свежей незавершённой.
 
-    Один INSERT..SELECT..WHERE NOT EXISTS — окно гонки check-then-insert закрыто на
-    уровне БД (два конкурентных вызова из воркер-тика и ручного свипа больше не могут
-    оба увидеть «свободно» и вставить по строке): вся проверка и вставка — одна команда
-    для БД, а не SELECT и INSERT по отдельности из Python. Работает и на Postgres, и на
-    SQLite (RETURNING поддержан с 3.35, тестовый движок ≥ этого). STALE_MIN перекрывает
-    зависший running крашнутого воркера. Возвращает id новой строки или None (замок занят).
+    Один INSERT..SELECT..WHERE NOT EXISTS — окно гонки сужено до одной SQL-команды; остаточная
+    гонка READ COMMITTED (~мс) остаётся, но последствия ограничены капами и STALE_MIN. При >1
+    воркере добавить partial unique index или ON CONFLICT. Возвращает id новой строки или None
+    (замок занят).
     """
     from sqlalchemy import select, exists, insert, literal
     from app.db import SessionLocal
