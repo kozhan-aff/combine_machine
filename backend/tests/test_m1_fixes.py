@@ -85,6 +85,15 @@ def test_wayback_ru_casino_brands():
     assert "casino" in _classify_text("Azino777 и joycasino бонусы")
 
 
+def test_wayback_brands_no_false_positive():
+    from app.integrations.wayback import _classify_text
+    # геология/туризм/фэшн — НЕ казино
+    assert _classify_text("Извержение вулкана мощное, вулкан дымился неделю") == set()
+    assert _classify_text("Фотосессия в стиле пинап, пин ап платья и винтаж") == set()
+    # но однозначные бренды — ловятся
+    assert "casino" in _classify_text("вулкан казино играть, азино777 бонус")
+
+
 # ---------- I1: ошибка RKN/blacklist не даёт auto-approve ----------
 
 def test_rkn_or_blacklist_error_caps_at_scored():
