@@ -47,34 +47,53 @@
   </div>
 </div>
 
-<div id="prog" class="hint" style="margin:8px 0"></div>
+<div id="prog" class="progress">
+  <span class="lbl"></span>
+  <div class="track"><div class="fill"></div></div>
+  <span class="pct"></span>
+</div>
 <script>
-// Терминальный контракт — см. docstring services/jobs.py: error проверяем ПЕРВЫМ
-// (иначе частичный done/total маскирует падение под «готово»); терминал = running==false;
-// done/total — только отображение («готово (0)» — валидный исход: нет кандидатов).
-function poll(job) {
+// Терминальный контракт (см. services/jobs.py): error ПЕРВЫМ (иначе частичный done/total
+// маскирует падение), терминал = running==false, total==0 && running = неопределённый режим.
+// Меняем только представление — рисуем визуальный бар (см. .progress в base.html).
+var JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки'};
+function bar(){ return document.getElementById('prog'); }
+function render(job, p){
+  var el = bar(), lbl = el.querySelector('.lbl'), fill = el.querySelector('.fill'),
+      pct = el.querySelector('.pct'), name = JOB_RU[job] || job;
+  el.className = 'progress show';                       // сброс состояний
+  if (p.error){ el.classList.add('err');               // стоп: без reload, оператор видит
+    lbl.innerHTML='<b>'+name+'</b> — ошибка'; pct.textContent=''; fill.style.width='100%';
+    fill.style.marginLeft='0'; return; }
+  if (p.running){
+    if (p.total>0){ var d=Math.round(p.done/p.total*100);
+      fill.style.width=d+'%'; fill.style.marginLeft='0';
+      lbl.innerHTML='<b>'+name+'</b>'+(p.current?' — '+p.current:'');
+      pct.textContent=p.done+'/'+p.total;
+    } else { el.classList.add('indet');                // total неизвестен — бегущая полоса
+      fill.style.width=''; lbl.innerHTML='<b>'+name+'</b>'+(p.current?' — '+p.current:'');
+      pct.textContent='…'; }
+    return;
+  }
+  el.classList.add('done');                            // терминал без ошибки — успех
+  lbl.innerHTML='<b>'+name+'</b> — готово'; pct.textContent=p.done;
+}
+function poll(job){
   fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
-    const el = document.getElementById('prog');
-    if (p.error) {
-      el.textContent = job+': ошибка — '+p.error;          // стоп: без reload, оператор видит
-    } else if (p.running) {
-      el.textContent = job+': '+p.done+'/'+p.total+(p.current ? ' — '+p.current : '');
-      setTimeout(()=>poll(job), 1500);
-    } else {                                               // терминал без ошибки — успех
-      el.textContent = job+': готово ('+p.done+')'; setTimeout(()=>location.reload(), 800);
-    }
-  }).catch(()=>{                                           // сеть моргнула — не молчим, повторяем
-    document.getElementById('prog').textContent = job+': нет связи с панелью, повторяю…';
+    render(job, p);
+    if (p.error) return;                               // стоп на ошибке
+    if (p.running){ setTimeout(()=>poll(job), 1500); }
+    else { setTimeout(()=>location.reload(), 800); }   // успех — обновить таблицу
+  }).catch(()=>{                                        // сеть моргнула — не молчим, повторяем
+    var el=bar(), lbl=el.querySelector('.lbl');
+    el.className='progress show'; lbl.innerHTML='<b>'+(JOB_RU[job]||job)+'</b> — нет связи, повторяю…';
     setTimeout(()=>poll(job), 1500);
   });
 }
-// стартуем опрос, если джоб уже идёт (после сабмита формы); если джоб упал, пока оператора
-// не было (перезагрузка страницы), ошибка не должна тонуть молча — показываем её сразу.
+// старт-проверка: если джоб уже идёт (после сабмита) — поллим; если упал, пока оператора
+// не было (перезагрузка) — показываем ошибку сразу, не тонет молча.
 ['discovery','score'].forEach(j => fetch('/run/'+j+'/progress').then(r=>r.json())
-  .then(p=>{
-    if (p.running) poll(j);
-    else if (p.error) document.getElementById('prog').textContent = j+': ошибка — '+p.error;
-  }).catch(()=>{}));    // старт-проверка: тихий скип, без поллинга
+  .then(p=>{ if (p.running) poll(j); else if (p.error) render(j, p); }).catch(()=>{}));
 </script>
 
 <details class="legend">
