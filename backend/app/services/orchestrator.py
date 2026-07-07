@@ -10,30 +10,37 @@ STALE_MIN = 15   # «running»-строка старше этого — краш
 
 
 def _acquire_lock(trigger: str) -> int | None:
-    """Single-flight: вставить running-строку, если нет свежей незавершённой. Вернуть id|None.
+    """Single-flight: атомарно вставить running-строку, если нет свежей незавершённой.
 
-    ponytail: check-then-insert; на Postgres окно гонки ~мс — при тике раз в 5 мин и редком
-    ручном свипе это неопасно. Упрётся — заменить на pg_advisory_lock (но SQLite-тесты его
-    не умеют, потому не сейчас). STALE_MIN перекрывает зависший running крашнутого воркера.
+    Один INSERT..SELECT..WHERE NOT EXISTS — окно гонки check-then-insert закрыто на
+    уровне БД (два конкурентных вызова из воркер-тика и ручного свипа больше не могут
+    оба увидеть «свободно» и вставить по строке): вся проверка и вставка — одна команда
+    для БД, а не SELECT и INSERT по отдельности из Python. Работает и на Postgres, и на
+    SQLite (RETURNING поддержан с 3.35, тестовый движок ≥ этого). STALE_MIN перекрывает
+    зависший running крашнутого воркера. Возвращает id новой строки или None (замок занят).
     """
-    from sqlalchemy import select
+    from sqlalchemy import select, exists, insert, literal
     from app.db import SessionLocal
     from app.models.autonomy import AutonomyRun
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_MIN)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=STALE_MIN)
+    fresh = select(AutonomyRun.id).where(
+        AutonomyRun.status == "running", AutonomyRun.started_at > cutoff)
+    src = select(
+        literal(now, AutonomyRun.started_at.type),
+        literal(trigger, AutonomyRun.trigger.type),
+        literal("running", AutonomyRun.status.type),
+        literal({}, AutonomyRun.counts.type),
+        literal([], AutonomyRun.errors.type),
+    ).where(~exists(fresh))
+    stmt = insert(AutonomyRun).from_select(
+        ["started_at", "trigger", "status", "counts", "errors"], src
+    ).returning(AutonomyRun.id)
     with SessionLocal() as db:
-        fresh = db.execute(
-            select(AutonomyRun.id).where(
-                AutonomyRun.status == "running", AutonomyRun.started_at > cutoff)
-        ).first()
-        if fresh is not None:
-            return None                              # замок держит свежий running
-        run = AutonomyRun(status="running", trigger=trigger,
-                          started_at=datetime.now(timezone.utc), counts={}, errors=[])
-        db.add(run)
+        run_id = db.execute(stmt).scalar_one_or_none()
         db.commit()
-        db.refresh(run)
-        return run.id
+        return run_id
 
 
 def _finish_run(run_id: int, status: str, counts: dict, errors: list) -> None:
@@ -51,7 +58,7 @@ def _finish_run(run_id: int, status: str, counts: dict, errors: list) -> None:
         db.commit()
 
 
-def last_finished_sweep_at():
+def last_finished_sweep_at() -> datetime | None:
     """Максимум finished_at завершённых прогонов (для throttle шедулера) или None."""
     from sqlalchemy import select, func
     from app.db import SessionLocal
