@@ -160,6 +160,22 @@ def test_blacklist_rejects_before_wayback():
     assert wb.calls == 0            # blacklist — T2, Wayback (T3) до неё не доходит
 
 
+def test_blacklist_none_downgrades_via_funnel():
+    """Ревью C2 (Important gap): строка `blacklisted is None -> errors.append("blacklist:unavailable")`
+    в _funnel была покрыта только юнитом на _decide напрямую (test_m1_fixes.py), а не реальной
+    проводкой через score_domain/_funnel. Прогоняем полную воронку с blacklist-клиентом,
+    отдающим None (транзиент), на иначе-сильном домене (тот же профиль, что и в
+    test_clean_strong_domain_approved) — без строки-фикса errors остался бы пуст и статус
+    остался бы approved, тест бы упал."""
+    did = _mk(domain="bl-none.ru", referring_domains=3000, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    out = scoring.score_domain(did, clients=_clients(old, wb, bl=None))
+    assert "blacklist:unavailable" in out["errors"]
+    assert out["status"] == "scored"        # downgrade from approved (не rejected — не hard-reject)
+    assert wb.calls == 1                    # blacklist:unavailable не блокирует T3
+
+
 def test_history_dirty_rejects_after_wayback():
     did = _mk(domain="dirtyhist.ru", referring_domains=50, lane="bid")
     wb = _WaybackDirty()
