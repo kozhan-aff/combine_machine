@@ -59,3 +59,11 @@ def test_gates_counts(client):
         s.add(Page(site_id=site.id, url_path="/", status="draft")); s.commit()
     html = client.get("/autopilot").text
     assert "/domains?status=scored" in html and "/queue" in html
+
+
+def test_dashboard_shows_autopilot_strip(client):
+    # сайдбар (Task 5) уже содержит «Автопилот»/href — проверяем текст самой полоски
+    autonomy.update_autonomy(autopilot_on=True)
+    html = client.get("/").text
+    assert "✈ Автопилот: вкл" in html          # бейдж мастера в полоске
+    assert "последний свип" in html and "ждёт тебя" in html

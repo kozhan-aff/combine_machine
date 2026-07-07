@@ -2,6 +2,19 @@
 {% block title %}Пульт{% endblock %}
 {% block content %}
 
+<div class="card" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:14px">
+  <span class="badge b-{{ 'approved' if autopilot.autopilot_on else 'discovered' }}"
+        title="мастер-выключатель автопилота">✈ Автопилот: {{ 'вкл' if autopilot.autopilot_on else 'выкл' }}</span>
+  <span class="hint">последний свип:
+    <b>{{ last_sweep.strftime('%d.%m %H:%M') if last_sweep else '—' }}</b></span>
+  <span class="hint">ждёт тебя —
+    курация: <b>{{ gates.curate }}</b> ·
+    подтверждение: <b>{{ gates.money }}</b> ·
+    редактура: <b>{{ gates.edit }}</b></span>
+  <a class="btn" href="/autopilot" title="открыть кокпит автопилота: тумблеры стадий, капы, прогоны"
+     style="margin-left:auto">→ Автопилот</a>
+</div>
+
 <h2><span class="idx">◈</span> Воронка конвейера
   <span class="hint">каждая плитка кликабельна — открывает список этой стадии</span></h2>
 <div class="funnel">

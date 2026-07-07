@@ -144,6 +144,8 @@ def _gates(db: Session) -> dict:
 # ============================================================================
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_session)):
+    from app.services.autonomy import get_autonomy
+    from app.services.orchestrator import last_finished_sweep_at
     dc = _domain_counts(db)
     return templates.TemplateResponse(request, "dashboard.html", {
         "active": "dash",
@@ -153,6 +155,7 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
         "offers_total": db.scalar(select(func.count()).select_from(Offer)) or 0,
         "sites": _sites_overview(db),
         "steps": _next_steps(db),
+        "autopilot": get_autonomy(), "gates": _gates(db), "last_sweep": last_finished_sweep_at(),
     })
 
 
