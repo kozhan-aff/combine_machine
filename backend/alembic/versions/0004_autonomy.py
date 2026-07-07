@@ -40,10 +40,10 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
-        sa.Column("trigger", sa.String(16)),
-        sa.Column("status", sa.String(16)),
-        sa.Column("counts", postgresql.JSONB()),
-        sa.Column("errors", postgresql.JSONB()),
+        sa.Column("trigger", sa.String(16), nullable=False, server_default="cron"),
+        sa.Column("status", sa.String(16), nullable=False, server_default="running"),
+        sa.Column("counts", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column("errors", postgresql.JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),
     )
 
 
