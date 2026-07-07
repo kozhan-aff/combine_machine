@@ -25,6 +25,10 @@ from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+from app.services.labels import status_ru as _status_ru, reject_ru as _reject_ru, lane_ru as _lane_ru
+templates.env.filters["status_ru"] = _status_ru
+templates.env.filters["reject_ru"] = _reject_ru
+templates.env.filters["lane_ru"] = _lane_ru
 router = APIRouter()
 
 # ручная курация из шортлиста. 'purchased' = оператор купил домен руками — этот клик
