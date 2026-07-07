@@ -169,7 +169,9 @@ def test_diag_view_flags_critical_down(client, monkeypatch):
             ("b", "Опц", "M3 · опц", "1", "M3", False, lambda: (_ for _ in ()).throw(RuntimeError("down")))]
     monkeypatch.setattr(dg, "_spec", lambda: spec)
     html = client.get("/diag").text
-    assert "Крит" in html                          # упавший критичный виден в сводке
+    # сводку проверяем точной фразой (не «Крит где-то на странице» — метка есть и в строке
+    # таблицы): crit_down = ровно [Крит], опциональный упавший Опц в критичные НЕ попал.
+    assert "критичные: Крит ✗" in html
 
 
 def test_settings_preview_rd_null_passes(client):
