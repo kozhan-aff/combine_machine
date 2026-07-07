@@ -59,6 +59,8 @@ def mark_purchased(domain_id: int, db: Session = Depends(get_session)):
     d = db.get(Domain, domain_id)
     if not d:
         raise HTTPException(404, "domain not found")
+    # ручной override money-gate: человек пометил домен купленным мимо очереди. Осознанный
+    # обход (человек = денежный гейт). Оркестратор (services/orchestrator) этот роут НЕ зовёт.
     d.status = "purchased"   # ponytail: MVP buys by hand — the human action IS the money gate
     db.commit()
     return {"id": d.id, "domain": d.domain, "status": d.status}

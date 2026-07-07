@@ -322,6 +322,8 @@ def score_one_action(domain_id: int):
 
 @router.post("/domains/{domain_id}/set-status")
 def set_status_action(domain_id: int, status: str = Form(...), db: Session = Depends(get_session)):
+    # ручной override: 'purchased' здесь — money-gate человека мимо очереди; оркестратор
+    # (services/orchestrator) этот роут НЕ зовёт (двигает только до pending_confirm).
     if status in _MANUAL_STATUSES:      # guard: только ручные переходы курации
         d = db.get(Domain, domain_id)
         if d:

@@ -146,7 +146,7 @@ function poll(job){
   {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
     {% if counts.get(st) %}
     <a class="chip {{ 'on' if f_status==st }}" href="/domains?status={{ st }}"
-       title="показать только домены в статусе {{ st }}">{{ st }} <b>{{ counts[st] }}</b></a>
+       title="показать только домены в статусе {{ st }} ({{ st|status_ru }})">{{ st|status_ru }} <b>{{ counts[st] }}</b></a>
     {% endif %}
   {% endfor %}
   <form method="get" action="/domains" style="display:flex; gap:10px; margin-left:12px; align-items:end">

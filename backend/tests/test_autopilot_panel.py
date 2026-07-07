@@ -67,3 +67,13 @@ def test_dashboard_shows_autopilot_strip(client):
     html = client.get("/").text
     assert "✈ Автопилот: вкл" in html          # бейдж мастера в полоске
     assert "последний свип" in html and "ждёт тебя" in html
+
+
+def test_domains_filter_chips_localized(client):
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="chip.ru", source="backorder", status="approved"))
+        s.commit()
+    html = client.get("/domains").text
+    # чип статуса: видимый текст локализован, счётчик на месте
+    assert "одобрен" in html                       # approved -> одобрен (через status_ru)
+    assert ">approved <b>" not in html             # сырой английский в тексте чипа исчез

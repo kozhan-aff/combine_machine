@@ -80,9 +80,9 @@
       <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}"
             title="{{ {'provisioning':'ждёт провижна: Cloudflare + vhost','content':'инфраструктура готова — этап контента','published':'страницы опубликованы'}.get(s.site.status, s.site.status) }}">{{ s.site.status|status_ru }}</span>
       <span class="hint">
-        стр.: {{ s.pages.get('draft', 0) }} draft ·
-        {{ s.pages.get('edited', 0) }} edited ·
-        {{ s.pages.get('published', 0) }} publ ·
+        стр.: {{ s.pages.get('draft', 0) }} черновик ·
+        {{ s.pages.get('edited', 0) }} вычитано ·
+        {{ s.pages.get('published', 0) }} опубликовано ·
         {{ s.indexed }} в индексе
       </span>
     </div>

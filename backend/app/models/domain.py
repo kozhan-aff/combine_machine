@@ -70,7 +70,7 @@ class AcquisitionOrder(Base):
     provider: Mapped[str] = mapped_column(String(32))               # backorder | optimizator
     provider_order_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="pending_confirm")
-    # pending_confirm | ordered | caught | failed
+    # pending_confirm | ordering | ordered | caught | failed | cancelled
     cost: Mapped[float | None] = mapped_column(Numeric)
     confirmed_by_human: Mapped[bool] = mapped_column(Boolean, default=False)  # HARD GATE
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
