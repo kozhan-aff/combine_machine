@@ -1009,7 +1009,8 @@ from app.services import autonomy
 def test_autopilot_renders(client):
     r = client.get("/autopilot")
     assert r.status_code == 200
-    assert "Автопилот" in r.text and "ждёт тебя" in r.text.lower() or "Автопилот" in r.text
+    assert "Мастер-выключатель" in r.text     # станция мастера (не сайдбар — контент экрана)
+    assert "на курацию" in r.text             # блок «ждёт тебя»
 
 
 def test_autopilot_settings_save(client):
@@ -1329,10 +1330,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ```python
 def test_dashboard_shows_autopilot_strip(client):
+    # сайдбар (Task 5) уже содержит «Автопилот»/href — проверяем текст самой полоски
     autonomy.update_autonomy(autopilot_on=True)
     html = client.get("/").text
-    assert "Автопилот" in html and "/autopilot" in html    # полоска со ссылкой на экран
-    assert "ждёт тебя" in html
+    assert "✈ Автопилот: вкл" in html          # бейдж мастера в полоске
+    assert "последний свип" in html and "ждёт тебя" in html
 ```
 
 - [ ] **Step 2: Прогнать — убедиться, что падает**
