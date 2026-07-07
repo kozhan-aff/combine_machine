@@ -58,25 +58,33 @@
 // Меняем только представление — рисуем визуальный бар (см. .progress в base.html).
 var JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки'};
 function bar(){ return document.getElementById('prog'); }
+// подпись строим безопасно: имя жирным + хвост текст-нодой. p.current/p.error приходят
+// с внешнего фида (имена доменов) — в innerHTML не подставляем, чтобы не пустить HTML/скрипт.
+function setLabel(lbl, name, tail){
+  var b = document.createElement('b'); b.textContent = name;
+  lbl.replaceChildren(b);
+  if (tail) lbl.appendChild(document.createTextNode(' — ' + tail));
+}
 function render(job, p){
   var el = bar(), lbl = el.querySelector('.lbl'), fill = el.querySelector('.fill'),
       pct = el.querySelector('.pct'), name = JOB_RU[job] || job;
   el.className = 'progress show';                       // сброс состояний
   if (p.error){ el.classList.add('err');               // стоп: без reload, оператор видит
-    lbl.innerHTML='<b>'+name+'</b> — ошибка'; pct.textContent=''; fill.style.width='100%';
-    fill.style.marginLeft='0'; return; }
+    setLabel(lbl, name, 'ошибка: ' + p.error); pct.textContent='';
+    fill.style.width='100%'; fill.style.marginLeft='0'; return; }
   if (p.running){
     if (p.total>0){ var d=Math.round(p.done/p.total*100);
       fill.style.width=d+'%'; fill.style.marginLeft='0';
-      lbl.innerHTML='<b>'+name+'</b>'+(p.current?' — '+p.current:'');
+      setLabel(lbl, name, p.current || '');
       pct.textContent=p.done+'/'+p.total;
     } else { el.classList.add('indet');                // total неизвестен — бегущая полоса
-      fill.style.width=''; lbl.innerHTML='<b>'+name+'</b>'+(p.current?' — '+p.current:'');
+      fill.style.width=''; setLabel(lbl, name, p.current || '');
       pct.textContent='…'; }
     return;
   }
   el.classList.add('done');                            // терминал без ошибки — успех
-  lbl.innerHTML='<b>'+name+'</b> — готово'; pct.textContent=p.done;
+  fill.style.width='100%'; fill.style.marginLeft='0';  // добить до 100% (инлайн-ширина осталась от running)
+  setLabel(lbl, name, 'готово'); pct.textContent=p.done;
 }
 function poll(job){
   fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
@@ -85,8 +93,8 @@ function poll(job){
     if (p.running){ setTimeout(()=>poll(job), 1500); }
     else { setTimeout(()=>location.reload(), 800); }   // успех — обновить таблицу
   }).catch(()=>{                                        // сеть моргнула — не молчим, повторяем
-    var el=bar(), lbl=el.querySelector('.lbl');
-    el.className='progress show'; lbl.innerHTML='<b>'+(JOB_RU[job]||job)+'</b> — нет связи, повторяю…';
+    var el=bar(); el.className='progress show';
+    setLabel(el.querySelector('.lbl'), JOB_RU[job]||job, 'нет связи, повторяю…');
     setTimeout(()=>poll(job), 1500);
   });
 }
