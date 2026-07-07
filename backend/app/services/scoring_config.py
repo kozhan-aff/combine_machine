@@ -51,5 +51,5 @@ DECISION = {
 
 # Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
 MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт: моложе — reject too_young
-SOURCES_ENABLED = {"backorder": True, "cctld": True, "reg_ru": True, "sweb": True}
+SOURCES_ENABLED = {"backorder": True, "cctld": False, "reg_ru": False, "sweb": False}  # сырые витрины выключены до выверки живой разметки (аудит 2026-07-07)
 MAX_WHOIS_PER_RUN = 200        # кап whois-пробоев за один прогон проверки (защита от сырого cctld)

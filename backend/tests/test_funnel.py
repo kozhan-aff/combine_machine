@@ -7,7 +7,8 @@ from app.services import scoring
 
 def _mk(**kw):
     with db.SessionLocal() as s:
-        d = Domain(domain=kw.pop("domain", "x.ru"), source="cctld", status="discovered", **kw)
+        d = Domain(domain=kw.pop("domain", "x.ru"), source=kw.pop("source", "cctld"),
+                   status="discovered", **kw)
         s.add(d); s.commit(); s.refresh(d)
         return d.id
 
@@ -288,6 +289,26 @@ def test_whois_fail_stays_discovered(sqlite_db):
     assert out.get("unresolved") is True and wb.calls == 0
     with db.SessionLocal() as s:
         assert s.get(Domain, did).status == "discovered"      # не сдвинулся
+
+
+def test_raw_source_future_deadline_stays_discovered():
+    # сырой домен, whois «занят», но дедлайн дропа в будущем -> ждём дропа, не reject
+    future = datetime.now(timezone.utc) + timedelta(days=5)
+    did = _mk(domain="dropping.ru", lane=None, source="cctld",
+              referring_domains=10, acquire_deadline=future)
+    wb = _Wayback()
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
+    assert out.get("unresolved") is True
+    assert out["status"] == "discovered"
+    assert wb.calls == 0                      # дорогой Wayback не тронут
+
+
+def test_raw_source_no_deadline_taken_is_not_acquirable():
+    did = _mk(domain="taken.ru", lane=None, source="cctld", referring_domains=10)
+    wb = _Wayback()
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
+    assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
+    assert wb.calls == 0
 
 
 def test_whois_budget_caps_run(monkeypatch, sqlite_db):

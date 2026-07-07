@@ -131,7 +131,16 @@ def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
         if av is True:
             sig["lane"] = "free"                    # свободен к регистрации
         elif av is False:
-            return "not_acquirable"                 # занят, не на backorder — купить нельзя
+            # занят СЕЙЧАС. Для сырого источника это может быть дропающийся домен, ещё
+            # зарегистрированный до своей даты: известный будущий дедлайн -> ждём, оставляем
+            # discovered (перепробуем после дропа). Нет дедлайна / он в прошлом -> реально занят.
+            dl = d.acquire_deadline
+            if dl is not None and dl.tzinfo is None:
+                dl = dl.replace(tzinfo=timezone.utc)
+            if dl is not None and dl > now:
+                sig["acquirability_unresolved"] = True
+                return None
+            return "not_acquirable"                 # занят, купить нельзя
         else:                                       # av is None — не определили
             sig["acquirability_unresolved"] = True
             return None
