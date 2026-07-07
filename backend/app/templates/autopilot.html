@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Автопилот{% endblock %}
+{% block content %}
+<h2><span class="idx">✈</span> Автопилот
+  <span class="hint">комбайн двигает конвейер сам — до человеческих гейтов; деньги и редактура всегда за тобой</span></h2>
+
+<div class="funnel" style="margin-bottom:6px">
+  <div class="stat"><a href="/domains?status=scored" title="ждут курации: реши ✓ approve / ✗ reject">
+    <div class="v {{ 'hot' if gates.curate }}">{{ gates.curate }}</div>
+    <div class="k">на курацию</div><div class="k" style="color:var(--dim)">гейт отбора</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/queue" title="ждут подтверждения выкупа — денежный гейт (только ты)">
+    <div class="v {{ 'hot' if gates.money }}">{{ gates.money }}</div>
+    <div class="k">на подтверждение</div><div class="k" style="color:var(--dim)">денежный гейт</div></a></div>
+  <span class="fun-arrow">▸</span>
+  <div class="stat"><a href="/#sites" title="черновики ждут редактуры — публикация возьмёт только edited">
+    <div class="v {{ 'hot' if gates.edit }}">{{ gates.edit }}</div>
+    <div class="k">на редактуру</div><div class="k" style="color:var(--dim)">гейт редактуры</div></a></div>
+</div>
+
+<div id="prog" class="progress">
+  <span class="lbl"></span><div class="track"><div class="fill"></div></div><span class="pct"></span>
+</div>
+<form method="post" action="/autopilot/run" style="margin:6px 0 18px">
+  <button class="btn-amber" title="прогнать включённые стадии один раз прямо сейчас (минует мастер-выключатель, уважает тумблеры стадий)">▶ Прогнать сейчас</button>
+  <span class="hint">разовый свип: пройдёт по включённым ниже стадиям до ближайшего гейта</span>
+</form>
+
+<form method="post" action="/autopilot/settings" style="max-width:820px; display:grid; gap:14px">
+  <div class="station">
+    <div class="plate">Мастер-выключатель — <b>шедулер свипает автоматически</b></div>
+    <div class="what">Включено → воркер прогоняет включённые стадии по расписанию (throttle ниже).
+      Выключено → машина двигается только кнопкой «Прогнать сейчас». Разовый прогон мастер минует.</div>
+    <div class="go">
+      <label><input type="checkbox" name="autopilot_on" {{ 'checked' if a.autopilot_on }}> автопилот включён</label>
+      <span class="hint" style="margin-left:16px">интервал между авто-свипами, мин:</span>
+      <input type="number" name="sweep_interval_min" min="5" max="1440" value="{{ a.sweep_interval_min }}"
+             style="width:90px; padding:2px 8px">
+    </div>
+  </div>
+
+  {% set stages = [
+    ('discovery','Поиск дропов','собрать свежие домены из включённых источников','discovered', none),
+    ('score','Проверка','прогнать воронку скоринга; сильные и чистые уйдут в approved','до гейта курации', a.cap_score),
+    ('queue','В очередь выкупа','поставить одобренные в очередь заказов','до денежного гейта', a.cap_queue),
+    ('provision','Провижн','поднять сайт: Cloudflare + aaPanel (идемпотентно)','provisioning → content', a.cap_provision),
+    ('generate','Черновики','сгенерировать AI-черновики страниц','до гейта редактуры', a.cap_generate),
+    ('publish','Публикация','выложить страницы','только уже edited', a.cap_publish),
+    ('check_index','Индексация','проверить попадание в индекс (site:)','обновить статус', a.cap_check_index)
+  ] %}
+  {% for key, name, what, gate, cap in stages %}
+  <div class="station">
+    <div class="plate">Стадия · {{ name }} — <b>{{ gate }}</b></div>
+    <div class="what">{{ what }}.</div>
+    <div class="go">
+      <label><input type="checkbox" name="auto_{{ key }}" {{ 'checked' if a['auto_' + key] }}> автоматом</label>
+      {% if cap is not none %}
+      <span class="hint" style="margin-left:16px">кап за свип:</span>
+      <input type="number" name="cap_{{ key }}" min="0" max="500" value="{{ cap }}"
+             style="width:80px; padding:2px 8px">
+      {% else %}
+      <span class="hint" style="margin-left:16px">капа нет — bulk-pull всего фида</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="station">
+    <div class="plate">Применить — <b>записать конфиг автопилота</b></div>
+    <div class="what">Тумблеры и капы применяются со следующего тика воркера (без рестарта).</div>
+    <div class="go"><button class="btn-amber" title="сохранить конфиг автопилота">Сохранить</button></div>
+  </div>
+</form>
+
+<h2 style="margin-top:26px"><span class="idx">≡</span> Последние прогоны
+  <span class="hint">что машина сделала за свип; ошибки — если стадия споткнулась</span></h2>
+<div class="wrap">
+{% if runs %}
+<table>
+  <thead><tr><th>#</th><th>старт</th><th>триггер</th><th>статус</th><th>по стадиям</th><th>ошибки</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td class="num hint">{{ r.id }}</td>
+      <td class="num">{{ r.started_at.strftime('%d.%m %H:%M') if r.started_at else '' }}</td>
+      <td>{{ 'ручной' if r.trigger == 'manual' else 'по расписанию' }}</td>
+      <td><span class="badge b-{{ 'approved' if r.status == 'done' else 'rejected' if r.status == 'failed' else 'discovered' }}">{{ r.status }}</span></td>
+      <td class="hint">{% for k, v in (r.counts or {}).items() %}{{ k }}:{{ v }} {% endfor %}</td>
+      <td class="hint">{{ (r.errors or [])|length }}{% if r.errors %} · {{ r.errors[0] }}{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">ещё не было прогонов — нажми «▶ Прогнать сейчас» выше или включи мастер-выключатель.</div>
+{% endif %}
+</div>
+
+<script>
+// прогрессбар свипа: тот же терминальный контракт, что и в domains.html (см. services/jobs.py).
+var JOB_RU = {sweep:'Свип автопилота'};
+function bar(){ return document.getElementById('prog'); }
+function setLabel(lbl, name, tail){
+  var b = document.createElement('b'); b.textContent = name;
+  lbl.replaceChildren(b);
+  if (tail) lbl.appendChild(document.createTextNode(' — ' + tail));
+}
+function render(job, p){
+  var el = bar(), lbl = el.querySelector('.lbl'), fill = el.querySelector('.fill'),
+      pct = el.querySelector('.pct'), name = JOB_RU[job] || job;
+  el.className = 'progress show';
+  if (p.error){ el.classList.add('err');
+    setLabel(lbl, name, 'ошибка: ' + p.error); pct.textContent=''; fill.style.width='100%'; return; }
+  if (p.running){
+    if (p.total>0){ fill.style.width=Math.round(p.done/p.total*100)+'%';
+      setLabel(lbl, name, p.current || ''); pct.textContent=p.done+'/'+p.total; }
+    else { el.classList.add('indet'); fill.style.width=''; setLabel(lbl, name, p.current || ''); pct.textContent='…'; }
+    return;
+  }
+  el.classList.add('done'); fill.style.width='100%';
+  setLabel(lbl, name, 'готово'); pct.textContent=p.done;
+}
+function poll(job){
+  fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
+    render(job, p);
+    if (p.error) return;
+    if (p.running){ setTimeout(()=>poll(job), 1500); }
+    else { setTimeout(()=>location.reload(), 800); }
+  }).catch(()=>{ setTimeout(()=>poll(job), 1500); });
+}
+fetch('/run/sweep/progress').then(r=>r.json())
+  .then(p=>{ if (p.running) poll('sweep'); else if (p.error) render('sweep', p); }).catch(()=>{});
+</script>
+{% endblock %}

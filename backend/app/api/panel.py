@@ -129,6 +129,16 @@ def _pool_counts(db: Session, s: dict) -> dict:
     return {"total": total, "rd": rd, "age": age, "approve": approve, "manual": manual}
 
 
+def _gates(db: Session) -> dict:
+    """Счётчики «ждёт тебя» у трёх человеческих гейтов (для экрана Автопилот + Пульта)."""
+    from app.models.domain import AcquisitionOrder
+    curate = db.scalar(select(func.count()).select_from(Domain).where(Domain.status == "scored")) or 0
+    money = db.scalar(select(func.count()).select_from(AcquisitionOrder).where(
+        AcquisitionOrder.status == "pending_confirm", AcquisitionOrder.confirmed_by_human.is_(False))) or 0
+    edit = db.scalar(select(func.count()).select_from(Page).where(Page.status == "draft")) or 0
+    return {"curate": curate, "money": money, "edit": edit}
+
+
 # ============================================================================
 # ЭКРАНЫ
 # ============================================================================
@@ -193,6 +203,15 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
     s = st.get_settings()
     return templates.TemplateResponse(request, "settings.html", {
         "active": "settings", "s": s, "counts": _pool_counts(db, s)})
+
+
+@router.get("/autopilot", response_class=HTMLResponse)
+def autopilot_view(request: Request, db: Session = Depends(get_session)):
+    from app.services.autonomy import get_autonomy
+    from app.models.autonomy import AutonomyRun
+    runs = db.execute(select(AutonomyRun).order_by(AutonomyRun.id.desc()).limit(10)).scalars().all()
+    return templates.TemplateResponse(request, "autopilot.html", {
+        "active": "autopilot", "a": get_autonomy(), "gates": _gates(db), "runs": runs})
 
 
 @router.get("/settings/preview")
@@ -279,7 +298,7 @@ def run_progress(job: str):
     from fastapi import HTTPException
     from fastapi.responses import JSONResponse
     from app.services import jobs
-    if job not in ("discovery", "score"):        # только известные джобы, не эхо любого пути
+    if job not in ("discovery", "score", "sweep"):   # только известные джобы, не эхо любого пути
         raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
     return JSONResponse(jobs.progress(job))
 
@@ -587,3 +606,32 @@ def settings_reset():
     from app.services import settings as st
     st.reset_settings()
     return _back("/settings", msg="Настройки сброшены к дефолтам")
+
+
+@router.post("/autopilot/settings")
+def autopilot_settings_save(
+        autopilot_on: str = Form(""), sweep_interval_min: int = Form(60),
+        auto_discovery: str = Form(""), auto_score: str = Form(""), auto_queue: str = Form(""),
+        auto_provision: str = Form(""), auto_generate: str = Form(""), auto_publish: str = Form(""),
+        auto_check_index: str = Form(""),
+        cap_score: int = Form(20), cap_queue: int = Form(10), cap_provision: int = Form(5),
+        cap_generate: int = Form(5), cap_publish: int = Form(5), cap_check_index: int = Form(20)):
+    from app.services.autonomy import update_autonomy
+    update_autonomy(
+        autopilot_on=bool(autopilot_on), sweep_interval_min=sweep_interval_min,
+        auto_discovery=bool(auto_discovery), auto_score=bool(auto_score), auto_queue=bool(auto_queue),
+        auto_provision=bool(auto_provision), auto_generate=bool(auto_generate),
+        auto_publish=bool(auto_publish), auto_check_index=bool(auto_check_index),
+        cap_score=cap_score, cap_queue=cap_queue, cap_provision=cap_provision,
+        cap_generate=cap_generate, cap_publish=cap_publish, cap_check_index=cap_check_index)
+    return _back("/autopilot", msg="Настройки автопилота сохранены")
+
+
+@router.post("/autopilot/run")
+def autopilot_run_action():
+    from app.services import orchestrator, jobs
+    ok = jobs.start("sweep", lambda: orchestrator.run_sweep(
+        trigger="manual", respect_master=False,
+        on_progress=lambda d, t, c: jobs.report("sweep", d, t, c)))
+    return _back("/autopilot", msg="Свип запущен…" if ok else None,
+                 err=None if ok else "Свип уже идёт")
