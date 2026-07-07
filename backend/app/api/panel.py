@@ -178,9 +178,10 @@ def diag_view(request: Request):
     from app.services.diagnostics import run_diagnostics, PING_TIMEOUT
     checks = run_diagnostics()
     ok = sum(1 for c in checks if c["status"] == "ok")
+    crit_down = [c["label"] for c in checks if c.get("critical") and c["status"] == "fail"]
     return templates.TemplateResponse(request, "diag.html", {
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
-        "timeout": PING_TIMEOUT,
+        "crit_down": crit_down, "timeout": PING_TIMEOUT,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
         "version": _version.current_version(),
     })

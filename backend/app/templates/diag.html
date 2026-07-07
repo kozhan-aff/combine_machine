@@ -3,7 +3,8 @@
 {% block content %}
 
 <h2><span class="idx">◉</span> Диагностика интеграций
-  <span class="hint">{{ ok }} / {{ total }} на связи · страница пингует все сервисы при каждом открытии</span></h2>
+  <span class="hint">{{ ok }} / {{ total }} на связи ·
+    {% if crit_down %}<b style="color:var(--bad)">критичные: {{ crit_down|join(', ') }} ✗</b>{% else %}<b style="color:var(--ok)">критичные: все ✓</b>{% endif %}</span></h2>
 
 <div class="card" style="max-width:920px; margin-bottom:14px">
   <b>Версия кода:</b>
@@ -22,31 +23,44 @@
   <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
 </div>
 
-<div class="wrap" style="margin-bottom:8px">
-<table>
-  <thead><tr>
-    <th>сервис</th><th>зачем он конвейеру</th><th>статус</th><th class="num">отклик</th><th>детали ошибки</th>
-  </tr></thead>
-  <tbody>
-  {% for c in checks %}
-    <tr>
-      <td class="dom">{{ c.label }}</td>
-      <td class="hint">{{ c.role }}</td>
-      <td>
-        {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
-        {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="в .env нет кредов для этого сервиса — пинг бессмысленен">пропущен</span>
-        {% else %}<span class="led led-bad"></span><span style="color:var(--bad)">FAIL</span>{% endif %}
-      </td>
-      <td class="num hint">{{ (c.ms ~ ' мс') if c.ms is not none else '—' }}</td>
-      <td class="hint" style="max-width:520px; overflow:hidden; text-overflow:ellipsis">{{ c.error or '' }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-<p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>OK — сервис отвечает и креды верны ·
-  <span class="led led-bad"></span>FAIL — не отвечает или отверг запрос (текст справа) ·
-  <span class="led led-off"></span>пропущен — заполни креды в <code>.env</code> и обнови страницу.</p>
+{% set mod_titles = {'M1':'M1 — поиск и скоринг','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
+{% for mod in ['M1','M3','M4','M5','инфра'] %}
+  {% set group = checks|selectattr('module','equalto',mod)|list %}
+  {% if group %}
+  <h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">{{ mod_titles[mod] }}</h2>
+  <div class="wrap" style="margin-bottom:8px">
+  <table>
+    <thead><tr>
+      <th>сервис</th><th>зачем он конвейеру</th><th>статус</th><th class="num">отклик</th><th>детали ошибки</th>
+    </tr></thead>
+    <tbody>
+    {% for c in group %}
+      <tr>
+        <td class="dom">{{ c.label }}{% if c.critical %}<span class="hint" title="критичная зависимость конвейера" style="color:var(--amber2)"> ●</span>{% endif %}</td>
+        <td class="hint">{{ c.role }}</td>
+        <td>
+          {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
+          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="в .env нет кредов — пинг бессмысленен">пропущен</span>
+          {% elif c.critical %}<span class="led led-bad"></span><b style="color:var(--bad)">FAIL</b>
+          {% else %}<span class="led led-bad"></span><span class="hint" title="опциональная зависимость — деградируемо">FAIL (опц.)</span>{% endif %}
+        </td>
+        <td class="num">
+          {% if c.ms is not none %}<span class="hint">{{ c.ms }} мс</span>
+            <span class="meter" style="width:48px" title="доля от таймаута пинга ({{ timeout|int }} с)"><i class="m-mid" style="width:{{ [ (c.ms/(timeout*10))|round|int, 100]|min }}%"></i></span>
+          {% else %}<span class="hint">—</span>{% endif %}
+        </td>
+        <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or '' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+{% endfor %}
+<p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>OK — отвечает и креды верны ·
+  <span class="led led-bad"></span>FAIL — не отвечает/отверг (текст справа) ·
+  <span class="led led-off"></span>пропущен — заполни креды в <code>.env</code> ·
+  <span style="color:var(--amber2)">●</span> критичная зависимость (без неё конвейер стоит).</p>
 
 <div class="station" style="max-width:920px">
   <div class="plate">⇩ Обновить из git — подтянуть свежий код <span class="mod">{{ repo }}</span></div>

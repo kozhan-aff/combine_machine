@@ -20,45 +20,44 @@ def _db_ping() -> bool:
 
 
 def _spec():
-    """Список проверок: (key, label, role, need_cred, factory→ping-callable).
+    """Список проверок: (key, label, role, need_cred, module, critical, factory→ping).
 
     role — роль в конвейере (для UI). need_cred — значение настройки, без которой
     пинг бессмысленен (пусто → skip). Ленивый импорт клиентов внутри лямбд, чтобы
     отсутствие опц. зависимостей не роняло всю страницу.
     """
     return [
-        ("cloudflare", "Cloudflare", "M3 · зоны/DNS", settings.CLOUDFLARE_API_TOKEN,
+        ("cloudflare", "Cloudflare", "M3 · зоны/DNS", settings.CLOUDFLARE_API_TOKEN, "M3", False,
          lambda: __import__("app.integrations.cloudflare", fromlist=["x"]).CloudflareClient().ping()),
-        ("aapanel", "aaPanel", "M3 · vhost/файлы", settings.AAPANEL_API_KEY,
+        ("aapanel", "aaPanel", "M3 · vhost/файлы", settings.AAPANEL_API_KEY, "M3", False,
          lambda: __import__("app.integrations.aapanel", fromlist=["x"]).AaPanelClient().ping()),
-        ("llm", "LiteLLM", "M4 · контент", settings.LLM_BASE_URL,
+        ("llm", "LiteLLM", "M4 · контент", settings.LLM_BASE_URL, "M4", True,
          lambda: __import__("app.integrations.llm", fromlist=["x"]).LlmClient().ping()),
-        ("searxng", "SearXNG", "M1/M5 · SERP/индекс", settings.SEARXNG_URL,
+        ("searxng", "SearXNG", "M1/M5 · SERP/индекс", settings.SEARXNG_URL, "M5", False,
          lambda: __import__("app.integrations.searxng", fromlist=["x"]).SearxngClient().ping()),
-        ("backorder", "Backorder", "M1 · discovery", "1",  # публичный фид, кред не нужен
+        ("backorder", "Backorder", "M1 · discovery", "1", "M1", True,  # публичный фид, кред не нужен
          lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
-        ("wayback", "Wayback", "M1 · история", "1",
+        ("wayback", "Wayback", "M1 · история", "1", "M1", True,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
-        ("rkn", "РКН (antizapret)", "M1 · блок-лист", settings.RKN_SOURCE_URL,
+        ("rkn", "РКН (antizapret)", "M1 · блок-лист", settings.RKN_SOURCE_URL, "M1", True,
          lambda: __import__("app.integrations.rkn", fromlist=["x"]).RknClient().ping()),
-        ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY,
+        ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
-        ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, _db_ping),
+        ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
     ]
 
 
-def _run_one(key, label, role, need_cred, fn) -> dict:
+def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
+    base = {"key": key, "label": label, "role": role, "module": module, "critical": critical}
     if not need_cred:
-        return {"key": key, "label": label, "role": role,
-                "status": "skip", "ms": None, "error": "нет кредов в .env"}
+        return {**base, "status": "skip", "ms": None, "error": "нет кредов в .env"}
     t0 = time.monotonic()
     try:
         ok = bool(fn())
-        return {"key": key, "label": label, "role": role,
-                "status": "ok" if ok else "fail",
+        return {**base, "status": "ok" if ok else "fail",
                 "ms": int((time.monotonic() - t0) * 1000), "error": None}
     except Exception as e:  # noqa: BLE001 — любой сбой интеграции = красный, не 500
-        return {"key": key, "label": label, "role": role, "status": "fail",
+        return {**base, "status": "fail",
                 "ms": int((time.monotonic() - t0) * 1000),
                 "error": f"{type(e).__name__}: {e}"[:200]}
 
@@ -75,14 +74,15 @@ def run_diagnostics(specs=None) -> list[dict]:
     results: dict[int, dict] = {}
     ex = ThreadPoolExecutor(max_workers=len(specs) or 1)
     try:
-        futs = {ex.submit(_run_one, k, lbl, role, cred, fn): i
-                for i, (k, lbl, role, cred, fn) in enumerate(specs)}
+        futs = {ex.submit(_run_one, k, lbl, role, cred, mod, crit, fn): i
+                for i, (k, lbl, role, cred, mod, crit, fn) in enumerate(specs)}
         for fut, i in futs.items():
-            k, lbl, role, cred, fn = specs[i]
+            k, lbl, role, cred, mod, crit, fn = specs[i]
             try:
                 results[i] = fut.result(timeout=PING_TIMEOUT)
             except FutTimeout:
-                results[i] = {"key": k, "label": lbl, "role": role, "status": "fail",
+                results[i] = {"key": k, "label": lbl, "role": role, "module": mod,
+                              "critical": crit, "status": "fail",
                               "ms": int(PING_TIMEOUT * 1000), "error": f"timeout > {PING_TIMEOUT:.0f}s"}
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
@@ -91,11 +91,11 @@ def run_diagnostics(specs=None) -> list[dict]:
 
 if __name__ == "__main__":  # self-check: ok/fail/skip/timeout ветки без сети
     specs = [
-        ("a", "A", "role", "1", lambda: True),
-        ("b", "B", "role", "1", lambda: False),
-        ("c", "C", "role", "", lambda: True),                        # skip: нет кред
-        ("d", "D", "role", "1", lambda: (_ for _ in ()).throw(RuntimeError("boom"))),
-        ("e", "E", "role", "1", lambda: time.sleep(2)),              # timeout (short, фон дотикает)
+        ("a", "A", "role", "1", "M1", True, lambda: True),
+        ("b", "B", "role", "1", "M1", True, lambda: False),
+        ("c", "C", "role", "", "M1", False, lambda: True),                        # skip: нет кред
+        ("d", "D", "role", "1", "M1", True, lambda: (_ for _ in ()).throw(RuntimeError("boom"))),
+        ("e", "E", "role", "1", "M1", True, lambda: time.sleep(2)),               # timeout
     ]
     PING_TIMEOUT = 0.5  # module-level rebind (this block runs at module scope)
     out = {r["key"]: r["status"] for r in run_diagnostics(specs)}

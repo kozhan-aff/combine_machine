@@ -147,6 +147,31 @@ def test_diag_includes_aparser_and_db():
     assert _db_ping() is True            # SELECT 1 на тестовой SQLite отвечает
 
 
+def test_diag_spec_has_module_and_critical():
+    from app.services.diagnostics import _spec
+    for row in _spec():
+        assert len(row) == 7                      # key,label,role,need_cred,module,critical,fn
+        key, label, role, need_cred, module, critical, fn = row
+        assert module in ("M1", "M3", "M4", "M5", "инфра")
+        assert isinstance(critical, bool)
+
+
+def test_run_diagnostics_propagates_module_critical(monkeypatch):
+    from app.services import diagnostics as dg
+    spec = [("x", "X", "M1 · тест", "1", "M1", True, lambda: True)]
+    out = dg.run_diagnostics(specs=spec)
+    assert out[0]["module"] == "M1" and out[0]["critical"] is True and out[0]["status"] == "ok"
+
+
+def test_diag_view_flags_critical_down(client, monkeypatch):
+    from app.services import diagnostics as dg
+    spec = [("a", "Крит", "M1 · крит", "1", "M1", True, lambda: (_ for _ in ()).throw(RuntimeError("down"))),
+            ("b", "Опц", "M3 · опц", "1", "M3", False, lambda: (_ for _ in ()).throw(RuntimeError("down")))]
+    monkeypatch.setattr(dg, "_spec", lambda: spec)
+    html = client.get("/diag").text
+    assert "Крит" in html                          # упавший критичный виден в сводке
+
+
 def test_settings_preview_rd_null_passes(client):
     """NULL RD проходит гейт RD в превью — зеркало воронки (T0 режет только известный RD < порога)."""
     with db.SessionLocal() as s:
