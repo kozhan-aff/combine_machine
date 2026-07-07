@@ -185,3 +185,19 @@ def test_settings_save_accepts_max_whois(client, sqlite_db):
         "min_referring_domains": 1, "min_age_years": 3, "approve_at": 0.7,
         "manual_review_at": 0.4, "max_whois_per_run": 77, "backorder": "on"})
     assert get_settings()["max_whois_per_run"] == 77
+
+
+# --- Task 2 (спек 2 лицо): локализация статусов/лейнов/reject через фильтры -------
+def test_domains_localized_labels(client, sqlite_db):
+    import app.db as db
+    from app.models.domain import Domain
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="loc.ru", source="backorder", status="approved",
+                     lane="bid", referring_domains=100))
+        s.add(Domain(domain="rej.ru", source="cctld", status="rejected",
+                     reject_reason="not_acquirable"))
+        s.commit()
+    html = client.get("/domains?show_all=1").text
+    assert "одобрен" in html and "отклонён" in html       # статусы по-русски
+    assert "ставка" in html                                # лейн по-русски
+    assert "нельзя купить" in html and "not_acquirable" in html  # reject: фраза + код

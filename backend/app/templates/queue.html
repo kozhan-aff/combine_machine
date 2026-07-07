@@ -28,7 +28,7 @@
       <td class="dom">{{ o.domain }}</td>
       <td class="hint">{{ o.provider }}</td>
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
-            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status }}</span></td>
+            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status|status_ru }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
       <td>
@@ -60,7 +60,7 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty">Очередь пуста. Одобренные домены (статус <span class="badge b-approved">approved</span>)
+<div class="empty">Очередь пуста. Одобренные домены (статус <span class="badge b-approved">{{ 'approved'|status_ru }}</span>)
   ставятся сюда кнопкой «＋ в очередь выкупа» на экране <a href="/domains?status=approved">Домены</a>.</div>
 {% endif %}
 </div>

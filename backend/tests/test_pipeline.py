@@ -276,7 +276,7 @@ def test_panel_screens_render(client, monkeypatch):
 
     r = client.get("/domains")               # M1: тулбар + контекстные действия
     assert r.status_code == 200
-    assert "Discovery" in r.text and "set-status" in r.text and "make-site" not in r.text
+    assert "Поиск дропов" in r.text and "set-status" in r.text and "make-site" not in r.text
     r = client.get("/domains?status=purchased")
     assert f"/sites/{site_id}" in r.text     # purchased с сайтом -> ссылка на карточку
 

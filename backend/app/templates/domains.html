@@ -3,12 +3,12 @@
 {% block content %}
 
 <h2><span class="idx">02</span> Домены · M1
-  <span class="hint">конвейер отбора: discovery → score → твоё решение → покупка руками</span></h2>
+  <span class="hint">конвейер отбора: поиск дропов → проверка → твоё решение → покупка руками</span></h2>
 
 {# ---- станции: каждое действие с шильдиком, что именно оно делает ---- #}
 <div class="stations">
   <div class="station">
-    <div class="plate">↻ Discovery — найти кандидатов <span class="mod">M1a · 4 источника (выбор в Настройках)</span></div>
+    <div class="plate">↻ Поиск дропов — найти кандидатов <span class="mod">M1a · 4 источника (выбор в Настройках)</span></div>
     <div class="what">Забирает список <b>освобождающихся доменов</b> из включённых источников
       (backorder / cctld / reg.ru / sweb — какие включены, смотри на /settings), дедуплицирует
       по домену (выигрывает строка с бо́льшим RD) и складывает новые в таблицу со статусом
@@ -16,7 +16,7 @@
       Повторный запуск дублей не создаёт.</div>
     <div class="go">
       <form method="post" action="/run/discovery">
-        <button class="btn-amber">↻ Запустить Discovery</button>
+        <button class="btn-amber">↻ Найти дропы</button>
       </form>
       <form method="post" action="/admin/refresh-prices" style="margin-top:6px">
         <button class="btn" title="перечитать базовую цену бэкордера и проставить приобретаемым">Обновить цены бэкордера</button>
@@ -25,7 +25,7 @@
   </div>
 
   <div class="station">
-    <div class="plate">▶ Score — оценить очередь <span class="mod">M1b · RD → возраст → РКН/блэклист → эхо → Wayback</span></div>
+    <div class="plate">▶ Запуск проверки — оценить очередь <span class="mod">M1b · RD → возраст → РКН/блэклист → эхо → Wayback</span></div>
     <div class="what">Прогоняет <b>discovered</b>-домены через воронку дёшево→дорого: RD из фида →
       whois-возраст → РКН/блэклисты → эхо в поисковом индексе → история Wayback (адалт/фарма/казино
       в прошлом — дорогая проверка, только для доменов, доживших до неё). Выставляет <b>score 0–1</b>
@@ -36,7 +36,7 @@
       <form method="post" action="/run/score" style="display:flex; gap:10px; align-items:end">
         <label class="f">доменов за запуск
           <input type="number" name="n" value="5" min="1" max="50" style="width:72px"></label>
-        <button class="btn-amber">▶ Запустить Score</button>
+        <button class="btn-amber">▶ Запустить проверку</button>
       </form>
       <form method="post" action="/run/score" style="margin-left:10px">
         <input type="hidden" name="n" value="100000">
@@ -80,21 +80,21 @@ function poll(job) {
 <details class="legend">
   <summary>Легенда: статусы доменов и колонки таблицы</summary>
   <div class="legend-grid">
-    <span class="badge b-discovered">discovered</span><span class="who">машина</span>
-      <span class="desc">найден в фиде, ещё не оценён — ждёт ▶ Score</span>
-    <span class="badge b-scored">scored</span><span class="who">машина</span>
+    <span class="badge b-discovered">{{ 'discovered'|status_ru }}</span><span class="who">машина</span>
+      <span class="desc">найден в фиде, ещё не оценён — ждёт ▶ Запуск проверки</span>
+    <span class="badge b-scored">{{ 'scored'|status_ru }}</span><span class="who">машина</span>
       <span class="desc">оценён, но не дотянул до авто-одобрения — реши сам: ✓ или ✗</span>
-    <span class="badge b-approved">approved</span><span class="who">машина / ты</span>
+    <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">машина / ты</span>
       <span class="desc">чистый и годный к выкупу — купи руками у провайдера, потом отметь 🛒</span>
-    <span class="badge b-rejected">rejected</span><span class="who">машина / ты</span>
-      <span class="desc">отклонён — причина в колонке «статус» (<code>reject_reason</code>):
+    <span class="badge b-rejected">{{ 'rejected'|status_ru }}</span><span class="who">машина / ты</span>
+      <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>):
       <code>low_rd</code> мало доноров, <code>feed_flag</code> флаг источника, <code>too_young</code>
       моложе порога, <code>rkn</code> реестр РКН, <code>blacklist</code> блэклист,
       <code>history_dirty</code> грязная история, <code>low_score</code> низкий скор,
       <code>not_acquirable</code> нельзя купить (занят, не на бэкордере)</span>
-    <span class="badge b-purchased">purchased</span><span class="who">только ты</span>
+    <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span><span class="who">только ты</span>
       <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
-    <span class="badge b-live">live</span><span class="who">машина</span>
+    <span class="badge b-live">{{ 'live'|status_ru }}</span><span class="who">машина</span>
       <span class="desc">сайт на домене опубликован и работает</span>
   </div>
   <div class="legend-grid" style="border-top:1px dashed var(--line)">
@@ -147,13 +147,13 @@ function poll(job) {
     <tr>
       <td class="dom">
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
-          title="источник: {{ d.source or '—' }} · лейн: {{ 'ставка' if d.lane=='bid' else 'свободный' if d.lane=='free' else '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}"
+          title="источник: {{ d.source or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}"
           >{{ {'backorder':'bo','cctld':'cc','reg_ru':'rg','sweb':'sw'}.get(d.source, (d.source or '?')[:2]) }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
            title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
-      <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status }}</span>
-        {% if d.reject_reason %}<code title="причина отклонения (reject_reason) — расшифровка в легенде">{{ d.reject_reason }}</code>{% endif %}</td>
-      <td><span class="hint">{{ 'ставка' if d.lane=='bid' else 'свободный' if d.lane=='free' else '—' }}</span></td>
+      <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status|status_ru }}</span>
+        {% if d.reject_reason %}<span class="hint" title="причина отклонения (reject_reason)">{{ d.reject_reason|reject_ru }} <code>{{ d.reject_reason }}</code></span>{% endif %}</td>
+      <td><span class="hint">{{ d.lane|lane_ru or '—' }}</span></td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td>
         {% if d.score is not none %}{% set sc = d.score|float %}
@@ -217,7 +217,7 @@ function poll(job) {
 </table>
 {% else %}
 <div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни со станции
-  «↻ Discovery» — фид принесёт свежие дропы, затем «▶ Score» их оценит.</div>
+  «↻ Поиск дропов» — фид принесёт свежие дропы, затем «▶ Запуск проверки» их оценит.</div>
 {% endif %}
 </div>
 

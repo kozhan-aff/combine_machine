@@ -10,7 +10,7 @@
 
 <h2><span class="idx">◈</span> {{ domain }}
   <span class="badge b-{{ site.status if site.status in ['provisioning','content','published'] else 'default' }}"
-        title="{{ {'provisioning':'ждёт провижна (шаг 3)','content':'инфраструктура готова — контент и редактура','published':'страницы опубликованы'}.get(site.status, site.status) }}">{{ site.status }}</span>
+        title="{{ {'provisioning':'ждёт провижна (шаг 3)','content':'инфраструктура готова — контент и редактура','published':'страницы опубликованы'}.get(site.status, site.status) }}">{{ site.status|status_ru }}</span>
   <span class="hint">сайт #{{ site.id }}{{ ' · zone ' + site.cf_zone_id if site.cf_zone_id }}</span>
 </h2>
 <p class="hint" style="margin:0 0 14px">Карточка ведёт по шагам сверху вниз. Индикатор слева:
@@ -132,7 +132,7 @@
       <td class="dom">{{ p.url_path }}</td>
       <td>{{ p.title or '—' }}</td>
       <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}"
-            title="{{ {'draft':'AI-черновик — публикация его не возьмёт','edited':'вычитано человеком — готово к публикации','published':'опубликовано на сайте'}.get(p.status, p.status) }}">{{ p.status }}</span></td>
+            title="{{ {'draft':'AI-черновик — публикация его не возьмёт','edited':'вычитано человеком — готово к публикации','published':'опубликовано на сайте'}.get(p.status, p.status) }}">{{ p.status|status_ru }}</span></td>
       <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>в индексе
           {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>не в индексе
           {% else %}<span class="led led-off"></span><span class="hint">не проверялось</span>{% endif %}</td>

@@ -65,7 +65,7 @@
     <div class="d">{{ s.domain }}</div>
     <div class="row">
       <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}"
-            title="{{ {'provisioning':'ждёт провижна: Cloudflare + vhost','content':'инфраструктура готова — этап контента','published':'страницы опубликованы'}.get(s.site.status, s.site.status) }}">{{ s.site.status }}</span>
+            title="{{ {'provisioning':'ждёт провижна: Cloudflare + vhost','content':'инфраструктура готова — этап контента','published':'страницы опубликованы'}.get(s.site.status, s.site.status) }}">{{ s.site.status|status_ru }}</span>
       <span class="hint">
         стр.: {{ s.pages.get('draft', 0) }} draft ·
         {{ s.pages.get('edited', 0) }} edited ·
@@ -79,7 +79,7 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">purchased</span> → кнопка «＋ создать сайт» на экране <a href="/domains">Домены</a>.</div>
+<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span> → кнопка «＋ создать сайт» на экране <a href="/domains">Домены</a>.</div>
 {% endif %}
 
 {% endblock %}
