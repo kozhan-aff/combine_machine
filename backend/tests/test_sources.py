@@ -136,6 +136,22 @@ def test_run_discovery_persists_acquirability(monkeypatch):
         assert d.lane == "bid" and d.visitors == 10 and d.tic == 20
 
 
+def test_canonical_domain():
+    from app.services.discovery import canonical_domain
+    assert canonical_domain("Пример.РФ") == "xn--e1afmkfd.xn--p1ai"
+    assert canonical_domain("xn--e1afmkfd.xn--p1ai") == "xn--e1afmkfd.xn--p1ai"   # уже punycode
+    assert canonical_domain("www.Example.COM.") == "example.com"                   # www + регистр + точка
+    assert canonical_domain("under_score.ru") is None                             # мусор
+    assert canonical_domain("") is None
+    assert canonical_domain("support@mail.ru") is None                            # e-mail — не домен
+
+
+def test_normalize_row_keeps_rf():
+    from app.services.discovery import normalize_row
+    nr = normalize_row({"domainname": "пример.рф", "links": "7"})
+    assert nr is not None and nr["domain"] == "xn--e1afmkfd.xn--p1ai"
+
+
 def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
     """Finding 5 (финальное ревью): падение одного источника не должно тонуть молча —
     остальные источники всё равно собираются (continue-семантика), но в лог уходит warning

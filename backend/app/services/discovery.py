@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")   # проверяем punycode-форму (ASCII)
 
 
 def _parse_deadline(val) -> datetime | None:
@@ -27,11 +27,26 @@ def _parse_deadline(val) -> datetime | None:
     return None
 
 
+def canonical_domain(raw) -> str | None:
+    """Единая канон-форма домена для ВСЕХ источников: lower, без www./точки, IDN→punycode.
+    None если не домен (мусор, e-mail, пустое, недопустимые метки)."""
+    s = (raw or "").strip().lower().rstrip(".")
+    if s.startswith("www."):
+        s = s[4:]
+    if not s or len(s) > 253 or "@" in s or " " in s:
+        return None
+    try:
+        puny = s.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return None                       # пустая метка, >63, недопустимый символ
+    return puny if _DOMAIN_RE.match(puny) else None
+
+
 def normalize_row(row: dict) -> dict | None:
     """Одна строка фида backorder -> нормализованный кандидат (или None если мусор).
     backorder — bid-лейн из источника; тянем дедлайн/visitors/tic (раньше выбрасывались)."""
-    domain = (row.get("domainname") or "").strip().lower().rstrip(".")
-    if not domain or len(domain) > 253 or not _DOMAIN_RE.match(domain):
+    domain = canonical_domain(row.get("domainname"))
+    if domain is None:
         return None
 
     def _int(v):
@@ -92,9 +107,10 @@ def run_discovery(on_progress=None) -> int:
     rows = _collect(get_settings()["sources_enabled"], on_progress)
     best: dict[str, dict] = {}
     for r in rows:
-        d = r.get("domain")
+        d = canonical_domain(r.get("domain"))      # единый ключ: сырые источники тоже канонятся
         if not d:
             continue
+        r["domain"] = d
         cur = best.get(d)
         if cur is None or (r.get("referring_domains") or 0) > (cur.get("referring_domains") or 0):
             best[d] = r
@@ -141,9 +157,9 @@ def run_discovery(on_progress=None) -> int:
 
 if __name__ == "__main__":  # pure normalize self-check (no network)
     nr = normalize_row({"domainname": "Example.COM.", "links": "12"})
-    assert nr["domain"] == "example.com" and nr["source"] == "backorder"
-    assert nr["referring_domains"] == 12 and nr["lane"] == "bid"
-    assert normalize_row({"domainname": "under_score.ru", "links": 1}) is None  # junk char
+    assert nr["domain"] == "example.com" and nr["referring_domains"] == 12 and nr["lane"] == "bid"
+    assert normalize_row({"domainname": "пример.рф", "links": 3})["domain"] == "xn--e1afmkfd.xn--p1ai"
+    assert normalize_row({"domainname": "under_score.ru", "links": 1}) is None
     assert normalize_row({"domainname": "", "links": 5}) is None
-    assert normalize_row({"domainname": "sub.dropzone.ru"})["referring_domains"] == 0
+    assert canonical_domain("www.a.ru") == "a.ru" and canonical_domain("x@y.ru") is None
     print("discovery normalize_row ok")
