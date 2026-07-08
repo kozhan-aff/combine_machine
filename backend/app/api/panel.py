@@ -23,12 +23,14 @@ from app.db import get_session
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
+from app.services import diag_cache
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import status_ru as _status_ru, reject_ru as _reject_ru, lane_ru as _lane_ru
 templates.env.filters["status_ru"] = _status_ru
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
+templates.env.globals["diag_alert"] = diag_cache.alert   # баннер в base.html читает кэш
 router = APIRouter()
 
 # ручная курация из шортлиста. 'purchased' = оператор купил домен руками — этот клик
@@ -188,8 +190,8 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
 @router.get("/diag", response_class=HTMLResponse)
 def diag_view(request: Request):
     from app.services import version as _version
-    from app.services.diagnostics import run_diagnostics, PING_TIMEOUT
-    checks = run_diagnostics()
+    from app.services.diagnostics import PING_TIMEOUT
+    checks = diag_cache.refresh()   # та же цена (живой прогон) + кладём в кэш -> баннер консистентен с /diag
     ok = sum(1 for c in checks if c["status"] == "ok")
     crit_down = [c["label"] for c in checks if c.get("critical") and c["status"] == "fail"]
     return templates.TemplateResponse(request, "diag.html", {
@@ -198,6 +200,15 @@ def diag_view(request: Request):
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
         "version": _version.current_version(),
     })
+
+
+@router.post("/diag/refresh")
+def diag_refresh(request: Request):
+    """Кнопка «перепроверить» в баннере: синхронный прогон диагностики (≤20с, пинги
+    параллельны), редирект назад — оператор остаётся на своём экране, баннер отражает свежий кэш."""
+    diag_cache.refresh()
+    back = request.headers.get("referer") or "/"
+    return _back(back, msg="Статусы внешних инструментов перепроверены")
 
 
 @router.get("/settings", response_class=HTMLResponse)

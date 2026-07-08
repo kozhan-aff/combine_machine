@@ -55,3 +55,30 @@ def test_sig_is_sorted_and_tracks_set(monkeypatch):
         ("aparser", "A-Parser", "fail")))
     diag_cache.refresh()
     assert diag_cache.alert()["sig"] == "aparser,cloudflare"   # sorted keys, детерминировано
+
+
+def test_diag_refresh_redirects_to_referer_and_updates_cache(client, monkeypatch):
+    calls = {"n": 0}
+
+    def fake():
+        calls["n"] += 1
+        return [{"key": "aparser", "label": "A-Parser", "status": "fail", "role": "",
+                 "module": "M1", "critical": True, "ms": 1, "error": None}]
+
+    monkeypatch.setattr("app.services.diag_cache.run_diagnostics", fake)
+    r = client.post("/diag/refresh", headers={"referer": "http://testserver/domains"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("http://testserver/domains")
+    assert "msg=" in r.headers["location"]
+    assert calls["n"] >= 1
+    assert diag_cache.alert()["down"] == ["A-Parser"]
+
+
+def test_diag_view_populates_cache(client, monkeypatch):
+    monkeypatch.setattr("app.services.diag_cache.run_diagnostics",
+                        lambda: [{"key": "llm", "label": "LiteLLM", "status": "ok", "role": "",
+                                  "module": "M4", "critical": True, "ms": 1, "error": None}])
+    r = client.get("/diag")
+    assert r.status_code == 200
+    assert diag_cache.alert() is not None      # /diag прогнал refresh -> кэш заполнен
