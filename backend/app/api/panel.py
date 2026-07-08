@@ -609,13 +609,13 @@ def check_updates_action():
 @router.post("/settings/save")
 def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
-                  max_whois_per_run: int = Form(200),
+                  max_whois_per_run: int = Form(200), max_ahrefs_per_run: int = Form(50),
                   backorder: str = Form(""), cctld: str = Form(""),
                   reg_ru: str = Form(""), sweb: str = Form("")):
     from app.services import settings as st
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
-                       max_whois_per_run=max_whois_per_run,
+                       max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,
                        sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
                                         "reg_ru": bool(reg_ru), "sweb": bool(sweb)})
     return _back("/settings", msg="Настройки сохранены")

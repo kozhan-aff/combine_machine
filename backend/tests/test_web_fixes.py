@@ -214,6 +214,15 @@ def test_settings_save_accepts_max_whois(client, sqlite_db):
     assert get_settings()["max_whois_per_run"] == 77
 
 
+def test_settings_save_accepts_max_ahrefs(client, sqlite_db):
+    from app.services.settings import get_settings
+    client.post("/settings/save", data={
+        "min_referring_domains": 1, "min_age_years": 3, "approve_at": 0.7,
+        "manual_review_at": 0.4, "max_whois_per_run": 200, "max_ahrefs_per_run": 5,
+        "backorder": "on"})
+    assert get_settings()["max_ahrefs_per_run"] == 5
+
+
 # --- Task 2 (спек 2 лицо): локализация статусов/лейнов/reject через фильтры -------
 def test_domains_localized_labels(client, sqlite_db):
     import app.db as db
