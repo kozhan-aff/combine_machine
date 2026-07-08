@@ -72,21 +72,18 @@ def compute_score(sig: dict) -> dict:
 
 def _make_clients() -> dict:
     """Собрать интеграционные клиенты один раз на прогон (переиспользуются между доменами)."""
-    from app.config import settings
     from app.integrations.wayback import WaybackClient
     from app.integrations.rkn import RknClient
     from app.integrations.blacklist import BlacklistClient
     from app.integrations.searxng import SearxngClient
-    from app.integrations.openpagerank import OpenPageRankClient
     from app.integrations.aparser import AParserClient
     return {
         "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
         "searxng": SearxngClient(), "aparser": AParserClient(),
-        "opr": OpenPageRankClient() if settings.OPENPAGERANK_API_KEY else None,
     }
 
 
-def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
+def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
     источников (backorder объявляет lane=bid сам). Дорогой Wayback (T3) — только для
@@ -184,15 +181,25 @@ def _funnel(d, c, st, sig, whois_budget=None) -> str | None:
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
         return "too_young"
 
-    if c["opr"] is not None:
+    # T3b — Ahrefs (дорого, капча за деньги): ТОЛЬКО если фид не дал RD (cctld/reg_ru/
+    # sweb — у backorder RD уже есть, повторно не проверяем) и бюджет жив.
+    # ahrefs_budget=None -> НЕ вызываем (в отличие от whois_budget=None=безлимит — Ahrefs
+    # платный, дефолт должен быть "выключено", а не "неограниченно").
+    if d.referring_domains is None and ahrefs_budget is not None and ahrefs_budget[0] > 0:
+        ahrefs_budget[0] -= 1
         try:
-            sig["dr"] = c["opr"].get_page_rank([d.domain]).get(d.domain)
+            ah = c["aparser"].ahrefs_probe(d.domain)
+            sig["dr"] = ah["dr"]
+            sig["ahrefs_backlinks"] = ah["backlinks"]
+            if ah["referring_domains"] is not None:
+                sig["referring_domains"] = ah["referring_domains"]
         except Exception as e:  # noqa: BLE001
-            sig["errors"].append(f"opr:{type(e).__name__}")
+            sig["errors"].append(f"ahrefs:{type(e).__name__}")
     return None
 
 
-def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None) -> dict:
+def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
+                 ahrefs_budget=None) -> dict:
     """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита)."""
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -208,7 +215,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None)
         c = clients or _make_clients()
         sig: dict = {"errors": []}
         sig["trademark_risk"] = d.trademark_risk
-        reject = _funnel(d, c, st, sig, whois_budget)
+        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget)
 
         if sig.get("acquirability_unresolved"):
             # приобретаемость не определена (whois сбой/непонятно/бюджет) — НЕ пишем,
@@ -240,9 +247,12 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None)
         d.indexed_echo = sig.get("indexed_echo")
         if sig.get("dr") is not None:
             d.dr = sig["dr"]
+        if sig.get("referring_domains") is not None:
+            d.referring_domains = sig["referring_domains"]
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
-        d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", [])}
+        d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
+                             "ahrefs_backlinks": sig.get("ahrefs_backlinks")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()
@@ -266,6 +276,7 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
         ).all()
     clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
     whois_budget = [int(st["max_whois_per_run"])]   # общий на прогон: cctld (RD=null) идёт последним
+    ahrefs_budget = [int(st["max_ahrefs_per_run"])]  # общий на прогон: платная капча, 0 = выключено
     total = len(rows)
     for i, (did, name) in enumerate(rows, 1):
         # репорт ДО скоринга: total известен сразу (бар не висит в 0/0), а current —
@@ -273,7 +284,7 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
         if on_progress:
             on_progress(i - 1, total, name)
         try:
-            score_domain(did, clients, whois_budget)
+            score_domain(did, clients, whois_budget, ahrefs_budget)
         except Exception:  # noqa: BLE001 — падение одного домена не топит батч (как в оркестраторе)
             logging.getLogger(__name__).exception("score_domain %s упал", name)
     if on_progress:

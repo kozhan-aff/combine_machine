@@ -60,11 +60,7 @@ class Settings(BaseSettings):
     # a-parser — whois/SERP/keywords (локальный бокс)
     APARSER_URL: str = "http://192.168.1.77:9091"
     APARSER_API_KEY: str = ""
-    APARSER_PROXY_CHECKER: str = "Free Proxy 2"  # имя прокси-чекера в A-Parser UI, box-specific
-
-    # openpagerank — DR-прокси, informational-only (вес=0). Free-регистрация закрыта
-    # после покупки Keywords Everywhere (2026); новый ключ не выдают. Старый ещё работает.
-    OPENPAGERANK_API_KEY: str = ""
+    APARSER_PROXY_CHECKER: str = "ipv6_free"  # имя прокси-чекера в A-Parser UI, box-specific
 
     # rkn — источник реестра (antizapret primary; z-i заморожен 2025-10)
     RKN_SOURCE_URL: str = "https://antizapret.prostovpn.org/domains-export.txt"

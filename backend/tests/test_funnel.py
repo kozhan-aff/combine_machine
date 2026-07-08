@@ -43,7 +43,7 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback, "opr": None}
+            "wayback": wayback}
 
 
 def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True):
@@ -57,7 +57,7 @@ def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True):
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wb, "opr": None}
+            "wayback": wb}
 
 
 def _id_of(domain: str):
@@ -341,3 +341,86 @@ def test_whois_budget_caps_run(monkeypatch, sqlite_db):
     with db.SessionLocal() as s:
         still = s.execute(_count_discovered()).scalar()
     assert still == 1                                          # один не обработан (бюджет исчерпан)
+
+
+class _AhrefsMock:
+    def __init__(self, dr=42, backlinks=500, referring_domains=300, raises=False):
+        self.calls = 0
+        self.dr, self.backlinks, self.referring_domains = dr, backlinks, referring_domains
+        self.raises = raises
+    def ahrefs_probe(self, domain):
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("captcha service down")
+        return {"dr": self.dr, "backlinks": self.backlinks, "referring_domains": self.referring_domains}
+
+
+def test_ahrefs_skipped_when_feed_has_referring_domains():
+    """Домен уже с RD из фида (backorder-like) -> Ahrefs НЕ вызывается, даже с живым
+    бюджетом — не дублируем платный вызов там, где фид уже дал число."""
+    did = _mk(domain="hasrd.ru", referring_domains=500, source="backorder", lane="bid")
+    wb = _Wayback()
+    ah = _AhrefsMock()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    clients = _clients(old, wb)
+    clients["aparser"].ahrefs_probe = ah.ahrefs_probe   # прикрутить мок Ahrefs к тому же aparser-дублёру
+    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
+    assert ah.calls == 0
+    assert out["status"] in ("approved", "scored")
+
+
+def test_ahrefs_called_when_feed_has_no_referring_domains_and_budget_positive():
+    """Домен без RD из фида (cctld/reg_ru/sweb-like), T3-выживший, живой бюджет ->
+    Ahrefs вызывается, DR/RD из него попадают в sig и в итоге в Domain."""
+    did = _mk(domain="nord.ru", referring_domains=None, source="cctld", lane="bid")
+    wb = _Wayback()
+    ah = _AhrefsMock(dr=55, backlinks=1000, referring_domains=200)
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    clients = _clients(old, wb)
+    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
+    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
+    assert ah.calls == 1
+    assert out["breakdown"]["components"]["authority"] > 0.0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.referring_domains == 200          # Ahrefs domains-count перезаписал None из фида
+    assert d.score_breakdown["ahrefs_backlinks"] == 1000   # informational (out["breakdown"] — только
+                                                           # result["breakdown"] из compute_score,
+                                                           # ahrefs_backlinks живёт в d.score_breakdown)
+
+
+def test_ahrefs_not_called_when_budget_is_none():
+    """ahrefs_budget=None (не передан явно) -> Ahrefs НЕ вызывается (opt-in, платный)."""
+    did = _mk(domain="nobudget.ru", referring_domains=None, source="cctld", lane="bid")
+    wb = _Wayback()
+    ah = _AhrefsMock()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    clients = _clients(old, wb)
+    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
+    scoring.score_domain(did, clients=clients)     # без ahrefs_budget
+    assert ah.calls == 0
+
+
+def test_ahrefs_not_called_when_budget_exhausted():
+    did = _mk(domain="exhausted.ru", referring_domains=None, source="cctld", lane="bid")
+    wb = _Wayback()
+    ah = _AhrefsMock()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    clients = _clients(old, wb)
+    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
+    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[0])
+    assert ah.calls == 0
+    assert out["status"] in ("approved", "scored", "rejected")   # не unresolved — не гейт приобретаемости
+
+
+def test_ahrefs_failure_does_not_crash_funnel():
+    did = _mk(domain="ahrefsdown.ru", referring_domains=None, source="cctld", lane="bid")
+    wb = _Wayback()
+    ah = _AhrefsMock(raises=True)
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    clients = _clients(old, wb)
+    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
+    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
+    assert ah.calls == 1
+    assert any(e.startswith("ahrefs:") for e in out["errors"])
+    assert out["breakdown"]["components"]["authority"] == 0.0   # сбой -> dr=None -> 0, не крэш

@@ -1,16 +1,14 @@
 """Tunable thresholds and weights for donor scoring. See docs/DONORS.md.
 
-v1 runs on the FREE stack (no backlink API): weight sits on clean history / age /
-RD-proxy / indexed-echo, NOT on RD-quality/anchors/topical (those need Ahrefs and are
-an optional later stage). All values are starting points — calibrate against real data.
-Every component lands in Domain.score_breakdown for transparency.
+v1 runs on the FREE stack (Wayback/RKN/Spamhaus/SearXNG) + Ahrefs DR/backlinks/
+referring-domains via A-Parser (RuCapcha Turnstile-solver — live-verified 2026-07-08,
+see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md). Every component lands in
+Domain.score_breakdown for transparency.
 
-# ponytail: OpenPageRank (DR-proxy) closed new free signups after the Keywords
-# Everywhere acquisition (2026). DR is now informational-only — computed if an old
-# OPR key still works, but carries ZERO weight. The free authority signal is RD
-# (referring_domains from the backorder feed). Add DR weight back only if you get a
-# paid key. RD_FULL is tuned so real dropped-domain RD (tens..thousands) spreads
-# instead of clamping everyone to 1.0 (which pinned every clean domain to one score).
+Ahrefs is called ONLY for T3 survivors the discovery feed didn't already give a
+referring-domains count for (cctld/reg_ru/sweb — backorder domains keep trusting the
+feed's own RD, no duplicate paid call), and only under the runtime `max_ahrefs_per_run`
+budget (services/settings.py) — it costs real money per captcha-solve.
 """
 
 # Stage B — light pre-filter (drop obvious garbage before the heavy Wayback pass).
@@ -18,7 +16,7 @@ Every component lands in Domain.score_breakdown for transparency.
 # domains for clean history, NOT for link juice.
 PREFILTER = {
     "min_referring_domains": 1,   # from feed `links`
-    "min_dr_proxy": 0.0,          # OpenPageRank 0..10; 0 = don't gate on it
+    "min_dr_proxy": 0.0,          # Ahrefs DR 0..100; 0 = don't gate on it
 }
 
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
@@ -26,19 +24,22 @@ PREFILTER = {
 HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling", "spam")  # prior_flags categories
 # also hard-reject on: rkn_listed, blacklisted is True, prior_flags.topic_switch
 
-# Stage F — composite weights (positives; sum = 1.0). Free-stack only.
-# NB: `authority` (DR) is intentionally absent — OPR is dead-free (see header); its
-# old 0.20 was folded into rd_proxy, the surviving free authority signal.
+# Stage F — composite weights (positives; sum = 1.0). Free-stack + Ahrefs (live-verified
+# 2026-07-08, see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).
+# `authority` (DR) now carries real weight — Ahrefs replaces the old free DR-proxy path
+# (see docs/api/openpagerank.md, deprecated).
 WEIGHTS = {
-    "history_cleanliness": 0.40,  # from Wayback prior_flags (spam etc.)
-    "age": 0.20,                  # Wayback first_seen, normalized by AGE_FULL
-    "rd_proxy": 0.30,             # referring_domains (feed `links`), log-normalized
-    "indexed_echo": 0.10,         # still in the index (SearXNG site:)
+    "history_cleanliness": 0.35,  # from Wayback prior_flags (spam etc.)
+    "age": 0.18,                  # Wayback first_seen, normalized by AGE_FULL
+    "rd_proxy": 0.27,             # referring_domains (feed `links` or Ahrefs `domains`), log-normalized
+    "indexed_echo": 0.08,         # still in the index (SearXNG site:)
+    "authority": 0.12,            # Ahrefs DR, normalized by DR_FULL
 }
 
 # Normalization anchors ("full credit" points) for the 0..1 components
 NORM = {
-    "DR_FULL": 6.0,      # OpenPageRank ~6 already strong (informational-only now)
+    "DR_FULL": 30.0,     # Ahrefs DR (0-100 scale) — 30+ is already strong for a drop-candidate,
+                         # NOT calibrated to sites like Wikipedia (DR 97, off the scale on purpose)
     "AGE_FULL": 8.0,     # years
     "RD_FULL": 3000.0,   # referring domains (log scale) — spreads real drop RD, was 100 (clamped all)
 }

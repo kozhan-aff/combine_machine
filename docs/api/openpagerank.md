@@ -1,4 +1,4 @@
-# OpenPageRank API (DomCop / Keywords Everywhere)
+# DEPRECATED — заменён Ahrefs (docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md): OpenPageRank API (DomCop / Keywords Everywhere)
 
 > Integration reference for `integrations/` transport layer. Used in M1 Domain
 > Intelligence, Stage B (metrics pre-filter, see `docs/DONORS.md`).

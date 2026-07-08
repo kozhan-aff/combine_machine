@@ -109,6 +109,32 @@ def test_rkn_or_blacklist_error_caps_at_scored():
     assert compute_score({**strong, "errors": ["blacklist:RuntimeError"]})["status"] == "scored"
 
 
+# ---------- Ahrefs: authority (DR) получает реальный вес ----------
+
+def test_authority_none_dr_contributes_zero():
+    from app.services.scoring import compute_score
+    out = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
+                         "referring_domains": 3000, "indexed_echo": True, "dr": None})
+    assert out["breakdown"]["components"]["authority"] == 0.0
+
+
+def test_authority_real_dr_contributes_nonzero():
+    from app.services.scoring import compute_score
+    from app.services import scoring_config as cfg
+    without_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
+                                "referring_domains": 3000, "indexed_echo": True, "dr": None})
+    with_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
+                             "referring_domains": 3000, "indexed_echo": True, "dr": 30})
+    assert with_dr["breakdown"]["components"]["authority"] > 0.0
+    assert with_dr["score"] > without_dr["score"]
+    assert "authority" in cfg.WEIGHTS and cfg.WEIGHTS["authority"] > 0
+
+
+def test_weights_still_sum_to_one():
+    from app.services import scoring_config as cfg
+    assert abs(sum(cfg.WEIGHTS.values()) - 1.0) < 1e-9
+
+
 # ---------- I2: DNS_RESOLVER + sentinel заблокированного резолвера ----------
 
 def test_blacklist_sentinel_raises(monkeypatch):
@@ -431,11 +457,11 @@ def test_score_pending_isolates_failure(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
     real = scoring.score_domain
-    def _boom(did, clients=None, whois_budget=None):
+    def _boom(did, clients=None, whois_budget=None, ahrefs_budget=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
-        return real(did, clients, whois_budget)
+        return real(did, clients, whois_budget, ahrefs_budget)
     monkeypatch.setattr(scoring, "score_domain", _boom)
     # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)

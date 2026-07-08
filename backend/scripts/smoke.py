@@ -27,7 +27,6 @@ def main() -> None:
     from app.integrations.wayback import WaybackClient
     from app.integrations.rkn import RknClient
     from app.integrations.backorder import BackorderClient
-    from app.integrations.openpagerank import OpenPageRankClient
     from app.integrations.aparser import AParserClient
 
     print("— free / локальные (Фаза 0, без кредов) —")
@@ -40,10 +39,6 @@ def main() -> None:
         check("a-parser", lambda: AParserClient().ping())
     else:
         skip("a-parser", "нет APARSER_API_KEY")
-    if settings.OPENPAGERANK_API_KEY:
-        check("openpagerank", lambda: OpenPageRankClient().ping())
-    else:
-        skip("openpagerank", "нет OPENPAGERANK_API_KEY (free-ключ, 2 мин)")
 
     print("— credentialed (реализуются позже, при наличии кредов) —")
     for name in ("cloudflare", "aapanel", "optimizator", "registrar"):
