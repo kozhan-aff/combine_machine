@@ -58,6 +58,17 @@ class BackorderClient(BaseClient):
         })
         data = r.json()
         rows = data if isinstance(data, list) else []
+
+        def _links(row):    # фид отдаёт links строкой ("5") — сравнивать строку с int нельзя
+            try:
+                return int(row.get("links"))
+            except (TypeError, ValueError):
+                return 0
+        bad = [row for row in rows if isinstance(row, dict) and _links(row) < min_links]
+        if bad:
+            import logging
+            logging.getLogger(__name__).warning(
+                "backorder: %d/%d строк с links<%d — фильтр не применился?", len(bad), len(rows), min_links)
         return rows[:limit]
 
     def order(self, domain: str, price_id: str, period_id: str) -> dict:

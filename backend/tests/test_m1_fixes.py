@@ -299,3 +299,40 @@ def test_blacklist_none_goes_to_errors_and_downgrades(monkeypatch):
     # прямой юнит на _decide: approved + blacklist-ошибка -> scored
     sig_err = {"errors": ["blacklist:unavailable"]}
     assert scoring._decide(0.9, sig_err, 0.7, 0.4) == "scored"
+
+
+# ---------- M9: status-gate — рескорится только discovered/scored/rejected ----------
+
+def test_score_only_discovered_status(monkeypatch):
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+    with db.SessionLocal() as s:
+        d = Domain(domain="live.ru", source="backorder", status="live", lane="bid")
+        s.add(d); s.commit(); did = d.id
+    out = scoring.score_domain(did)
+    assert out.get("skipped") == "status"                   # live не рескорится
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "live"          # статус цел
+
+
+# ---------- M12: score_pending изолирует падение одного домена ----------
+
+def test_score_pending_isolates_failure(monkeypatch):
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+    with db.SessionLocal() as s:
+        s.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
+                          lane="bid", referring_domains=i) for i in range(3)]); s.commit()
+    calls = {"n": 0}
+    real = scoring.score_domain
+    def _boom(did, clients=None, whois_budget=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return real(did, clients, whois_budget)
+    monkeypatch.setattr(scoring, "score_domain", _boom)
+    # не должно упасть, остальные 2 обработаны
+    n = scoring.score_pending(limit=10)
+    assert n == 3 and calls["n"] == 3

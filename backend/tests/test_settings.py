@@ -42,4 +42,15 @@ def test_max_whois_per_run_default_and_clamp():
     assert get_settings()["max_whois_per_run"] == 200          # дефолт
     assert update_settings(max_whois_per_run=50)["max_whois_per_run"] == 50
     assert update_settings(max_whois_per_run=999999)["max_whois_per_run"] == 5000  # верхний кламп
-    assert update_settings(max_whois_per_run=-5)["max_whois_per_run"] == 0         # нижний кламп
+    assert update_settings(max_whois_per_run=-5)["max_whois_per_run"] == 1         # нижний кламп (M13, >=1)
+
+
+def test_approve_clamped_above_manual():
+    from app.services import settings
+    out = settings.update_settings(approve_at=0.3, manual_review_at=0.8)
+    assert out["approve_at"] >= out["manual_review_at"]      # инверсия не записывается
+
+
+def test_max_whois_min_one():
+    from app.services import settings
+    assert settings.update_settings(max_whois_per_run=0)["max_whois_per_run"] >= 1

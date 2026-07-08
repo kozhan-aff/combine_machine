@@ -4,6 +4,7 @@ Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo 
 -> composite score + breakdown -> status approved | scored(manual) | rejected.
 `compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
 """
+import logging
 import math
 from app.services import scoring_config as cfg
 
@@ -202,8 +203,11 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None)
         d = db.get(Domain, domain_id)
         if d is None:
             raise ValueError(f"domain {domain_id} not found")
+        if d.status not in ("discovered", "scored", "rejected"):
+            return {"domain": d.domain, "status": d.status, "skipped": "status"}
         c = clients or _make_clients()
         sig: dict = {"errors": []}
+        sig["trademark_risk"] = d.trademark_risk
         reject = _funnel(d, c, st, sig, whois_budget)
 
         if sig.get("acquirability_unresolved"):
@@ -268,7 +272,10 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
         # домен, который сейчас в работе (whois/Wayback идут секунды, оператор видит кого).
         if on_progress:
             on_progress(i - 1, total, name)
-        score_domain(did, clients, whois_budget)
+        try:
+            score_domain(did, clients, whois_budget)
+        except Exception:  # noqa: BLE001 — падение одного домена не топит батч (как в оркестраторе)
+            logging.getLogger(__name__).exception("score_domain %s упал", name)
     if on_progress:
         on_progress(total, total, "")   # все готовы
     return total

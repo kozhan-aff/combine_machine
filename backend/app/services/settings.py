@@ -11,7 +11,7 @@ _BOUNDS = {                       # (min, max) для валидации пол�
     "min_age_years": (0.0, 30.0),
     "approve_at": (0.0, 1.0),
     "manual_review_at": (0.0, 1.0),
-    "max_whois_per_run": (0, 5000),
+    "max_whois_per_run": (1, 5000),
 }
 
 
@@ -66,6 +66,10 @@ def update_settings(**kw) -> dict:
         if "sources_enabled" in kw and isinstance(kw["sources_enabled"], dict):
             r.sources_enabled = {s: bool(kw["sources_enabled"].get(s, False))
                                  for s in cfg.SOURCES_ENABLED}
+        if r.max_whois_per_run < 1:
+            r.max_whois_per_run = 1                 # 0 глушил бы скоринг целиком
+        if r.approve_at < r.manual_review_at:
+            r.approve_at = r.manual_review_at       # инверсия порогов -> approve не ниже manual
         db.commit()
     return get_settings()
 
