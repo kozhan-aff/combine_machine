@@ -259,3 +259,64 @@ def test_regru_drops_ping(monkeypatch):
         text = "<html>ничего нет</html>"
     monkeypatch.setattr(c, "request", lambda method, url, **kw: _Empty())
     assert c.ping() is False
+
+
+def test_sweb_drops_excludes_dates_sharing_class_with_domain(monkeypatch):
+    """Регрессия (найдена при ревью спеки, 2026-07-08): domains-deleted__text — ОБЩИЙ
+    класс для домена И обеих дат (регистрация/освобождение), в отличие от reg.ru тут нет
+    отдельного "первая колонка" маркера. Наивный якорь на класс поймал бы '07.07.2026'
+    как домен (три числовые группы через точку проходят простую проверку домен-формы).
+    Якорь на label='Домен' должен вернуть только реальные домены."""
+    from app.integrations.sweb_drops import SwebDropsClient
+    c = SwebDropsClient()
+    html = (
+        '<li class="domains-deleted__item">'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Домен</span>'
+        '<span class="domains-deleted__text">first-drop.ru</span></div>'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Первичная регистрация</span>'
+        '<span class="domains-deleted__text">03.06.2022</span></div>'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Дата освобождения</span>'
+        '<span class="domains-deleted__text">07.07.2026</span></div>'
+        '</li>'
+        '<li class="domains-deleted__item">'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Домен</span>'
+        '<span class="domains-deleted__text">second-drop.ru</span></div>'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Первичная регистрация</span>'
+        '<span class="domains-deleted__text">12.11.2012</span></div>'
+        '<div class="domains-deleted__item-row">'
+        '<span class="domains-deleted__label">Дата освобождения</span>'
+        '<span class="domains-deleted__text">07.07.2026</span></div>'
+        '</li>'
+    )
+
+    class _Resp:
+        text = html
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Resp())
+    rows = c.list_dropping()
+    domains = [r["domain"] for r in rows]
+    assert domains == ["first-drop.ru", "second-drop.ru"]
+    assert "03.06.2022" not in domains
+    assert "07.07.2026" not in domains
+    assert "12.11.2012" not in domains
+    assert all(r["source"] == "sweb" and r["referring_domains"] is None for r in rows)
+
+
+def test_sweb_drops_ping(monkeypatch):
+    from app.integrations.sweb_drops import SwebDropsClient
+    c = SwebDropsClient()
+
+    class _Ok:
+        text = ('<span class="domains-deleted__label">Домен</span>'
+                '<span class="domains-deleted__text">x.ru</span>')
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Ok())
+    assert c.ping() is True
+
+    class _Empty:
+        text = "<html>ничего нет</html>"
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Empty())
+    assert c.ping() is False
