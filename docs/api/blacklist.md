@@ -305,6 +305,13 @@ Key points:
 
 ## Recommendation for our volume
 
+**Реализовано (2026-07-08):** `unbound` поднят в `docker-compose.yml` (сервис `unbound`,
+сеть `combine`, статический `172.28.0.53` — dnspython принимает только IP-литерал, не имя
+сервиса). `DNS_RESOLVER=172.28.0.53` в `.env.example`. `integrations/blacklist.py` уже читал
+`settings.DNS_RESOLVER` (и `ping()`, и `is_blacklisted()`/`_resolve()` — единый путь). На
+боксе: раскатать compose-изменения, задать `DNS_RESOLVER` в `.env`, `↻ перепроверить` на
+`/diag`. Free DQS-ключ (вариант 2 ниже) не подключён — не нужен, пока `unbound` работает.
+
 Our M1 volume is **modest** (we score a stream of drop candidates, not mail-server-scale
 millions/day). Two viable setups:
 

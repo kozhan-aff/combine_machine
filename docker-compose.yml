@@ -1,4 +1,15 @@
 services:
+  unbound:
+    # Собственный рекурсивный резолвер: Spamhaus/SURBL блокируют публичные резолверы
+    # (8.8.8.8/1.1.1.1) как shared/anonymous — см. docs/api/blacklist.md. Статический IP
+    # в сети combine, т.к. dnspython (DNS_RESOLVER) принимает только IP-литерал, не имя
+    # сервиса. Без ports: — нужен только внутри docker-сети, наружу не торчит.
+    image: mvance/unbound:latest
+    restart: unless-stopped
+    networks:
+      combine:
+        ipv4_address: 172.28.0.53
+
   db:
     image: postgres:16
     environment:
@@ -14,6 +25,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - combine
 
   backend:
     build: ./backend
@@ -21,6 +34,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - combine
     ports:
       # EXPOSED ON LAN (trusted home network). The panel/pipeline have NO auth, so this is
       # safe ONLY behind the home router's NAT — never port-forward :8000 to the internet.
@@ -46,9 +61,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - combine
     volumes:
       - ./backend:/app
     command: python -m app.workers.scheduler
+
+networks:
+  combine:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   pgdata:
