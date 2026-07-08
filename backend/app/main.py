@@ -1,14 +1,37 @@
 """FastAPI entrypoint. Include routers from app.api as they are implemented."""
+import asyncio
 import base64
 import secrets
+from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
 from app.config import settings
+from app.services import diag_cache
 
-app = FastAPI(title="VPN Affiliate Portfolio")
+
+async def _diag_loop():
+    """Фоново обновляет кэш диагностики раз в REFRESH_SEC — держит глобальный баннер
+    свежим. Шедулер-воркер — отдельный процесс docker-compose, до памяти панели не
+    достаёт, поэтому автопроверка живёт здесь, внутри процесса панели."""
+    while True:
+        try:
+            await asyncio.to_thread(diag_cache.refresh)
+        except Exception:  # noqa: BLE001 — диагностика не должна ронять панель; следующий цикл повторит
+            pass
+        await asyncio.sleep(diag_cache.REFRESH_SEC)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(_diag_loop())   # первая проверка сразу, в фоне (старт не ждёт 20с пингов)
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="VPN Affiliate Portfolio", lifespan=lifespan)
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
