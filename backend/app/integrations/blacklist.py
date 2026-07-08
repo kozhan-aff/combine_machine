@@ -74,7 +74,11 @@ class BlacklistClient:
         return False
 
     def ping(self) -> bool:
+        """Тест-поинт через _resolve() — тот же DNS_RESOLVER-путь, что и реальный гейт
+        (is_blacklisted), иначе на боксе с публичным системным DNS Spamhaus блокирует
+        голый socket.gethostbyname и /diag врёт «down» при исправном гейте."""
         try:
-            return socket.gethostbyname(_TESTPOINT).startswith("127.")
+            ip = self._resolve(_TESTPOINT)
         except OSError:
             return False
+        return bool(ip and ip.startswith("127."))

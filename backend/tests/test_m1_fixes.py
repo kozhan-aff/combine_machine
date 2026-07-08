@@ -163,6 +163,48 @@ def test_blacklist_uses_custom_resolver(monkeypatch):
     assert used["ns"] == ["9.9.9.9"]   # запрос ушёл через заданный резолвер
 
 
+# ---------- T2 (бэклог аудита M1): ping() игнорил DNS_RESOLVER ----------
+
+def test_blacklist_ping_uses_custom_resolver(monkeypatch):
+    """ping() раньше резолвил тест-поинт голым socket.gethostbyname — на боксе с
+    публичным системным DNS Spamhaus блокирует его, и /diag показывал ложный down
+    даже когда реальный гейт (is_blacklisted) работал через DNS_RESOLVER. ping()
+    должен идти тем же путём, что и is_blacklisted/_resolve."""
+    from app.config import settings
+    from app.integrations.blacklist import BlacklistClient
+    import dns.resolver
+    monkeypatch.setattr(settings, "DNS_RESOLVER", "9.9.9.9")
+    used = {}
+
+    class _Rec:
+        address = "127.0.1.2"
+
+    class _Answer:
+        def __getitem__(self, i):
+            return _Rec()
+
+    class FakeResolver:
+        def __init__(self, configure=True):
+            self.nameservers = []
+
+        def resolve(self, host, rtype):
+            used["ns"] = list(self.nameservers)
+            return _Answer()
+
+    monkeypatch.setattr(dns.resolver, "Resolver", FakeResolver)
+    assert BlacklistClient().ping() is True
+    assert used["ns"] == ["9.9.9.9"]   # ping тоже идёт через кастомный резолвер, не socket.gethostbyname
+
+
+def test_blacklist_ping_falls_back_to_socket_when_no_resolver(monkeypatch):
+    """DNS_RESOLVER не задан -> прежнее поведение (системный резолвер) не сломано."""
+    from app.config import settings
+    from app.integrations.blacklist import BlacklistClient
+    monkeypatch.setattr(settings, "DNS_RESOLVER", "")
+    monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.1.2")
+    assert BlacklistClient().ping() is True
+
+
 # ---------- I3: обрезанный дамп РКН не кэшируется молча ----------
 
 class _FakeResp:
