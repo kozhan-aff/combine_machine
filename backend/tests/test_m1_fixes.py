@@ -205,6 +205,45 @@ def test_blacklist_ping_falls_back_to_socket_when_no_resolver(monkeypatch):
     assert BlacklistClient().ping() is True
 
 
+# ---------- Spamhaus DQS-ключ: keyed-зона вместо публичной (residential-IP блок) ----------
+
+def test_blacklist_uses_dqs_zone_when_key_set(monkeypatch):
+    """SPAMHAUS_DQS_KEY задан -> и control-проба, и реальный запрос идут в
+    <label>.<key>.dbl.dq.spamhaus.net, а не в публичную dbl.spamhaus.org (которую
+    Spamhaus блокирует для residential/generic-rDNS египресса — см. blacklist.py докстринг)."""
+    from app.config import settings
+    from app.integrations.blacklist import BlacklistClient
+    monkeypatch.setattr(BlacklistClient, "_control_ok", None)
+    monkeypatch.setattr(settings, "DNS_RESOLVER", "")
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "abcd1234efgh5678ijkl9012mn")
+    seen = []
+
+    def fake_gethostbyname(host):
+        seen.append(host)
+        return "127.0.1.2"
+    monkeypatch.setattr(socket, "gethostbyname", fake_gethostbyname)
+    assert BlacklistClient().is_blacklisted("spammy.com") is True
+    assert seen == [
+        "test.abcd1234efgh5678ijkl9012mn.dbl.dq.spamhaus.net",
+        "spammy.com.abcd1234efgh5678ijkl9012mn.dbl.dq.spamhaus.net",
+    ]
+
+
+def test_blacklist_ping_uses_dqs_zone_when_key_set(monkeypatch):
+    from app.config import settings
+    from app.integrations.blacklist import BlacklistClient
+    monkeypatch.setattr(settings, "DNS_RESOLVER", "")
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "abcd1234efgh5678ijkl9012mn")
+    seen = []
+
+    def fake_gethostbyname(host):
+        seen.append(host)
+        return "127.0.1.2"
+    monkeypatch.setattr(socket, "gethostbyname", fake_gethostbyname)
+    assert BlacklistClient().ping() is True
+    assert seen == ["test.abcd1234efgh5678ijkl9012mn.dbl.dq.spamhaus.net"]
+
+
 # ---------- I3: обрезанный дамп РКН не кэшируется молча ----------
 
 class _FakeResp:

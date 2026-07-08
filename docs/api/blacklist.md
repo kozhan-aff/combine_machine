@@ -307,10 +307,22 @@ Key points:
 
 **Реализовано (2026-07-08):** `unbound` поднят в `docker-compose.yml` (сервис `unbound`,
 сеть `combine`, статический `172.28.0.53` — dnspython принимает только IP-литерал, не имя
-сервиса). `DNS_RESOLVER=172.28.0.53` в `.env.example`. `integrations/blacklist.py` уже читал
-`settings.DNS_RESOLVER` (и `ping()`, и `is_blacklisted()`/`_resolve()` — единый путь). На
-боксе: раскатать compose-изменения, задать `DNS_RESOLVER` в `.env`, `↻ перепроверить` на
-`/diag`. Free DQS-ключ (вариант 2 ниже) не подключён — не нужен, пока `unbound` работает.
+сервиса). `DNS_RESOLVER=172.28.0.53` в `.env.example`. На живом боксе (residential IP)
+`unbound` снял блокировку "public resolver" (8.8.8.8/1.1.1.1), но **Spamhaus всё равно
+вернул `127.255.255.254`** — свой резолвер не помогает против блока по generic-rDNS/
+residential-IP самого egress'а, это отдельная причина того же кода (см. таблицу выше).
+**Фикс (2026-07-08):** `SPAMHAUS_DQS_KEY` вайрен в `integrations/blacklist.py`
+(`_dbl_host()`) — если ключ задан, DBL-запросы (и control-проба, и `ping()`) уходят в
+приватную `<label>.<key>.dbl.dq.spamhaus.net` вместо публичной `dbl.spamhaus.org`; DQS
+аутентифицируется ключом, а не source-IP, поэтому residential-блок не применяется. Нужно
+только получить бесплатный DQS-ключ (≤100k/день, регистрация на spamhaus.com) и положить
+в `.env` бокса — код уже готов, доп. правок не требует. **SURBL отключён** (тот же
+residential-блок, `127.0.0.1`, но у SURBL нет бесплатной keyed-альтернативы — только
+платный фид) — `integrations/blacklist.py` больше не запрашивает `multi.surbl.org` вообще
+(решение принято пользователем 2026-07-08: мириться без него, чем заваливать risk-guard
+в вечный manual review). `unbound`-инфраструктура остаётся нужной как транспорт для
+DQS-запросов (свой `DNS_RESOLVER`), просто одного её недостаточно против этого конкретного
+кода ошибки.
 
 Our M1 volume is **modest** (we score a stream of drop candidates, not mail-server-scale
 millions/day). Two viable setups:

@@ -1,25 +1,36 @@
 """Spam blacklist check (Stage E). See docs/api/blacklist.md.
 
-DNS-based domain lists: Spamhaus DBL, SURBL. Query <domain>.<zone> for an A record;
-NXDOMAIN = not listed, 127.0.x.y = listed, 127.255.255.x = lookup unavailable (public
-resolver blocked / over quota) -> RAISE (never treat as clean OR as a hit).
+Spamhaus DBL: query <domain>.dbl.spamhaus.org for an A record; NXDOMAIN = not listed,
+127.0.x.y = listed, 127.255.255.x = lookup unavailable (public resolver blocked / over
+quota) -> RAISE (never treat as clean OR as a hit).
+
+With SPAMHAUS_DQS_KEY set, the query moves to <domain>.<key>.dbl.dq.spamhaus.net instead
+— DQS is keyed (authenticates by account, not source IP), so it is not subject to the
+open-resolver/residential-IP block that the free public zone enforces (same 127.* codes).
+
+SURBL is DISABLED (2026-07-08): the free public `multi.surbl.org` zone returns
+`127.0.0.1` (access blocked) from a residential egress IP exactly like Spamhaus used to
+before DQS — but SURBL has no free keyed alternative (only a paid data feed, see
+docs/api/blacklist.md). Querying it would just poison every domain's risk-guard into
+permanent manual review for a check that can never succeed here. Re-enable if a clean
+egress (e.g. routed via a hosting-provider VPS) or a paid SURBL feed becomes available.
 
 Fail-closed control probe: many public resolvers don't return the 127.255.255.x sentinel
 at all for Spamhaus zones — they just NXDOMAIN everything under dbl.spamhaus.org, including
 the always-listed test point. That silently reads as "clean" unless we explicitly verify the
-resolver can see Spamhaus at all first: `test.dbl.spamhaus.org` is guaranteed listed
+resolver can see Spamhaus at all first: the permanent test entry is guaranteed listed
 (127.0.1.2); if OUR resolver can't resolve it to a 127.* address, the zone is unreachable and
 we must not trust any "not listed" result from it -> RAISE (fail-closed), scoring routes the
 domain to manual `scored` instead of silently passing the gate.
 
-Spamhaus blocks public resolvers (8.8.8.8/1.1.1.1): set DNS_RESOLVER to your own unbound
-(then queries go through dnspython), or use SPAMHAUS_DQS_KEY.
+Spamhaus blocks public resolvers (8.8.8.8/1.1.1.1) AND residential/generic-rDNS egress IPs
+on its free public zone: set DNS_RESOLVER to your own unbound (fixes the public-resolver
+case only), or set SPAMHAUS_DQS_KEY (free, lifts both restrictions).
 """
 import socket
 from app.config import settings
 
-_ZONES = ("dbl.spamhaus.org", "multi.surbl.org")
-_TESTPOINT = "test.dbl.spamhaus.org"     # всегда листнут (127.0.1.2) — контроль доступности
+_TESTPOINT = "test"     # DBL-домен, всегда листнут (127.0.1.2) — контроль доступности
 
 
 class BlacklistClient:
@@ -44,41 +55,49 @@ class BlacklistClient:
                 return None                   # настоящий NXDOMAIN — не листнут в этой зоне
             raise                             # резолвер/сеть отвалились — вверх, не «чисто»
 
+    def _dbl_host(self, label: str) -> str:
+        """label — домен на проверку либо литерал _TESTPOINT. С SPAMHAUS_DQS_KEY уходит
+        в приватную keyed-зону вместо публичной (не блокируется как public/residential)."""
+        if settings.SPAMHAUS_DQS_KEY:
+            return f"{label}.{settings.SPAMHAUS_DQS_KEY}.dbl.dq.spamhaus.net"
+        return f"{label}.dbl.spamhaus.org"
+
     def _ensure_control(self) -> None:
         """Тест-поинт Spamhaus всегда листнут; если наш резолвер его не видит —
         публичный резолвер заблокирован, проверка бессмысленна → RAISE (fail-closed)."""
         if BlacklistClient._control_ok is None:
             try:
-                ip = self._resolve(_TESTPOINT)
+                ip = self._resolve(self._dbl_host(_TESTPOINT))
             except OSError:
                 ip = None
             BlacklistClient._control_ok = bool(ip and ip.startswith("127."))
         if not BlacklistClient._control_ok:
             raise RuntimeError(
-                "blacklist: резолвер не видит Spamhaus (тест-поинт не листнут) — задай DNS_RESOLVER")
+                "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
+                "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
 
     def is_blacklisted(self, domain: str) -> bool | None:
-        """True = листнут, False = чист на всех зонах, None = транзиентный сбой резолвера."""
+        """True = листнут в Spamhaus DBL, False = чист, None = транзиентный сбой резолвера.
+        SURBL не проверяется — см. докстринг модуля."""
         self._ensure_control()
-        for zone in _ZONES:
-            try:
-                ip = self._resolve(f"{domain}.{zone}")
-            except OSError:
-                return None                   # транзиент -> None -> scoring уведёт в errors
-            if ip is None:
-                continue
-            if ip.startswith("127.255.255."):
-                raise RuntimeError("Spamhaus blocked public resolver — задай DNS_RESOLVER")
-            if ip.startswith("127."):
-                return True
-        return False
+        try:
+            ip = self._resolve(self._dbl_host(domain))
+        except OSError:
+            return None                       # транзиент -> None -> scoring уведёт в errors
+        if ip is None:
+            return False
+        if ip.startswith("127.255.255."):
+            raise RuntimeError(
+                "Spamhaus заблокировал запрос (public resolver / DQS-ключ невалиден) — "
+                "проверь DNS_RESOLVER/SPAMHAUS_DQS_KEY")
+        return ip.startswith("127.")
 
     def ping(self) -> bool:
-        """Тест-поинт через _resolve() — тот же DNS_RESOLVER-путь, что и реальный гейт
+        """Тест-поинт через _resolve() — тот же DNS_RESOLVER/DQS-путь, что и реальный гейт
         (is_blacklisted), иначе на боксе с публичным системным DNS Spamhaus блокирует
         голый socket.gethostbyname и /diag врёт «down» при исправном гейте."""
         try:
-            ip = self._resolve(_TESTPOINT)
+            ip = self._resolve(self._dbl_host(_TESTPOINT))
         except OSError:
             return False
         return bool(ip and ip.startswith("127."))
