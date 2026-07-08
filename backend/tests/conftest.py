@@ -50,7 +50,7 @@ def sqlite_db():
 @pytest.fixture(autouse=True)
 def _default_sources_backorder_only(sqlite_db, monkeypatch):
     """Структурный офлайн-гвард (финальное ревью, Finding 4): по умолчанию сид настроек
-    воронки видит только backorder включённым — многоисточниковые cctld/reg_ru/sweb (A-Parser)
+    воронки видит только backorder включённым — многоисточниковые cctld/reg_ru/sweb (httpx)
     выключены, чтобы будущий тест run_discovery() не мог тихо уйти в живую сеть. Достигается
     монки-патчем самого дефолта в scoring_config (не отдельным update_settings-вызовом), поэтому
     test_settings.py::test_get_settings_seeds_defaults (сверяет seed с cfg.SOURCES_ENABLED)

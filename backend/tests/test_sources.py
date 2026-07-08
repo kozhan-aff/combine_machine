@@ -87,14 +87,6 @@ def test_whois_probe_propagates_transport_error(monkeypatch):
         c.whois_created("x.ru")
 
 
-def test_parse_domains_extracts_ru():
-    from app.integrations.cctld import _parse_domains
-    html = "<tr><td>Example-1.RU</td></tr><tr><td>второй.рф</td></tr> мусор foo.com bar"
-    got = _parse_domains(html)
-    assert "example-1.ru" in got and "второй.рф" in got
-    assert "foo.com" not in got          # берём только .ru/.рф/.su
-
-
 def test_run_discovery_dedups_across_sources(monkeypatch):
     from app.services import discovery
     import app.db as db
@@ -319,4 +311,96 @@ def test_sweb_drops_ping(monkeypatch):
     class _Empty:
         text = "<html>ничего нет</html>"
     monkeypatch.setattr(c, "request", lambda method, url, **kw: _Empty())
+    assert c.ping() is False
+
+
+def _make_zip(filename: str, lines: list[str]) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(filename, "\n".join(lines))
+    return buf.getvalue()
+
+
+def test_cctld_downloads_both_zips_and_lists_domains(monkeypatch):
+    """Живая проверка (2026-07-08): лендинг не содержит домены — только ссылки на
+    ежедневные ZIP (RUDelList<YYYYMMDD>.zip / RFDelList<YYYYMMDD>.zip), внутри — простой
+    текстовый список, один домен на строку."""
+    from app.integrations.cctld import CctldClient
+    c = CctldClient()
+    landing = (
+        '<a href="/files/docs/pendingdelete/RUDelList20260708.zip">RU</a> '
+        '<a href="/files/docs/pendingdelete/RFDelList20260708.zip">RF</a>'
+    )
+    ru_zip = _make_zip("RUDelList20260708.txt", ["one.ru", "two.ru"])
+    rf_zip = _make_zip("RFDelList20260708.txt", ["xn--e1afmkfd.xn--p1ai"])
+
+    class _Resp:
+        def __init__(self, text=None, content=None):
+            self.text = text
+            self.content = content
+
+    def fake_request(method, url, **kw):
+        if url.endswith("RUDelList20260708.zip"):
+            return _Resp(content=ru_zip)
+        if url.endswith("RFDelList20260708.zip"):
+            return _Resp(content=rf_zip)
+        return _Resp(text=landing)
+
+    monkeypatch.setattr(c, "request", fake_request)
+    rows = c.list_dropping()
+    domains = {r["domain"] for r in rows}
+    assert domains == {"one.ru", "two.ru", "xn--e1afmkfd.xn--p1ai"}
+    assert all(r["source"] == "cctld" and r["referring_domains"] is None for r in rows)
+
+
+def test_cctld_partial_zip_failure_logs_and_returns_other(monkeypatch, caplog):
+    """Спека: если один zip не скачался/битый — не ронять весь источник, вернуть то,
+    что получилось от другого, и залогировать warning (иначе тихий частичный отказ
+    недебажим — тот же класс бага, что уже чинили в discovery.py I6)."""
+    from app.integrations.cctld import CctldClient
+    c = CctldClient()
+    landing = (
+        '<a href="/files/docs/pendingdelete/RUDelList20260708.zip">RU</a> '
+        '<a href="/files/docs/pendingdelete/RFDelList20260708.zip">RF</a>'
+    )
+    ru_zip = _make_zip("RUDelList20260708.txt", ["ok.ru"])
+
+    class _Resp:
+        def __init__(self, text=None, content=None):
+            self.text = text
+            self.content = content
+
+    def fake_request(method, url, **kw):
+        if url.endswith("RUDelList20260708.zip"):
+            return _Resp(content=ru_zip)
+        if url.endswith("RFDelList20260708.zip"):
+            return _Resp(content=b"not a zip file")
+        return _Resp(text=landing)
+
+    monkeypatch.setattr(c, "request", fake_request)
+    with caplog.at_level("WARNING", logger="app.integrations.cctld"):
+        rows = c.list_dropping()
+    assert [r["domain"] for r in rows] == ["ok.ru"]
+    assert any("cctld" in r.message for r in caplog.records)
+
+
+def test_cctld_ping_true_when_zip_href_found(monkeypatch):
+    from app.integrations.cctld import CctldClient
+    c = CctldClient()
+
+    class _Resp:
+        text = '<a href="/files/docs/pendingdelete/RUDelList20260708.zip">RU</a>'
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Resp())
+    assert c.ping() is True
+
+
+def test_cctld_ping_false_when_no_zip_href(monkeypatch):
+    from app.integrations.cctld import CctldClient
+    c = CctldClient()
+
+    class _Resp:
+        text = "<html>ничего нет</html>"
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Resp())
     assert c.ping() is False
