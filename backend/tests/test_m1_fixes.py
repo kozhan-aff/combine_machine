@@ -318,6 +318,28 @@ def test_score_only_discovered_status(monkeypatch):
 
 # ---------- M12: score_pending изолирует падение одного домена ----------
 
+def _fake_clients() -> dict:
+    """Оффлайн-заглушки под ключи _make_clients() (см. test_funnel.py:_clients) — score_pending
+    строит клиентов сама через _make_clients(), поэтому патчим саму фабрику, иначе реальный
+    боевой прогон (whois на 192.168.1.77, РКН antizapret, DNS к dbl.spamhaus.org, archive.org)
+    дёргается для доменов #2,#3 (Finding-1, ревью Task 7)."""
+    class _W:  # aparser
+        def whois_probe(self, dom):
+            return {"available": False, "created": None}
+    class _R:
+        def is_listed(self, dom): return False
+    class _B:
+        def is_blacklisted(self, dom): return False
+    class _S:
+        def indexed_echo(self, dom): return False
+    class _WB:
+        def classify_history(self, dom, **k):
+            return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
+                    "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
+            "wayback": _WB(), "opr": None}
+
+
 def test_score_pending_isolates_failure(monkeypatch):
     import app.db as db
     from app.models.domain import Domain
@@ -325,6 +347,7 @@ def test_score_pending_isolates_failure(monkeypatch):
     with db.SessionLocal() as s:
         s.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
                           lane="bid", referring_domains=i) for i in range(3)]); s.commit()
+    monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
     real = scoring.score_domain
     def _boom(did, clients=None, whois_budget=None):
@@ -333,6 +356,6 @@ def test_score_pending_isolates_failure(monkeypatch):
             raise RuntimeError("boom")
         return real(did, clients, whois_budget)
     monkeypatch.setattr(scoring, "score_domain", _boom)
-    # не должно упасть, остальные 2 обработаны
+    # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)
     assert n == 3 and calls["n"] == 3

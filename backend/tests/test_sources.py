@@ -176,6 +176,24 @@ def test_normalize_row_sentinels_and_price():
     assert nr["visitors"] is None and nr["tic"] is None and nr["price"] == 190.0
 
 
+def test_list_dropping_string_links_below_min_warns(monkeypatch, caplog):
+    """M2 инвариант (см. ревью Task 7): фид иногда отдаёт links строкой ("0") даже когда
+    запрошен min_links=1 (серверный фильтр не сработал). Safe int-parse не должен падать
+    TypeError на сравнении str<int, но и не должен молчать — обязан залогировать warning."""
+    from app.integrations.backorder import BackorderClient
+    c = BackorderClient()
+
+    class _Resp:
+        def json(self):
+            return [{"domainname": "x.ru", "links": "0", "delete_date": "2026-07-10"}]
+
+    monkeypatch.setattr(c, "request", lambda *a, **k: _Resp())
+    with caplog.at_level("WARNING", logger="app.integrations.backorder"):
+        rows = c.list_dropping(min_links=1)   # не должно бросить исключение
+    assert rows == [{"domainname": "x.ru", "links": "0", "delete_date": "2026-07-10"}]
+    assert any("backorder" in r.message and "links" in r.message for r in caplog.records)
+
+
 def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
     """Finding 5 (финальное ревью): падение одного источника не должно тонуть молча —
     остальные источники всё равно собираются (continue-семантика), но в лог уходит warning
