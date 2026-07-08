@@ -213,3 +213,49 @@ def test_collect_logs_and_survives_source_failure(monkeypatch, caplog):
         rows = discovery._collect({"backorder": True, "cctld": True})
     assert rows == [{"domain": "alive.ru", "source": "cctld", "referring_domains": None}]
     assert any("backorder" in r.message and "feed timeout" in r.message for r in caplog.records)
+
+
+def test_regru_drops_extracts_only_domain_cells(monkeypatch):
+    """Живая проверка (2026-07-08): b-table__cell_node_first — единственный класс на
+    ячейке с доменом (у дат тот же базовый класс, но без node_first; заголовок 'Домен' —
+    <th>, не <td>). Общий regex-по-странице ловил бы reg.ru/yandex.ru из футера —
+    якорь на класс не должен."""
+    from app.integrations.regru_drops import RegruDropsClient
+    c = RegruDropsClient()
+    html = (
+        '<footer><a href="https://reg.ru">reg.ru</a> '
+        '<a href="https://yandex.ru">yandex.ru</a></footer>'
+        '<table><tr>'
+        '<td class="b-table__cell b-table__cell_type_content b-table__cell_node_first">'
+        'first-drop.ru</td>'
+        '<td class="b-table__cell b-table__cell_type_content">03.06.2022</td>'
+        '</tr><tr>'
+        '<td class="b-table__cell b-table__cell_type_content b-table__cell_node_first">'
+        'second-drop.ru</td>'
+        '<td class="b-table__cell b-table__cell_type_content">07.07.2026</td>'
+        '</tr></table>'
+    )
+
+    class _Resp:
+        text = html
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Resp())
+    rows = c.list_dropping()
+    domains = [r["domain"] for r in rows]
+    assert domains == ["first-drop.ru", "second-drop.ru"]
+    assert "reg.ru" not in domains and "yandex.ru" not in domains
+    assert all(r["source"] == "reg_ru" and r["referring_domains"] is None for r in rows)
+
+
+def test_regru_drops_ping(monkeypatch):
+    from app.integrations.regru_drops import RegruDropsClient
+    c = RegruDropsClient()
+
+    class _Ok:
+        text = '<td class="b-table__cell_node_first">x.ru</td>'
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Ok())
+    assert c.ping() is True
+
+    class _Empty:
+        text = "<html>ничего нет</html>"
+    monkeypatch.setattr(c, "request", lambda method, url, **kw: _Empty())
+    assert c.ping() is False
