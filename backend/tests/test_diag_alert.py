@@ -82,3 +82,23 @@ def test_diag_view_populates_cache(client, monkeypatch):
     r = client.get("/diag")
     assert r.status_code == 200
     assert diag_cache.alert() is not None      # /diag прогнал refresh -> кэш заполнен
+
+
+def test_banner_renders_when_external_down(client, monkeypatch):
+    monkeypatch.setattr("app.services.diag_cache.run_diagnostics",
+                        lambda: [{"key": "aparser", "label": "A-Parser", "status": "fail",
+                                  "role": "", "module": "M1", "critical": True, "ms": 1, "error": None}])
+    diag_cache.refresh()
+    r = client.get("/")                          # баннер глобальный — виден на дашборде, не только /diag
+    assert 'id="diag-alert"' in r.text
+    assert "A-Parser" in r.text
+    assert "/diag/refresh" in r.text
+
+
+def test_no_banner_when_all_ok(client, monkeypatch):
+    monkeypatch.setattr("app.services.diag_cache.run_diagnostics",
+                        lambda: [{"key": "aparser", "label": "A-Parser", "status": "ok",
+                                  "role": "", "module": "M1", "critical": True, "ms": 1, "error": None}])
+    diag_cache.refresh()
+    r = client.get("/")
+    assert 'id="diag-alert"' not in r.text

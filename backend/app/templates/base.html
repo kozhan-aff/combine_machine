@@ -82,6 +82,7 @@
            display:flex; gap:12px; align-items:baseline; border:1px solid; }
   .flash.msg { border-color:#bfe6cd; background:var(--ok-soft); color:#14663a; }
   .flash.err { border-color:#f2c4c4; background:var(--bad-soft); color:#a32626; }
+  .flash.warn { border-color:#ecd9a8; background:#fbf3dd; color:#7a5d14; }
   .flash .tag { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:1px;
                 text-transform:uppercase; flex:none; opacity:.75; }
 
@@ -341,6 +342,23 @@
 </aside>
 
 <main>
+{% set _alert = diag_alert() %}
+{% if _alert and _alert.down %}
+<div class="flash warn" id="diag-alert" data-sig="{{ _alert.sig }}">
+  <span class="tag">Связь</span>
+  <span style="flex:1">Нет связи: {{ _alert.down|join(', ') }}
+        · проверено {{ _alert.checked_at.strftime('%H:%M') }} UTC</span>
+  <form method="post" action="/diag/refresh" style="display:inline">
+    <button class="btn-sm" title="Прогнать диагностику ещё раз (до 20 секунд)">↻ перепроверить</button>
+  </form>
+  <button type="button" class="btn-sm" title="Скрыть до конца сессии браузера"
+          onclick="sessionStorage.setItem('diagDismiss', this.closest('#diag-alert').dataset.sig); this.closest('#diag-alert').remove()">×</button>
+</div>
+<script>
+  if (sessionStorage.getItem('diagDismiss') === document.getElementById('diag-alert').dataset.sig)
+    document.getElementById('diag-alert').remove();
+</script>
+{% endif %}
 {% set _msg = request.query_params.get('msg') %}
 {% set _err = request.query_params.get('err') %}
 {% if _err %}<div class="flash err"><span class="tag">Ошибка</span><span>{{ _err }}</span></div>
