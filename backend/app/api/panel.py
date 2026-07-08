@@ -10,7 +10,7 @@ GET /run/{job}/progress; остальные действия синхронны 
   - редактура: publish берёт только 'edited', draft -> edited делает ЧЕЛОВЕК в редакторе.
 """
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from fastapi import APIRouter, Request, Depends, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -207,7 +207,11 @@ def diag_refresh(request: Request):
     """Кнопка «перепроверить» в баннере: синхронный прогон диагностики (≤20с, пинги
     параллельны), редирект назад — оператор остаётся на своём экране, баннер отражает свежий кэш."""
     diag_cache.refresh()
-    back = request.headers.get("referer") or "/"
+    raw = request.headers.get("referer") or "/"
+    p = urlsplit(raw)
+    # выбрасываем прежние flash-параметры: иначе старый ?err= подавит «перепроверено», а повторные клики пухнут URL
+    q = urlencode([(k, v) for k, v in parse_qsl(p.query) if k not in ("msg", "err")])
+    back = urlunsplit((p.scheme, p.netloc, p.path or "/", q, ""))
     return _back(back, msg="Статусы внешних инструментов перепроверены")
 
 

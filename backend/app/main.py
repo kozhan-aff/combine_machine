@@ -2,7 +2,7 @@
 import asyncio
 import base64
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -29,6 +29,8 @@ async def lifespan(app):
     task = asyncio.create_task(_diag_loop())   # первая проверка сразу, в фоне (старт не ждёт 20с пингов)
     yield
     task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task                             # чистое завершение: не оставляем «висящую» задачу на shutdown
 
 
 app = FastAPI(title="VPN Affiliate Portfolio", lifespan=lifespan)

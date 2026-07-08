@@ -104,6 +104,18 @@ def test_no_banner_when_all_ok(client, monkeypatch):
     assert 'id="diag-alert"' not in r.text
 
 
+def test_diag_refresh_strips_stale_flash_keeps_filters(client, monkeypatch):
+    monkeypatch.setattr("app.services.diag_cache.run_diagnostics", lambda: [])
+    r = client.post("/diag/refresh",
+                    headers={"referer": "http://testserver/domains?err=boom&status=approved"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    loc = r.headers["location"]
+    assert "err=" not in loc            # прежний flash выброшен
+    assert "status=approved" in loc     # фильтр пользователя сохранён
+    assert "msg=" in loc                # свежее подтверждение добавлено
+
+
 def test_diag_loop_fires_refresh_on_startup(monkeypatch):
     """lifespan запускает _diag_loop, который дёргает refresh() на старте.
     Входим в TestClient как контекст-менеджер — только он гоняет lifespan
