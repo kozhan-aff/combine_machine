@@ -47,9 +47,40 @@ Python 3.12 + FastAPI + SQLAlchemy 2.x + Pydantic v2; PostgreSQL 16; Alembic; ht
 Панель для MVP минимальная (FastAPI+HTMX хватит). Форма управления свободная: Docker+Telegram-бот
 или веб-панель — на твоё усмотрение, главное надёжность пайплайна.
 
-## Текущее состояние (2026-07-06)
-**M1 переделан в умную воронку + операционка панели** (14 коммитов 2026-07-06, subagent-driven,
-каждая задача прошла спек+качество ревью, финальное whole-branch ревью «Ready to merge»; 91/91 тестов):
+## Dev Commands
+```bash
+# Start locally
+docker compose up --build
+
+# Run tests (offline, SQLite-harness, no network)
+docker compose run --rm backend pytest backend/tests/ -q
+
+# Run single test
+docker compose run --rm backend pytest backend/tests/test_name.py::test_case -v
+
+# Lint (pyflakes on app & tests)
+.venv/bin/python -m pyflakes backend/app backend/tests
+
+# Smoke test (check all integrations)
+docker compose run --rm backend python backend/scripts/smoke.py
+```
+
+**Note:** Tests are hermetic (autouse-fixture blocks network). Live box testing on `192.168.1.77`.
+
+## Текущее состояние (2026-07-09)
+**Ahrefs DR/backlinks/referring-domains** (2026-07-09): Fully shipped — `AParserClient.ahrefs_probe()` 
+(Rank::Ahrefs + RuCapcha Turnstile), DR weight added to scoring (authority=0.12, rebalanced all weights 
+to sum=1.0), runtime budget cap `max_ahrefs_per_run` (default 50, 0=disabled). All 207 tests green, 
+pyflakes clean, 0 Critical/Important findings. → `docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md`.
+
+**Dev agents & tools** (2026-07-09): `.claude/agents/combine-reviewer.md` created — project-aware ревьюер 
+for per-task + whole-branch reviews, checks 8 hard invariants + design contract + test hygiene (read-only, 
+opus-model). Smoke-tested on real diff `d6e69c2` (polish after Ahrefs). New plugins installed: 
+oh-my-claudecode (OMC) + ecc (Extensible Claude Code); `ecc:code-reviewer` recommended for code quality 
+checks. **Ponytail mode active** (full level).
+
+**M1 воронка + операционка панели** (14 коммитов 2026-07-06, subagent-driven,
+каждая задача прошла спек+качество ревью, финальное whole-branch ревью «Ready to merge»; 207/207 тестов):
 - **Воронка T0–T3** (см. M1 выше): регрессия доказывает, что отсеянный на T0–T2 домен НЕ доходит до
   Wayback (`wb.calls == 0`); рантайм-пороги `/settings` реально управляют статусом (`_decide()` в
   scoring.py — та же логика для дефолтов и рантайма, downgrade-гарды сохранены).
@@ -83,15 +114,33 @@ HTML-панель — `app/api/panel.py` + `app/templates/`; JSON-двойник
 репо `D:\combine_machine`, панель на LAN `http://192.168.1.77:8000/` (защищать Basic-auth; детали docs/DEPLOY.md).
 
 ## Что делать дальше
-**Первый прогон воронки на боксе:** обновить бокс (host PowerShell `git pull --ff-only origin main`
-из-за EOL-фантома контейнера, либо кнопка git-pull если пройдёт; миграция 0002 накатится сама) →
-`/settings` выставить пороги → ↻ Discovery (смотреть, что соберут 4 источника; live-разметка
-cctld/reg.ru/sweb не выверена — при нуле смотреть docker-логи, ошибки источников там) → ▶ Score →
-разобрать `/domains` с reject_reason. Затем **первый реальный домен через полную петлю:** купить
-одобренный дроп руками → карточка сайта, шаги 3→7.
-Блокеры кред: `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` в `.env` бокса; `backend/aapanel.pem`
-на боксе (gitignored — копируется руками с Mac). Критерий MVP: сайт поднят системой, контент
-отредактирован, опубликован, страницы в индексе (проверка `site:`).
+
+**Ближайшее (блокирует MVP):**
+
+1. **Спека 4 — LLM-критик редактуры** — автоматическая оценка качества контента перед гейтом 
+   (может заменить/дополнить человеческую редактуру, но гейт НИКОГДА не убирается).
+
+2. **Тред D — дешёвые критерии скоринга** — SE::Google::SafeBrowsing, Rank::Archive, 
+   SecurityTrails, SERP-fallback через SE::Google/Yandex (live тесты A-Parser форматов).
+
+3. **Первый прогон воронки на боксе:**
+   - Обновить бокс: `git pull --ff-only origin main` (кнопка git-pull в `/diag`)
+   - `/settings` выставить пороги → Discovery → Score → разобрать `/domains` с reject_reason
+   - Live-разметка cctld/reg.ru/sweb проверяется впервые (смотреть docker-логи при ошибках)
+
+4. **Первый домен через полную петлю** (M1→M5):
+   - Ручной покуп одобренного дропа → карточка сайта (M3 provisioning)
+   - M4 контент-генерация → гейт редактуры (человек)
+   - M5 публикация + проверка индексации (`site:` через SearXNG)
+   - Критерий MVP: сайт поднят системой, контент отредактирован, опубликован, в индексе
+
+**Блокеры кред:** `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` в `.env` бокса; 
+`backend/aapanel.pem` на боксе (gitignored).
+
+**Infrastructure & Tooling:**
+- `combine-reviewer` встроить в SDD-pipeline (`subagent-driven-development`)
+- Smoke-test на боксе: `/diag` доступен, все интеграции пингуются
+- Опционально: smoke-команда `/smoke` (в `.claude/commands/smoke.md`)
 
 ## Панель: дизайн
 **Светлая современная CMS** — по фидбеку пользователя тёмный/индустриальный стиль НЕ используем.
