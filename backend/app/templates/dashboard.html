@@ -40,7 +40,7 @@
     <div class="fg-cells">
       <a class="fcell" href="/#sites" title="карточки сайтов: провижн → контент → публикация">
         <div class="v">{{ sites|length }}</div><div class="k">сайтов</div></a>
-      <span class="fcell {{ 'gate' if pc.get('draft') }}" title="AI-черновики: не публикуются, пока не вычитаешь (гейт публикации)">
+      <span class="fcell {{ 'gate' if pc.get('draft') }}" title="AI-черновики: не публикуются, пока не вычитаешь (гейт редактуры)">
         <div class="v">{{ pc.get('draft', 0) }}</div><div class="k">черновики</div></span>
       <span class="fcell" title="вычитаны человеком — публикация возьмёт только их">
         <div class="v">{{ pc.get('edited', 0) }}</div><div class="k">edited</div></span>
