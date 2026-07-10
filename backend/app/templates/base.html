@@ -239,9 +239,15 @@
     display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .station .plate .mod { margin-left:auto; font-family:var(--mono); color:var(--dim);
     font-size:10px; font-weight:500; letter-spacing:.04em; }
-  .station .what { color:var(--mut); font-size:12.5px; line-height:1.6; padding:12px 16px 4px;
-    flex:1; }
-  .station .what b { color:var(--ink); font-weight:600; }
+  .station details.what { border-top:1px solid var(--line); margin-top:auto; }
+  .station details.what > summary { cursor:pointer; list-style:none; user-select:none;
+    padding:9px 16px; font-size:11.5px; font-weight:600; color:var(--dim); }
+  .station details.what > summary::-webkit-details-marker { display:none; }
+  .station details.what > summary::before { content:"▸ "; color:var(--acc); }
+  .station details.what[open] > summary::before { content:"▾ "; }
+  .station details.what > summary:hover { color:var(--ink); }
+  .what-body { color:var(--mut); font-size:12.5px; line-height:1.6; padding:2px 16px 13px; }
+  .what-body b { color:var(--ink); font-weight:600; }
   .station .go { display:flex; gap:10px; align-items:end; flex-wrap:wrap; padding:12px 16px 15px; }
 
   /* ---- легенда статусов: бейдж → кто ставит → что означает ---- */

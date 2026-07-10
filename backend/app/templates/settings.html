@@ -7,8 +7,9 @@
 <form method="post" action="/settings/save" style="max-width:760px; display:grid; gap:14px">
   <div class="station">
     <div class="plate">T0 · min доноров (RD) — <b>отсекает пустышки</b></div>
-    <div class="what">Домены с RD ниже порога отбраковываются на входе (0 = не резать по RD).
-      Сырые списки без RD проходят на T1.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Домены с RD ниже порога отбраковываются на входе (0 = не резать по RD).
+      Сырые списки без RD проходят на T1.</div></details>
     <div class="go">
       <input type="range" name="min_referring_domains" min="0" max="50" step="1"
              value="{{ s.min_referring_domains }}" oninput="pv()" style="flex:1 1 200px">
@@ -19,7 +20,8 @@
   </div>
   <div class="station">
     <div class="plate">T1 · min возраст, лет — <b>отсекает молодые до дорогой истории</b></div>
-    <div class="what">Возраст из whois (дата регистрации). Моложе порога → reject, не доходя до Wayback.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Возраст из whois (дата регистрации). Моложе порога → reject, не доходя до Wayback.</div></details>
     <div class="go">
       <input type="range" name="min_age_years" min="0" max="15" step="0.5"
              value="{{ s.min_age_years }}" oninput="pv()" style="flex:1 1 200px">
@@ -29,7 +31,8 @@
   </div>
   <div class="station">
     <div class="plate">Финальный скор · порог approve — <b>выше = авто-одобрение</b></div>
-    <div class="what">Итоговый скор ≥ порога → домен одобряется автоматически.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Итоговый скор ≥ порога → домен одобряется автоматически.</div></details>
     <div class="go">
       <input type="range" name="approve_at" min="0" max="1" step="0.05"
              value="{{ s.approve_at }}" oninput="pv()" style="flex:1 1 200px">
@@ -39,7 +42,8 @@
   </div>
   <div class="station">
     <div class="plate">Финальный скор · порог manual — <b>ниже = reject</b></div>
-    <div class="what">Скор между manual и approve → ручной разбор (scored); ниже manual → reject.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Скор между manual и approve → ручной разбор (scored); ниже manual → reject.</div></details>
     <div class="go">
       <input type="range" name="manual_review_at" min="0" max="1" step="0.05"
              value="{{ s.manual_review_at }}" oninput="pv()" style="flex:1 1 200px">
@@ -49,8 +53,9 @@
   </div>
   <div class="station">
     <div class="plate">Кап whois за прогон — <b>защита от сырого cctld</b></div>
-    <div class="what">За один запуск проверки пробьём whois не более этого числа доменов
-      (лучшие по RD — первыми). Остальные подождут следующего прогона.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">За один запуск проверки пробьём whois не более этого числа доменов
+      (лучшие по RD — первыми). Остальные подождут следующего прогона.</div></details>
     <div class="go">
       <input type="range" name="max_whois_per_run" min="0" max="2000" step="50"
              value="{{ s.max_whois_per_run }}"
@@ -61,10 +66,11 @@
   </div>
   <div class="station">
     <div class="plate">Кап Ahrefs-проверок за прогон — <b>платная капча за штуку</b></div>
-    <div class="what">За один запуск проверки сделаем не более этого числа платных
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">За один запуск проверки сделаем не более этого числа платных
       Ahrefs-запросов (DR/backlinks) — только для доменов без RD из фида (cctld/reg_ru/
       sweb), только для приобретаемых выживших. 0 — полностью выключить Ahrefs-
-      обогащение (authority-балл останется 0, остальной скоринг идёт как обычно).</div>
+      обогащение (authority-балл останется 0, остальной скоринг идёт как обычно).</div></details>
     <div class="go">
       <input type="range" name="max_ahrefs_per_run" min="0" max="500" step="10"
              value="{{ s.max_ahrefs_per_run }}"
@@ -75,8 +81,9 @@
   </div>
   <div class="station">
     <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
-    <div class="what">Выключенный источник просто не опрашивается при ↻ Discovery;
-      уже найденные с него домены остаются в пуле.</div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Выключенный источник просто не опрашивается при ↻ Discovery;
+      уже найденные с него домены остаются в пуле.</div></details>
     <div class="go">
       <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
       <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
@@ -86,9 +93,10 @@
   </div>
   <div class="station">
     <div class="plate">Применить — <b>записать пороги в конвейер</b></div>
-    <div class="what">«Сохранить» записывает пороги и источники в настройки — действовать начнут
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">«Сохранить» записывает пороги и источники в настройки — действовать начнут
       со следующего запуска ▶ Score / ↻ Discovery (уже отскоренные домены не пересчитываются).
-      «Сбросить» возвращает стартовые значения из scoring_config.</div>
+      «Сбросить» возвращает стартовые значения из scoring_config.</div></details>
     <div class="go">
       <button class="btn-amber" title="сохранить пороги и включённые источники">Сохранить</button>
       <button class="btn" form="settings-reset"

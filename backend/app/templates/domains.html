@@ -9,11 +9,12 @@
 <div class="stations">
   <div class="station">
     <div class="plate">↻ Поиск дропов — найти кандидатов <span class="mod">M1a · 4 источника (выбор в Настройках)</span></div>
-    <div class="what">Забирает список <b>освобождающихся доменов</b> из включённых источников
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Забирает список <b>освобождающихся доменов</b> из включённых источников
       (backorder / cctld / reg.ru / sweb — какие включены, смотри на /settings), дедуплицирует
       по домену (выигрывает строка с бо́льшим RD) и складывает новые в таблицу со статусом
       <b>discovered</b>. Ничего не оценивает и не покупает — только пополняет очередь.
-      Повторный запуск дублей не создаёт.</div>
+      Повторный запуск дублей не создаёт.</div></details>
     <div class="go">
       <form method="post" action="/run/discovery">
         <button class="btn-amber">↻ Найти дропы</button>
@@ -26,12 +27,13 @@
 
   <div class="station">
     <div class="plate">▶ Запуск проверки — оценить очередь <span class="mod">M1b · RD → возраст → РКН/блэклист → эхо → Wayback</span></div>
-    <div class="what">Прогоняет <b>discovered</b>-домены через воронку дёшево→дорого: RD из фида →
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Прогоняет <b>discovered</b>-домены через воронку дёшево→дорого: RD из фида →
       whois-возраст → РКН/блэклисты → эхо в поисковом индексе → история Wayback (адалт/фарма/казино
       в прошлом — дорогая проверка, только для доменов, доживших до неё). Выставляет <b>score 0–1</b>
       и статус: чистые и сильные — <b>approved</b>, спорные — <b>scored</b> (решаешь ты), грязные —
       <b>rejected</b> (причина — колонка «статус»). Запускается в фоне (прогресс ниже), ≈5 с на
-      домен; лучшие по RD идут первыми.</div>
+      домен; лучшие по RD идут первыми.</div></details>
     <div class="go">
       <form method="post" action="/run/score" style="display:flex; gap:10px; align-items:end">
         <label class="f">доменов за запуск
