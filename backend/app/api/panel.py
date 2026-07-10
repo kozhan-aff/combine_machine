@@ -189,7 +189,7 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
 
 @router.get("/diag", response_class=HTMLResponse)
 def diag_view(request: Request):
-    from app.services import version as _version
+    from app.services import deploy as _deploy
     from app.services.diagnostics import PING_TIMEOUT
     checks = diag_cache.refresh()   # та же цена (живой прогон) + кладём в кэш -> баннер консистентен с /diag
     ok = sum(1 for c in checks if c["status"] == "ok")
@@ -198,7 +198,7 @@ def diag_view(request: Request):
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
         "crit_down": crit_down, "timeout": PING_TIMEOUT,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
-        "version": _version.current_version(),
+        "status": _deploy.deploy_status(),
     })
 
 
@@ -523,50 +523,29 @@ def check_index_action(site_id: int):
 # --- self-update: git pull + миграции (панель localhost-only, POST-only) -----
 # ponytail: тянем по HTTPS с fine-grained PAT — не монтируем SSH-ключ в контейнер.
 # Требует volume `.:/repo` + git в образе (см. docker-compose/Dockerfile).
+def _pull_banner(r: dict):
+    """Единый баннер из dict deploy.git_pull()/git_force_pull()."""
+    if not r.get("ok"):
+        return _back("/diag", err=r.get("error", "обновление не удалось"))
+    warn = f" ⚠ миграции: {r['alembic_warn']}" if r.get("alembic_warn") else ""
+    rebuild = " · нужна пересборка образа: docker compose up -d --build" if r.get("needs_rebuild") else ""
+    verb = "Принудительно обновлено" if r.get("forced") else "Обновлено"
+    subj = r.get("subject", "")
+    if r["old"] == r["new"]:
+        return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{warn}{rebuild}")
+    return _back("/diag", msg=f"{verb}: {r['old']}→{r['new']} «{subj}»{warn}{rebuild}")
+
+
 @router.post("/admin/pull")
 def git_pull_action():
-    import base64 as _b64
-    import os
-    import subprocess
-    from app.services.version import current_version
-    if not settings.GITHUB_TOKEN:
-        return _back("/diag", err="GITHUB_TOKEN не задан в .env — нечем авторизовать git pull")
-    old = current_version().get("hash", "")
-    tok = settings.GITHUB_TOKEN
-    scrub = lambda s: s.replace(tok, "***")  # никогда не светить токен в баннере
-    # Токен НЕ в argv (виден в ps/procfs), а через http.extraheader в окружении git:
-    # чистый URL без креденшелов + Authorization: Basic base64(x-access-token:TOKEN).
-    clean_url = f"https://github.com/{settings.GITHUB_REPO}.git"
-    basic = _b64.b64encode(f"x-access-token:{tok}".encode()).decode()
-    git_env = {
-        **os.environ,
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
-    }
-    try:
-        try:
-            pull = subprocess.run(
-                ["git", "-C", "/repo", "-c", "safe.directory=/repo", "pull", "--ff-only", clean_url, "main"],
-                capture_output=True, text=True, timeout=120, env=git_env)
-        except FileNotFoundError:
-            return _back("/diag", err="git не установлен в контейнере — пересобери образ (docker compose build)")
-        if pull.returncode != 0:
-            return _back("/diag", err=f"git pull: {scrub((pull.stderr or pull.stdout).strip())[:300]}")
-        # миграции идемпотентны; код подхватит uvicorn --reload (следит за /app)
-        try:
-            mig = subprocess.run(["alembic", "upgrade", "head"], cwd="/app",
-                                 capture_output=True, text=True, timeout=120)
-            warn = "" if mig.returncode == 0 else f" ⚠ alembic: {scrub(mig.stderr.strip())[:150]}"
-        except FileNotFoundError:
-            warn = " ⚠ alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
-        cur = current_version()   # один вызов: hash + subject для баннера
-        new = cur.get("hash", "")
-        if old == new:            # ff-only no-op: HEAD не сдвинулся — не врать «Обновлено»
-            return _back("/diag", msg=f"Уже свежая версия: {new} «{cur.get('subject', '')}»{warn}")
-        return _back("/diag", msg=f"Обновлено: {old}→{new} «{cur.get('subject', '')}»{warn}")
-    except Exception as e:  # noqa: BLE001
-        return _back("/diag", err=f"update: {scrub(str(e))[:200]}")
+    from app.services import deploy
+    return _pull_banner(deploy.git_pull())
+
+
+@router.post("/admin/force-pull")
+def git_force_pull_action():
+    from app.services import deploy
+    return _pull_banner(deploy.git_force_pull())
 
 
 @router.post("/admin/check-updates")

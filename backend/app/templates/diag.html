@@ -8,8 +8,16 @@
 
 <div class="card" style="max-width:920px; margin-bottom:14px">
   <b>Версия кода:</b>
-  {% if version.error %}<span style="color:var(--bad)">git недоступен — {{ version.error }}</span>
-  {% else %}<code>{{ version.hash }}</code> · {{ version.subject }} · <span class="hint">{{ version.date }}</span>{% endif %}
+  {% if status.error %}<span style="color:var(--bad)">git недоступен — {{ status.error }}</span>
+  {% else %}<code>{{ status.hash }}</code> · {{ status.subject }} · <span class="hint">{{ status.date }}</span>
+  <br><b>Ветка:</b> <code>{{ status.branch }}</code> ·
+    {% if status.detached %}<span style="color:var(--bad)">detached HEAD — нужна ⚠ Принудительно обновить</span>
+    {% elif status.dirty %}<span style="color:var(--bad)">⚠ грязно (есть локальные правки — обычный pull откажет)</span>
+    {% elif status.ahead and status.behind %}<span style="color:var(--bad)">⚠ разошлось (впереди {{ status.ahead }}, позади {{ status.behind }})</span>
+    {% elif status.behind %}<span style="color:var(--acc2)">позади origin на {{ status.behind }}</span>
+    {% elif status.ahead %}<span class="hint">впереди origin на {{ status.ahead }}</span>
+    {% else %}<span style="color:var(--ok)">✓ чисто · актуально</span>{% endif %}
+  {% endif %}
   {% if can_pull %}
   <form method="post" action="/admin/check-updates" style="display:inline; margin-left:12px">
     <button class="btn" title="git ls-remote — сравнить с origin/main">проверить обновления</button>
@@ -64,19 +72,25 @@
 
 <div class="station" style="max-width:920px">
   <div class="plate">⇩ Обновить из git — подтянуть свежий код <span class="mod">{{ repo }}</span></div>
-  <div class="what">Выполняет <b>git pull --ff-only</b> из ветки main прямо в контейнере и применяет
-    миграции БД (<b>alembic upgrade head</b>); работающий сервер подхватит код авто-релоадом —
-    консоль не нужна. Локальные правки не затрёт (не-fast-forward просто откажет с ошибкой
-    в баннере). Если менялись зависимости или Dockerfile — всё равно нужен ручной
-    <code>docker compose up -d --build</code>.</div>
+  <div class="what"><b>⇩ Обновить</b> = <b>git pull --ff-only</b> из main + <b>alembic upgrade head</b>
+    прямо в контейнере; backend и worker подхватят код авто-релоадом — консоль не нужна. Если дерево
+    грязное/история разошлась — обычный pull откажет, тогда <b>⚠ Принудительно обновить</b> (fetch +
+    reset до origin/main; локальные правки потеряются, <code>.env</code> и ключи — нет). Смена
+    <b>requirements.txt/Dockerfile</b> всё равно требует <code>docker compose up -d --build</code>
+    (баннер предупредит). LAN-панель с деструктивной кнопкой стоит закрыть Basic-auth
+    (<code>PANEL_USER</code>/<code>PANEL_PASS</code> в .env).</div>
   <div class="go">
     {% if can_pull %}
     <form method="post" action="/admin/pull"
           onsubmit="return confirm('Забрать свежий код из git (main) и применить миграции?')">
-      <button class="btn-acc" title="git pull --ff-only + alembic upgrade head; результат покажется баннером сверху">⇩ Обновить из git</button>
+      <button class="btn-acc" title="git pull --ff-only + alembic upgrade head; результат — баннером сверху">⇩ Обновить из git</button>
+    </form>
+    <form method="post" action="/admin/force-pull"
+          onsubmit="return confirm('Принудительно привести код к origin/main. Локальные правки на боксе будут потеряны (.env и ключи сохранятся). Продолжить?')">
+      <button class="btn-bad" title="git fetch + checkout -f -B main до origin/main — чинит грязное/разошедшееся/detached дерево, когда обычный pull отказал">⚠ Принудительно обновить</button>
     </form>
     {% else %}
-    <span class="hint">Кнопка выключена: задай <b>GITHUB_TOKEN</b> (fine-grained PAT, read-only Contents)
+    <span class="hint">Кнопки выключены: задай <b>GITHUB_TOKEN</b> (fine-grained PAT, read-only Contents)
       в <code>.env</code> и смонтируй репозиторий (<code>.:/repo</code>) — см. docs/DEPLOY.md.</span>
     {% endif %}
   </div>
