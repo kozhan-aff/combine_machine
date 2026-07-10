@@ -33,7 +33,7 @@
   :focus-visible { outline:2px solid var(--acc); outline-offset:2px; border-radius:4px; }
 
   /* ---- каркас: сайдбар + контент ---- */
-  .shell { display:grid; grid-template-columns:248px 1fr; min-height:100vh; }
+  .shell { display:grid; grid-template-columns:200px 1fr; min-height:100vh; }
   aside.side { background:var(--panel); border-right:1px solid var(--line);
     padding:22px 14px 16px; display:flex; flex-direction:column; gap:4px;
     position:sticky; top:0; height:100vh; overflow-y:auto; }
@@ -44,15 +44,13 @@
                border-bottom:1px solid var(--line); margin-bottom:12px; }
 
   nav.rail { display:flex; flex-direction:column; gap:2px; }
-  .rl { display:flex; flex-direction:column; gap:1px; padding:9px 10px; border-radius:var(--r);
+  .rl { display:flex; align-items:baseline; padding:7px 10px; border-radius:var(--r);
         color:var(--ink); font-size:13.5px; font-weight:600; border:1px solid transparent; }
   .rl:hover { background:var(--panel2); text-decoration:none; }
   .rl .n { font-family:var(--mono); font-size:10px; color:var(--dim); font-weight:500;
-           margin-right:7px; }
-  .rl .sub { font-size:10.5px; color:var(--mut); font-weight:400; line-height:1.35; }
+           margin-right:9px; flex:none; }
   .rl.on { background:var(--acc-soft); border-color:#c9dbf7; }
   .rl.on, .rl.on .n { color:var(--acc2); }
-  .rl.on .sub { color:var(--acc2); }
   .side .gates { margin-top:auto; padding:12px 10px 0; border-top:1px solid var(--line);
     font-size:10.5px; color:var(--mut); line-height:1.6; }
   .side .gates b { color:var(--ink); font-weight:600; }
@@ -64,7 +62,6 @@
                  align-items:center; border-right:0; border-bottom:1px solid var(--line); }
     .brand-sub { border:0; margin:0; }
     nav.rail { flex-direction:row; flex-wrap:wrap; }
-    .rl .sub { display:none; }
     .side .gates { display:none; }
     main { padding:18px 16px 60px; }
   }
@@ -309,30 +306,22 @@
   <div class="brand">КОМ<b>БАЙН</b></div>
   <div class="brand-sub">конвейер VPN-портфеля · M1→M5</div>
   <nav class="rail">
-    <a class="rl {{ 'on' if active=='dash' }}" href="/">
-      <span><span class="n">00</span>Пульт</span>
-      <span class="sub">сводка воронки + что делать дальше</span></a>
-    <a class="rl {{ 'on' if active=='offers' }}" href="/offers">
-      <span><span class="n">01</span>Офферы</span>
-      <span class="sub">бренды и партнёрские ссылки — вход машины</span></a>
-    <a class="rl {{ 'on' if active=='domains' }}" href="/domains">
-      <span><span class="n">02</span>Домены · M1</span>
-      <span class="sub">поиск дропов, скоринг, отбор, покупка</span></a>
-    <a class="rl {{ 'on' if active=='queue' }}" href="/queue">
-      <span><span class="n">M2</span>Выкуп</span>
-      <span class="sub">очередь заказов + подтверждение выкупа</span></a>
-    <a class="rl" href="/#sites">
-      <span><span class="n">03</span>Сайты · M3–M5</span>
-      <span class="sub">провижн → контент → редактура → публикация</span></a>
-    <a class="rl {{ 'on' if active=='diag' }}" href="/diag">
-      <span><span class="n">◉</span>Диагностика</span>
-      <span class="sub">связь с сервисами + обновление кода</span></a>
-    <a class="rl {{ 'on' if active=='settings' }}" href="/settings">
-      <span><span class="n">⚙</span>Настройки</span>
-      <span class="sub">пороги воронки и источники</span></a>
-    <a class="rl {{ 'on' if active=='autopilot' }}" href="/autopilot">
-      <span><span class="n">✈</span>Автопилот</span>
-      <span class="sub">тумблеры стадий, капы, «ждёт тебя»</span></a>
+    <a class="rl {{ 'on' if active=='dash' }}" href="/" title="сводка воронки + что делать дальше">
+      <span class="n">00</span>Пульт</a>
+    <a class="rl {{ 'on' if active=='offers' }}" href="/offers" title="бренды и партнёрские ссылки — вход машины">
+      <span class="n">01</span>Офферы</a>
+    <a class="rl {{ 'on' if active=='domains' }}" href="/domains" title="поиск дропов, скоринг, отбор, покупка">
+      <span class="n">02</span>Домены · M1</a>
+    <a class="rl {{ 'on' if active=='queue' }}" href="/queue" title="очередь заказов + подтверждение выкупа">
+      <span class="n">M2</span>Выкуп</a>
+    <a class="rl" href="/#sites" title="провижн → контент → редактура → публикация">
+      <span class="n">03</span>Сайты · M3–M5</a>
+    <a class="rl {{ 'on' if active=='diag' }}" href="/diag" title="связь с сервисами + обновление кода">
+      <span class="n">◉</span>Диагностика</a>
+    <a class="rl {{ 'on' if active=='settings' }}" href="/settings" title="пороги воронки и источники">
+      <span class="n">⚙</span>Настройки</a>
+    <a class="rl {{ 'on' if active=='autopilot' }}" href="/autopilot" title="тумблеры стадий, капы, «ждёт тебя»">
+      <span class="n">✈</span>Автопилот</a>
   </nav>
   <div class="gates">
     <b>Гейты машины</b><br>
