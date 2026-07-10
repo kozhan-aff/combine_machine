@@ -5,17 +5,15 @@
   <span class="hint">комбайн двигает конвейер сам — до человеческих гейтов; деньги и редактура всегда за тобой</span></h2>
 
 <div class="funnel" style="margin-bottom:6px">
-  <div class="stat"><a href="/domains?status=scored" title="ждут курации: реши ✓ approve / ✗ reject">
-    <div class="v {{ 'hot' if gates.curate }}">{{ gates.curate }}</div>
-    <div class="k">на курацию</div><div class="k" style="color:var(--dim)">гейт отбора</div></a></div>
-  <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/queue" title="ждут подтверждения выкупа — денежный гейт (только ты)">
-    <div class="v {{ 'hot' if gates.money }}">{{ gates.money }}</div>
-    <div class="k">на подтверждение</div><div class="k" style="color:var(--dim)">денежный гейт</div></a></div>
-  <span class="fun-arrow">▸</span>
-  <div class="stat"><a href="/#sites" title="черновики ждут редактуры — публикация возьмёт только edited">
-    <div class="v {{ 'hot' if gates.edit }}">{{ gates.edit }}</div>
-    <div class="k">на редактуру</div><div class="k" style="color:var(--dim)">гейт редактуры</div></a></div>
+  <div class="fgroup"><div class="fg-h">Ждёт тебя</div>
+    <div class="fg-cells">
+      <a class="fcell {{ 'gate' if gates.curate }}" href="/domains?status=scored" title="на курацию (гейт отбора): реши ✓ approve / ✗ reject">
+        <div class="v">{{ gates.curate }}</div><div class="k">на курацию</div></a>
+      <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="на подтверждение (денежный гейт, только ты): ждут выкупа">
+        <div class="v">{{ gates.money }}</div><div class="k">подтвердить</div></a>
+      <a class="fcell {{ 'gate' if gates.edit }}" href="/#sites" title="на редактуру (гейт редактуры): черновики, публикация возьмёт только edited">
+        <div class="v">{{ gates.edit }}</div><div class="k">на редактуру</div></a>
+    </div></div>
 </div>
 
 <div id="prog" class="progress">
