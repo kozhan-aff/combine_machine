@@ -18,7 +18,7 @@
 
 <div class="toolbar">
   <form method="get" action="/diag">
-    <button class="btn-amber" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
+    <button class="btn-acc" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
   </form>
   <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
 </div>
@@ -36,7 +36,7 @@
     <tbody>
     {% for c in group %}
       <tr>
-        <td class="dom">{{ c.label }}{% if c.critical %}<span class="hint" title="критичная зависимость конвейера" style="color:var(--amber2)"> ●</span>{% endif %}</td>
+        <td class="dom">{{ c.label }}{% if c.critical %}<span class="hint" title="критичная зависимость конвейера" style="color:var(--acc2)"> ●</span>{% endif %}</td>
         <td class="hint">{{ c.role }}</td>
         <td>
           {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
@@ -60,7 +60,7 @@
 <p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>OK — отвечает и креды верны ·
   <span class="led led-bad"></span>FAIL — не отвечает/отверг (текст справа) ·
   <span class="led led-off"></span>пропущен — заполни креды в <code>.env</code> ·
-  <span style="color:var(--amber2)">●</span> критичная зависимость (без неё конвейер стоит).</p>
+  <span style="color:var(--acc2)">●</span> критичная зависимость (без неё конвейер стоит).</p>
 
 <div class="station" style="max-width:920px">
   <div class="plate">⇩ Обновить из git — подтянуть свежий код <span class="mod">{{ repo }}</span></div>
@@ -73,7 +73,7 @@
     {% if can_pull %}
     <form method="post" action="/admin/pull"
           onsubmit="return confirm('Забрать свежий код из git (main) и применить миграции?')">
-      <button class="btn-amber" title="git pull --ff-only + alembic upgrade head; результат покажется баннером сверху">⇩ Обновить из git</button>
+      <button class="btn-acc" title="git pull --ff-only + alembic upgrade head; результат покажется баннером сверху">⇩ Обновить из git</button>
     </form>
     {% else %}
     <span class="hint">Кнопка выключена: задай <b>GITHUB_TOKEN</b> (fine-grained PAT, read-only Contents)

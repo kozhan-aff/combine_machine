@@ -2,7 +2,7 @@
 {% block title %}✎ {{ domain }}{{ page.url_path }}{% endblock %}
 {% block content %}
 
-<h2><span class="idx">✎</span> {{ domain }}<span style="color:var(--amber)">{{ page.url_path }}</span>
+<h2><span class="idx">✎</span> {{ domain }}<span style="color:var(--acc)">{{ page.url_path }}</span>
   <span class="badge b-{{ page.status if page.status in ['draft','edited','published'] else 'default' }}"
         title="{{ {'draft':'AI-черновик — публикация его не возьмёт, пока не сохранишь здесь','edited':'вычитано — публикация возьмёт эту страницу','published':'уже опубликовано; сохранение вернёт в edited для повторной публикации'}.get(page.status, page.status) }}">{{ page.status|status_ru }}</span>
 </h2>
@@ -21,7 +21,7 @@
     </label>
   </div>
   <div class="toolbar" style="margin-top:14px">
-    <button class="btn-amber" title="сохранить текст и перевести страницу в edited — шаг 6 «Публикация» сможет её взять">✓ Сохранить как EDITED — пропустить через гейт редактуры</button>
+    <button class="btn-acc" title="сохранить текст и перевести страницу в edited — шаг 6 «Публикация» сможет её взять">✓ Сохранить как EDITED — пропустить через гейт редактуры</button>
     <a class="btn" href="/sites/{{ site.id }}" title="вернуться на карточку сайта, изменения не сохранятся">← к сайту без сохранения</a>
   </div>
 </form>

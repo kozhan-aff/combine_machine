@@ -124,8 +124,8 @@
     transition:background .12s ease, border-color .12s ease, box-shadow .12s ease; }
   button:hover, .btn:hover { border-color:var(--dim); background:var(--panel2);
     text-decoration:none; }
-  .btn-amber { background:var(--acc); border-color:var(--acc); color:#fff; }
-  .btn-amber:hover { background:var(--acc2); border-color:var(--acc2); }
+  .btn-acc { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .btn-acc:hover { background:var(--acc2); border-color:var(--acc2); }
   .btn-ok  { background:var(--ok-soft);  border-color:#b5dfc4; color:#14663a; }
   .btn-ok:hover { background:#d9f0e2; border-color:var(--ok); }
   .btn-bad { background:var(--bad-soft); border-color:#eec3c3; color:#a32626; }
@@ -135,7 +135,7 @@
   .btn-sm { padding:4px 10px; font-size:12px; border-radius:7px; }
   button:disabled { opacity:.4; cursor:default; }
   button:disabled:hover { border-color:var(--line2); background:var(--panel); }
-  .btn-amber:disabled:hover { background:var(--acc); border-color:var(--acc); }
+  .btn-acc:disabled:hover { background:var(--acc); border-color:var(--acc); }
   form.inline { display:inline; }
 
   /* ---- поля ---- */
@@ -223,7 +223,7 @@
   @media (max-width:980px) { .edit-grid { grid-template-columns:1fr; } }
   textarea.body { width:100%; min-height:520px; resize:vertical; line-height:1.6;
                   font:13px/1.6 var(--mono); }
-  .preview { background:var(--panel); color:#26241f; border:1px solid var(--line);
+  .preview { background:var(--panel); color:var(--ink); border:1px solid var(--line);
              border-radius:var(--r); padding:24px 28px; min-height:520px; overflow:auto;
              font:15.5px/1.7 Georgia,"Times New Roman",serif; box-shadow:var(--shadow); }
   .preview h2, .preview h3, .preview h4 { font-family:var(--ui); display:block;

@@ -43,7 +43,7 @@
           </select>
           <button class="btn-sm" title="закрепить выбранный оффер за этим сайтом">привязать к сайту</button>
         </form>
-        {% else %}<a class="btn btn-sm btn-amber" href="/offers" title="сначала создай оффер на экране «Офферы»">＋ создать оффер</a>{% endif %}
+        {% else %}<a class="btn btn-sm btn-acc" href="/offers" title="сначала создай оффер на экране «Офферы»">＋ создать оффер</a>{% endif %}
       </div>
     </li>
 
@@ -55,7 +55,7 @@
           баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/provision">
-          <button class="btn-sm {{ '' if prov_done else 'btn-amber' }}"
+          <button class="btn-sm {{ '' if prov_done else 'btn-acc' }}"
                   title="создать/проверить: CF-зона, NS, A-запись, vhost, SSL — безопасно жать повторно">
             {{ '↻ Прогнать provision заново' if prov_done else '▶ Запустить provision' }}</button>
         </form>
@@ -72,7 +72,7 @@
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px; align-items:center">
           <select name="lang" title="язык, на котором LLM напишет черновики"><option value="ru">ru</option><option value="en">en</option></select>
-          <button class="btn-sm {{ '' if has_pages else 'btn-amber' }}"
+          <button class="btn-sm {{ '' if has_pages else 'btn-acc' }}"
                   title="сгенерировать AI-черновики страниц (публиковаться не будут до редактуры)">▶ Сгенерировать черновики</button>
         </form>
       </div>
@@ -95,7 +95,7 @@
           кнопка не тронет.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/publish">
-          <button class="btn-sm {{ 'btn-amber' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}
+          <button class="btn-sm {{ 'btn-acc' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}
                   title="задеплоить все edited-страницы на сайт{{ '' if n_edited else ' (нет edited-страниц — сначала шаг 5)' }}">
             ▶ Опубликовать edited-страницы{{ ' (' ~ n_edited ~ ')' if n_edited }}</button>
         </form>
@@ -136,7 +136,7 @@
       <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>в индексе
           {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>не в индексе
           {% else %}<span class="led led-off"></span><span class="hint">не проверялось</span>{% endif %}</td>
-      <td><a class="btn btn-sm {{ 'btn-amber' if p.status == 'draft' }}" href="/pages/{{ p.id }}"
+      <td><a class="btn btn-sm {{ 'btn-acc' if p.status == 'draft' }}" href="/pages/{{ p.id }}"
              title="{{ 'открыть редактор: вычитать черновик и сохранить как edited' if p.status == 'draft' else 'открыть страницу в редакторе' }}">
         {{ '✎ вычитать черновик' if p.status == 'draft' else '✎ открыть в редакторе' }}</a></td>
     </tr>

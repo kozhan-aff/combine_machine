@@ -12,7 +12,7 @@
   нажал «подтвердить выкуп» — система сама деньги не тратит. Быстрый путь без очереди
   (отметить домен купленным руками) остался на экране <a href="/domains">Домены</a>; эта очередь —
   когда выкуп идёт через API провайдера (backorder/optimizator).
-  {% if n_pending %}<br><b style="color:var(--amber2)">{{ n_pending }} заказов ждут твоего подтверждения.</b>{% endif %}
+  {% if n_pending %}<br><b style="color:var(--acc2)">{{ n_pending }} заказов ждут твоего подтверждения.</b>{% endif %}
 </p>
 
 <div class="wrap">
@@ -38,7 +38,7 @@
             <button class="btn-sm btn-buy" title="поднять денежный гейт: я готов оплатить этот домен">✓ подтвердить выкуп</button></form>
         {% elif o.status == 'pending_confirm' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
-            <button class="btn-sm btn-amber" title="отправить подтверждённый заказ провайдеру">▶ отправить провайдеру</button></form>
+            <button class="btn-sm btn-acc" title="отправить подтверждённый заказ провайдеру">▶ отправить провайдеру</button></form>
         {% elif o.status == 'failed' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
             <button class="btn-sm" title="повторить отправку провайдеру">↻ повторить</button></form>
