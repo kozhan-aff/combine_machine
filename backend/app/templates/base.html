@@ -172,18 +172,23 @@
   .meter i { display:block; height:100%; border-radius:999px; }
   .m-ok  { background:var(--ok); } .m-mid { background:var(--warn); } .m-low { background:var(--bad); }
 
-  /* ---- воронка на пульте ---- */
-  .funnel { display:flex; align-items:stretch; gap:0; flex-wrap:wrap; row-gap:12px; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
-          padding:13px 18px; min-width:118px; box-shadow:var(--shadow);
-          transition:border-color .12s ease, transform .12s ease; }
-  .stat:hover { border-color:var(--line2); transform:translateY(-1px); }
-  .stat .v { font-family:var(--mono); font-size:26px; font-weight:700; color:var(--ink);
-             line-height:1.15; font-variant-numeric:tabular-nums; }
-  .stat .v.hot { color:var(--acc); }
-  .stat .k { font-size:11px; font-weight:600; color:var(--mut); margin-top:2px; }
-  .stat a { color:inherit; } .stat a:hover { text-decoration:none; }
-  .fun-arrow { align-self:center; color:var(--line2); padding:0 7px; font-size:13px; flex:none; }
+  /* ---- воронка-лента: группы по модулям, гейт-точка где ждёт человек ---- */
+  .funnel { display:flex; gap:16px; flex-wrap:wrap; align-items:stretch; }
+  .fgroup { display:flex; flex-direction:column; gap:6px; }
+  .fg-h { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.08em;
+          text-transform:uppercase; color:var(--dim); padding-left:2px; }
+  .fg-cells { display:flex; gap:1px; background:var(--line); border:1px solid var(--line);
+              border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow); }
+  .fcell { background:var(--panel); padding:11px 15px; min-width:76px; color:inherit;
+           position:relative; transition:background .12s ease; }
+  a.fcell:hover { background:var(--panel2); text-decoration:none; }
+  .fcell .v { font-family:var(--mono); font-size:22px; font-weight:700; line-height:1.1;
+              color:var(--ink); font-variant-numeric:tabular-nums; }
+  .fcell .k { font-size:10.5px; font-weight:600; color:var(--mut); margin-top:2px;
+              white-space:nowrap; }
+  .fcell.gate .v { color:var(--acc); }
+  .fcell.gate::after { content:""; position:absolute; top:8px; right:8px; width:7px; height:7px;
+                       border-radius:50%; background:var(--acc); }
 
   /* ---- шаги "что дальше" ---- */
   ol.steps { list-style:none; margin:0; padding:0; counter-reset:s; }
