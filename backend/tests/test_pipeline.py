@@ -212,15 +212,19 @@ def test_acquisition_queue_and_gate(monkeypatch):
     assert "gate" in (r.get("error") or "")
     with db.SessionLocal() as s:
         assert s.get(AcquisitionOrder, oid).status == "pending_confirm"
-    # человек подтверждает -> гейт открыт; ставка (тариф) = его же решение о деньгах
+    # человек подтверждает -> гейт открыт; ставка (тариф) = его же решение о деньгах,
+    # и тир замораживается прямо здесь (execute его уже не выбирает)
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
     acquisition.confirm_order(oid, 190)
     with db.SessionLocal() as s:
         o = s.get(AcquisitionOrder, oid)
         assert o.confirmed_by_human is True and float(o.cost) == 190.0
+        assert o.result["price_id"] == "4769" and o.result["period_id"] == "3442"
     # execute идёт к провайдеру; провайдер отверг -> честный failed (не ложный успех)
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.tariffs",
-                        lambda self, zone=".RU", refresh=False: [
-                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.find_order",
+                        lambda self, domain: None)
     monkeypatch.setattr("app.integrations.backorder.BackorderClient.order",
                         lambda self, domain, price_id, period_id: (_ for _ in ()).throw(
                             RuntimeError("недостаточно средств на балансе")))

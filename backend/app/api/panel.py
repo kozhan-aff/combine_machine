@@ -424,7 +424,7 @@ def queue_poll_action():
     from app.services import acquisition
     try:
         r = acquisition.poll_orders()
-        return _back("/queue", msg=f"Статусы у провайдера: заказов {r['checked']} · "
+        return _back("/queue", msg=f"Сверено с провайдером: наших заказов {r['checked']} · "
                                    f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
                                    f"в полёте {r.get('pending', 0)}.")
     except Exception as e:  # noqa: BLE001

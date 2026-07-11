@@ -16,11 +16,14 @@ BID = 190          # базовый тир .RU; ставку теперь обя
 
 
 @pytest.fixture(autouse=True)
-def _offline_tariffs(monkeypatch):
-    """Сетка тарифов — офлайн: execute зовёт pick_tariff, а живая сеть в тестах запрещена."""
+def _offline_backorder(monkeypatch):
+    """Офлайн: confirm зовёт pick_tariff (сетка), execute — find_order (заказы у провайдера).
+    Живая сеть в тестах запрещена; find_order=None = «у провайдера заказа нет»."""
     monkeypatch.setattr("app.integrations.backorder.BackorderClient.tariffs",
                         lambda self, zone=".RU", refresh=False: [
                             {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.find_order",
+                        lambda self, domain: None)
 
 
 def _reject(msg="недостаточно средств на балансе"):
@@ -93,6 +96,10 @@ def test_retry_from_failed_works(monkeypatch):
     assert r1["status"] == "failed" and "недостаточно средств" in (r1.get("error") or "")
     r2 = acquisition.execute_confirmed_order(oid)      # ретрай из failed реально отрабатывает
     assert r2["status"] == "failed" and "недостаточно средств" in (r2.get("error") or "")
+    # ставка пережила обе неудачи: повтор не должен требовать переподтверждения на ровном месте
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, oid)
+        assert o.result["price_id"] == "4769" and float(o.cost) == 190.0
 
 
 # --- fix 3: create_order only from approved ------------------------------------

@@ -71,8 +71,14 @@
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
             <button class="btn-sm btn-acc" title="отправить подтверждённый заказ провайдеру">▶ отправить провайдеру</button></form>
         {% elif o.status == 'failed' and o.confirmed %}
+          {% if o.result and o.result.maybe_sent %}
+            <div class="hint" style="color:var(--bad); max-width:200px; margin-bottom:6px"
+                  title="Связь оборвалась ПОСЛЕ отправки — заказ мог уйти к провайдеру и деньги списаться. Повтор вслепую = риск второго платного заказа. Сначала «↻ обновить статусы у провайдера»: если заказ там есть, он подхватится.">
+              ⚠ заказ мог уйти — сперва «↻ обновить статусы»</div>
+          {% else %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
-            <button class="btn-sm" title="повторить отправку провайдеру">↻ повторить</button></form>
+            <button class="btn-sm" title="повторить отправку провайдеру (перед отправкой проверим у провайдера, нет ли уже заказа на этот домен)">↻ повторить</button></form>
+          {% endif %}
         {% elif o.status == 'ordered' %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/caught"
                 onsubmit="return confirm('Домен {{ o.domain }} пойман провайдером? Переведём его в purchased.')">
@@ -84,8 +90,10 @@
             <button class="btn-sm btn-bad" title="снять заявку, вернуть домен в approved">✗ отменить</button></form>
         {% elif o.status not in ['ordered'] %}<span class="hint">—</span>{% endif %}
       </td>
+      {# только человекочитаемое: ошибка / заметка / статус у провайдера. price_id/period_id —
+         служебные (замороженный тариф), в UI им делать нечего: ставка есть отдельной колонкой. #}
       <td class="hint" style="max-width:360px; overflow:hidden; text-overflow:ellipsis">
-        {{ o.result.error if o.result and o.result.error else (o.result if o.result else '') }}</td>
+        {% if o.result %}{{ o.result.error or o.result.note or o.result.clear_status or '' }}{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

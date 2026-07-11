@@ -88,15 +88,25 @@ def _reset_pricing_cache():
     pricing._TARIFF = saved
 
 
+def _no_live_order(self, domain, price_id, period_id):
+    raise AssertionError(
+        f"живой ПЛАТНЫЙ заказ backorder из теста ({domain})! Тест, которому нужен «успех», "
+        "обязан сам подменить BackorderClient.order своим monkeypatch.")
+
+
 @pytest.fixture
 def client(monkeypatch):
     """TestClient + офлайн-гвард на backorder.
 
-    Структурный гвард (как _default_sources_backorder_only): /queue рендерит сетку ставок и
-    баланс лицевого счёта через httpx, поэтому ЛЮБОЙ тест, открывающий панель с заявкой в
-    очереди, без этого патча тихо уходил бы в живую сеть. Патчим на фикстуре `client`, а не
-    autouse: панельные роуты достижимы только через неё, а юнит-тесты транспорта
-    (test_pricing / test_backorder_order) должны гонять НАСТОЯЩИЙ tariffs()/pick_tariff().
+    Структурный гвард (как _default_sources_backorder_only). Настоящего сетевого блока в
+    харнессе НЕТ, а панель денежного пути ходит к провайдеру с БОЕВЫМИ кредами из .env:
+      /queue        -> tariffs() + balance()   (чтение)
+      /queue/poll   -> client_orders()         (чтение)
+      /queue/{}/exec-> find_order() + order()  (ПЛАТНО!)
+    Без патча любой тест на этих роутах уходил бы в живую сеть, а execute при ненулевом
+    балансе — списал бы деньги. Поэтому order() тут не «заглушка», а ловушка: падает громко.
+    Патчим на фикстуре `client`, а не autouse — юнит-тесты транспорта (test_pricing /
+    test_backorder_order) должны гонять НАСТОЯЩИЕ tariffs()/pick_tariff()/order().
     Баланс 0 ₽ — честный дефолт: он же и на живом счету."""
     from fastapi.testclient import TestClient
     from app.integrations.backorder import BackorderClient
@@ -105,5 +115,8 @@ def client(monkeypatch):
                         lambda self, zone=".RU", refresh=False: [
                             {"price_id": "4769", "period_id": "3442", "price": 190.0},
                             {"price_id": "4770", "period_id": "3443", "price": 400.0}])
-    monkeypatch.setattr(BackorderClient, "balance", lambda self: 0.0)
+    monkeypatch.setattr(BackorderClient, "balance", lambda self, ttl=60.0: 0.0)
+    monkeypatch.setattr(BackorderClient, "client_orders", lambda self: [])
+    monkeypatch.setattr(BackorderClient, "find_order", lambda self, domain: None)
+    monkeypatch.setattr(BackorderClient, "order", _no_live_order)
     return TestClient(app)

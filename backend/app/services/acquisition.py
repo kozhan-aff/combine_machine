@@ -1,12 +1,18 @@
 """M2 — Acquisition. Очередь выкупа с ЖЁСТКИМ денежным гейтом (PLAN §2, правило 2).
 
-Поток: approved-домен → create_order (pending_confirm) → человек confirm_order
-(ставит confirmed_by_human=True) → execute_confirmed_order шлёт заказ провайдеру
+Поток: approved-домен → create_order (pending_confirm) → человек confirm_order (ставит
+confirmed_by_human=True И выбирает СТАВКУ) → execute_confirmed_order шлёт заказ провайдеру
 ТОЛЬКО при confirmed_by_human. Деньги на автопилоте не тратятся.
 
-Живой заказ у провайдера (backorder.order / optimizator) требует login-кредов и пока
-не реализован в транспорте — execute это честно репортит (status='failed', reason), не
-делая вид, что купил. Механика очереди и гейт — рабочие и покрыты тестами.
+Ставка — часть денежного гейта. У backorder тариф И ЕСТЬ ставка (сетка 190 ₽ … 5 млн ₽:
+выше тариф → больше регистраторов → выше шанс перехвата), поэтому «сколько заплатить»
+решает человек на confirm; выбранный тир замораживается в заказе (cost + price_id/period_id
+в result), и execute уже ничего не до-решает.
+
+backorder заказывается живьём (uniservice.order). execute идемпотентен по деньгам: перед
+отправкой спрашивает провайдера, нет ли уже заказа на этот домен — иначе ambiguous-таймаут
+(заказ ушёл, ответ не дошёл) + кнопка «повторить» = второе списание. optimizator ещё не
+реализован — execute это честно репортит (status='failed'), не делая вид, что купил.
 """
 _PROVIDERS = {"backorder", "optimizator"}
 # статусы, при которых по домену уже есть незакрытый заказ — второй не плодим
@@ -70,11 +76,29 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         if bid_rub is not None:
             if bid_rub <= 0:
                 raise ValueError(f"ставка должна быть больше нуля, получено {bid_rub}")
-            o.cost = bid_rub                         # сколько человек готов заплатить
+        if o.provider == "backorder":
+            # Тариф выбираем ЗДЕСЬ и замораживаем в заказе: ставка между тирами округляется
+            # вверх, и человек должен увидеть фактическую сумму на своём же действии, а не
+            # получить «система решила доплатить» на отправке. execute тир уже не трогает.
+            from app.integrations.backorder import BackorderClient
+            t = BackorderClient().pick_tariff(d_of(db, o.domain_id), float(bid_rub))
+            o.cost = t["price"]                      # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
+            o.result = {**(o.result or {}), "price_id": t["price_id"], "period_id": t["period_id"]}
+        elif bid_rub is not None:
+            o.cost = bid_rub
         o.confirmed_by_human = True                  # HARD GATE поднят человеком
         db.commit()
         return {"order_id": order_id, "status": o.status, "confirmed_by_human": True,
                 "bid_rub": float(o.cost) if o.cost is not None else None}
+
+
+def d_of(db, domain_id: int) -> str:
+    """Имя домена по id (тариф зависит от зоны)."""
+    from app.models.domain import Domain
+    d = db.get(Domain, domain_id)
+    if d is None:
+        raise ValueError(f"domain {domain_id} not found")
+    return d.domain
 
 
 def execute_confirmed_order(order_id: int) -> dict:
@@ -114,32 +138,59 @@ def execute_confirmed_order(order_id: int) -> dict:
         db.refresh(o)
 
         d = db.get(Domain, o.domain_id)
+        # Тариф, замороженный человеком на confirm, живёт в o.result — а неудача перезаписывает
+        # result ошибкой. Несём его через ВСЕ ветки, иначе «↻ повторить» после первого отказа
+        # теряет ставку и требует переподтверждения на ровном месте.
+        saved = {k: v for k, v in (o.result or {}).items() if k in ("price_id", "period_id")}
         try:
             if o.provider == "backorder":
+                import httpx
                 from app.integrations.backorder import BackorderClient
-                if not o.cost:                        # ставка ставится человеком в confirm
+                price_id, period_id = saved.get("price_id"), saved.get("period_id")
+                if not (price_id and period_id):      # тариф замораживается человеком в confirm
                     raise RuntimeError("не выбрана ставка (тариф) — переподтверди заказ со ставкой")
                 c = BackorderClient()
-                t = c.pick_tariff(d.domain, float(o.cost))
-                res = c.order(d.domain, price_id=t["price_id"], period_id=t["period_id"])
-                o.cost = t["price"]                   # фактический тир (ставка округлена вверх)
+
+                # ИДЕМПОТЕНТНОСТЬ ДЕНЕГ. Прежде чем платить — спросить провайдера, нет ли уже
+                # заказа на этот домен. Закрывает ambiguous-сбой (таймаут ПОСЛЕ отправки:
+                # заказ ушёл, мы записали failed, человек жмёт «повторить») и ручной заказ из ЛК.
+                dup = c.find_order(d.domain)
+                if dup is not None:
+                    o.status = "ordered"
+                    o.provider_order_id = dup["elid"]
+                    o.result = {**saved, "note": "заказ на этот домен у провайдера уже есть — "
+                                                 "второй не шлём", "clear_status": dup["clear_status"]}
+                    o.ordered_at = o.ordered_at or datetime.now(timezone.utc)
+                    db.commit()
+                    return {"order_id": order_id, "status": o.status, "result": o.result}
+
+                try:
+                    res = c.order(d.domain, price_id=price_id, period_id=period_id)
+                except httpx.TransportError as e:
+                    # Сбой ПОСЛЕ отправки неотличим от сбоя до неё — заказ мог уйти и деньги
+                    # списаться. Не предлагаем «повторить» вслепую: сначала опрос провайдера.
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"связь с провайдером оборвалась: {type(e).__name__}",
+                                "maybe_sent": True}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
             else:
                 from app.integrations.optimizator import OptimizatorClient
                 res = OptimizatorClient().register([d.domain])   # optimizator берёт список
             o.status = "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
-            o.result = res if isinstance(res, dict) else {"raw": str(res)}
+            o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
             o.ordered_at = datetime.now(timezone.utc)
             db.commit()
             return {"order_id": order_id, "status": o.status, "result": o.result}
         except NotImplementedError:
             o.status = "failed"
-            o.result = {"error": f"провайдер {o.provider}: транспорт заказа не реализован"}
+            o.result = {**saved, "error": f"провайдер {o.provider}: транспорт заказа не реализован"}
             db.commit()
             return {"order_id": order_id, "status": "failed", **o.result}
         except Exception as e:  # noqa: BLE001 — сбой провайдера -> failed, не 500
             o.status = "failed"
-            o.result = {"error": f"{type(e).__name__}: {e}"[:200]}
+            o.result = {**saved, "error": f"{type(e).__name__}: {e}"[:200]}
             db.commit()
             return {"order_id": order_id, "status": "failed", **o.result}
 
@@ -180,29 +231,44 @@ def poll_orders() -> dict:
     from app.models.domain import Domain, AcquisitionOrder
     from app.integrations.backorder import BackorderClient
 
-    by_domain = {o["domain"]: o for o in BackorderClient().client_orders()}
+    remote_orders = BackorderClient().client_orders()
+    by_elid = {r["elid"]: r for r in remote_orders if r["elid"]}
+    by_domain = {r["domain"]: r for r in remote_orders}     # фолбэк для строк без elid
     moved = {"caught": 0, "failed": 0, "pending": 0}
+    matched = 0
     with SessionLocal() as db:
+        # 'failed' опрашиваем тоже: там может лежать ФАНТОМ — заказ, который на самом деле
+        # ушёл (ambiguous-таймаут), и провайдер его знает. Иначе он невидим, а домен потерян.
         rows = db.execute(
             select(AcquisitionOrder).where(AcquisitionOrder.provider == "backorder",
-                                           AcquisitionOrder.status == "ordered")
+                                           AcquisitionOrder.status.in_(("ordered", "failed")))
         ).scalars().all()
         for o in rows:
             d = db.get(Domain, o.domain_id)
-            remote = by_domain.get(d.domain if d else "")
+            # Матч по elid, а не по домену: заказов на один домен может быть несколько
+            # (ретрай, ручной заказ из ЛК), и словарь по имени схлопнул бы их в последний —
+            # свежий заказ получил бы статус протухшего.
+            remote = by_elid.get(o.provider_order_id or "") or (
+                by_domain.get(d.domain) if d and not o.provider_order_id else None)
             if remote is None:
                 continue                              # провайдер ещё не показывает заказ
+            matched += 1
+            if not o.provider_order_id and remote["elid"]:
+                o.provider_order_id = remote["elid"]  # усыновляем фантом: теперь он отслеживаем
             state = remote["state"]
             moved[state] = moved.get(state, 0) + 1
             o.result = {**(o.result or {}), "clear_status": remote["clear_status"]}
+            o.result.pop("maybe_sent", None)          # неопределённость снята правдой провайдера
             if state == "caught":
                 o.status = "caught"
                 if d is not None:
                     d.status = "purchased"            # домен наш — путь в M3
             elif state == "failed":
                 o.status = "failed"
+            else:
+                o.status = "ordered"                  # в полёте (в т.ч. поднимает фантом из failed)
         db.commit()
-    return {"checked": len(by_domain), **moved}
+    return {"checked": matched, **moved}
 
 
 def cancel_order(order_id: int) -> dict:

@@ -93,8 +93,10 @@ def test_provider_error_raises_and_scrubs_password():
 # --- статусы провайдера ---------------------------------------------------------
 
 def test_state_map_covers_all_documented_statuses():
-    caught, failed, pending = [8, 11], [3, 6, 7, 9, 12, 14], [2, 4, 5, 10, 13]
-    assert all(backorder.state_of(s) == "caught" for s in caught)
+    """8 «в процессе передачи» НЕ caught: caught терминален (домен -> purchased -> M3),
+    а передача ещё может сорваться. Ждём 11 — ждать ничего не стоит."""
+    failed, pending = [3, 6, 7, 9, 12, 14], [2, 4, 5, 8, 10, 13]
+    assert backorder.state_of(11) == "caught"        # единственное терминальное «наш»
     assert all(backorder.state_of(s) == "failed" for s in failed)
     assert all(backorder.state_of(s) == "pending" for s in pending)
     assert backorder.state_of("11") == "caught"      # API отдаёт строкой
@@ -167,6 +169,91 @@ def test_execute_picks_tier_by_bid_and_sends(sqlite_db, monkeypatch):
         o = s.get(AcquisitionOrder, oid)
         assert float(o.cost) == 400.0                   # фактический тир, не желаемые 300
         assert o.provider_order_id == "5140302"
+
+
+def test_execute_does_not_double_order_if_provider_already_has_one(sqlite_db, monkeypatch):
+    """ИДЕМПОТЕНТНОСТЬ ДЕНЕГ: у провайдера уже есть заказ на домен -> второй НЕ шлём.
+
+    Закрывает ambiguous-таймаут (заказ ушёл, ответ не дошёл -> failed -> «повторить»)
+    и ручной заказ из ЛК. Провайдерский domain работает как idempotency key.
+    """
+    sent: list = []
+    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: {
+        "elid": "5140302", "domain": domain, "id_status": "2",
+        "clear_status": "Не оплачен", "state": "pending", "tariff": "190"})
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: sent.append(d))
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    r = acquisition.execute_confirmed_order(oid)
+
+    assert sent == [], "второй платный заказ на тот же домен!"
+    assert r["status"] == "ordered" and r["result"]["clear_status"] == "Не оплачен"
+    import app.db as db
+    from app.models.domain import AcquisitionOrder
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).provider_order_id == "5140302"  # усыновили
+
+
+def test_transport_error_marks_maybe_sent_not_plain_failed(sqlite_db, monkeypatch):
+    """Обрыв связи неотличим от «заказ ушёл» -> maybe_sent, чтобы панель не звала повторить вслепую."""
+    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: None)
+
+    def _timeout(self, d, price_id, period_id):
+        raise httpx.ReadTimeout("оборвалось")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _timeout)
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and r["maybe_sent"] is True
+
+
+def test_confirm_freezes_tier_and_execute_does_not_repick(sqlite_db, monkeypatch):
+    """Тир выбирает ЧЕЛОВЕК на confirm, и он заморожен: execute не «доплачивает» за него сам.
+
+    Свойство проверяем сменой сетки ПОД НОГАМИ между confirm и execute (так выглядит
+    протухший процессный кеш или пополнение сетки у провайдера): заказ обязан уйти по
+    тарифу, который человек подтвердил, а не по пересчитанному.
+    """
+    import app.db as db
+    from app.models.domain import AcquisitionOrder
+    grid = [{"price_id": "4769", "period_id": "3442", "price": 190.0},
+            {"price_id": "4770", "period_id": "3443", "price": 400.0}]
+    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: grid)
+    monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: None)
+    sent: list = []
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: sent.append((price_id, period_id))
+                        or {"order_id": "OK"})
+
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 300)                  # человек: 300 ₽ -> тир 400 ₽, заморожен
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, oid)
+        assert float(o.cost) == 400.0                    # видит фактический тир, не свои 300
+        assert o.result["price_id"] == "4770" and o.result["period_id"] == "3443"
+
+    grid.insert(1, {"price_id": "9999", "period_id": "8888", "price": 300.0})   # сетка «уехала»
+    assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
+    assert sent == [("4770", "3443")], "execute пересчитал тариф вместо подтверждённого человеком"
+
+
+def test_pick_tariff_refuses_unknown_zone(monkeypatch):
+    """Незнакомая зона (.su/gTLD) -> отказ, а не покупка по .RU-сетке."""
+    c = _client({"elem": []})
+    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    assert backorder.zone_of("site.su") is None
+    with pytest.raises(RuntimeError, match="нет тарифной сетки"):
+        c.pick_tariff("site.su", 190)
 
 
 def test_poll_moves_ordered_to_caught_and_failed(sqlite_db, monkeypatch):
