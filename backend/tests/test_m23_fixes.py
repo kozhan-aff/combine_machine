@@ -1,14 +1,33 @@
 """Regression tests for the reviewed M2 (acquisition) + M3 (provisioning) fixes.
 
-Runs on the shared SQLite harness (conftest.py). No network: provider transports
-raise NotImplementedError by default; where a provider "success" is needed it's
-monkeypatched. The hard money gate (order goes to a provider ONLY when
-confirmed_by_human) is asserted to still hold after every change.
+Runs on the shared SQLite harness (conftest.py). No network: the provider transport is
+monkeypatched — «успех» отдаёт order_id, «отказ» бросает RuntimeError (так теперь выглядит
+реальный отказ backorder: нет средств / заказ отвергнут). The hard money gate (order goes
+to a provider ONLY when confirmed_by_human) is asserted to still hold after every change.
+
+Ставка (тариф) с 2026-07-11 обязательна на confirm — она и есть решение о деньгах.
 """
 import pytest
 
 import app.db as db
 from app.models.domain import Domain, AcquisitionOrder
+
+BID = 190          # базовый тир .RU; ставку теперь обязан задать человек на confirm
+
+
+@pytest.fixture(autouse=True)
+def _offline_tariffs(monkeypatch):
+    """Сетка тарифов — офлайн: execute зовёт pick_tariff, а живая сеть в тестах запрещена."""
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+
+
+def _reject(msg="недостаточно средств на балансе"):
+    """Провайдер отверг заказ — честный путь в 'failed' (раньше это давал NotImplementedError)."""
+    def _raise(self, domain, price_id, period_id):
+        raise RuntimeError(msg)
+    return _raise
 
 
 def _add(obj):
@@ -37,7 +56,7 @@ def test_claim_blocks_double_execute(monkeypatch):
     from app.services import acquisition
     did = _add(Domain(domain="claim.ru", source="backorder", status="approved"))
     oid = acquisition.create_order(did, "backorder")
-    acquisition.confirm_order(oid)
+    acquisition.confirm_order(oid, BID)
     # провайдер «успешно» принял заказ -> ordered
     monkeypatch.setattr("app.integrations.backorder.BackorderClient.order",
                         lambda self, domain, price_id, period_id: {"order_id": "OK1"})
@@ -55,7 +74,7 @@ def test_in_flight_order_is_not_re_sent():
     from app.services import acquisition
     did = _add(Domain(domain="inflight.ru", source="backorder", status="approved"))
     oid = acquisition.create_order(did, "backorder")
-    acquisition.confirm_order(oid)
+    acquisition.confirm_order(oid, BID)
     with db.SessionLocal() as s:                       # симулируем in-flight claim
         s.get(AcquisitionOrder, oid).status = "ordering"
         s.commit()
@@ -63,16 +82,17 @@ def test_in_flight_order_is_not_re_sent():
     assert r.get("status") == "ordering" and "note" in r
 
 
-def test_retry_from_failed_works():
-    """Fix 4: заказ в 'failed' + confirmed можно повторить (транспорт не готов -> честный failed)."""
+def test_retry_from_failed_works(monkeypatch):
+    """Fix 4: заказ в 'failed' + confirmed можно повторить (провайдер отверг -> честный failed)."""
     from app.services import acquisition
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.order", _reject())
     did = _add(Domain(domain="retry.ru", source="backorder", status="approved"))
     oid = acquisition.create_order(did, "backorder")
-    acquisition.confirm_order(oid)
-    r1 = acquisition.execute_confirmed_order(oid)      # real transport -> NotImplementedError
-    assert r1["status"] == "failed" and "implement" in (r1.get("error") or "").lower()
+    acquisition.confirm_order(oid, BID)
+    r1 = acquisition.execute_confirmed_order(oid)      # провайдер отверг -> failed, не ложный успех
+    assert r1["status"] == "failed" and "недостаточно средств" in (r1.get("error") or "")
     r2 = acquisition.execute_confirmed_order(oid)      # ретрай из failed реально отрабатывает
-    assert r2["status"] == "failed" and "implement" in (r2.get("error") or "").lower()
+    assert r2["status"] == "failed" and "недостаточно средств" in (r2.get("error") or "")
 
 
 # --- fix 3: create_order only from approved ------------------------------------
@@ -92,7 +112,7 @@ def test_mark_caught_moves_domain_to_purchased(monkeypatch):
     from app.services import acquisition
     did = _add(Domain(domain="caught.ru", source="backorder", status="approved"))
     oid = acquisition.create_order(did, "backorder")
-    acquisition.confirm_order(oid)
+    acquisition.confirm_order(oid, BID)
     monkeypatch.setattr("app.integrations.backorder.BackorderClient.order",
                         lambda self, domain, price_id, period_id: {"order_id": "OK2"})
     assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
@@ -126,11 +146,12 @@ def test_cancel_returns_domain_to_approved():
         assert s.get(Domain, did).status == "approved"     # вернулся в очередь на покупку
 
 
-def test_cancel_from_failed_also_returns_approved():
+def test_cancel_from_failed_also_returns_approved(monkeypatch):
     from app.services import acquisition
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.order", _reject())
     did = _add(Domain(domain="cancelfailed.ru", source="backorder", status="approved"))
     oid = acquisition.create_order(did, "backorder")
-    acquisition.confirm_order(oid)
+    acquisition.confirm_order(oid, BID)
     assert acquisition.execute_confirmed_order(oid)["status"] == "failed"
     r = acquisition.cancel_order(oid)
     assert r["status"] == "cancelled"

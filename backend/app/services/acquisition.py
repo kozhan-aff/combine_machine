@@ -48,8 +48,12 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         return order.id
 
 
-def confirm_order(order_id: int) -> dict:
+def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
     """ЧЕЛОВЕК подтверждает выкуп — единственный путь поднять денежный гейт.
+
+    `bid_rub` — СТАВКА. У backorder тариф и есть ставка (сетка 190 ₽ … 5 млн ₽): чем выше,
+    тем выше шанс перехвата. «Сколько заплатить» — это решение о деньгах, поэтому его
+    принимает человек здесь же, на гейте, а не система. Кладём в AcquisitionOrder.cost.
 
     Только ставит confirmed_by_human=True; заказ провайдеру НЕ шлёт (это execute)."""
     from app.db import SessionLocal
@@ -61,9 +65,16 @@ def confirm_order(order_id: int) -> dict:
             raise ValueError(f"order {order_id} not found")
         if o.status != "pending_confirm":
             return {"order_id": order_id, "status": o.status, "note": "не в статусе pending_confirm"}
+        if o.provider == "backorder" and not bid_rub:
+            raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
+        if bid_rub is not None:
+            if bid_rub <= 0:
+                raise ValueError(f"ставка должна быть больше нуля, получено {bid_rub}")
+            o.cost = bid_rub                         # сколько человек готов заплатить
         o.confirmed_by_human = True                  # HARD GATE поднят человеком
         db.commit()
-        return {"order_id": order_id, "status": o.status, "confirmed_by_human": True}
+        return {"order_id": order_id, "status": o.status, "confirmed_by_human": True,
+                "bid_rub": float(o.cost) if o.cost is not None else None}
 
 
 def execute_confirmed_order(order_id: int) -> dict:
@@ -106,8 +117,12 @@ def execute_confirmed_order(order_id: int) -> dict:
         try:
             if o.provider == "backorder":
                 from app.integrations.backorder import BackorderClient
-                # реальный заказ требует price_id/period_id + login — транспорт не готов
-                res = BackorderClient().order(d.domain, price_id="", period_id="")
+                if not o.cost:                        # ставка ставится человеком в confirm
+                    raise RuntimeError("не выбрана ставка (тариф) — переподтверди заказ со ставкой")
+                c = BackorderClient()
+                t = c.pick_tariff(d.domain, float(o.cost))
+                res = c.order(d.domain, price_id=t["price_id"], period_id=t["period_id"])
+                o.cost = t["price"]                   # фактический тир (ставка округлена вверх)
             else:
                 from app.integrations.optimizator import OptimizatorClient
                 res = OptimizatorClient().register([d.domain])   # optimizator берёт список
@@ -119,7 +134,7 @@ def execute_confirmed_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": o.status, "result": o.result}
         except NotImplementedError:
             o.status = "failed"
-            o.result = {"error": "provider transport not implemented (нужны login-креды провайдера)"}
+            o.result = {"error": f"провайдер {o.provider}: транспорт заказа не реализован"}
             db.commit()
             return {"order_id": order_id, "status": "failed", **o.result}
         except Exception as e:  # noqa: BLE001 — сбой провайдера -> failed, не 500
@@ -150,6 +165,44 @@ def mark_caught(order_id: int) -> dict:
             d.status = "purchased"                    # домен куплен — путь в M3
         db.commit()
         return {"order_id": order_id, "status": "caught", "domain_id": o.domain_id}
+
+
+def poll_orders() -> dict:
+    """Синхронизировать отправленные заказы с правдой провайдера (по кнопке, не автопилотом).
+
+    Читает clientbackorder (денег НЕ тратит) и двигает 'ordered' -> 'caught'/'failed' по
+    id_status. Это НЕ обход денежного гейта: деньги уже потрачены на execute за подтверждением
+    человека, а поимка — факт со стороны провайдера, а не наше решение. Ручной mark_caught
+    остаётся (провайдер может молчать). Оркестратор эту функцию не зовёт.
+    """
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.domain import Domain, AcquisitionOrder
+    from app.integrations.backorder import BackorderClient
+
+    by_domain = {o["domain"]: o for o in BackorderClient().client_orders()}
+    moved = {"caught": 0, "failed": 0, "pending": 0}
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(AcquisitionOrder).where(AcquisitionOrder.provider == "backorder",
+                                           AcquisitionOrder.status == "ordered")
+        ).scalars().all()
+        for o in rows:
+            d = db.get(Domain, o.domain_id)
+            remote = by_domain.get(d.domain if d else "")
+            if remote is None:
+                continue                              # провайдер ещё не показывает заказ
+            state = remote["state"]
+            moved[state] = moved.get(state, 0) + 1
+            o.result = {**(o.result or {}), "clear_status": remote["clear_status"]}
+            if state == "caught":
+                o.status = "caught"
+                if d is not None:
+                    d.status = "purchased"            # домен наш — путь в M3
+            elif state == "failed":
+                o.status = "failed"
+        db.commit()
+    return {"checked": len(by_domain), **moved}
 
 
 def cancel_order(order_id: int) -> dict:
@@ -195,6 +248,7 @@ def list_orders() -> list[dict]:
             out.append({"id": o.id, "domain": d.domain if d else f"#{o.domain_id}",
                         "provider": o.provider, "status": o.status,
                         "confirmed": o.confirmed_by_human,
+                        "bid": float(o.cost) if o.cost is not None else None,
                         "result": o.result, "domain_id": o.domain_id})
     return out
 

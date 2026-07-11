@@ -89,7 +89,21 @@ def _reset_pricing_cache():
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    """TestClient + офлайн-гвард на backorder.
+
+    Структурный гвард (как _default_sources_backorder_only): /queue рендерит сетку ставок и
+    баланс лицевого счёта через httpx, поэтому ЛЮБОЙ тест, открывающий панель с заявкой в
+    очереди, без этого патча тихо уходил бы в живую сеть. Патчим на фикстуре `client`, а не
+    autouse: панельные роуты достижимы только через неё, а юнит-тесты транспорта
+    (test_pricing / test_backorder_order) должны гонять НАСТОЯЩИЙ tariffs()/pick_tariff().
+    Баланс 0 ₽ — честный дефолт: он же и на живом счету."""
     from fastapi.testclient import TestClient
+    from app.integrations.backorder import BackorderClient
     from app.main import app
+    monkeypatch.setattr(BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0},
+                            {"price_id": "4770", "period_id": "3443", "price": 400.0}])
+    monkeypatch.setattr(BackorderClient, "balance", lambda self: 0.0)
     return TestClient(app)
