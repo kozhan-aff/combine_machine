@@ -25,6 +25,9 @@
 - **Дизайн:** светлая холодная CMS, единственный акцент `--acc #2563c9`, IBM Plex Sans (UI) / JetBrains Mono (числа, домены). Тёмная тема и тёплые/оранжевые акценты запрещены. UI на русском.
 - **Коммиты:** сообщение через heredoc (`git commit -F - <<'EOF'`), НЕ через `-m` — бэктики в `-m` ловит zsh.
 - **Уже сделано, не делать заново:** «Гейты машины» в подвале сайдбара (`base.html:346-350`) и строка баланса backorder на `/queue` (`queue.html:25-28`) существуют. Макет их отрисовал с живой панели. Спека §7 в этой части описывает существующее.
+- **SQLite отдаёт даты naive, PostgreSQL — tz-aware.** Это проверено на живом харнессе: `DateTime(timezone=True)` возвращает из SQLite `tzinfo=None`, и любое python-сравнение с `datetime.now(timezone.utc)` даёт `TypeError: can't compare offset-naive and offset-aware datetimes`. Значит: сравнивать даты **в SQL** (там драйвер сам приведёт бинд, как уже делает `_pool_counts`), либо нормализовать перед сравнением в Python — `if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)` (так уже поступает `scoring.acquirability_verdict`). Ни одного голого `dt <= now` в python-коде этой ветки быть не должно.
+- **CSRF-гард требует одноимённый Referer.** `main.py:csrf_guard` отбивает 403 на любом POST, если `urlsplit(Referer).netloc != Host`. В тестах Referer обязан быть `http://testserver/...` — чужой (`http://x/`) вернёт 403, а не редирект.
+- **`pool.html` — не «просто переезд».** На разметку старой таблицы `/domains` (бейджи статуса, `reject_reason`, чипы фильтров, поле лимита) опираются 6 существующих тестов. Переносить дословно; тесты перенаправить на `/domains/pool`.
 
 ---
 
@@ -39,11 +42,23 @@
 | `backend/app/services/scoring.py` | править (T2) | `score_pending` / `recheck_acquirability` под `track`; `_funnel` репортит стадию; `blind_reason()` |
 | `backend/app/services/orchestrator.py` | править (T3) | `run_sweep` под `track`, стадии = `STAGES` |
 | `backend/app/api/panel.py` | править (T3, T5, T6, T7) | `spawn`, `/api/jobs/live`, `/run/{job}/cancel`, возврат на `Referer`, инбокс, пул, причины |
-| `backend/app/templates/base.html` | править (T4) | CSS карточки задачи + JS-поллер + тонкая полоса в шапке |
-| `backend/app/templates/dashboard.html` | править (T5) | блок «Машина сейчас» (занята / простой) |
+| `backend/app/templates/base.html` | править (T4) | CSS карточки задачи + JS-поллер + тонкая полоса в шапке; удаление `.progress` |
+| `backend/app/templates/autopilot.html` | править (T4) | свой `#prog` + поллер `/run/sweep/progress` заменяются на общий `#machine` |
+| `backend/app/templates/dashboard.html` | править (T5, T6) | блок «Машина сейчас»; плитки воронки — на `/domains/pool` |
 | `backend/app/templates/domains.html` | переписать (T6, T7) | строка действий, инбокс, готовы к выкупу, модалка причин |
-| `backend/app/templates/pool.html` | создать (T6) | полный реестр доменов (нынешняя таблица целиком) |
+| `backend/app/templates/pool.html` | создать (T6) | полный реестр доменов (нынешняя таблица целиком, дословно) |
+| `backend/app/templates/queue.html` | править (T6) | одна ссылка `/domains?status=approved` → `/domains` |
 | `docs/DESIGN.md`, `CLAUDE.md`, спека | править (T8) | зафиксировать новые классы, состояние, поправки |
+
+**Тесты, которые ветка обязана починить** (сегодня зелёные, после переезда `/domains` — красные):
+
+| Файл | Что держит | Куда |
+|---|---|---|
+| `test_web_fixes.py` | `?limit=` кламп, бейдж `reject_reason`, скрытие `not_acquirable`, локализованные лейблы | → `/domains/pool` (T6) |
+| `test_autopilot_panel.py` | локализованные чипы фильтров на `/domains` | → `/domains/pool` (T6) |
+| `test_pipeline.py` | `/domains?status=purchased` → ссылка на карточку сайта | → `/domains/pool` (T6) |
+| `test_jobs.py` | in-memory реестр + `on_progress` | удаляется (T2) |
+| `test_sources.py`, `test_orchestrator.py`, `test_recheck_acquirability.py` | `on_progress` в сигнатурах | снять колбэк (T2, T3) |
 
 ---
 
@@ -69,12 +84,22 @@
   - `jobs.cancelled(name) -> bool`, `jobs.request_cancel(name) -> bool`.
   - `jobs.live() -> list[dict]`, `jobs.last(name) -> dict | None`, `jobs.progress(name) -> dict`, `jobs.is_running(name) -> bool`.
   - `jobs.start(name, target) -> bool` — legacy-шим (удаляется в Task 3).
-  - Форма dict: `{"name","trigger","status","stage","stages","done","total","current","message","error","cancel_requested","running","started_at","finished_at"}`.
+  - Форма dict: `{"name","trigger","status","stage","stages","done","total","current","message","error","cancel_requested","running","stale","started_at","finished_at"}`.
   - `stages` = `[{"key": str, "label": str, "state": "done"|"active"|"pending"|"skip"}]`.
 
-**Отступление от спеки §3.1:** параметр `lock=False` для свипа не нужен. Частичный уникальный
-индекс срабатывает на любой `running`-строке, а протухшие (контейнер убили) гасит `_reap()` —
-замок не может повиснуть навсегда. Спека правится в Task 8.
+**Отступление от спеки §3.1 (уже внесено в спеку):** параметра `lock=False` нет. Замок держит
+частичный уникальный индекс, а протухшую строку гасит `_reap()`.
+
+**Реап — только на пути захвата замка (`_open` / `is_running`), НИКОГДА на пути чтения.** Панель
+поллит `live()` раз в 1.5 с; стадия свипа `generate` (LLM по 5 сайтам) законно молчит дольше
+`STALE_MIN` — реап в `live()` пометил бы ЖИВУЮ задачу упавшей и отпустил замок под вторую. Чтение
+только считает флаг `stale` (спека §3.3).
+
+**Осознанный остаточный риск (не чинить в этой ветке).** Окно всё же есть: если оператор нажмёт
+кнопку ровно в тот момент, когда живая задача молчит дольше `STALE_MIN`, `is_running()` сочтёт её
+трупом, погасит и пустит вторую. Это ровно та же семантика, что у `_acquire_lock` оркестратора
+сегодня (тот же `STALE_MIN = 15`), и лечится она не здесь, а более частым `report()` внутри длинных
+стадий. Отдельная спека «Автопилот, которому можно доверять» (§11) — её место.
 
 - [ ] **Step 1: Написать падающий тест реестра**
 
@@ -108,6 +133,18 @@ def test_single_flight_between_processes():
         with pytest.raises(jobs.AlreadyRunning):
             with jobs.track("discovery"):
                 pass
+
+
+def test_double_spawn_rejected_before_row_exists():
+    """Гонка своего процесса: строку job_run открывает уже ПОТОК, а spawn проверяет замок из
+    потока вызывающего. Без _INFLIGHT второй клик проскакивал в это окно, и панель врала
+    «запущено», хотя второй прогон тут же умирал об AlreadyRunning."""
+    import threading
+    gate = threading.Event()
+    assert jobs.spawn("score", lambda: gate.wait(5)) is True
+    assert jobs.spawn("score", lambda: gate.wait(5)) is False   # без гонок, сразу
+    gate.set()
+    jobs._reset()      # _INFLIGHT живёт на процесс, а не на БД — иначе течёт в соседний тест
 
 
 def test_cancel_marks_cancelled_and_keeps_progress():
@@ -152,6 +189,47 @@ def test_report_outside_track_is_noop():
     """score_domain по одной кнопке и юнит-тесты зовут report без открытого прогона."""
     jobs.report("score", done=1, total=1)     # не должно падать
     assert jobs.progress("score")["running"] is False
+
+
+def test_stale_run_is_shown_not_killed():
+    """Чтение реестра НЕ гасит прогон: поллер панели зовёт live() каждые 1.5с, а стадия свипа
+    (LLM по 5 сайтам) законно молчит дольше STALE_MIN. Реап на пути чтения убил бы ЖИВУЮ задачу
+    и отпустил замок под вторую. live() только помечает stale; гасит — попытка занять замок."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models.job import JobRun
+
+    with jobs.track("sweep"):
+        with SessionLocal() as db:                       # состарить строку на месте
+            r = db.execute(select(JobRun)).scalars().one()
+            r.updated_at = jobs._utcnow() - timedelta(minutes=jobs.STALE_MIN + 1)
+            db.commit()
+        live = jobs.live()
+        assert live[0]["status"] == "running"            # НЕ убита чтением
+        assert live[0]["stale"] is True                  # но честно помечена «оборвалась»
+        assert jobs.is_running("sweep") is False         # захват замка её гасит...
+    assert jobs.live() == []
+
+
+def test_reaped_run_frees_the_lock():
+    """Убитый контейнер не должен запирать джоб навсегда."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models.job import JobRun
+
+    with jobs.track("discovery"):
+        with SessionLocal() as db:
+            r = db.execute(select(JobRun)).scalars().one()
+            r.updated_at = jobs._utcnow() - timedelta(minutes=jobs.STALE_MIN + 1)
+            db.commit()
+        with jobs.track("discovery"):                    # ...и следующий прогон стартует
+            assert jobs.progress("discovery")["running"] is True
 ```
 
 - [ ] **Step 2: Прогнать — убедиться, что падает**
@@ -256,16 +334,28 @@ _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.mo
   done/total — только отображение, не признак терминала.
 
 Замок — частичный уникальный индекс (name) WHERE status='running'. Строку, чей updated_at
-старше STALE_MIN, считаем оборванной (контейнер перезапустили) и гасим при следующем
-открытии: иначе замок повис бы навсегда и джоб нельзя было бы запустить уже никогда.
+старше STALE_MIN, считаем оборванной (контейнер перезапустили).
+
+ГДЕ ГАСИМ ПРОТУХШЕЕ (_reap): ТОЛЬКО на пути захвата замка — _open() и is_running(). НИКОГДА
+на пути чтения (live/progress/last): панель поллит live() раз в 1.5с, а стадия свипа `generate`
+(LLM по 5 сайтам) законно молчит дольше STALE_MIN — реап в live() пометил бы ЖИВУЮ задачу
+упавшей и отпустил бы замок под вторую. Чтение только считает флаг stale: «оборвалась» — это
+показ, а не мутация. Гасим ровно тогда, когда замок кому-то реально понадобился.
 """
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 STALE_MIN = 15                       # как STALE_MIN оркестратора: running без обновлений = труп
-_EXEC = ThreadPoolExecutor(max_workers=2)
+# по потоку на КАЖДОЕ имя джоба (discovery|score|recheck|sweep). Меньше — и третий одновременный
+# запуск молча ляжет в очередь пула: строки в реестре ещё нет, панель ничего не рисует, кнопка
+# выглядит сломанной. Один оператор, четыре кнопки — четыре потока.
+_EXEC = ThreadPoolExecutor(max_workers=4)
+# уже отданные в пул, но ещё не открывшие свою строку в БД (см. spawn) — гонка своего процесса
+_INFLIGHT: set[str] = set()
+_INFLIGHT_LOCK = threading.Lock()
 _log = logging.getLogger(__name__)
 
 
@@ -303,18 +393,31 @@ def _running(db, name: str):
                                            JobRun.status == "running")).scalars().first()
 
 
+def _is_stale(r) -> bool:
+    """running-строка без обновлений дольше STALE_MIN = контейнер убили. Только ПОКАЗ.
+
+    Дату нормализуем: SQLite отдаёт DateTime naive, PostgreSQL — tz-aware; голое сравнение
+    с now(tz) роняет TypeError (тот же приём — в scoring.acquirability_verdict)."""
+    if r.status != "running" or r.updated_at is None:
+        return False
+    u = r.updated_at
+    if u.tzinfo is None:
+        u = u.replace(tzinfo=timezone.utc)
+    return u < _utcnow() - timedelta(minutes=STALE_MIN)
+
+
 def _as_dict(r) -> dict:
     return {"name": r.name, "trigger": r.trigger, "status": r.status, "stage": r.stage,
             "stages": r.stages or [], "done": r.done, "total": r.total, "current": r.current,
             "message": r.message, "error": r.error, "cancel_requested": r.cancel_requested,
-            "running": r.status == "running",
+            "running": r.status == "running", "stale": _is_stale(r),
             "started_at": r.started_at, "finished_at": r.finished_at}
 
 
 def _blank() -> dict:
     return {"name": "", "trigger": "", "status": "", "stage": "", "stages": [], "done": 0,
             "total": 0, "current": "", "message": "", "error": None, "cancel_requested": False,
-            "running": False, "started_at": None, "finished_at": None}
+            "running": False, "stale": False, "started_at": None, "finished_at": None}
 
 
 def _open(name: str, trigger: str, stages: list | None) -> int | None:
@@ -434,18 +537,22 @@ def request_cancel(name: str) -> bool:
 
 
 def is_running(name: str) -> bool:
+    """Путь ЗАХВАТА замка (зовёт spawn) — значит здесь протухшее гасим: иначе убитый контейнер
+    запер бы джоб навсегда (is_running -> True -> spawn отказывает -> _open, который умеет реап,
+    не вызывается НИКОГДА)."""
     from app.db import SessionLocal
     with SessionLocal() as db:
+        _reap(db)
         return _running(db, name) is not None
 
 
 def live() -> list[dict]:
-    """Все идущие задачи — Пульту и полосе в шапке."""
+    """Все идущие задачи — Пульту и полосе в шапке. ЧИТАЕТ, не мутирует: реапа здесь нет
+    намеренно (см. шапку модуля) — протухшее помечается флагом stale, а не убивается."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.job import JobRun
     with SessionLocal() as db:
-        _reap(db)
         rows = db.execute(select(JobRun).where(JobRun.status == "running")
                           .order_by(JobRun.started_at)).scalars().all()
         return [_as_dict(r) for r in rows]
@@ -473,18 +580,32 @@ def progress(name: str) -> dict:
 
 
 def spawn(name: str, target) -> bool:
-    """Запустить target() в фоне. False — уже идёт (проверка до старта: у одного оператора
-    остаточная гонка безвредна, а внутри её всё равно ловит AlreadyRunning)."""
-    if is_running(name):
-        return False
+    """Запустить target() в фоне. False — уже идёт.
+
+    _INFLIGHT — не дубль замка, а закрытие ГОНКИ СОБСТВЕННОГО ПРОЦЕССА. Строку job_run создаёт
+    сам сервис (target -> track -> _open) уже В ПОТОКЕ, а `is_running()` смотрит в БД из потока
+    вызывающего — между ними окно в несколько миллисекунд, и второй клик по кнопке в него
+    пролезает: spawn возвращает True, панель молчит про «уже идёт», а второй прогон умирает
+    внутри об AlreadyRunning. Работы он не сделает (индекс держит), но панель СОВРЁТ про запуск —
+    ровно та болезнь, которую эта ветка лечит.
+
+    Межпроцессную гонку (панель против воркера) по-прежнему судит индекс, а не этот сет.
+    """
+    with _INFLIGHT_LOCK:
+        if name in _INFLIGHT or is_running(name):
+            return False
+        _INFLIGHT.add(name)
 
     def _run():
         try:
             target()
         except AlreadyRunning:
-            pass                            # гонку выиграл кто-то другой — молча уходим
+            pass                            # гонку выиграл другой ПРОЦЕСС — молча уходим
         except Exception:                   # noqa: BLE001 — track уже записал failed
             _log.exception("джоб %s упал", name)
+        finally:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT.discard(name)
 
     _EXEC.submit(_run)
     return True
@@ -503,10 +624,16 @@ def _reset() -> None:                       # только для тестов
     from sqlalchemy import delete
     from app.db import SessionLocal
     from app.models.job import JobRun
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.clear()                   # иначе имя от прошлого теста блокирует spawn
     with SessionLocal() as db:
         db.execute(delete(JobRun))
         db.commit()
 ```
+
+`_reset()` сохранён: за него держатся `test_pipeline.py` и `test_recheck_acquirability.py`.
+Сама БД теперь свежая на каждый тест (фикстура `sqlite_db`), поэтому чистить нужно только
+`_INFLIGHT` — но чистить НАДО, он живёт на процесс.
 
 - [ ] **Step 6: Миграция 0007**
 
@@ -566,8 +693,9 @@ def downgrade() -> None:
 - [ ] **Step 7: Прогнать тесты — новые зелёные, старые не сломаны**
 
 Run: `.venv/bin/python -m pytest backend/tests/ -q`
-Expected: PASS — 276 старых + 7 новых = 283 passed. `test_jobs.py` (legacy) обязан остаться
-зелёным: он и проверяет, что шим `start()` сохранил старый контракт.
+Expected: PASS — 276 старых + 10 новых = 286 passed. `test_jobs.py` (legacy) обязан остаться
+зелёным: он и проверяет, что шим `start()` сохранил старый контракт — в том числе
+`test_double_start_rejected`, который и ловит гонку `spawn` (см. `_INFLIGHT`).
 
 Run: `.venv/bin/python -m pyflakes backend/app backend/tests`
 Expected: пусто.
@@ -824,13 +952,16 @@ def blind_reason(d) -> str | None:
 `score_domain(domain_id, clients=None, whois_budget=None, ahrefs_budget=None, job=None)` —
 прокинуть `job` в `_funnel(..., job=job)`.
 
-`score_pending`:
+`score_pending` — заменить целиком:
 
 ```python
 def score_pending(limit: int = 100) -> int:
     """Скорит `discovered` домены. Прогресс и стадии — через jobs.track (см. services/jobs.py).
     Между доменами смотрит стоп-кнопку: «Проверить весь пул» — это часы работы и квоты
-    A-Parser, прервать это должно быть можно без рестарта контейнера."""
+    A-Parser, прервать это должно быть можно без рестарта контейнера.
+
+    Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
+    Оркестратор пишет это в counts свипа — врать ему нельзя."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -850,33 +981,86 @@ def score_pending(limit: int = 100) -> int:
     clients = _make_clients()
     whois_budget = [int(st["max_whois_per_run"])]
     ahrefs_budget = [int(st["max_ahrefs_per_run"])]
-    total = len(rows)
+    total, done = len(rows), 0
     with jobs.track("score", stages=stages):
         for i, (did, name) in enumerate(rows, 1):
+            # ПОРЯДОК ВАЖЕН: репорт ДО проверки стопа. done = i-1 — это ровно столько доменов,
+            # сколько уже дошли до конца. Проверь стоп раньше репорта — и в реестре останется
+            # done от прошлой итерации, то есть «остановлена на 0 / 5» после одного домена.
+            jobs.report("score", done=i - 1, total=total, current=name)
             if jobs.cancelled("score"):
                 raise jobs.Cancelled()
-            jobs.report("score", done=i - 1, total=total, current=name)
             try:
                 score_domain(did, clients, whois_budget, ahrefs_budget, job="score")
             except Exception:  # noqa: BLE001 — падение одного домена не топит батч
                 logging.getLogger(__name__).exception("score_domain %s упал", name)
+            done = i
         jobs.report("score", done=total, total=total, current="",
                     message=f"прогнано {total} доменов через воронку")
-    return total
+    return done
 ```
 
-`recheck_acquirability(limit=200)` — тот же приём: `on_progress` убрать, обернуть в
-`with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}])`,
-проверять `jobs.cancelled("recheck")` в цикле, а сводку писать `jobs.report(..., message=...)`
-внутри `track` (сегодня её лепит `panel.py` — она переезжает сюда):
+`recheck_acquirability` — заменить сигнатуру, обёртку и цикл (тело проверки одного домена, от
+`now = datetime.now(timezone.utc)` до декремента `out["taken"]`, НЕ трогать: там продуманная
+логика вердикта и атомарного апдейта):
 
 ```python
-        jobs.report("recheck", done=checked, total=checked, current="",
-                    message=f"проверено {checked}: свободны {free}, ждут дропа {waiting}, "
-                            f"ЗАНЯТЫ {taken} (отбракованы), не определилось {unknown}")
+def recheck_acquirability(limit: int = 200) -> dict:
+    """Перепроверить whois'ом отобранных доноров: не выкупил ли их кто-то за это время.
+
+    (докстрока ЗАЧЕМ/что делает — сохранить как есть)
+
+    Прогресс — сам, через jobs.track: сводка («ЗАНЯТЫ 3») переехала сюда из panel.py и живёт
+    в job_run.message, а датирует её job_run.finished_at — штамп времени руками больше не нужен.
+    """
+    from datetime import datetime, timezone
+    from sqlalchemy import select, update
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    from app.services import jobs
+    from app.services.settings import get_settings
+
+    out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
+    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]):
+        jobs.report("recheck", stage="whois")
+        budget = int(get_settings()["max_whois_per_run"])
+        if budget <= 0:
+            # ВНУТРИ track, а не до него: иначе прогон завершался бы, не создав строки реестра,
+            # и кнопка «Перепроверить» выглядела бы сломанной — ровно та болезнь, которую лечим.
+            jobs.report("recheck", message="whois-бюджет = 0, проверять нечем (см. /settings)")
+            return out
+        with SessionLocal() as db:
+            ids = db.execute(
+                select(Domain.id).where(Domain.status.in_(_RECHECK_STATUSES))
+                .order_by(Domain.acquirability_checked_at.asc().nulls_first(), Domain.id.asc())
+                .limit(min(limit, budget))
+            ).scalars().all()
+
+        c = _make_clients()
+        total = len(ids)
+        for i, did in enumerate(ids, 1):
+            jobs.report("recheck", done=i - 1, total=total)   # ДО стопа — см. score_pending
+            if jobs.cancelled("recheck"):
+                raise jobs.Cancelled()
+            with SessionLocal() as db:
+                d = db.get(Domain, did)
+                if d is None or d.status not in _RECHECK_STATUSES:
+                    continue                      # статус увели, пока шли (напр. в выкуп)
+                name, deadline, lane = d.domain, d.acquire_deadline, d.lane
+            jobs.report("recheck", current=name)  # репорт ДО вызова: whois идёт секунды
+
+            now = datetime.now(timezone.utc)
+            ...                                   # ТЕЛО БЕЗ ИЗМЕНЕНИЙ (whois -> вердикт -> апдейт)
+
+        jobs.report("recheck", done=total, total=total, current="",
+                    message=f"проверено {out['checked']}: свободны {out['free']}, "
+                            f"ждут дропа {out['waiting']}, ЗАНЯТЫ {out['taken']} (отбракованы), "
+                            f"не определилось {out['unknown']}")
+    return out
 ```
 
-Штамп времени в сообщении больше не нужен: `job_run.finished_at` датирует прогон сам.
+`test_recheck_acquirability.py::test_panel_recheck_runs_and_reports` проверяет `"ЗАНЯТЫ 1" in
+p["message"]` — формулировку сводки сохранить дословно.
 
 - [ ] **Step 5: Переписать тесты, державшиеся за `on_progress`**
 
@@ -939,6 +1123,11 @@ EOF
   - `POST /run/discovery|score|recheck`, `POST /autopilot/run` — 303 на `Referer`
   - Удалены: `GET /run/{job}/progress` (та самая 404-дыра на `recheck`), `jobs.start`
 
+**Роут поллят ДВА шаблона, не один.** `domains.html:138` (discovery|score|recheck) и
+`autopilot.html:136` (`/run/sweep/progress`). Снос роута оставляет оба поллера на 404 —
+их обоих заменяет `#machine` в Task 4. Между коммитом T3 и коммитом T4 полоса прогресса
+на `/domains` и `/autopilot` не рисуется; это ожидаемо, экраны при этом рабочие.
+
 - [ ] **Step 1: Написать падающий тест API**
 
 Создать `backend/tests/test_jobs_api.py`:
@@ -976,11 +1165,22 @@ def test_cancel_sets_flag(client):
 
 
 def test_run_returns_to_page_it_was_pressed_on(client, monkeypatch):
-    """Кнопки запуска есть и на Пульте — редирект обязан вернуть туда, откуда нажали."""
+    """Кнопки запуска есть и на Пульте — редирект обязан вернуть туда, откуда нажали.
+
+    Referer ОБЯЗАН быть http://testserver/...: csrf_guard (main.py) отбивает 403, если хост
+    Referer'а не равен Host. С чужим Referer'ом тест проверял бы 403, а не редирект."""
     monkeypatch.setattr(jobs, "spawn", lambda name, target: True)
-    r = client.post("/run/discovery", headers={"referer": "http://x/"}, follow_redirects=False)
-    assert r.headers["location"].startswith("/")
-    assert "/domains" not in r.headers["location"]
+    r = client.post("/run/discovery", headers={"referer": "http://testserver/"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"          # вернулись на Пульт, а не на жёсткий /domains
+
+
+def test_run_falls_back_when_no_referer(client, monkeypatch):
+    """Referrer-Policy может срезать заголовок — тогда возвращаемся на /domains, а не в никуда."""
+    monkeypatch.setattr(jobs, "spawn", lambda name, target: True)
+    r = client.post("/run/score", data={"n": "5"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/domains"
 
 
 def test_progress_route_is_gone(client):
@@ -1043,17 +1243,27 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     n, errs = handler(cap)
                     counts[key] = n
                     errors += [f"{key}: {e}" for e in errs]
+                except jobs.AlreadyRunning:
+                    # ЗАМОК СРАБОТАЛ ШТАТНО, а не сломался: оператор прямо сейчас гоняет свой
+                    # score/discovery, и второй прогон поверх — ровно то, что мы запрещали
+                    # (двое жгут квоту A-Parser). Пропустить стадию и сказать об этом честно;
+                    # красить весь свип в failed = кричать волком на собственную защиту.
+                    errors.append(f"{key}: пропущена — занята ручным прогоном")
                 except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
                     errors.append(f"{key}: {type(e).__name__}: {e}")
                     status = "failed"
             jobs.report("sweep", done=total, total=total, current="",
                         message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
     except jobs.AlreadyRunning:
+        # а ЭТОТ AlreadyRunning — от самого track("sweep"): свип уже идёт в другом процессе.
         _finish_run(run_id, "done", {}, ["sweep: реестр занят другим прогоном"])
         return {"skipped": "already_running"}
     _finish_run(run_id, status, counts, errors)
     return {"run_id": run_id, "status": status, "counts": counts, "errors": errors}
 ```
+
+**Порядок `except` обязателен:** `AlreadyRunning` наследует `RuntimeError`, то есть `Exception` —
+поставь его ниже, и он попадёт в общий обработчик, а свип станет `failed`.
 
 - [ ] **Step 4: Панель — `spawn`, `/api/jobs/live`, `cancel`, возврат на `Referer`**
 
@@ -1178,19 +1388,26 @@ EOF
 ## Task 4: Компонент «карточка задачи» + полоса в шапке
 
 **Files:**
-- Modify: `backend/app/templates/base.html` (CSS + JS-поллер + контейнеры)
+- Modify: `backend/app/templates/base.html` (CSS + JS-поллер + контейнеры; **удалить** `.progress`, строки 298-320)
 - Modify: `backend/app/templates/domains.html` (снять старый `#prog` и его скрипт: строки 81-140)
+- Modify: `backend/app/templates/autopilot.html` (снять `#prog`, строка 19, и его скрипт с `/run/sweep/progress`, ~101-137)
 - Test: `backend/tests/test_panel_machine.py` (новый)
 
 **Interfaces:**
 - Consumes: `GET /api/jobs/live` (Task 3).
-- Produces: DOM-контракт — `<div id="machine" data-machine>` (полные карточки; Пульт и M1) и
+- Produces: DOM-контракт — `<div id="machine">` (полные карточки; Пульт, M1, Автопилот) и
   `<div id="mbar">` (тонкая полоса в шапке, рендерится всегда, когда нет `#machine`).
   CSS-классы: `.job`, `.job.err`, `.job.cancelled`, `.job-head`, `.job-chips`, `.chip-st`,
-  `.chip-st.done|.active|.pending|.skip`, `.job-bar`, `.job-fill`, `.job-num`, `.mbar`.
+  `.chip-st.done|.active|.pending|.skip|.fail`, `.job-bar`, `.job-track`, `.job-fill`,
+  `.job-num`, `.mbar`.
 
 Макет — `docs/design/new-03-карточка-состояния.png` (три состояния) и
 `02-домены-m1.png` (карточка в работе).
+
+**`.progress` теперь можно удалить.** Её держали ДВА потребителя — `domains.html` и
+`autopilot.html`; оба конвертируются здесь же. Если снести CSS, не тронув `autopilot.html`,
+экран Автопилота останется с мёртвой полосой и поллером в 404 (урок из `DESIGN.md`: удаление
+общего правила в `base.html` задевает потребителей во ВСЕХ шаблонах — проверять grep'ом).
 
 - [ ] **Step 1: Тест рендера**
 
@@ -1215,6 +1432,14 @@ def test_old_progress_widget_is_gone(client):
     html = client.get("/domains").text
     assert 'id="prog"' not in html
     assert "/run/discovery/progress" not in html
+
+
+def test_autopilot_uses_the_same_component(client):
+    """У /autopilot был СВОЙ #prog с поллером /run/sweep/progress — роут снесён, значит
+    экран обязан переехать на общий компонент, иначе останется мёртвая полоса."""
+    html = client.get("/autopilot").text
+    assert 'id="machine"' in html
+    assert 'id="prog"' not in html and "/run/sweep/progress" not in html
 ```
 
 - [ ] **Step 2: Прогнать — падает**
@@ -1261,35 +1486,49 @@ Expected: FAIL — `assert 'id="mbar"' in html`
 
 - [ ] **Step 4: Контейнер + поллер в `base.html`**
 
-Сразу после блока flash (`base.html:374`), перед `{% block content %}`:
+Контейнер — сразу после блока flash (`base.html:374`), перед `{% block content %}`:
 
 ```html
 <div class="mbar" id="mbar"></div>
+```
+
+Скрипт — **в самом конце, перед `</body>`** (сейчас там ничего нет). Не рядом с контейнером:
+`{% block content %}` рендерится НИЖЕ, и `#machine` в момент парса скрипта ещё не существует —
+первый `getElementById` вернул бы null, а спасала бы только сетевая задержка `fetch`. Внизу
+страницы гонки нет вовсе.
+
+```html
 <script>
 // Один поллер на всю панель. Терминальный контракт — см. services/jobs.py:
 // status running -> идёт; failed -> упал (error + stage, где встал); cancelled -> остановлен
-// человеком; done -> успех, ДАЖЕ при done==total==0.
+// человеком; done -> успех, ДАЖЕ при done==total==0. Плюс stale: running-строка, чей процесс
+// умер (контейнер убили) — показываем «оборвалась», НЕ рисуем живой бар.
 // Данные приходят из фида (имена доменов) — только textContent, никогда innerHTML.
 const JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки',
                 recheck:'Перепроверка занятости', sweep:'Свип автопилота'};
 function jobCard(j){
+  const dead = j.status==='failed' || j.stale;       // stale = процесс убит, бар врал бы «идёт»
   const el = document.createElement('div');
-  el.className = 'job' + (j.status==='failed' ? ' err' : j.status==='cancelled' ? ' cancelled' : '');
+  el.className = 'job' + (dead ? ' err' : j.status==='cancelled' ? ' cancelled' : '');
   const head = document.createElement('div'); head.className = 'job-head';
   const nm = document.createElement('span'); nm.className = 'nm';
   nm.textContent = JOB_RU[j.name] || j.name; head.appendChild(nm);
   const badge = document.createElement('span');
-  badge.className = 'badge ' + (j.status==='failed' ? 'b-rejected' : 'b-scored');
-  badge.textContent = j.status==='failed' ? 'ОШИБКА' : j.status==='cancelled' ? 'ОСТАНОВЛЕНА' : 'ИДЁТ';
+  badge.className = 'badge ' + (dead ? 'b-rejected' : 'b-scored');
+  badge.textContent = dead ? (j.stale && j.status==='running' ? 'ОБОРВАЛАСЬ' : 'ОШИБКА')
+                   : j.status==='cancelled' ? 'ОСТАНОВЛЕНА' : 'ИДЁТ';
   head.appendChild(badge);
   if (j.trigger === 'auto'){
     const a = document.createElement('span'); a.className = 'badge b-default';
     a.textContent = '✈ автопилот'; head.appendChild(a);
   }
   const cur = document.createElement('span'); cur.className = 'cur';
-  cur.textContent = j.status==='failed' ? (j.error || '') : (j.current ? 'сейчас: ' + j.current : '');
+  // «сейчас: X» — только у ЖИВОЙ задачи: у остановленной X — домен, который так и не начали.
+  cur.textContent = j.stale ? 'процесс не отвечает — задача оборвалась'
+                  : j.status==='failed' ? (j.error || '')
+                  : j.status==='running' && j.current ? 'сейчас: ' + j.current : '';
   head.appendChild(cur);
-  if (j.status === 'running'){                       // стоп — только у живой задачи
+  if (j.status === 'running' && !j.stale){           // стоп — только у живой задачи
     const f = document.createElement('form');
     f.method = 'post'; f.action = '/run/' + j.name + '/cancel';
     const b = document.createElement('button');
@@ -1301,9 +1540,10 @@ function jobCard(j){
     const chips = document.createElement('div'); chips.className = 'job-chips';
     for (const s of j.stages){
       const c = document.createElement('span');
-      const failedHere = j.status === 'failed' && s.key === j.stage;
-      c.className = 'chip-st ' + (failedHere ? 'fail' : s.state);
-      c.textContent = (s.state==='done' ? '✓ ' : failedHere ? '✕ ' : s.state==='active' ? '● ' : '○ ') + s.label;
+      const brokeHere = dead && s.key === j.stage;   // ЗДЕСЬ встала — вот что нужно оператору
+      c.className = 'chip-st ' + (brokeHere ? 'fail' : s.state);
+      c.textContent = (brokeHere ? '✕ ' : s.state==='done' ? '✓ '
+                     : s.state==='active' ? '● ' : '○ ') + s.label;
       chips.appendChild(c);
     }
     el.appendChild(chips);
@@ -1312,11 +1552,13 @@ function jobCard(j){
   const track = document.createElement('div'); track.className = 'job-track';
   const fill = document.createElement('div'); fill.className = 'job-fill';
   const pct = j.total > 0 ? Math.round(j.done / j.total * 100) : 0;
-  fill.style.width = (j.status==='running' && j.total===0 ? 35 : pct) + '%';
+  // total=0 у ЖИВОЙ задачи = неопределённый режим (discovery не по-доменный) — рисуем 35%.
+  // У мёртвой/остановленной так делать нельзя: полоса врала бы про «идёт».
+  fill.style.width = (j.status==='running' && !j.stale && j.total===0 ? 35 : pct) + '%';
   track.appendChild(fill); bar.appendChild(track);
   const num = document.createElement('div'); num.className = 'job-num';
   const b = document.createElement('b');
-  b.textContent = j.status==='failed' ? 'встала' : j.status==='cancelled' ? 'остановлена' : pct + '%';
+  b.textContent = dead ? 'встала' : j.status==='cancelled' ? 'остановлена' : pct + '%';
   num.appendChild(b);
   num.appendChild(document.createTextNode(j.total ? ' ' + j.done + ' / ' + j.total : ''));
   bar.appendChild(num); el.appendChild(bar);
@@ -1352,8 +1594,15 @@ function pollMachine(){
   fetch('/api/jobs/live').then(r => r.json()).then(d => {
     const busy = (d.jobs || []).length > 0;
     renderMachine(d);
-    // задача только что закончилась -> перечитать страницу: таблицы/счётчики устарели
-    if (machineWasBusy && !busy){ location.reload(); return; }
+    // Задача закончилась -> таблицы и счётчики на экранах машины устарели, перечитываем.
+    // ТОЛЬКО там, где есть #machine (Пульт / M1 / Автопилот). На остальных экранах
+    // перезагрузка недопустима: свип, дописавшийся в фоне, пока человек вычитывает черновик
+    // в /pages/{id}, снёс бы несохранённую редактуру. Гейт редактуры бережёт контент от
+    // машины — ломать это ради полоски прогресса нельзя.
+    if (machineWasBusy && !busy && document.getElementById('machine')){
+      location.reload();
+      return;
+    }
     machineWasBusy = busy;
     machineTimer = setTimeout(pollMachine, busy ? 1500 : 5000);
   }).catch(() => { machineTimer = setTimeout(pollMachine, 3000); });
@@ -1362,19 +1611,29 @@ pollMachine();
 </script>
 ```
 
-- [ ] **Step 5: Снять старую полосу с `domains.html`**
+- [ ] **Step 5: Снять старые полосы с `domains.html` И `autopilot.html`**
 
-Удалить из `backend/app/templates/domains.html` строки 81-140 целиком (`<div id="prog">` +
-`<script>` с `poll()`): их работу забрал компонент из `base.html`. Вместо них — контейнер:
+Оба шаблона держали свой `#prog` со своим поллером мёртвого теперь `/run/{job}/progress`.
+В обоих удалить блок `<div id="prog" class="progress">…</div>` вместе со `<script>`-поллером
+(`domains.html` — строки 81-140; `autopilot.html` — строка 19 и скрипт ~101-137) и поставить
+на их место общий контейнер:
 
 ```html
 <div id="machine"></div>
 ```
 
+На `/autopilot` это и по смыслу лучше: свип — его собственная задача, и карточка со стадиями
+`STAGES` («поиск → скоринг → очередь → провижн → контент → публикация → индексация», выключенные
+помечены `skip`) показывает её честнее безымянной полосы, которая была.
+
+После этого `grep -rn "class=\"progress\"\|id=\"prog\"" backend/app/templates/` обязан быть
+пуст — только тогда удаление `.progress` из `base.html` (Step 3) никого не осиротит.
+
 - [ ] **Step 6: Прогнать тесты + глаза**
 
 Run: `.venv/bin/python -m pytest backend/tests/ -q` → PASS
 Run: `.venv/bin/python -m pyflakes backend/app backend/tests` → пусто
+Run: `grep -rn 'class="progress"\|id="prog"\|/progress' backend/app/templates/` → пусто
 
 Глазами (обязательно — это визуальная задача): отрендерить `/domains` с открытым `job_run`
 в трёх состояниях (running / failed / cancelled) через TestClient в статический HTML,
@@ -1385,17 +1644,23 @@ Run: `.venv/bin/python -m pyflakes backend/app backend/tests` → пусто
 - [ ] **Step 7: Коммит**
 
 ```bash
-git add backend/app/templates/base.html backend/app/templates/domains.html backend/tests/test_panel_machine.py
+git add backend/app/templates/base.html backend/app/templates/domains.html \
+        backend/app/templates/autopilot.html backend/tests/test_panel_machine.py
 git commit -F - <<'EOF'
 feat(ui): карточка задачи с чипами стадий — один компонент на всю панель (T4)
 
 Три состояния из макета new-03: идёт (чип активной стадии залит акцентом), упала
 (чип стадии, НА КОТОРОЙ встала, помечен ✕; полоса красная; «встала 18/100» вместо
-голого «ошибка»), остановлена человеком.
+голого «ошибка»), остановлена человеком. Плюс четвёртое, которого не было нигде:
+«оборвалась» — running-строка, чей процесс убили.
 
 Поллер живёт в base.html, поэтому тонкая полоса «машина работает» видна на ЛЮБОМ
-экране, а полные карточки — там, где есть #machine (Пульт, M1). Старый #prog из
-domains.html снесён вместе с его 404-поллингом recheck.
+экране, а полные карточки — там, где есть #machine (Пульт, M1, Автопилот). Свои
+#prog были у ДВУХ шаблонов (domains + autopilot) — оба снесены вместе с .progress
+и мёртвым поллингом /run/{job}/progress.
+
+Автоперезагрузка по завершении задачи — только на экранах с #machine: свип,
+дописавшийся в фоне, пока человек вычитывает черновик, снёс бы редактуру.
 EOF
 ```
 
@@ -1516,9 +1781,11 @@ EOF
 ## Task 6: M1 — инбокс решений, пакетное одобрение, полный пул
 
 **Files:**
-- Modify: `backend/app/api/panel.py` (`domains_view`, новые `/domains/pool`, `/domains/bulk-approve`, `/domains/bulk-preview`)
+- Modify: `backend/app/api/panel.py` (`domains_view`, `_next_steps`, новые `/domains/pool`, `/domains/bulk-approve`, `/domains/bulk-preview`)
 - Rewrite: `backend/app/templates/domains.html`
 - Create: `backend/app/templates/pool.html`
+- Modify: `backend/app/templates/dashboard.html:25-31`, `autopilot.html:10`, `queue.html:109` — ссылки `/domains?status=…` (Step 7)
+- Modify: `backend/tests/test_web_fixes.py`, `test_autopilot_panel.py`, `test_pipeline.py` — те же ссылки (Step 7)
 - Test: `backend/tests/test_inbox.py` (новый)
 
 **Interfaces:**
@@ -1557,6 +1824,20 @@ def test_inbox_sorts_by_drop_deadline_not_score(client):
     _add(domain="pretty.ru", status="scored", score=0.95, acquire_deadline=later)
     html = client.get("/domains").text
     assert html.index("urgent.ru") < html.index("pretty.ru")
+
+
+def test_urgency_marks_only_near_deadlines(client):
+    """Срочность — БЛИЗКИЙ дедлайн, а не наличие дедлайна: у backorder-домена он есть всегда,
+    и полоса «у всех» не выделяла бы ничего. Заодно регрессия на naive-даты SQLite:
+    голое сравнение с now(tz) уронило бы этот роут TypeError'ом."""
+    soon = datetime.now(timezone.utc) + timedelta(days=1)
+    later = datetime.now(timezone.utc) + timedelta(days=40)
+    _add(domain="soon.ru", status="scored", score=0.5, acquire_deadline=soon)
+    _add(domain="later.ru", status="scored", score=0.5, acquire_deadline=later)
+    r = client.get("/domains")
+    assert r.status_code == 200                       # не TypeError на naive-дате
+    assert r.text.count('class="urgent"') == 1        # полоса ровно у одного
+    assert "дроп: 1" in r.text                        # и счётчик срочных сходится
 
 
 def test_blind_domain_is_flagged_in_inbox(client):
@@ -1612,6 +1893,21 @@ Expected: FAIL — `/domains/pool` отдаёт 404.
 _URGENT_DAYS = 3        # «дроп на носу» — столько же, сколько DROP_GRACE в scoring, с запасом
 
 
+def _urgent(d, soon) -> bool:
+    """Дедлайн дропа на носу. Срочность = БЛИЗКИЙ дедлайн, а не наличие дедлайна: у каждого
+    backorder-домена дедлайн есть всегда, и «янтарная полоса у всех» ничего не выделяет.
+
+    Дату нормализуем: SQLite отдаёт acquire_deadline naive, PostgreSQL — tz-aware; голое
+    сравнение с now(tz) роняет TypeError. Тот же приём — в scoring.acquirability_verdict."""
+    from datetime import timezone
+    dl = d.acquire_deadline
+    if dl is None:
+        return False
+    if dl.tzinfo is None:
+        dl = dl.replace(tzinfo=timezone.utc)
+    return dl <= soon
+
+
 @router.get("/domains", response_class=HTMLResponse)
 def domains_view(request: Request, db: Session = Depends(get_session)):
     """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool."""
@@ -1624,8 +1920,7 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     ready = db.execute(select(Domain).where(Domain.status == "approved").order_by(*order)).scalars().all()
     counts = _domain_counts(db)
     soon = datetime.now(timezone.utc) + timedelta(days=_URGENT_DAYS)
-    urgent = sum(1 for d in inbox + ready
-                 if d.acquire_deadline is not None and d.acquire_deadline <= soon)
+    urgent = sum(1 for d in inbox + ready if _urgent(d, soon))
     reasons = dict(db.execute(
         select(Domain.reject_reason, func.count()).where(Domain.status == "rejected")
         .group_by(Domain.reject_reason)).all())
@@ -1634,7 +1929,9 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     thr = sum(n for code, n in reasons.items() if code in ("low_rd", "too_young", "low_score"))
     return templates.TemplateResponse(request, "domains.html", {
         "active": "domains",
-        "inbox": [(d, blind_reason(d)) for d in inbox],
+        # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
+        # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
+        "inbox": [(d, blind_reason(d), _urgent(d, soon)) for d in inbox],
         "ready": ready,
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),
@@ -1812,12 +2109,16 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 <div class="wrap">
 <table>
   <tbody>
-  {% for d, blind in inbox %}
-    <tr class="{{ 'urgent' if d.acquire_deadline }}">
+  {% for d, blind, urgent in inbox %}
+    {# полоса срочности — только у БЛИЗКОГО дедлайна: у backorder-домена дедлайн есть всегда,
+       и полоса «у всех» перестала бы что-либо выделять. Признак посчитан в panel.py (там же
+       нормализация tz — SQLite отдаёт дату naive). #}
+    <tr class="{{ 'urgent' if urgent }}">
       <td style="width:120px">
         {% if d.acquire_deadline %}
           <div class="hint" style="font-size:10px; letter-spacing:.08em">СРОК ДРОПА</div>
-          <div style="font-weight:700; color:var(--acc2)">{{ d.acquire_deadline.strftime('%d.%m') }}</div>
+          <div style="font-weight:700; {{ 'color:var(--acc2)' if urgent else 'color:var(--mut)' }}">
+            {{ d.acquire_deadline.strftime('%d.%m') }}</div>
         {% else %}<span class="hint">— без дедлайна</span>{% endif %}
       </td>
       <td class="dom">
@@ -1908,17 +2209,60 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 
 (`.row` может уже существовать — проверить `grep -n "^\s*\.row" base.html` и не дублировать.)
 
-- [ ] **Step 7: Прогнать + глаза**
+- [ ] **Step 7: Починить ВСЁ, что ссылалось на `/domains?...`**
+
+Параметры `status` / `min_score` / `limit` / `show_all` уехали на `/domains/pool` — прежние
+потребители теперь молча промахиваются мимо инбокса (ссылка ведёт куда-то, но фильтр не
+применяется). Их **одиннадцать в коде и шесть в тестах** — сверено grep'ом, ниже полный список.
+
+Правило переезда:
+
+| было | стало | почему |
+|---|---|---|
+| `?status=scored` | `/domains` | инбокс — это И ЕСТЬ список `scored` |
+| `?status=approved` | `/domains` | блок «готовы к выкупу» на том же экране |
+| `?status=discovered` | `/domains/pool?status=discovered` | сырьё живёт в пуле |
+| `?status=purchased` | `/domains/pool?status=purchased` | купленные — в пуле |
+
+**Код (4 места в `panel.py`, 3 шаблона):**
+
+- `panel.py:83,85,87,92` — `_next_steps()`, подсказки «что дальше» на Пульте.
+- `dashboard.html:25,27,29,31` — четыре плитки воронки (`discovered` / `scored` / `approved` /
+  `purchased`).
+- `autopilot.html:10` — плитка гейта курации (`?status=scored` → `/domains`).
+- `queue.html:109` — подсказка «ставятся кнопкой на экране Домены» (`?status=approved` → `/domains`).
+
+**Тесты (6):** заменить URL, проверки внутри НЕ трогать — они и охраняют разметку таблицы,
+которую мы перенесли в `pool.html` дословно.
+
+- `test_web_fixes.py::test_panel_limit_clamped_high` — `/domains?limit=…` → `/domains/pool?limit=…`
+- `test_web_fixes.py::test_panel_domains_renders_reject_reason_badge` — → `/domains/pool?status=rejected`
+- `test_web_fixes.py::test_domains_hides_not_acquirable_by_default` — оба GET → `/domains/pool`
+- `test_web_fixes.py::test_domains_localized_labels` — → `/domains/pool?show_all=1`
+- `test_autopilot_panel.py::test_domains_filter_chips_localized` — → `/domains/pool`
+- `test_autopilot_panel.py` (строка 61) — `assert "/domains?status=scored" in html` →
+  `assert 'href="/domains"' in html` (плитка гейта теперь ведёт в инбокс)
+- `test_pipeline.py` (строка 302) — `/domains?status=purchased` → `/domains/pool?status=purchased`
+
+Проверка, что мёртвых ссылок не осталось:
+
+```bash
+grep -rn 'href="/domains?\|get("/domains?' backend/app/templates/ backend/app/api/panel.py backend/tests/
+```
+Ожидаемо: пусто. (`backend/app/api/domains.py:3` — докстрока JSON-API `/api/domains?status=`,
+к панели отношения не имеет; `test_diag_alert.py:110` — Referer-строка, не ссылка. Оба не трогать.)
+
+- [ ] **Step 8: Прогнать + глаза**
 
 Run: `.venv/bin/python -m pytest backend/tests/ -q` → PASS
 Run: `.venv/bin/python -m pyflakes backend/app backend/tests` → пусто
 Скриншоты `/domains` (полный инбокс, пустой инбокс) и `/domains/pool`; сверить с
 `new-04-домены-инбокс.png` и `new-05-домены-инбокс-пусто.png`.
 
-- [ ] **Step 8: Коммит**
+- [ ] **Step 9: Коммит**
 
 ```bash
-git add backend/app/api/panel.py backend/app/templates/ backend/tests/test_inbox.py
+git add backend/app/api/panel.py backend/app/templates/ backend/tests/
 git commit -F - <<'EOF'
 feat(m1): экран стал инбоксом решений, полный реестр уехал в /domains/pool (T6)
 
@@ -1974,7 +2318,8 @@ Expected: FAIL — `assert "Мало доноров" in html`
 В блок воронки (Task 6, Step 5) добавить шестую плитку, открывающую `<dialog>`:
 
 ```html
-      <button class="fcell" onclick="document.getElementById('why').showModal()"
+      {# type="button" обязателен: без него это submit, и первая же обёртка в <form> отправит её #}
+      <button type="button" class="fcell" onclick="document.getElementById('why').showModal()"
               title="разобрать, почему домены не прошли воронку">
         <div class="v" style="color:var(--bad)">{{ counts.get('rejected', 0) }}</div>
         <div class="k">отклонено</div></button>
@@ -1999,7 +2344,9 @@ Expected: FAIL — `assert "Мало доноров" in html`
   </form>
   <div class="why-grid">
     {% for code, n in reasons.items()|sort(attribute='1', reverse=true) %}
-      {% set ru, kind = RU.get(code, (code, 'taken')) %}
+      {# фолбэк на (code or 'без причины'), а не на голый code: у старых строк reject_reason
+         бывает NULL, и RU.get(None, (None, ...)) отрендерил бы оператору слово «None» #}
+      {% set ru, kind = RU.get(code, (code or 'без причины', 'taken')) %}
       <div class="why-nm">{{ ru }} <code>{{ code or '—' }}</code></div>
       <div class="why-bar"><i class="k-{{ kind }}"
            style="width:{{ (n / reasons_total * 100)|round|int if reasons_total else 0 }}%"></i></div>
@@ -2061,25 +2408,26 @@ EOF
 ## Task 8: Документация
 
 **Files:**
-- Modify: `docs/DESIGN.md` (новые классы и двухуровневый шильдик)
+- Modify: `docs/DESIGN.md` (новые классы, удалённый `.progress`, двухуровневый шильдик)
 - Modify: `CLAUDE.md` (текущее состояние)
-- Modify: `docs/superpowers/specs/2026-07-12-panel-m1-observability-design.md` (две поправки)
 
-- [ ] **Step 1: Поправить спеку**
+- [ ] **Step 1: Спека уже поправлена — сверить, что план ей не противоречит**
 
-- §3.1: убрать упоминание `track("sweep", lock=False)` — параметра нет. Замок держит частичный
-  уникальный индекс, а протухшие `running`-строки гасит `_reap()` (`STALE_MIN = 15`).
-- §7: переписать из «добавляем» в «уже есть» — «Гейты машины» (`base.html:346-350`) и строка
-  баланса backorder (`queue.html:25-28`) существовали до этой ветки; макет отрисовал их с
-  живой панели.
+Правки внесены до старта реализации (§3.1 `lock=False` убран; §3.3 реап только на пути захвата
+замка + naive-даты SQLite; §5 `autopilot.html` на общий компонент + запрет автоперезагрузки вне
+`#machine`; §6 срочность = близкий дедлайн + переезд потребителей `/domains?...`; §7 переписан на
+«уже в коде»; §10 список переезжающих тестов). Здесь — только прочитать спеку и убедиться, что
+реализация с ней сошлась; расхождение = баг, а не «мелочь для доков».
 
 - [ ] **Step 2: `docs/DESIGN.md`**
 
 Добавить раздел «Компоненты» с новыми классами: `.job` / `.job-head` / `.job-chips` / `.chip-st`
-(состояния `done` / `active` / `pending` / `skip` / `fail`) / `.job-bar` / `.mbar` — карточка
-задачи; `.blind` — предупреждение «оценён вслепую»; `tr.urgent` — срочность дропа; `.modal` /
-`.why-grid` / `.why-foot` — разбор причин. Зафиксировать поправку к шильдику: короткое пояснение
-видно всегда, полный абзац — в одном `<details>` на карточку (уровней два, не три).
+(состояния `done` / `active` / `pending` / `skip` / `fail`) / `.job-bar` / `.job-track` / `.mbar` —
+карточка задачи; `.blind` — предупреждение «оценён вслепую»; `tr.urgent` — срочность дропа;
+`.modal` / `.why-grid` / `.why-foot` — разбор причин; `.row` / `.sep` — строка действий.
+Отметить, что `.progress` **удалён** (его заменила карточка задачи) — иначе следующий подхватит
+мёртвый класс из доки. Зафиксировать поправку к шильдику: короткое пояснение видно всегда, полный
+абзац — в одном `<details>` на карточку (уровней два, не три).
 
 - [ ] **Step 3: `CLAUDE.md`**
 
@@ -2094,16 +2442,23 @@ EOF
 ```bash
 .venv/bin/python -m pytest backend/tests/ -q
 .venv/bin/python -m pyflakes backend/app backend/tests
-grep -rn "on_progress" backend/app/            # пусто
-grep -rn "jobs.start\|/run/.*progress" backend/app/   # пусто
+grep -rn "on_progress" backend/app/                           # пусто: колбэков не осталось
+grep -rn "jobs.start\|/run/.*progress" backend/app/           # пусто: шим и мёртвый роут снесены
+grep -rn 'class="progress"\|id="prog"' backend/app/templates/ # пусто: старой полосы нет нигде
+grep -rn 'href="/domains?\|get("/domains?' backend/app/templates/ backend/app/api/panel.py backend/tests/   # пусто
 ```
+
+Плюс глазами: пройти по всем экранам панели (`/`, `/domains`, `/domains/pool`, `/queue`,
+`/autopilot`, `/settings`, `/diag`, `/offers`, карточка сайта, редактор страницы) и убедиться,
+что тонкая полоса машины появляется везде, а полные карточки — только на трёх экранах с
+`#machine`. Особо: на `/pages/{id}` фоновая задача НЕ должна перезагружать страницу.
 
 - [ ] **Step 5: Коммит**
 
 ```bash
 git add docs/ CLAUDE.md
 git commit -F - <<'EOF'
-docs: наблюдаемость машины + M1 как инбокс — состояние, дизайн-система, поправки спеки (T8)
+docs: наблюдаемость машины + M1 как инбокс — состояние и дизайн-система (T8)
 EOF
 ```
 
@@ -2113,15 +2468,29 @@ EOF
 
 | Требование спеки | Задача |
 |---|---|
-| §3 реестр в PG, single-flight между процессами, `_reap` | T1 |
+| §3 реестр в PG, single-flight между процессами, `_reap` только на пути захвата замка | T1 |
 | §3.2 контракт `track`/`spawn`/`report`/`cancelled`/`live`/`last` | T1 |
-| §3.3 терминальный контракт | T1 (тесты), T4 (JS держится того же) |
-| §4 чипы стадий, 3 состояния карточки | T2 (данные), T4 (вид) |
+| §3.3 терминальный контракт + `stale` как показ, не мутация | T1 (тесты), T4 (JS держится того же) |
+| §3.1 замок, сработавший штатно, ≠ ошибка свипа | T3 |
+| §4 чипы стадий, 3 состояния карточки (+ 4-е: «оборвалась») | T2 (данные), T4 (вид) |
 | §5 Пульт «Машина сейчас» + простой + возврат на `Referer` | T3 (роуты), T5 (вид) |
+| §5 `autopilot.html` на общий компонент; автоперезагрузка только на экранах с `#machine` | T4 |
 | §6 действия одной строкой, инбокс, срочность, «вслепую», пакет, пустое состояние, `/domains/pool` | T6 |
+| §6 срочность = БЛИЗКИЙ дедлайн; переезд `_next_steps` и 6 тестов с `/domains?...` | T6 |
 | §6 блок 4 — разбор причин с делением «порог / грязь» | T7 |
 | §7 гейты в сайдбаре, баланс backorder | **уже в коде** — не задача |
 | §8 баннеры у запуска задач убраны | T3 |
 | §1.6 стоп-кнопка | T1 (флаг), T2 (сервисы смотрят), T3 (роут), T4 (кнопка) |
-| §9 дизайн-контракт, новые классы в `base.html` | T4, T6, T7, T8 |
-| §10 тесты | по задаче в каждой |
+| §9 дизайн-контракт, новые классы в `base.html`, удалённый `.progress` | T4, T6, T7, T8 |
+| §10 тесты, включая переезд шести существующих | по задаче в каждой |
+
+## Инварианты, которые ветка НЕ трогает (проверить финальным ревью)
+
+- **Денежный гейт**: заказ уходит провайдеру только при `confirmed_by_human=true`. Пакетное
+  одобрение (T6) двигает `scored → approved` — это не покупка, деньги не тратятся, очередь M2 и
+  её подтверждение на месте.
+- **Гейт редактуры**: публикация только из `edited`; `mark_edited` зовёт человек. Автоперезагрузка
+  страницы (T4) намеренно не работает на `/pages/{id}` — иначе фоновый свип снёс бы несохранённую
+  редактуру, то есть наблюдаемость сломала бы то, что гейт защищает.
+- **Оркестратор** по-прежнему не зовёт `confirm_order` / `execute_confirmed_order` / `mark_caught` /
+  `mark_edited`; `STAGES` только обрастают подписями и прогрессом.
