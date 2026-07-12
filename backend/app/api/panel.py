@@ -262,9 +262,11 @@ def queue_view(request: Request):
             c = BackorderClient()
             for o in orders:
                 z = zone_of(o["domain"])
+                o["zone"] = z
+                if z is None:                 # незнакомая зона (.su/gTLD) — сетки нет и не будет;
+                    continue                  # без этого tariffs(None) тянул бы JSON на каждый рендер
                 if z not in grids:
                     grids[z] = c.tariffs(z)
-                o["zone"] = z
             balance = c.balance()
         except Exception as e:  # noqa: BLE001 — панель не должна падать из-за провайдера
             bo_err = f"{type(e).__name__}: {e}"[:200]

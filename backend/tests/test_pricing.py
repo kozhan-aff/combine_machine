@@ -27,14 +27,19 @@ def _clear_grid():
     backorder._GRID_CACHE.clear()
 
 
-def _client(monkeypatch):
-    from app.integrations import backorder
+class _R:
+    """Ответ price-JSON. tariffs() ходит мимо BaseClient.request (короткий таймаут, без
+    ретрая — денежный экран не должен висеть), поэтому подменяем именно _client.request."""
+    def __init__(self, payload): self._p = payload
+    def json(self): return self._p
+    def raise_for_status(self): return None
 
-    class _R:
-        @staticmethod
-        def json(): return _LIVE
+
+def _client(monkeypatch, payload=None):
+    from app.integrations import backorder
     c = backorder.BackorderClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _R())
+    monkeypatch.setattr(c._client, "request",
+                        lambda *a, **k: _R(_LIVE if payload is None else payload))
     return c
 
 
@@ -71,27 +76,26 @@ def test_pick_tariff_uses_domain_zone(monkeypatch):
 
 def test_pick_tariff_refuses_empty_grid(monkeypatch):
     """Пустая сетка -> RuntimeError, а не молчаливый заказ по неизвестному тарифу."""
-    from app.integrations import backorder
-
-    class _R:
-        @staticmethod
-        def json(): return []
-    c = backorder.BackorderClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _R())
+    c = _client(monkeypatch, payload=[])
     with pytest.raises(RuntimeError, match="сетка тарифов"):
         c.pick_tariff("x.ru", 190)
 
 
+def test_empty_grid_is_not_cached(monkeypatch):
+    """Пустой ответ НЕ кешируется: иначе один сбой формата навсегда ломает подтверждение
+    (refresh=True ниоткуда не зовётся — сетка обновляется только рестартом контейнера)."""
+    from app.integrations import backorder
+    c = _client(monkeypatch, payload=[])
+    assert c.tariffs(".RU") == []
+    assert ".RU" not in backorder._GRID_CACHE          # пустоту не запомнили
+    c2 = _client(monkeypatch)                          # провайдер «починился»
+    assert len(c2.tariffs(".RU")) == 3                 # сетка поднялась без рестарта
+
+
 def test_tariff_row_without_period_id_is_skipped(monkeypatch):
     """Битая запись (period без id) выбрасывается из сетки, а не роняет её KeyError'ом."""
-    from app.integrations import backorder
     broken = {"id": "7", "type_id": "63", "grp": "... в .RU", "period": [{"price_num": "490"}]}
-
-    class _R:
-        @staticmethod
-        def json(): return [broken]
-    c = backorder.BackorderClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _R())
+    c = _client(monkeypatch, payload=[broken])
     assert c.tariffs(".RU") == []
     assert c.get_tariffs()["period_id"] is None
 

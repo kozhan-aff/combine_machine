@@ -63,42 +63,49 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
 
     Только ставит confirmed_by_human=True; заказ провайдеру НЕ шлёт (это execute)."""
     from app.db import SessionLocal
-    from app.models.domain import AcquisitionOrder
+    from app.models.domain import Domain, AcquisitionOrder
 
+    # Читаем состояние и валидируем, НЕ держа транзакцию открытой на время сетевого вызова.
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
         if o is None:
             raise ValueError(f"order {order_id} not found")
         if o.status != "pending_confirm":
             return {"order_id": order_id, "status": o.status, "note": "не в статусе pending_confirm"}
-        if o.provider == "backorder" and not bid_rub:
-            raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
-        if bid_rub is not None:
-            if bid_rub <= 0:
-                raise ValueError(f"ставка должна быть больше нуля, получено {bid_rub}")
-        if o.provider == "backorder":
-            # Тариф выбираем ЗДЕСЬ и замораживаем в заказе: ставка между тирами округляется
-            # вверх, и человек должен увидеть фактическую сумму на своём же действии, а не
-            # получить «система решила доплатить» на отправке. execute тир уже не трогает.
-            from app.integrations.backorder import BackorderClient
-            t = BackorderClient().pick_tariff(d_of(db, o.domain_id), float(bid_rub))
-            o.cost = t["price"]                      # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
-            o.result = {**(o.result or {}), "price_id": t["price_id"], "period_id": t["period_id"]}
+        provider = o.provider
+        d = db.get(Domain, o.domain_id)
+        domain = d.domain if d else None
+    if provider == "backorder" and not bid_rub:
+        raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
+    if bid_rub is not None and bid_rub <= 0:
+        raise ValueError(f"ставка должна быть больше нуля, получено {bid_rub}")
+
+    tier = None
+    if provider == "backorder":
+        # Тариф выбираем ЗДЕСЬ и замораживаем в заказе: ставка между тирами округляется вверх,
+        # и человек должен увидеть фактическую сумму на своём же действии, а не получить
+        # «система решила доплатить» на отправке. execute тир уже не трогает.
+        # Сетевой pick_tariff — ВНЕ транзакции БД (иначе лежащий провайдер держит соединение).
+        from app.integrations.backorder import BackorderClient
+        if domain is None:
+            raise ValueError(f"order {order_id}: домен не найден")
+        tier = BackorderClient().pick_tariff(domain, float(bid_rub))
+
+    with SessionLocal() as db:
+        o = db.get(AcquisitionOrder, order_id)
+        if o is None or o.status != "pending_confirm":   # состояние сменилось, пока ходили в сеть
+            return {"order_id": order_id, "status": o.status if o else "gone",
+                    "note": "не в статусе pending_confirm"}
+        if tier is not None:
+            o.cost = tier["price"]                   # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
+            o.result = {**(o.result or {}),
+                        "price_id": tier["price_id"], "period_id": tier["period_id"]}
         elif bid_rub is not None:
             o.cost = bid_rub
         o.confirmed_by_human = True                  # HARD GATE поднят человеком
         db.commit()
         return {"order_id": order_id, "status": o.status, "confirmed_by_human": True,
                 "bid_rub": float(o.cost) if o.cost is not None else None}
-
-
-def d_of(db, domain_id: int) -> str:
-    """Имя домена по id (тариф зависит от зоны)."""
-    from app.models.domain import Domain
-    d = db.get(Domain, domain_id)
-    if d is None:
-        raise ValueError(f"domain {domain_id} not found")
-    return d.domain
 
 
 def execute_confirmed_order(order_id: int) -> dict:
@@ -144,8 +151,7 @@ def execute_confirmed_order(order_id: int) -> dict:
         saved = {k: v for k, v in (o.result or {}).items() if k in ("price_id", "period_id")}
         try:
             if o.provider == "backorder":
-                import httpx
-                from app.integrations.backorder import BackorderClient
+                from app.integrations.backorder import AmbiguousSend, BackorderClient
                 price_id, period_id = saved.get("price_id"), saved.get("period_id")
                 if not (price_id and period_id):      # тариф замораживается человеком в confirm
                     raise RuntimeError("не выбрана ставка (тариф) — переподтверди заказ со ставкой")
@@ -166,12 +172,12 @@ def execute_confirmed_order(order_id: int) -> dict:
 
                 try:
                     res = c.order(d.domain, price_id=price_id, period_id=period_id)
-                except httpx.TransportError as e:
-                    # Сбой ПОСЛЕ отправки неотличим от сбоя до неё — заказ мог уйти и деньги
+                except AmbiguousSend as e:
+                    # Исход НЕИЗВЕСТЕН (таймаут / 5xx / не-JSON) — заказ мог уйти и деньги
                     # списаться. Не предлагаем «повторить» вслепую: сначала опрос провайдера.
+                    # Явный отказ провайдера сюда НЕ попадает — он RuntimeError ниже.
                     o.status = "failed"
-                    o.result = {**saved, "error": f"связь с провайдером оборвалась: {type(e).__name__}",
-                                "maybe_sent": True}
+                    o.result = {**saved, "error": f"исход неизвестен: {e}", "maybe_sent": True}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
             else:
@@ -231,9 +237,18 @@ def poll_orders() -> dict:
     from app.models.domain import Domain, AcquisitionOrder
     from app.integrations.backorder import BackorderClient
 
+    from app.integrations.backorder import _norm
+
     remote_orders = BackorderClient().client_orders()
     by_elid = {r["elid"]: r for r in remote_orders if r["elid"]}
-    by_domain = {r["domain"]: r for r in remote_orders}     # фолбэк для строк без elid
+    # Фолбэк для строк без elid — по нормализованному домену (.РФ: фид кириллица, billmgr
+    # punycode) и по ЖИВОМУ заказу: первый не-failed. Голый dict-comprehension схлопывал бы
+    # историю домена в последнюю строку и мог усыновить фантому старый аннулированный заказ.
+    by_domain: dict = {}
+    for r in remote_orders:
+        k = _norm(r["domain"])
+        if k not in by_domain or (by_domain[k]["state"] == "failed" and r["state"] != "failed"):
+            by_domain[k] = r
     moved = {"caught": 0, "failed": 0, "pending": 0}
     matched = 0
     with SessionLocal() as db:
@@ -249,7 +264,7 @@ def poll_orders() -> dict:
             # (ретрай, ручной заказ из ЛК), и словарь по имени схлопнул бы их в последний —
             # свежий заказ получил бы статус протухшего.
             remote = by_elid.get(o.provider_order_id or "") or (
-                by_domain.get(d.domain) if d and not o.provider_order_id else None)
+                by_domain.get(_norm(d.domain)) if d and not o.provider_order_id else None)
             if remote is None:
                 continue                              # провайдер ещё не показывает заказ
             matched += 1
@@ -285,6 +300,12 @@ def cancel_order(order_id: int) -> dict:
         if o.status not in {"pending_confirm", "failed"}:
             return {"order_id": order_id, "status": o.status,
                     "note": "снять можно только заказ в статусе pending_confirm/failed"}
+        if (o.result or {}).get("maybe_sent"):
+            # cancelled из поллинга не опрашивается -> реально оплаченный заказ стал бы
+            # невидим навсегда, а домен вернулся бы в approved. Сначала снять неизвестность.
+            return {"order_id": order_id, "status": o.status,
+                    "error": "исход заказа неизвестен (связь оборвалась, деньги могли уйти) — "
+                             "сначала «↻ обновить статусы у провайдера», потом отменяй"}
         o.status = "cancelled"
         d = db.get(Domain, o.domain_id)
         if d is not None and d.status == "purchasing":

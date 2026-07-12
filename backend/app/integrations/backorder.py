@@ -45,6 +45,26 @@ _GRID_CACHE: dict[str, list[dict]] = {}
 _BALANCE_CACHE: dict = {"at": 0.0, "value": None}      # /queue рендерится часто, счёт — редко
 
 
+class AmbiguousSend(Exception):
+    """Запрос ушёл, исход НЕИЗВЕСТЕН — заказ мог быть создан и оплачен.
+
+    Отличается от обычного отказа принципиально: провайдер, вернувший структурный
+    {"error": {...}}, заказ НЕ создал (повтор безопасен). А таймаут, HTTP-5xx от фронта
+    billmgr и HTML-страница вместо JSON приходят и ПОСЛЕ успешного создания заказа —
+    повторять вслепую нельзя, это второе списание.
+    """
+
+
+def _norm(domain: str) -> str:
+    """Каноническая форма домена для сравнения. Ключ идемпотентности денег — сверять
+    сырые строки нельзя: фид отдаёт .РФ кириллицей, а billmgr хранит punycode."""
+    d = (domain or "").strip().rstrip(".").lower()
+    try:
+        return d.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        return d
+
+
 def zone_of(domain: str) -> str | None:
     """Зона тарифной сетки домена, или None для незнакомой зоны.
 
@@ -87,11 +107,16 @@ class BackorderClient(BaseClient):
         return s
 
     def _billmgr(self, func: str, *, retry: bool = True, timeout: float | None = None,
-                 **params) -> list[dict]:
+                 money: bool = False, **params) -> list[dict]:
         """GET billmgr?func=... -> список из конверта {"elem": [...]}.
 
         retry=False для денежных вызовов: BaseClient.request ретраит транспортные сбои
         3 раза, а повтор uniservice.order по таймауту = второй платный заказ.
+
+        money=True меняет КЛАСС ошибки, а не только её текст: всё, где исход неизвестен
+        (таймаут / HTTP-5xx / не-JSON), поднимается как AmbiguousSend — вызывающий обязан
+        считать, что деньги могли уйти. Структурный {"error": {...}} остаётся обычным
+        RuntimeError: провайдер явно отверг, заказа нет, повтор безопасен.
         """
         p = {"func": func, "out": "json", "authinfo": f"{self.login}:{self.password}", **params}
         kw = {"params": p} if timeout is None else {"params": p, "timeout": timeout}
@@ -102,13 +127,20 @@ class BackorderClient(BaseClient):
                 resp = self._client.request("GET", _BILLMGR, **kw)
                 resp.raise_for_status()
             data = resp.json()
+        except httpx.TransportError as e:
+            if money:
+                raise AmbiguousSend(f"связь оборвалась: {type(e).__name__}") from None
+            raise
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(self._scrub(f"backorder {func}: HTTP {e.response.status_code}")) from None
+            msg = self._scrub(f"backorder {func}: HTTP {e.response.status_code}")
+            raise (AmbiguousSend(msg) if money else RuntimeError(msg)) from None
         except ValueError:
-            raise RuntimeError(f"backorder {func}: ответ не JSON") from None
+            msg = f"backorder {func}: ответ не JSON (страница ошибки billmgr?)"
+            raise (AmbiguousSend(msg) if money else RuntimeError(msg)) from None
         if isinstance(data, dict) and data.get("error"):
             err = data["error"]
             msg = err.get("msg") if isinstance(err, dict) else err
+            # Явный отказ провайдера: заказ НЕ создан — это не ambiguous, повтор безопасен.
             raise RuntimeError(self._scrub(f"backorder {func}: {msg}"))
         elem = data.get("elem") if isinstance(data, dict) else None
         return elem if isinstance(elem, list) else []
@@ -159,13 +191,17 @@ class BackorderClient(BaseClient):
         "190.0000 RUB / 190", float() на ней падает.
         """
         if refresh or zone not in _GRID_CACHE:
-            r = self.request("GET", _PRICE_JSON)
+            # timeout+без ретрая: сетка тянется на рендере /queue (денежный экран) — лежащий
+            # price-JSON не должен вешать страницу на 3 ретрая × 30 с.
+            r = self._client.request("GET", _PRICE_JSON, timeout=8.0)
+            r.raise_for_status()
             raw = r.json()
             rows = raw if isinstance(raw, list) else []
             for z in (".RU", ".РФ"):
-                _GRID_CACHE[z] = sorted(
-                    (t for t in (self._tier(row, z) for row in rows) if t),
-                    key=lambda t: t["price"])
+                grid = sorted((t for t in (self._tier(row, z) for row in rows) if t),
+                              key=lambda t: t["price"])
+                if grid:                      # пустую сетку НЕ кешируем: иначе сменившийся
+                    _GRID_CACHE[z] = grid     # формат ответа навсегда ломает подтверждение
         return _GRID_CACHE.get(zone, [])
 
     @staticmethod
@@ -218,12 +254,16 @@ class BackorderClient(BaseClient):
     def find_order(self, domain: str) -> dict | None:
         """Есть ли у провайдера ЖИВОЙ заказ на этот домен. Ключ идемпотентности.
 
-        Нужен, чтобы не заплатить дважды: ambiguous-сбой (таймаут ПОСЛЕ отправки) оставляет
-        заказ у провайдера, а у нас — 'failed' с кнопкой «повторить». Спрашиваем провайдера,
-        прежде чем слать. Ловит и заказ, размещённый руками из ЛК.
+        Нужен, чтобы не заплатить дважды: ambiguous-сбой (заказ ушёл, ответ не дошёл)
+        оставляет заказ у провайдера, а у нас — 'failed' с кнопкой «повторить». Спрашиваем
+        провайдера, прежде чем слать. Ловит и заказ, размещённый руками из ЛК.
+
+        Сравнение — по нормализованной (punycode) форме: фид отдаёт .РФ кириллицей, billmgr
+        хранит punycode, и сырое сравнение строк молча пропустило бы дубль на всю зону .РФ.
         """
+        want = _norm(domain)
         for r in self.client_orders():
-            if r["domain"] == domain and r["state"] != "failed":
+            if _norm(r["domain"]) == want and r["state"] != "failed":
                 return r
         return None
 
@@ -273,7 +313,7 @@ class BackorderClient(BaseClient):
                 "backorder.order: пусты BACKORDER_ACCOUNT_ID/BACKORDER_CONTACT_ID в .env "
                 "(взять из accountinfo/domaincontact)")
         elem = self._billmgr(
-            "uniservice.order", retry=False,
+            "uniservice.order", retry=False, money=True,
             period=period_id, price=price_id, domainname=domain,
             itype=_ITYPE_BACKORDER, sok="ok",
             payfrom=f"account{self.account_id}",   # литерал 'account' + id счёта слитно

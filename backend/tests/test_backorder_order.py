@@ -21,10 +21,11 @@ class _Resp:
 
 
 def _client(payload, spy: list | None = None):
-    """BackorderClient с замоканным транспортом; spy собирает params каждого вызова."""
+    """BackorderClient с замоканным транспортом; spy собирает params каждого вызова.
+    Идентификаторы — синтетические: боевым в репо не место."""
     c = backorder.BackorderClient()
     c.login, c.password = "LOGIN", "SECRET"
-    c.account_id, c.contact_id = "9841111", "301648"
+    c.account_id, c.contact_id = "111", "222"
 
     def fake(method, url, **kw):
         if spy is not None:
@@ -47,10 +48,64 @@ def test_order_sends_documented_params():
     assert p["price"] == "4770" and p["period"] == "3443"
     assert p["domainname"] == "example.ru"
     assert p["itype"] == "63"                  # тип услуги = освобождающийся домен
-    assert p["payfrom"] == "account9841111"    # литерал 'account' + id счёта СЛИТНО
-    assert p["contact"] == "301648"
+    assert p["payfrom"] == "account111"        # литерал 'account' + id счёта СЛИТНО
+    assert p["contact"] == "222"
     assert p["sok"] == "ok" and p["paynow"] == "on" and p["clientbackorder"] == "yes"
     assert p["authinfo"] == "LOGIN:SECRET"
+
+
+def test_ambiguous_vs_explicit_rejection():
+    """КЛАСС ошибки решает, можно ли повторять заказ.
+
+    Явный {"error":{...}} = провайдер отверг, заказа НЕТ -> обычный RuntimeError, повтор
+    безопасен. Таймаут / HTTP-5xx / не-JSON приходят и ПОСЛЕ создания заказа -> AmbiguousSend,
+    повторять вслепую нельзя. Раньше ambiguous ловился только по TransportError, а 5xx и
+    HTML-страница billmgr тихо становились «обычным отказом» с кнопкой «повторить».
+    """
+    c = _client({"error": {"code": "100", "msg": "нет средств"}})
+    with pytest.raises(RuntimeError) as e:            # явный отказ — НЕ ambiguous
+        c.order("example.ru", price_id="1", period_id="2")
+    assert not isinstance(e.value, backorder.AmbiguousSend)
+
+    for boom in (httpx.ReadTimeout("t"),
+                 httpx.HTTPStatusError("502", request=httpx.Request("GET", "https://x"),
+                                       response=httpx.Response(502))):
+        c = _client({})
+
+        def fake(method, url, **kw):
+            raise boom
+        c._client.request = fake      # type: ignore[method-assign]
+        with pytest.raises(backorder.AmbiguousSend):
+            c.order("example.ru", price_id="1", period_id="2")
+
+    c = _client(None)                                  # не-JSON / мусор вместо конверта
+    c._client.request = lambda *a, **k: _BadJson()     # type: ignore[method-assign]
+    with pytest.raises(backorder.AmbiguousSend):
+        c.order("example.ru", price_id="1", period_id="2")
+
+
+class _BadJson:
+    def json(self):
+        raise ValueError("HTML, не JSON")
+
+    def raise_for_status(self):
+        return None
+
+
+def test_find_order_matches_punycode_and_cyrillic():
+    """.РФ: фид отдаёт кириллицу, billmgr — punycode. Сырое сравнение строк пропустило бы
+    дубль и на повторе списало бы деньги второй раз на всю зону .РФ."""
+    c = _client({"elem": [{"id": "1", "domainname": "xn--80aswg.xn--p1ai", "id_status": "4",
+                           "clear_status": "Ожидает исполнения"}]})
+    assert c.find_order("сайт.рф") is not None         # кириллица == punycode
+    assert c.find_order("другой.рф") is None
+
+
+def test_find_order_ignores_failed_orders():
+    """Аннулированный заказ не должен блокировать новую попытку — он не «живой»."""
+    c = _client({"elem": [{"id": "1", "domainname": "drop.ru", "id_status": "7",
+                           "clear_status": "Аннулирован"}]})
+    assert c.find_order("drop.ru") is None             # 7 = не поймали -> можно заказать снова
 
 
 def test_order_never_retries():
@@ -64,7 +119,7 @@ def test_order_never_retries():
         raise httpx.ConnectTimeout("таймаут")
     c._client.request = boom          # type: ignore[method-assign]
 
-    with pytest.raises(httpx.ConnectTimeout):
+    with pytest.raises(backorder.AmbiguousSend):       # исход неизвестен, не «просто ошибка»
         c.order("example.ru", price_id="4770", period_id="3443")
     assert len(calls) == 1, f"заказ ушёл {len(calls)} раз — риск двойного списания"
 
@@ -131,7 +186,18 @@ def test_confirm_requires_bid(sqlite_db):
         acquisition.confirm_order(oid, -5)
 
 
-def test_confirm_stores_bid(sqlite_db):
+def _offline_grid(monkeypatch, grid=None):
+    """Сетка + «у провайдера заказов нет». Без этого confirm/execute уходят в живую сеть
+    (рубильник _no_live_network в conftest уронит тест — так и задумано)."""
+    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: grid or [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0},
+                            {"price_id": "4770", "period_id": "3443", "price": 400.0}])
+    monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: None)
+
+
+def test_confirm_stores_bid(sqlite_db, monkeypatch):
+    _offline_grid(monkeypatch)
     oid, _ = _queued()
     r = acquisition.confirm_order(oid, 400)
     assert r["confirmed_by_human"] is True and r["bid_rub"] == 400.0
@@ -152,10 +218,7 @@ def test_execute_picks_tier_by_bid_and_sends(sqlite_db, monkeypatch):
     import app.db as db
     from app.models.domain import AcquisitionOrder
     sent: list = []
-    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
-                        lambda self, zone=".RU", refresh=False: [
-                            {"price_id": "4769", "period_id": "3442", "price": 190.0},
-                            {"price_id": "4770", "period_id": "3443", "price": 400.0}])
+    _offline_grid(monkeypatch)
     monkeypatch.setattr(backorder.BackorderClient, "order",
                         lambda self, d, price_id, period_id: sent.append((d, price_id, period_id))
                         or {"order_id": "5140302"})
@@ -198,20 +261,36 @@ def test_execute_does_not_double_order_if_provider_already_has_one(sqlite_db, mo
         assert s.get(AcquisitionOrder, oid).provider_order_id == "5140302"  # усыновили
 
 
-def test_transport_error_marks_maybe_sent_not_plain_failed(sqlite_db, monkeypatch):
-    """Обрыв связи неотличим от «заказ ушёл» -> maybe_sent, чтобы панель не звала повторить вслепую."""
-    monkeypatch.setattr(backorder.BackorderClient, "tariffs",
-                        lambda self, zone=".RU", refresh=False: [
-                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
-    monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: None)
+def test_ambiguous_send_marks_maybe_sent_not_plain_failed(sqlite_db, monkeypatch):
+    """Неизвестный исход -> maybe_sent: панель не зовёт повторить вслепую И не даёт отменить
+    (cancelled из поллинга не опрашивается — оплаченный заказ исчез бы навсегда)."""
+    _offline_grid(monkeypatch)
 
-    def _timeout(self, d, price_id, period_id):
-        raise httpx.ReadTimeout("оборвалось")
-    monkeypatch.setattr(backorder.BackorderClient, "order", _timeout)
+    def _amb(self, d, price_id, period_id):
+        raise backorder.AmbiguousSend("связь оборвалась: ReadTimeout")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _amb)
     oid, _ = _queued()
     acquisition.confirm_order(oid, 190)
     r = acquisition.execute_confirmed_order(oid)
     assert r["status"] == "failed" and r["maybe_sent"] is True
+
+    c = acquisition.cancel_order(oid)                   # отмена фантома запрещена сервисом
+    assert "исход заказа неизвестен" in (c.get("error") or "")
+    assert c["status"] == "failed"                      # не ушёл в cancelled
+
+
+def test_explicit_rejection_stays_retryable(sqlite_db, monkeypatch):
+    """Явный отказ провайдера -> failed БЕЗ maybe_sent: повторить и отменить можно."""
+    _offline_grid(monkeypatch)
+
+    def _reject(self, d, price_id, period_id):
+        raise RuntimeError("backorder uniservice.order: нет средств")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _reject)
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and not r.get("maybe_sent")
+    assert acquisition.cancel_order(oid)["status"] == "cancelled"
 
 
 def test_confirm_freezes_tier_and_execute_does_not_repick(sqlite_db, monkeypatch):

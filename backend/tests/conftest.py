@@ -32,6 +32,32 @@ def _jsonb_as_json(element, compiler, **kw):  # DDL only; bind/result still json
 
 
 @pytest.fixture(autouse=True)
+def _no_live_network(monkeypatch):
+    """РУБИЛЬНИК ЖИВОЙ СЕТИ. Инвариант герметичности — структурный, не «на честном слове».
+
+    До этого гвардов было два (источники + фикстура `client`), и оба дырявые: юнит-тесты
+    денежного пути не брали `client`, и сьют доказуемо ходил в боевой billmgr backorder
+    с реальными BACKORDER_LOGIN/PASSWORD из .env (`confirm_order` -> pick_tariff -> живой
+    price-JSON; `execute` -> find_order -> живой authed-запрос). Зелёный сьют держался на
+    интернете, а от списания денег отделял один забытый monkeypatch.
+
+    Рубим httpx.HTTPTransport (реальные сокеты), а НЕ httpx.Client: TestClient — подкласс
+    httpx.Client и ходит через ASGITransport, панель обязана работать. Юнит-тесты транспорта
+    подменяют request/_client.request на ИНСТАНСЕ — инстанс-атрибут перекрывает классовый,
+    до транспорта не доходит. Значит эта фикстура ловит ровно то, что и должна: настоящий
+    выход в сеть.
+    """
+    import httpx
+
+    def _boom(self, request, *a, **kw):
+        raise AssertionError(
+            f"живой сетевой запрос из теста: {request.method} {request.url.host}{request.url.path}. "
+            "Тесты герметичны — подмени клиент/метод через monkeypatch.")
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _boom)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def sqlite_db():
     """Fresh in-memory DB per test, bound into app.db. StaticPool = one shared conn."""
     engine = create_engine(
