@@ -78,66 +78,7 @@
   </div>
 </div>
 
-<div id="prog" class="progress">
-  <span class="lbl"></span>
-  <div class="track"><div class="fill"></div></div>
-  <span class="pct"></span>
-</div>
-<script>
-// Терминальный контракт (см. services/jobs.py): error ПЕРВЫМ (иначе частичный done/total
-// маскирует падение), терминал = running==false, total==0 && running = неопределённый режим.
-// Меняем только представление — рисуем визуальный бар (см. .progress в base.html).
-var JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки', recheck:'Перепроверка занятости'};
-function bar(){ return document.getElementById('prog'); }
-// подпись строим безопасно: имя жирным + хвост текст-нодой. p.current/p.error приходят
-// с внешнего фида (имена доменов) — в innerHTML не подставляем, чтобы не пустить HTML/скрипт.
-function setLabel(lbl, name, tail){
-  var b = document.createElement('b'); b.textContent = name;
-  lbl.replaceChildren(b);
-  if (tail) lbl.appendChild(document.createTextNode(' — ' + tail));
-}
-function render(job, p){
-  var el = bar(), lbl = el.querySelector('.lbl'), fill = el.querySelector('.fill'),
-      pct = el.querySelector('.pct'), name = JOB_RU[job] || job;
-  el.className = 'progress show';                       // сброс состояний
-  if (p.error){ el.classList.add('err');               // стоп: без reload, оператор видит
-    setLabel(lbl, name, 'ошибка: ' + p.error); pct.textContent='';
-    fill.style.width='100%'; fill.style.marginLeft='0'; return; }
-  if (p.running){
-    if (p.total>0){ var d=Math.round(p.done/p.total*100);
-      fill.style.width=d+'%'; fill.style.marginLeft='0';
-      setLabel(lbl, name, p.current || '');
-      pct.textContent=p.done+'/'+p.total;
-    } else { el.classList.add('indet');                // total неизвестен — бегущая полоса
-      fill.style.width=''; setLabel(lbl, name, p.current || '');
-      pct.textContent='…'; }
-    return;
-  }
-  el.classList.add('done');                            // терминал без ошибки — успех
-  fill.style.width='100%'; fill.style.marginLeft='0';  // добить до 100% (инлайн-ширина осталась от running)
-  // message — итог джоба, если он его оставил (перепроверка: сколько занято/свободно).
-  // Через textContent, как и current: приходит из джоба, в innerHTML не подставляем.
-  setLabel(lbl, name, p.message || 'готово'); pct.textContent=p.done;
-}
-function poll(job){
-  fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
-    render(job, p);
-    if (p.error) return;                               // стоп на ошибке
-    if (p.running){ setTimeout(()=>poll(job), 1500); }
-    else { setTimeout(()=>location.reload(), 800); }   // успех — обновить таблицу
-  }).catch(()=>{                                        // сеть моргнула — не молчим, повторяем
-    var el=bar(); el.className='progress show';
-    setLabel(el.querySelector('.lbl'), JOB_RU[job]||job, 'нет связи, повторяю…');
-    setTimeout(()=>poll(job), 1500);
-  });
-}
-// старт-проверка: если джоб уже идёт (после сабмита) — поллим; если упал, пока оператора
-// не было (перезагрузка) — показываем ошибку сразу, не тонет молча. Итог (message) тоже
-// переживает перезагрузку: poll() после успеха делает reload, и без этого сводка
-// «сколько занято» мелькнула бы на 800 мс и пропала.
-['discovery','score','recheck'].forEach(j => fetch('/run/'+j+'/progress').then(r=>r.json())
-  .then(p=>{ if (p.running) poll(j); else if (p.error || p.message) render(j, p); }).catch(()=>{}));
-</script>
+<div id="machine"></div>
 
 <details class="legend">
   <summary>Легенда: статусы доменов и колонки таблицы</summary>

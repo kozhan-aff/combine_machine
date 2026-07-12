@@ -16,9 +16,7 @@
     </div></div>
 </div>
 
-<div id="prog" class="progress">
-  <span class="lbl"></span><div class="track"><div class="fill"></div></div><span class="pct"></span>
-</div>
+<div id="machine"></div>
 <form method="post" action="/autopilot/run" style="margin:6px 0 18px">
   <button class="btn-acc" title="прогнать включённые стадии один раз прямо сейчас (минует мастер-выключатель, уважает тумблеры стадий)">▶ Прогнать сейчас</button>
   <span class="hint">разовый свип: пройдёт по включённым ниже стадиям до ближайшего гейта</span>
@@ -97,43 +95,4 @@
 {% endif %}
 </div>
 
-<script>
-// прогрессбар свипа: тот же терминальный контракт, что и в domains.html (см. services/jobs.py).
-var JOB_RU = {sweep:'Свип автопилота'};
-function bar(){ return document.getElementById('prog'); }
-function setLabel(lbl, name, tail){
-  var b = document.createElement('b'); b.textContent = name;
-  lbl.replaceChildren(b);
-  if (tail) lbl.appendChild(document.createTextNode(' — ' + tail));
-}
-function render(job, p){
-  var el = bar(), lbl = el.querySelector('.lbl'), fill = el.querySelector('.fill'),
-      pct = el.querySelector('.pct'), name = JOB_RU[job] || job;
-  el.className = 'progress show';
-  if (p.error){ el.classList.add('err');
-    setLabel(lbl, name, 'ошибка: ' + p.error); pct.textContent=''; fill.style.width='100%'; return; }
-  if (p.running){
-    if (p.total>0){ fill.style.width=Math.round(p.done/p.total*100)+'%';
-      setLabel(lbl, name, p.current || ''); pct.textContent=p.done+'/'+p.total; }
-    else { el.classList.add('indet'); fill.style.width=''; setLabel(lbl, name, p.current || ''); pct.textContent='…'; }
-    return;
-  }
-  el.classList.add('done'); fill.style.width='100%';
-  setLabel(lbl, name, 'готово'); pct.textContent=p.done;
-}
-function poll(job){
-  fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
-    render(job, p);
-    if (p.error) return;
-    if (p.running){ setTimeout(()=>poll(job), 1500); }
-    else { setTimeout(()=>location.reload(), 800); }
-  }).catch(()=>{                                        // сеть моргнула — не молчим, повторяем
-    var el=bar(); el.className='progress show';
-    setLabel(el.querySelector('.lbl'), JOB_RU[job]||job, 'нет связи, повторяю…');
-    setTimeout(()=>poll(job), 1500);
-  });
-}
-fetch('/run/sweep/progress').then(r=>r.json())
-  .then(p=>{ if (p.running) poll('sweep'); else if (p.error) render('sweep', p); }).catch(()=>{});
-</script>
 {% endblock %}
