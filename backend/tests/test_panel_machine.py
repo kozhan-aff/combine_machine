@@ -24,3 +24,15 @@ def test_autopilot_uses_the_same_component(client):
     html = client.get("/autopilot").text
     assert 'id="machine"' in html
     assert 'id="prog"' not in html and "/run/sweep/progress" not in html
+
+
+def test_dashboard_shows_machine_block_and_last_runs(client):
+    from app.services import jobs
+    with jobs.track("recheck"):
+        jobs.report("recheck", done=200, total=200,
+                    message="занято уже 3 из отобранных — ушли в rejected")
+    html = client.get("/").text
+    assert 'id="machine"' in html and 'id="machine-idle"' in html
+    assert "Машина сейчас" in html
+    assert "занято уже 3 из отобранных" in html      # итог последнего прогона виден в простое
+    assert "Простаивает" in html

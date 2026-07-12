@@ -15,6 +15,45 @@
      style="margin-left:auto">→ Автопилот</a>
 </div>
 
+<h2><span class="idx">◐</span> Машина сейчас
+  <span class="hint">что крутится прямо сейчас — в реальном времени</span></h2>
+
+{# карточки активных задач рисует поллер из base.html; пока пусто — показываем итоги прогонов #}
+<div id="machine"></div>
+
+<div class="card" id="machine-idle">
+  <div class="row" style="border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:8px">
+    <span class="badge b-default">Простаивает</span>
+    <span class="hint">задач в работе нет — ниже последние прогоны</span>
+  </div>
+  {% for key, ru in [('discovery','Поиск дропов'), ('score','Проверка'),
+                     ('recheck','Перепроверка занятости'), ('sweep','Свип автопилота')] %}
+    {% set r = last_runs.get(key) %}
+    <div class="row">
+      <b style="min-width:190px">{{ ru }}</b>
+      {% if r %}
+        <span class="hint" style="flex:1">
+          {% if r.status == 'failed' %}<span style="color:var(--bad)">упала: {{ r.error }}</span>
+          {% elif r.status == 'cancelled' %}остановлена на {{ r.done }} / {{ r.total }}
+          {% else %}{{ r.message or 'готово' }}{% endif %}
+        </span>
+        <span class="hint num">{{ (r.finished_at[8:10] + '.' + r.finished_at[5:7] + ' ' + r.finished_at[11:16]) if r.finished_at else '—' }}</span>
+      {% else %}
+        <span class="hint" style="flex:1">ни разу не запускалась</span>
+      {% endif %}
+    </div>
+  {% endfor %}
+  <div class="row" style="margin-top:10px">
+    <form method="post" action="/run/discovery" class="inline">
+      <button class="btn btn-acc btn-sm" title="собрать свежие дропы из включённых источников">↻ Найти дропы</button>
+    </form>
+    <form method="post" action="/run/score" class="inline">
+      <input type="hidden" name="n" value="5">
+      <button class="btn btn-sm" title="прогнать 5 доменов через воронку скоринга">▶ Запустить проверку</button>
+    </form>
+  </div>
+</div>
+
 <h2><span class="idx">◈</span> Воронка конвейера
   <span class="hint">каждая плитка кликабельна — открывает список этой стадии</span></h2>
 <div class="funnel">

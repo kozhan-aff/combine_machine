@@ -149,6 +149,7 @@ def _gates(db: Session) -> dict:
 # ============================================================================
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_session)):
+    from app.services import jobs
     from app.services.autonomy import get_autonomy
     from app.services.orchestrator import last_finished_sweep_at
     dc = _domain_counts(db)
@@ -161,6 +162,7 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
         "sites": _sites_overview(db),
         "steps": _next_steps(db),
         "autopilot": get_autonomy(), "gates": _gates(db), "last_sweep": last_finished_sweep_at(),
+        "last_runs": {name: jobs.last(name) for name in _JOBS},
     })
 
 
