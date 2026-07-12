@@ -21,9 +21,11 @@ import app.models.offer
 import app.models.monitoring
 import app.models.settings
 import app.models.autonomy
+import app.models.job
 # reference the modules so their table-registration side effect (create_all needs
 # every table, incl. index_history from publish.check_index) isn't seen as a dead import
-_REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring, app.models.settings, app.models.autonomy)
+_REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring,
+                    app.models.settings, app.models.autonomy, app.models.job)
 
 
 @compiles(JSONB, "sqlite")
@@ -99,6 +101,25 @@ def sqlite_db():
     db.SessionLocal.configure(bind=engine)
     yield engine
     Base.metadata.drop_all(engine)
+
+
+@pytest.fixture(autouse=True)
+def _drain_background_jobs(sqlite_db):
+    """ДОПОЛНЕНИЕ ПРОТИВ БРИФА Task 1 (не было в спеке, добавлено при эмпирической проверке).
+
+    jobs.py теперь реально пишет job_run из ФОНОВОГО потока (spawn/track), а не в dict процесса
+    — старый in-memory jobs.py никогда не касался БД из другого потока, поэтому эта гонка была
+    физически невозможна раньше. Не каждый тест дожидается is_running()==False перед возвратом
+    (test_autopilot_panel.py::test_autopilot_run_starts_job поллит побочный эффект внутри
+    target(), а не реестр) — тогда фоновый поток ещё дописывает "done" в job_run, когда
+    `sqlite_db` уже снёс таблицы под ним. На этой машине SQLite собран THREADSAFE=2
+    («multi-thread»): по документации SQLite это segfault, не гипотетика — воспроизведено.
+    Зависимость от `sqlite_db` в сигнатуре — не для доступа к движку, а чтобы pytest завершил
+    ЭТОТ фиксчур (наш drain) РАНЬШЕ, чем teardown `sqlite_db` (drop_all): фикстуры сворачиваются
+    в обратном порядке, а этот объявлен позже/поверх sqlite_db."""
+    yield
+    from app.services import jobs
+    jobs._drain()
 
 
 @pytest.fixture(autouse=True)

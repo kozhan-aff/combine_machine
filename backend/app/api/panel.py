@@ -364,7 +364,16 @@ def run_progress(job: str):
     from app.services import jobs
     if job not in ("discovery", "score", "sweep"):   # только известные джобы, не эхо любого пути
         raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
-    return JSONResponse(jobs.progress(job))
+    # ДОПОЛНЕНИЕ ВНЕ ПЕРИМЕТРА Task 1 (jobs.py), но необходимое: Task 1 расширила форму
+    # jobs.progress() (см. app/services/jobs.py) под кросс-процессный реестр — новые ключи
+    # (name/trigger/stage/stages/cancel_requested/stale/started_at/finished_at) поверх старых
+    # шести. Этот роут раньше отдавал jobs.progress() как есть, и старый JS/тесты (см.
+    # test_pipeline.py::test_run_score_double_start_and_progress_route) ждут ИМЕННО старую
+    # шестёрку ключей. Проекция вниз — временный мост до Task 2/3, где этот роут и JS-полоса
+    # получат стадии/отмену по-настоящему; трогать сам jobs.py тут не нужно.
+    p = jobs.progress(job)
+    legacy = {k: p[k] for k in ("running", "done", "total", "current", "message", "error")}
+    return JSONResponse(legacy)
 
 
 @router.post("/domains/{domain_id}/score")
