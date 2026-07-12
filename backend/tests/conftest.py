@@ -74,6 +74,14 @@ def _no_live_network(monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _boom)
     monkeypatch.setattr(socket, "getaddrinfo", _boom_dns)
     monkeypatch.setattr(socket, "gethostbyname", _boom_dns)
+    # blacklist.py при заданном DNS_RESOLVER ходит через dnspython — это СЫРЫЕ UDP-сокеты
+    # мимо getaddrinfo, патчи выше его не ловят.
+    try:
+        import dns.resolver
+        monkeypatch.setattr(dns.resolver.Resolver, "resolve",
+                            lambda self, qname, *a, **kw: _boom_dns(qname))
+    except ImportError:                       # dnspython опционален — этого пути просто нет
+        pass
     yield
 
 

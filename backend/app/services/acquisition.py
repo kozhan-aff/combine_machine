@@ -166,12 +166,18 @@ def execute_confirmed_order(order_id: int) -> dict:
                 # заказа на этот домен. Закрывает ambiguous-сбой (таймаут ПОСЛЕ отправки:
                 # заказ ушёл, мы записали failed, человек жмёт «повторить») и ручной заказ из ЛК.
                 dup = c.find_order(d.domain)
+                # Провайдер ОТВЕТИЛ — его список заказов и есть правда, неизвестности больше
+                # нет. Снимаем флаг и когда дубль найден, и когда честно сказано «заказа нет»:
+                # если мы доверяем этому ответу настолько, что на его основании ТРАТИМ деньги
+                # (шлём новый заказ), то и разблокировать отмену он вправе. Иначе постоянный
+                # отказ провайдера (приём закрыт / домен ушёл) запирал заявку навсегда: повтор
+                # падает вечно, отмена заперта, а create_order не берёт домен из 'purchasing'.
+                saved.pop("maybe_sent", None)
                 if dup is not None:
                     o.status = "ordered"
                     o.provider_order_id = dup["elid"]
                     o.result = {**saved, "note": "заказ на этот домен у провайдера уже есть — "
                                                  "второй не шлём", "clear_status": dup["clear_status"]}
-                    o.result.pop("maybe_sent", None)   # провайдер ответил — неизвестности нет
                     o.ordered_at = o.ordered_at or datetime.now(timezone.utc)
                     db.commit()
                     return {"order_id": order_id, "status": o.status, "result": o.result}
@@ -192,7 +198,6 @@ def execute_confirmed_order(order_id: int) -> dict:
             o.status = "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
             o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
-            o.result.pop("maybe_sent", None)          # заказ подтверждён провайдером — снято
             o.ordered_at = datetime.now(timezone.utc)
             db.commit()
             return {"order_id": order_id, "status": o.status, "result": o.result}

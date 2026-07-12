@@ -260,13 +260,18 @@ def queue_view(request: Request):
     for o in orders:                          # зона — до похода в сеть: иначе сбой на первой
         o["zone"] = zone_of(o["domain"])      # заявке оставил бы остальные строки без зоны
     if any(o["status"] == "pending_confirm" for o in orders):
+        c = BackorderClient()
+        # Сетка и баланс — независимые сбои: упавший баланс не должен писать «подтверждать
+        # нечем» над рабочим селектором ставки, и наоборот. Панель не падает ни от одного.
         try:
-            c = BackorderClient()
             for z in {o["zone"] for o in orders if o["zone"]}:   # None — сетки нет и не будет
                 grids[z] = c.tariffs(z)
+        except Exception as e:  # noqa: BLE001
+            bo_err = f"сетка тарифов: {type(e).__name__}: {e}"[:200]
+        try:
             balance = c.balance()
-        except Exception as e:  # noqa: BLE001 — панель не должна падать из-за провайдера
-            bo_err = f"{type(e).__name__}: {e}"[:200]
+        except Exception as e:  # noqa: BLE001 — баланс информационный, подтверждать не мешает
+            bo_err = (bo_err + " · " if bo_err else "") + f"баланс: {type(e).__name__}"[:80]
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
         "balance": balance, "bo_err": bo_err,
@@ -413,7 +418,13 @@ def queue_execute_action(order_id: int):
             return _back("/queue", err=r["error"])
         if r.get("status") == "failed":
             return _back("/queue", err=f"заказ #{order_id}: {r.get('error') or 'провайдер отверг заказ'}")
-        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус {r.get('status')}.")
+        # paynow=on списывает с баланса: при 0 ₽ заказ создастся, но повиснет «Не оплачен» и
+        # домен НЕ будет перехвачен. Сказать это сразу, а не оставлять узнавать через поллинг.
+        note = (r.get("result") or {}).get("note") or ""
+        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус "
+                                   f"{r.get('status')}.{' ' + note if note else ''} "
+                                   "Проверь «↻ обновить статусы»: при нулевом балансе заказ "
+                                   "повиснет «Не оплачен» и домен не перехватят.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отправка: {e}")
 

@@ -20,8 +20,9 @@
     <button class="btn" title="прочитать статусы заказов у backorder (clientbackorder) и подвинуть ordered → пойман/не вышло; денег не тратит">↻ обновить статусы у провайдера</button>
   </form>
   {% if bo_err %}
-    <span class="hint" style="color:var(--bad)">backorder недоступен: {{ bo_err }} — подтверждать нечем</span>
-  {% elif balance is not none %}
+    <span class="hint" style="color:var(--bad)">backorder: {{ bo_err }}</span>
+  {% endif %}
+  {% if balance is not none %}
     <span class="hint">баланс backorder:
       {% if balance <= 0 %}<b style="color:var(--bad)">{{ '%.0f'|format(balance) }} ₽ — заказ повиснет «Не оплачен», пополни счёт</b>
       {% else %}<b style="color:var(--ok)">{{ '%.0f'|format(balance) }} ₽</b>{% endif %}</span>

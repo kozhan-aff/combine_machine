@@ -191,6 +191,25 @@ def test_state_map_covers_all_documented_statuses():
     assert backorder.state_of(None) == "pending"     # мусор -> не трогаем заказ
 
 
+def test_balance_parses_live_form():
+    """Живая форма accountinfo (docs/api/backorder.md §3.1): balance — СТРОКА "0.00".
+    0 ₽ — это и есть текущий блокер покупки, парсинг обязан быть верным (не None, не 0 из-за
+    проглоченного исключения)."""
+    backorder._BALANCE_CACHE.update(at=0.0, value=None)          # кеш на процесс — сбросить
+    c = _client({"elem": [{"id": "1", "name": "BackOrder.ru", "balance": "0.00",
+                           "creditlimit": "0.0000"}]})
+    assert c.balance() == 0.0
+
+    backorder._BALANCE_CACHE.update(at=0.0, value=None)
+    assert _client({"elem": [{"balance": "1250.50"}]}).balance() == 1250.5
+
+    backorder._BALANCE_CACHE.update(at=0.0, value=None)
+    assert _client({"elem": []}).balance() is None                # счёт не отдан -> честный None
+
+    backorder._BALANCE_CACHE.update(at=0.0, value=None)
+    assert _client({"elem": [{"balance": "—"}]}).balance() is None   # мусор -> None, не 0.0
+
+
 def test_zone_of():
     assert backorder.zone_of("site.ru") == ".RU"
     assert backorder.zone_of("сайт.рф") == ".РФ"
@@ -333,6 +352,33 @@ def test_maybe_sent_is_not_a_dead_end(sqlite_db, monkeypatch):
     assert r["status"] == "ordered" and not r["result"].get("maybe_sent")
     with db.SessionLocal() as s:
         assert "maybe_sent" not in (s.get(AcquisitionOrder, oid).result or {})
+
+
+def test_provider_says_no_order_clears_the_unknown(sqlite_db, monkeypatch):
+    """Провайдер ЯВНО ответил «заказа нет» -> неизвестность снята, даже если сам заказ потом
+    отвергнут навсегда (приём закрыт / домен ушёл). Иначе заявка запиралась насмерть: повтор
+    падает вечно, отмена заперта, а create_order не берёт домен из purchasing."""
+    _offline_grid(monkeypatch)
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: (_ for _ in ()).throw(
+                            backorder.AmbiguousSend("связь оборвалась")))
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    assert acquisition.execute_confirmed_order(oid)["maybe_sent"] is True
+
+    # Повтор: провайдер на связи и говорит «заказа нет», но отвергает новый — навсегда.
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: (_ for _ in ()).throw(
+                            RuntimeError("backorder: приём заказа по домену закрыт")))
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and not r.get("maybe_sent")   # неизвестность снята
+    assert acquisition.cancel_order(oid)["status"] == "cancelled"  # выход есть
+
+    import app.db as db
+    from app.models.domain import Domain
+    with db.SessionLocal() as s:
+        from sqlalchemy import select
+        assert s.execute(select(Domain)).scalar_one().status == "approved"  # домен не потерян
 
 
 def test_maybe_sent_survives_a_failed_retry(sqlite_db, monkeypatch):
