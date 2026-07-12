@@ -218,14 +218,23 @@ STAGES = [
     ("check_index", "auto_check_index", "cap_check_index", _stage_check_index),
 ]
 
+STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "очередь",
+            "provision": "провижн", "generate": "контент", "publish": "публикация",
+            "check_index": "индексация"}
 
-def run_sweep(trigger: str = "cron", on_progress=None, respect_master: bool = True) -> dict:
+
+def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     """Прогнать включённые авто-стадии до гейтов. respect_master=False у ручного запуска.
 
     ЖЁСТКО: зовёт ТОЛЬКО безопасные сервисы из STAGES. НИКОГДА — confirm_order/
     execute_confirmed_order/mark_caught (деньги) и mark_edited (редактура): эти три гейта
     двигает только человек через роуты панели. Ошибка одной сущности не топит стадию/свип.
+
+    Прогресс пишет сам (jobs.track) — именно поэтому свип из воркера теперь виден Пульту.
+    Выключенные тумблером стадии показываем как skip, а не прячем: «стадия отключена» и
+    «стадия сломалась» — разные вещи, и оператор обязан их различать.
     """
+    from app.services import jobs
     from app.services.autonomy import get_autonomy
 
     cfg = get_autonomy()
@@ -236,20 +245,35 @@ def run_sweep(trigger: str = "cron", on_progress=None, respect_master: bool = Tr
         return {"skipped": "already_running"}
 
     enabled = [s for s in STAGES if cfg[s[1]]]
+    stages = [{"key": k, "label": STAGE_RU[k],
+               "state": "pending" if cfg[flag] else "skip"} for k, flag, _, _ in STAGES]
     total = len(enabled)
     counts, errors, status = {}, [], "done"
-    for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
-        if on_progress:
-            on_progress(i, total, key)
-        cap = cfg[cap_attr] if cap_attr else None
-        try:
-            n, errs = handler(cap)
-            counts[key] = n
-            errors += [f"{key}: {e}" for e in errs]
-        except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
-            errors.append(f"{key}: {type(e).__name__}: {e}")
-            status = "failed"
-    if on_progress:
-        on_progress(total, total, "")
+    try:
+        with jobs.track("sweep", trigger="auto" if trigger == "cron" else "manual",
+                        stages=stages):
+            for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
+                jobs.report("sweep", done=i, total=total, stage=key,
+                            current=STAGE_RU[key])
+                cap = cfg[cap_attr] if cap_attr else None
+                try:
+                    n, errs = handler(cap)
+                    counts[key] = n
+                    errors += [f"{key}: {e}" for e in errs]
+                except jobs.AlreadyRunning:
+                    # ЗАМОК СРАБОТАЛ ШТАТНО, а не сломался: оператор прямо сейчас гоняет свой
+                    # score/discovery, и второй прогон поверх — ровно то, что мы запрещали
+                    # (двое жгут квоту A-Parser). Пропустить стадию и сказать об этом честно;
+                    # красить весь свип в failed = кричать волком на собственную защиту.
+                    errors.append(f"{key}: пропущена — занята ручным прогоном")
+                except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
+                    errors.append(f"{key}: {type(e).__name__}: {e}")
+                    status = "failed"
+            jobs.report("sweep", done=total, total=total, current="",
+                        message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
+    except jobs.AlreadyRunning:
+        # а ЭТОТ AlreadyRunning — от самого track("sweep"): свип уже идёт в другом процессе.
+        _finish_run(run_id, "done", {}, ["sweep: реестр занят другим прогоном"])
+        return {"skipped": "already_running"}
     _finish_run(run_id, status, counts, errors)
     return {"run_id": run_id, "status": status, "counts": counts, "errors": errors}

@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from fastapi import APIRouter, Request, Depends, Form
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, or_
@@ -36,6 +37,8 @@ router = APIRouter()
 # ручная курация из шортлиста. 'purchased' = оператор купил домен руками — этот клик
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
+
+_JOBS = ("discovery", "score", "recheck", "sweep")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -316,64 +319,58 @@ def page_edit_view(request: Request, page_id: int, db: Session = Depends(get_ses
 # ============================================================================
 # ДЕЙСТВИЯ (POST -> redirect c msg/err)
 # ============================================================================
+def _back_here(request: Request, msg: str | None = None, err: str | None = None):
+    """Вернуть оператора на страницу, с которой он нажал кнопку (запуск есть и на Пульте,
+    и на M1). Свои query-параметры чистим: старый ?err= иначе подавит новый ?msg=."""
+    raw = request.headers.get("referer") or "/domains"
+    p = urlsplit(raw)
+    q = urlencode([(k, v) for k, v in parse_qsl(p.query) if k not in ("msg", "err")])
+    return _back(urlunsplit(("", "", p.path or "/domains", q, "")), msg=msg, err=err)
+
+
 @router.post("/run/discovery")
-def run_discovery_action():
+def run_discovery_action(request: Request):
     from app.services import discovery, jobs
-    ok = jobs.start("discovery", lambda: discovery.run_discovery(
-        on_progress=lambda d, t, c: jobs.report("discovery", d, t, c)))
-    return _back("/domains", msg="Discovery запущен…" if ok else None,
-                 err=None if ok else "Discovery уже идёт")
+    ok = jobs.spawn("discovery", discovery.run_discovery)
+    # запущено — баннера НЕТ: прогресс показывает карточка задачи (спека §8)
+    return _back_here(request, err=None if ok else "Поиск дропов уже идёт")
 
 
 @router.post("/run/score")
-def run_score_action(n: int = Form(5)):
-    from app.services import scoring, jobs
-    ok = jobs.start("score", lambda: scoring.score_pending(
-        limit=n, on_progress=lambda d, t, c: jobs.report("score", d, t, c)))
-    return _back("/domains", msg="Score запущен…" if ok else None,
-                 err=None if ok else "Score уже идёт")
+def run_score_action(request: Request, n: int = Form(5)):
+    from app.services import jobs, scoring
+    ok = jobs.spawn("score", lambda: scoring.score_pending(limit=n))
+    return _back_here(request, err=None if ok else "Проверка уже идёт")
 
 
 @router.post("/run/recheck")
-def run_recheck_action(n: int = Form(200)):
+def run_recheck_action(request: Request, n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
-    from datetime import datetime, timezone
-    from app.services import scoring, jobs
-
-    def _run():
-        r = scoring.recheck_acquirability(
-            limit=n, on_progress=lambda d, t, cur: jobs.report("recheck", d, t, cur))
-        # Сводка живёт в jobs до следующего прогона и показывается при каждом заходе на
-        # /domains — поэтому датируем её, иначе вчерашний итог неотличим от свежего.
-        # Явный UTC: контейнер живёт в UTC, оператор — в MSK; голое время врало бы на 3 часа.
-        stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
-        jobs.report("recheck", r["checked"], r["checked"], "",
-                    message=f"проверено {r['checked']}: свободны {r['free']}, "
-                            f"ждут дропа {r['waiting']}, ЗАНЯТЫ {r['taken']} (отбракованы), "
-                            f"не определилось {r['unknown']} · {stamp}")
-
-    ok = jobs.start("recheck", _run)
-    return _back("/domains", msg="Перепроверка занятости запущена…" if ok else None,
-                 err=None if ok else "Перепроверка уже идёт")
+    from app.services import jobs, scoring
+    ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
+    return _back_here(request, err=None if ok else "Перепроверка уже идёт")
 
 
-@router.get("/run/{job}/progress")
-def run_progress(job: str):
+@router.post("/run/{job}/cancel")
+def run_cancel_action(request: Request, job: str):
     from fastapi import HTTPException
+    from app.services import jobs
+    if job not in _JOBS:
+        raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
+    jobs.request_cancel(job)          # сервис увидит флаг между элементами и честно завершится
+    return _back_here(request)
+
+
+@router.get("/api/jobs/live")
+def jobs_live():
+    """Что машина делает прямо сейчас + итог последнего прогона каждой задачи.
+    Один эндпоинт на всю панель: карточки на Пульте/M1 и тонкая полоса в шапке."""
     from fastapi.responses import JSONResponse
     from app.services import jobs
-    if job not in ("discovery", "score", "sweep"):   # только известные джобы, не эхо любого пути
-        raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
-    # ДОПОЛНЕНИЕ ВНЕ ПЕРИМЕТРА Task 1 (jobs.py), но необходимое: Task 1 расширила форму
-    # jobs.progress() (см. app/services/jobs.py) под кросс-процессный реестр — новые ключи
-    # (name/trigger/stage/stages/cancel_requested/stale/started_at/finished_at) поверх старых
-    # шести. Этот роут раньше отдавал jobs.progress() как есть, и старый JS/тесты (см.
-    # test_pipeline.py::test_run_score_double_start_and_progress_route) ждут ИМЕННО старую
-    # шестёрку ключей. Проекция вниз — временный мост до Task 2/3, где этот роут и JS-полоса
-    # получат стадии/отмену по-настоящему; трогать сам jobs.py тут не нужно.
-    p = jobs.progress(job)
-    legacy = {k: p[k] for k in ("running", "done", "total", "current", "message", "error")}
-    return JSONResponse(legacy)
+    return JSONResponse(jsonable_encoder({
+        "jobs": jobs.live(),
+        "last": {name: jobs.last(name) for name in _JOBS},
+    }))
 
 
 @router.post("/domains/{domain_id}/score")
@@ -702,10 +699,8 @@ def autopilot_settings_save(
 
 
 @router.post("/autopilot/run")
-def autopilot_run_action():
-    from app.services import orchestrator, jobs
-    ok = jobs.start("sweep", lambda: orchestrator.run_sweep(
-        trigger="manual", respect_master=False,
-        on_progress=lambda d, t, c: jobs.report("sweep", d, t, c)))
-    return _back("/autopilot", msg="Свип запущен…" if ok else None,
-                 err=None if ok else "Свип уже идёт")
+def autopilot_run_action(request: Request):
+    from app.services import jobs, orchestrator
+    ok = jobs.spawn("sweep", lambda: orchestrator.run_sweep(trigger="manual",
+                                                            respect_master=False))
+    return _back_here(request, err=None if ok else "Свип уже идёт")

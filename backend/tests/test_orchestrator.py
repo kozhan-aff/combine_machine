@@ -87,7 +87,7 @@ def test_queue_stage_moves_approved_to_purchasing_up_to_cap():
 def test_score_stage_passes_cap_as_limit(monkeypatch):
     seen = {}
     monkeypatch.setattr("app.services.scoring.score_pending",
-                        lambda limit=100, on_progress=None: seen.update(limit=limit) or 4)
+                        lambda limit=100: seen.update(limit=limit) or 4)
     autonomy.update_autonomy(cap_score=7)
     _enable(auto_score=True)
     out = orch.run_sweep(trigger="cron")
@@ -131,8 +131,8 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
     monkeypatch.setattr("app.services.content.mark_edited",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("editorial gate called")))
     # offline: сетевые bulk-стадии в no-op, чтобы тумблеры можно было включить все
-    monkeypatch.setattr("app.services.discovery.run_discovery", lambda on_progress=None: 0)
-    monkeypatch.setattr("app.services.scoring.score_pending", lambda limit=100, on_progress=None: 0)
+    monkeypatch.setattr("app.services.discovery.run_discovery", lambda: 0)
+    monkeypatch.setattr("app.services.scoring.score_pending", lambda limit=100: 0)
     with db.SessionLocal() as s:
         s.add(Domain(domain="scored.ru", source="backorder", status="scored"))
         d = Domain(domain="site.ru", source="backorder", status="purchased")

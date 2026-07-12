@@ -351,15 +351,6 @@ def spawn(name: str, target) -> bool:
     return True
 
 
-def start(name: str, target) -> bool:
-    """LEGACY-ШИМ (удаляется в Task 3): оборачивает target в track сам, чтобы вызывающие,
-    которые ещё передают on_progress, продолжали работать."""
-    def _wrapped():
-        with track(name):
-            target()
-    return spawn(name, _wrapped)
-
-
 def _drain(timeout: float = 2.0) -> None:    # только для тестового харнесса (conftest.py)
     """Дождаться РЕАЛЬНОГО завершения всех фоновых потоков, отданных spawn().
 

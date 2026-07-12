@@ -43,9 +43,11 @@ def test_autopilot_run_starts_job(client, monkeypatch):
     assert seen.get("trigger") == "manual" and seen.get("respect_master") is False
 
 
-def test_sweep_progress_whitelisted(client):
-    assert client.get("/run/sweep/progress").status_code == 200
-    assert client.get("/run/bogus/progress").status_code == 404
+def test_jobs_live_ok_and_cancel_whitelisted(client):
+    """/run/{job}/progress снесён (Task 3) — живой список теперь один на всю панель
+    (/api/jobs/live), а whitelist известных джобов проверяет /run/{job}/cancel."""
+    assert client.get("/api/jobs/live").status_code == 200
+    assert client.post("/run/bogus/cancel", follow_redirects=False).status_code == 404
 
 
 def test_gates_counts(client):
