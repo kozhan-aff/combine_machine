@@ -457,11 +457,11 @@ def test_score_pending_isolates_failure(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
     real = scoring.score_domain
-    def _boom(did, clients=None, whois_budget=None, ahrefs_budget=None):
+    def _boom(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
-        return real(did, clients, whois_budget, ahrefs_budget)
+        return real(did, clients, whois_budget, ahrefs_budget, job=job)
     monkeypatch.setattr(scoring, "score_domain", _boom)
     # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)

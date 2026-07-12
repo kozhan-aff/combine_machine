@@ -79,17 +79,21 @@ def _sources():
             "reg_ru": RegruDropsClient, "sweb": SwebDropsClient}
 
 
-def _collect(enabled: dict, on_progress=None) -> list[dict]:
+_SOURCE_RU = {"backorder": "backorder", "cctld": "cctld", "reg_ru": "reg.ru", "sweb": "sweb"}
+
+
+def _collect(enabled: dict) -> list[dict]:
     """Собрать строки со всех включённых источников. Сбой одного источника не топит остальные.
 
-    on_progress(done, total, current) — чтобы бар не висел в 0/0 во время опроса источников:
-    репортим «собираю: <источник>» перед каждым (total=1, discovery не по-доменный)."""
+    Стадию репортим ПЕРЕД походом в источник: сбор идёт секунды, и оператор должен видеть,
+    кого именно сейчас опрашиваем (jobs.report вне track — no-op, юнит-тесты не ломаются).
+    """
+    from app.services import jobs
     rows: list[dict] = []
     for name, Client in _sources().items():
         if not enabled.get(name):
             continue
-        if on_progress:
-            on_progress(0, 1, f"собираю: {name}")
+        jobs.report("discovery", stage=name, current=f"собираю: {_SOURCE_RU.get(name, name)}")
         before = len(rows)
         try:
             if name == "backorder":                         # даёт RD + фид-флаги
@@ -111,81 +115,85 @@ def _collect(enabled: dict, on_progress=None) -> list[dict]:
     return rows
 
 
-def run_discovery(on_progress=None) -> int:
+def run_discovery() -> int:
     """Собрать включённые источники, дедуп по domain (выигрывает бо́льший RD), upsert новых +
-    обогащение уже известных discovered-строк (I5: повторная встреча дозаполняет NULL-поля и
-    повышает RD, а не пропускается молча). on_progress(done, total, current) — discovery не
-    по-доменный: во время сбора репортит «собираю: <источник>» по каждому, в конце (1, 1, "собрано N")."""
+    обогащение уже известных discovered-строк. Прогресс — сам, через jobs.track: тогда его
+    видно и когда discovery зовёт оркестратор из воркера, а не панель кнопкой."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.services import jobs
     from app.services.settings import get_settings
 
-    rows = _collect(get_settings()["sources_enabled"], on_progress)
-    best: dict[str, dict] = {}
-    for r in rows:
-        d = canonical_domain(r.get("domain"))      # единый ключ: сырые источники тоже канонятся
-        if not d:
-            continue
-        r["domain"] = d
-        cur = best.get(d)
-        if cur is None or (r.get("referring_domains") or 0) > (cur.get("referring_domains") or 0):
-            best[d] = r
-    candidates = best
-    if not candidates:
-        # ноль кандидатов (фид пуст / источники выключены) — тоже честный терминал:
-        # репортим 0/0 «нет кандидатов»; JS считает джоб завершённым по running=False
-        # (терминальный контракт в services/jobs.py), done/total — только отображение.
-        if on_progress:
-            on_progress(0, 0, "нет кандидатов")
-        return 0
-
-    def _insert(db) -> int:
-        existing = {d.domain: d for d in db.execute(
-            select(Domain).where(Domain.domain.in_(candidates))
-        ).scalars().all()}
-        fresh = [n for n in candidates if n not in existing]
-        # обогащение уже известных, но ещё НЕ обработанных (discovered) строк (I5): дозаполняем
-        # NULL-поля и повышаем RD, если повторная встреча принесла больше данных (например,
-        # домен сперва увиден на "сыром" реестре, потом — на backorder с RD/lane/дедлайном).
-        # Статус/reject_reason не трогаем — re-run не откатывает уже отсканированные домены.
-        for name, d in existing.items():
-            if d.status != "discovered":
+    enabled = get_settings()["sources_enabled"]
+    stages = ([{"key": k, "label": _SOURCE_RU[k]} for k in _SOURCE_RU if enabled.get(k)]
+              + [{"key": "dedup", "label": "дедуп"}, {"key": "save", "label": "запись"}])
+    with jobs.track("discovery", stages=stages):
+        rows = _collect(enabled)
+        jobs.report("discovery", stage="dedup")
+        best: dict[str, dict] = {}
+        for r in rows:
+            d = canonical_domain(r.get("domain"))      # единый ключ: сырые источники тоже канонятся
+            if not d:
                 continue
-            c = candidates[name]
-            new_rd = c.get("referring_domains") or 0
-            if new_rd > (d.referring_domains or 0):
-                d.referring_domains = new_rd
-            for attr in ("lane", "acquire_deadline", "feed_flags", "visitors", "tic"):
-                if getattr(d, attr, None) is None and c.get(attr) is not None:
-                    setattr(d, attr, c.get(attr))
-        db.add_all(Domain(
-            domain=candidates[n]["domain"], source=candidates[n]["source"],
-            referring_domains=candidates[n].get("referring_domains"),
-            feed_flags=candidates[n].get("feed_flags"),
-            lane=candidates[n].get("lane"),
-            acquire_deadline=candidates[n].get("acquire_deadline"),
-            visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
-            acquire_price=(candidates[n].get("price")
-                           or (__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
-                               if candidates[n].get("source") == "backorder" else None)),
-        ) for n in fresh)
-        db.commit()
-        return len(fresh)
+            r["domain"] = d
+            cur = best.get(d)
+            if cur is None or (r.get("referring_domains") or 0) > (cur.get("referring_domains") or 0):
+                best[d] = r
+        candidates = best
+        if not candidates:
+            # ноль кандидатов (фид пуст / источники выключены) — тоже честный терминал:
+            # репортим 0/0 «нет кандидатов»; JS считает джоб завершённым по running=False
+            # (терминальный контракт в services/jobs.py), done/total — только отображение.
+            jobs.report("discovery", done=0, total=0, current="", message="нет кандидатов")
+            return 0
+        jobs.report("discovery", stage="save")
 
-    with SessionLocal() as db:
-        try:
-            n = _insert(db)
-        except IntegrityError:
-            # гонка: параллельный запуск вставил часть кандидатов между нашим SELECT и COMMIT
-            # (unique на domain). Откатываемся, перечитываем existing и досыпаем остаток —
-            # одной повторной попытки достаточно (перечитанный existing уже включает их вставки).
-            db.rollback()
-            n = _insert(db)
-    if on_progress:
-        on_progress(1, 1, f"собрано {n}")
-    return n
+        def _insert(db) -> int:
+            existing = {d.domain: d for d in db.execute(
+                select(Domain).where(Domain.domain.in_(candidates))
+            ).scalars().all()}
+            fresh = [n for n in candidates if n not in existing]
+            # обогащение уже известных, но ещё НЕ обработанных (discovered) строк (I5): дозаполняем
+            # NULL-поля и повышаем RD, если повторная встреча принесла больше данных (например,
+            # домен сперва увиден на "сыром" реестре, потом — на backorder с RD/lane/дедлайном).
+            # Статус/reject_reason не трогаем — re-run не откатывает уже отсканированные домены.
+            for name, d in existing.items():
+                if d.status != "discovered":
+                    continue
+                c = candidates[name]
+                new_rd = c.get("referring_domains") or 0
+                if new_rd > (d.referring_domains or 0):
+                    d.referring_domains = new_rd
+                for attr in ("lane", "acquire_deadline", "feed_flags", "visitors", "tic"):
+                    if getattr(d, attr, None) is None and c.get(attr) is not None:
+                        setattr(d, attr, c.get(attr))
+            db.add_all(Domain(
+                domain=candidates[n]["domain"], source=candidates[n]["source"],
+                referring_domains=candidates[n].get("referring_domains"),
+                feed_flags=candidates[n].get("feed_flags"),
+                lane=candidates[n].get("lane"),
+                acquire_deadline=candidates[n].get("acquire_deadline"),
+                visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
+                acquire_price=(candidates[n].get("price")
+                               or (__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
+                                   if candidates[n].get("source") == "backorder" else None)),
+            ) for n in fresh)
+            db.commit()
+            return len(fresh)
+
+        with SessionLocal() as db:
+            try:
+                n = _insert(db)
+            except IntegrityError:
+                # гонка: параллельный запуск вставил часть кандидатов между нашим SELECT и COMMIT
+                # (unique на domain). Откатываемся, перечитываем existing и досыпаем остаток —
+                # одной повторной попытки достаточно (перечитанный existing уже включает их вставки).
+                db.rollback()
+                n = _insert(db)
+        jobs.report("discovery", done=1, total=1, current="", message=f"собрано {n} доменов")
+        return n
 
 
 if __name__ == "__main__":  # pure normalize self-check (no network)

@@ -25,6 +25,38 @@ def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+# Чипы воронки в панели: ключ -> подпись. Порядок = порядок проверок в _funnel.
+# Ahrefs шестой: он платный (капча за штуку) и при max_ahrefs_per_run=0 помечается skip —
+# честнее показать выключенную стадию, чем спрятать её.
+FUNNEL_STAGES = [
+    {"key": "rd", "label": "RD из фида"},
+    {"key": "whois", "label": "whois-возраст"},
+    {"key": "risk", "label": "РКН/блэклист"},
+    {"key": "echo", "label": "эхо в индексе"},
+    {"key": "history", "label": "Wayback-история"},
+    {"key": "ahrefs", "label": "Ahrefs (платно)"},
+]
+
+# Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Гарды в _decide не дают авто-approve
+# без Wayback — домен уходит в scored, то есть В ИНБОКС К ЧЕЛОВЕКУ, и там неотличим от честно
+# проверенного. Человек штампует непроверенное, думая, что машина посмотрела историю.
+_BLIND_RU = {
+    "wayback": "история НЕ проверена: Wayback был недоступен",
+    "rkn": "РКН НЕ проверен: реестр не ответил",
+    "blacklist": "блэклист НЕ проверен",
+    "searxng": "эхо в индексе НЕ проверено",
+}
+
+
+def blind_reason(d) -> str | None:
+    """Домен оценён при недоступной проверке — в пакет одобрения он не идёт (спека §1.5)."""
+    for e in (d.score_breakdown or {}).get("errors") or []:
+        head = str(e).split(":", 1)[0]
+        if head in _BLIND_RU:
+            return _BLIND_RU[head]
+    return None
+
+
 def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
     """Pure: score threshold -> status, plus the two invariant downgrade guards below.
     Factored out (2026-07 review, Finding 1) so BOTH `compute_score` (static cfg.DECISION)
@@ -132,20 +164,25 @@ def acquirability_verdict(available, acquire_deadline, now, *, lane) -> str:
     return "taken"                                   # дедлайн с запасом прошёл, а домен занят
 
 
-def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
+def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
     источников (backorder объявляет lane=bid сам). Дорогой Wayback (T3) — только для
     приобретаемых выживших. sig['acquirability_unresolved']=True → оставить domain discovered."""
     from datetime import datetime, timezone
+    from app.services import jobs
     now = datetime.now(timezone.utc)
 
+    if job:
+        jobs.report(job, stage="rd")
     # T0 — фид (0 стоимости)
     if d.feed_flags and any(d.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
         return "feed_flag"
     if d.referring_domains is not None and d.referring_domains < st["min_referring_domains"]:
         return "low_rd"
 
+    if job:
+        jobs.report(job, stage="whois")
     # T1 — приобретаемость + возраст (ОДИН whois-вызов, под бюджетом)
     if whois_budget is not None and whois_budget[0] <= 0:
         sig["acquirability_unresolved"] = True     # бюджет whois на прогон исчерпан — оставить discovered
@@ -194,7 +231,9 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
             sig["acquirability_unresolved"] = True
             return None
 
-    # T2 — риск (средне): РКН + Spamhaus + indexed_echo
+    if job:
+        jobs.report(job, stage="risk")
+    # T2 — риск (средне): РКН + Spamhaus
     try:
         sig["rkn_listed"] = c["rkn"].is_listed(d.domain)
         if sig["rkn_listed"]:
@@ -209,11 +248,17 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
         sig["errors"].append(f"blacklist:{type(e).__name__}")
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
+
+    if job:
+        jobs.report(job, stage="echo")
+    # indexed_echo
     try:
         sig["indexed_echo"] = c["searxng"].indexed_echo(d.domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
+    if job:
+        jobs.report(job, stage="history")
     # T3 — история (дорого): только для приобретаемых выживших
     try:
         hist = c["wayback"].classify_history(d.domain)
@@ -232,6 +277,8 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
         return "too_young"
 
+    if job:
+        jobs.report(job, stage="ahrefs")
     # T3b — Ahrefs (дорого, капча за деньги): ТОЛЬКО если фид не дал RD (cctld/reg_ru/
     # sweb — у backorder RD уже есть, повторно не проверяем) и бюджет жив.
     # ahrefs_budget=None -> НЕ вызываем (в отличие от whois_budget=None=безлимит — Ahrefs
@@ -250,8 +297,9 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
-                 ahrefs_budget=None) -> dict:
-    """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита)."""
+                 ahrefs_budget=None, job: str | None = None) -> dict:
+    """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита).
+    job — имя прогона в реестре (jobs.py): если задан, _funnel репортит текущую стадию."""
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
@@ -266,7 +314,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         c = clients or _make_clients()
         sig: dict = {"errors": []}
         sig["trademark_risk"] = d.trademark_risk
-        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget)
+        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, job=job)
 
         if sig.get("acquirability_unresolved"):
             # приобретаемость не определена (whois сбой/непонятно/бюджет) — НЕ пишем,
@@ -314,36 +362,49 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                 "errors": sig.get("errors", [])}
 
 
-def score_pending(limit: int = 100, on_progress=None) -> int:
-    """Score all `discovered` domains; return count processed. on_progress(done,total,current)."""
+def score_pending(limit: int = 100) -> int:
+    """Скорит `discovered` домены. Прогресс и стадии — через jobs.track (см. services/jobs.py).
+    Между доменами смотрит стоп-кнопку: «Проверить весь пул» — это часы работы и квоты
+    A-Parser, прервать это должно быть можно без рестарта контейнера.
+
+    Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
+    Оркестратор пишет это в counts свипа — врать ему нельзя."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.services import jobs
     from app.services.settings import get_settings
 
     st = get_settings()
     with SessionLocal() as db:
         rows = db.execute(
             select(Domain.id, Domain.domain).where(Domain.status == "discovered")
-            .order_by(Domain.referring_domains.desc().nulls_last())  # лучшие кандидаты первыми
+            .order_by(Domain.referring_domains.desc().nulls_last())
             .limit(limit)
         ).all()
-    clients = _make_clients()  # один набор клиентов на весь прогон, не на домен
-    whois_budget = [int(st["max_whois_per_run"])]   # общий на прогон: cctld (RD=null) идёт последним
-    ahrefs_budget = [int(st["max_ahrefs_per_run"])]  # общий на прогон: платная капча, 0 = выключено
-    total = len(rows)
-    for i, (did, name) in enumerate(rows, 1):
-        # репорт ДО скоринга: total известен сразу (бар не висит в 0/0), а current —
-        # домен, который сейчас в работе (whois/Wayback идут секунды, оператор видит кого).
-        if on_progress:
-            on_progress(i - 1, total, name)
-        try:
-            score_domain(did, clients, whois_budget, ahrefs_budget)
-        except Exception:  # noqa: BLE001 — падение одного домена не топит батч (как в оркестраторе)
-            logging.getLogger(__name__).exception("score_domain %s упал", name)
-    if on_progress:
-        on_progress(total, total, "")   # все готовы
-    return total
+    stages = [dict(s) for s in FUNNEL_STAGES]
+    if int(st["max_ahrefs_per_run"]) == 0:
+        stages[-1]["state"] = "skip"           # платная стадия выключена — так и покажем
+    clients = _make_clients()
+    whois_budget = [int(st["max_whois_per_run"])]
+    ahrefs_budget = [int(st["max_ahrefs_per_run"])]
+    total, done = len(rows), 0
+    with jobs.track("score", stages=stages):
+        for i, (did, name) in enumerate(rows, 1):
+            # ПОРЯДОК ВАЖЕН: репорт ДО проверки стопа. done = i-1 — это ровно столько доменов,
+            # сколько уже дошли до конца. Проверь стоп раньше репорта — и в реестре останется
+            # done от прошлой итерации, то есть «остановлена на 0 / 5» после одного домена.
+            jobs.report("score", done=i - 1, total=total, current=name)
+            if jobs.cancelled("score"):
+                raise jobs.Cancelled()
+            try:
+                score_domain(did, clients, whois_budget, ahrefs_budget, job="score")
+            except Exception:  # noqa: BLE001 — падение одного домена не топит батч
+                logging.getLogger(__name__).exception("score_domain %s упал", name)
+            done = i
+        jobs.report("score", done=total, total=total, current="",
+                    message=f"прогнано {total} доменов через воронку")
+    return done
 
 
 # статусы, где домен — ЕЩЁ НАШ КАНДИДАТ на покупку и им не владеет другая машина.
@@ -373,7 +434,7 @@ def stale_donors(days: int = 3, db=None) -> int:
         return s.execute(stmt).scalar_one()
 
 
-def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
+def recheck_acquirability(limit: int = 200) -> dict:
     """Перепроверить whois'ом отобранных доноров: не выкупил ли их кто-то за это время.
 
     ЗАЧЕМ. Скоринг решает приобретаемость ОДИН раз (T1) и больше к ней не возвращается.
@@ -389,79 +450,92 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
     Бюджет — `max_whois_per_run` с /settings, СВОЙ на прогон (не общий со скорингом: джобы
     single-flight по имени, поэтому Score и Перепроверка могут идти одновременно и взять по
     капу каждый — суммарно до 2× квоты A-Parser). Самые протухшие проверяются первыми.
+
+    Прогресс — сам, через jobs.track: сводка («ЗАНЯТЫ 3») переехала сюда из panel.py и живёт
+    в job_run.message, а датирует её job_run.finished_at — штамп времени руками больше не нужен.
     """
     from datetime import datetime, timezone
     from sqlalchemy import select, update
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.services import jobs
     from app.services.settings import get_settings
 
     # checked == сколько whois-вызовов реально сделали == расход бюджета. Обычно он же = сумма
     # free+waiting+taken+unknown; расходится ровно на домены, которые между whois и записью
     # успели уйти в выкуп (см. декремент taken по rowcount ниже) — их отбраковки не было.
     out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
-    budget = int(get_settings()["max_whois_per_run"])
-    if budget <= 0:                                   # семантика та же, что в воронке:
-        return out                                    # 0 = whois не звать вообще
-    with SessionLocal() as db:
-        ids = db.execute(
-            select(Domain.id).where(Domain.status.in_(_RECHECK_STATUSES))
-            # протухшие первыми; id — вторичный ключ, иначе порядок внутри NULL-корзины
-            # не определён и прогоны могут топтаться по одним и тем же доменам
-            .order_by(Domain.acquirability_checked_at.asc().nulls_first(), Domain.id.asc())
-            .limit(min(limit, budget))
-        ).scalars().all()
-
-    c = _make_clients()
-    total = len(ids)
-    for i, did in enumerate(ids, 1):
+    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]):
+        jobs.report("recheck", stage="whois")
+        budget = int(get_settings()["max_whois_per_run"])
+        if budget <= 0:
+            # ВНУТРИ track, а не до него: иначе прогон завершался бы, не создав строки реестра,
+            # и кнопка «Перепроверить» выглядела бы сломанной — ровно та болезнь, которую лечим.
+            jobs.report("recheck", message="whois-бюджет = 0, проверять нечем (см. /settings)")
+            return out
         with SessionLocal() as db:
-            d = db.get(Domain, did)
-            if d is None or d.status not in _RECHECK_STATUSES:
-                continue                              # статус увели, пока шли (напр. в выкуп)
-            name, deadline, lane = d.domain, d.acquire_deadline, d.lane
-        if on_progress:
-            on_progress(i - 1, total, name)           # репорт ДО вызова: whois идёт секунды
+            ids = db.execute(
+                select(Domain.id).where(Domain.status.in_(_RECHECK_STATUSES))
+                # протухшие первыми; id — вторичный ключ, иначе порядок внутри NULL-корзины
+                # не определён и прогоны могут топтаться по одним и тем же доменам
+                .order_by(Domain.acquirability_checked_at.asc().nulls_first(), Domain.id.asc())
+                .limit(min(limit, budget))
+            ).scalars().all()
 
-        now = datetime.now(timezone.utc)
-        out["checked"] += 1                           # вызов состоялся — бюджет потрачен
-        try:
-            pr = c["aparser"].whois_probe(name)
-        except Exception:  # noqa: BLE001 — падение одного домена не топит батч
-            logging.getLogger(__name__).exception("whois-перепроверка %s упала", name)
-            out["unknown"] += 1
-            continue        # СБОЙ (сеть/A-Parser) — транзиентен. Отметку не ставим: вернёмся.
+        c = _make_clients()
+        total = len(ids)
+        for i, did in enumerate(ids, 1):
+            jobs.report("recheck", done=i - 1, total=total)   # ДО стопа — см. score_pending
+            if jobs.cancelled("recheck"):
+                raise jobs.Cancelled()
+            with SessionLocal() as db:
+                d = db.get(Domain, did)
+                if d is None or d.status not in _RECHECK_STATUSES:
+                    continue                      # статус увели, пока шли (напр. в выкуп)
+                name, deadline, lane = d.domain, d.acquire_deadline, d.lane
+            jobs.report("recheck", current=name)  # репорт ДО вызова: whois идёт секунды
 
-        # lane обязателен: для bid-домена «занят» — НОРМА (ждёт своего дропа), и без него
-        # вердикт отбраковал бы живой дроп.
-        v = acquirability_verdict(pr.get("available"), deadline, now, lane=lane)
-        out[v] += 1
-        if v == "unknown" and pr.get("available") is None:
-            continue        # whois ОТВЕТИЛ, но невнятно. Не штампуем — пробуем ещё раз позже.
-        # Прочий unknown (bid без дедлайна) whois ОТВЕТИЛ по существу: «занят». Судить не по
-        # чему, но ответ ДЕТЕРМИНИРОВАННЫЙ — завтра будет ровно тот же. Такой домен обязан
-        # получить отметку, иначе он вечно висит в голове nulls_first-очереди и выедает весь
-        # бюджет: если таких доменов больше бюджета (а это ровно авария «фид сменил формат
-        # delete_date»), перепроверка никогда не дойдёт до остального списка и молча выродится
-        # в no-op. Статус не трогаем — домен остаётся кандидатом; счётчик unknown в сводке
-        # покажет оператору, что что-то не так.
+            now = datetime.now(timezone.utc)
+            out["checked"] += 1                           # вызов состоялся — бюджет потрачен
+            try:
+                pr = c["aparser"].whois_probe(name)
+            except Exception:  # noqa: BLE001 — падение одного домена не топит батч
+                logging.getLogger(__name__).exception("whois-перепроверка %s упала", name)
+                out["unknown"] += 1
+                continue        # СБОЙ (сеть/A-Parser) — транзиентен. Отметку не ставим: вернёмся.
 
-        # Атомарно и только из «наших» статусов: между whois-раундтрипом и записью человек
-        # мог отправить домен в выкуп (create_order -> purchasing). Голый UPDATE перезатёр бы
-        # его нашим rejected и разъехался с живым заказом; rowcount==0 = домен уже не наш.
-        with SessionLocal() as db:
-            vals = {"acquirability_checked_at": now}
-            if v == "taken":
-                vals |= {"status": "rejected", "reject_reason": "not_acquirable"}
-            res = db.execute(update(Domain)
-                             .where(Domain.id == did, Domain.status.in_(_RECHECK_STATUSES))
-                             .values(**vals))
-            db.commit()
-        if v == "taken" and res.rowcount == 0:
-            out["taken"] -= 1     # домен успели увести в выкуп — отбраковки НЕ было, не врём
+            # lane обязателен: для bid-домена «занят» — НОРМА (ждёт своего дропа), и без него
+            # вердикт отбраковал бы живой дроп.
+            v = acquirability_verdict(pr.get("available"), deadline, now, lane=lane)
+            out[v] += 1
+            if v == "unknown" and pr.get("available") is None:
+                continue        # whois ОТВЕТИЛ, но невнятно. Не штампуем — пробуем ещё раз позже.
+            # Прочий unknown (bid без дедлайна) whois ОТВЕТИЛ по существу: «занят». Судить не по
+            # чему, но ответ ДЕТЕРМИНИРОВАННЫЙ — завтра будет ровно тот же. Такой домен обязан
+            # получить отметку, иначе он вечно висит в голове nulls_first-очереди и выедает весь
+            # бюджет: если таких доменов больше бюджета (а это ровно авария «фид сменил формат
+            # delete_date»), перепроверка никогда не дойдёт до остального списка и молча выродится
+            # в no-op. Статус не трогаем — домен остаётся кандидатом; счётчик unknown в сводке
+            # покажет оператору, что что-то не так.
 
-    if on_progress:
-        on_progress(total, total, "")
+            # Атомарно и только из «наших» статусов: между whois-раундтрипом и записью человек
+            # мог отправить домен в выкуп (create_order -> purchasing). Голый UPDATE перезатёр бы
+            # его нашим rejected и разъехался с живым заказом; rowcount==0 = домен уже не наш.
+            with SessionLocal() as db:
+                vals = {"acquirability_checked_at": now}
+                if v == "taken":
+                    vals |= {"status": "rejected", "reject_reason": "not_acquirable"}
+                res = db.execute(update(Domain)
+                                 .where(Domain.id == did, Domain.status.in_(_RECHECK_STATUSES))
+                                 .values(**vals))
+                db.commit()
+            if v == "taken" and res.rowcount == 0:
+                out["taken"] -= 1     # домен успели увести в выкуп — отбраковки НЕ было, не врём
+
+        jobs.report("recheck", done=total, total=total, current="",
+                    message=f"проверено {out['checked']}: свободны {out['free']}, "
+                            f"ждут дропа {out['waiting']}, ЗАНЯТЫ {out['taken']} (отбракованы), "
+                            f"не определилось {out['unknown']}")
     return out
 
 
