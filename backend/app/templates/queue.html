@@ -15,11 +15,34 @@
   {% if n_pending %}<br><b style="color:var(--acc2)">{{ n_pending }} заказов ждут твоего подтверждения.</b>{% endif %}
 </p>
 
+<div class="toolbar">
+  <form method="post" action="/queue/poll">
+    <button class="btn" title="прочитать статусы заказов у backorder (clientbackorder) и подвинуть ordered → пойман/не вышло; денег не тратит">↻ обновить статусы у провайдера</button>
+  </form>
+  {% if bo_err %}
+    <span class="hint" style="color:var(--bad)">backorder: {{ bo_err }}</span>
+  {% endif %}
+  {% if balance is not none %}
+    <span class="hint">баланс backorder:
+      {% if balance <= 0 %}<b style="color:var(--bad)">{{ '%.0f'|format(balance) }} ₽ — заказ повиснет «Не оплачен», пополни счёт</b>
+      {% else %}<b style="color:var(--ok)">{{ '%.0f'|format(balance) }} ₽</b>{% endif %}</span>
+  {% endif %}
+</div>
+
+<details class="what" style="max-width:820px; margin:0 0 14px">
+  <summary>зачем выбирать ставку</summary>
+  <div class="what-body">У backorder <b>тариф = ставка</b>, а не фиксированная цена: сетка от 190 ₽ до
+    нескольких млн ₽ на зону. Чем выше тариф, тем к большему числу регистраторов Сервис отправит
+    заказ и тем выше шанс перехватить домен в момент удаления. Поэтому «сколько платим» выбираешь
+    ты на гейте подтверждения — система такое решение не принимает. Списание идёт с баланса сразу
+    (<code>paynow=on</code>): при нулевом балансе заказ создастся, но повиснет «Не оплачен».</div>
+</details>
+
 <div class="wrap">
 {% if orders %}
 <table>
   <thead><tr>
-    <th>#</th><th>домен</th><th>провайдер</th><th>статус</th><th>гейт</th><th>действие</th><th>результат</th>
+    <th>#</th><th>домен</th><th>провайдер</th><th>статус</th><th>гейт</th><th class="num">ставка</th><th>действие</th><th>результат</th>
   </tr></thead>
   <tbody>
   {% for o in orders %}
@@ -31,30 +54,52 @@
             title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status|status_ru }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
+      <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} ₽{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
         {% if o.status == 'pending_confirm' and not o.confirmed %}
+          {% set grid = grids.get(o.zone) %}
+          {% if grid %}
+          {# последний чекпойнт перед деньгами — подписываем его ФАКТИЧЕСКОЙ суммой из селекта,
+             а не общей фразой: тиры доходят до миллионов, промах ценой в ноль недопустим #}
           <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
-                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }}? Это money-gate — дальше заказ можно отправить провайдеру.')">
-            <button class="btn-sm btn-buy" title="поднять денежный гейт: я готов оплатить этот домен">✓ подтвердить выкуп</button></form>
+                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }} со ставкой ' + this.bid_rub.options[this.bid_rub.selectedIndex].text + '? Это денежный гейт — дальше заказ уйдёт провайдеру и сумма спишется с баланса.')">
+            <select name="bid_rub" title="тариф backorder = ставка: выше тариф → больше регистраторов → выше шанс перехвата">
+              {% for t in grid %}<option value="{{ t.price }}">{{ '%.0f'|format(t.price) }} ₽</option>{% endfor %}
+            </select>
+            <button class="btn-sm btn-buy" title="поднять денежный гейт: я готов оплатить этот домен по выбранной ставке">✓ подтвердить выкуп</button></form>
+          {% elif o.zone is none %}
+            <span class="hint" style="color:var(--bad)">зона домена вне сетки backorder (только .RU/.РФ)</span>
+          {% else %}
+            <span class="hint">сетка тарифов {{ o.zone }} не загрузилась — подтвердить нельзя</span>
+          {% endif %}
         {% elif o.status == 'pending_confirm' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
             <button class="btn-sm btn-acc" title="отправить подтверждённый заказ провайдеру">▶ отправить провайдеру</button></form>
         {% elif o.status == 'failed' and o.confirmed %}
+          {% if o.result and o.result.maybe_sent %}
+            <div class="hint" style="color:var(--bad); max-width:200px; margin-bottom:6px"
+                  title="Связь оборвалась — исход неизвестен, заказ мог уйти и деньги списаться. «↻ повторить» безопасно: перед отправкой мы спрашиваем провайдера, нет ли там уже заказа на этот домен, и если есть — подхватываем его, а не платим второй раз. Отмена заблокирована, пока неизвестность не снята.">
+              ⚠ исход неизвестен — заказ мог уйти</div>
+          {% endif %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
-            <button class="btn-sm" title="повторить отправку провайдеру">↻ повторить</button></form>
+            <button class="btn-sm" title="повторить: перед отправкой спросим провайдера, нет ли уже заказа на этот домен — второй раз не заплатим">↻ повторить</button></form>
         {% elif o.status == 'ordered' %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/caught"
                 onsubmit="return confirm('Домен {{ o.domain }} пойман провайдером? Переведём его в purchased.')">
             <button class="btn-sm btn-buy" title="домен пойман провайдером — перевести в purchased">✓ пойман</button></form>
         {% endif %}
-        {% if o.status in ['pending_confirm', 'failed'] %}
+        {# на maybe_sent прячем и «отменить»: cancelled из поллинга не опрашивается, и реально
+           оплаченный заказ исчез бы навсегда. Сервис это тоже запрещает — кнопка лишь не врёт. #}
+        {% if o.status in ['pending_confirm', 'failed'] and not (o.result and o.result.maybe_sent) %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/cancel"
                 onsubmit="return confirm('Снять заявку на {{ o.domain }}? Домен вернётся в approved.')">
             <button class="btn-sm btn-bad" title="снять заявку, вернуть домен в approved">✗ отменить</button></form>
-        {% elif o.status not in ['ordered'] %}<span class="hint">—</span>{% endif %}
+        {% elif o.status not in ['ordered'] and not (o.result and o.result.maybe_sent) %}<span class="hint">—</span>{% endif %}
       </td>
+      {# только человекочитаемое: ошибка / заметка / статус у провайдера. price_id/period_id —
+         служебные (замороженный тариф), в UI им делать нечего: ставка есть отдельной колонкой. #}
       <td class="hint" style="max-width:360px; overflow:hidden; text-overflow:ellipsis">
-        {{ o.result.error if o.result and o.result.error else (o.result if o.result else '') }}</td>
+        {% if o.result %}{{ o.result.error or o.result.note or o.result.clear_status or '' }}{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

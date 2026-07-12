@@ -251,9 +251,30 @@ def offers_view(request: Request, db: Session = Depends(get_session)):
 @router.get("/queue", response_class=HTMLResponse)
 def queue_view(request: Request):
     from app.services import acquisition
+    from app.integrations.backorder import BackorderClient, zone_of
     orders = acquisition.list_orders()
+
+    # Сетка ставок для селектора подтверждения + баланс счёта. Провайдер может лежать —
+    # тогда очередь всё равно рендерится, а подтверждать нечем: причина видна в шапке.
+    grids, balance, bo_err = {}, None, ""
+    for o in orders:                          # зона — до похода в сеть: иначе сбой на первой
+        o["zone"] = zone_of(o["domain"])      # заявке оставил бы остальные строки без зоны
+    if any(o["status"] == "pending_confirm" for o in orders):
+        c = BackorderClient()
+        # Сетка и баланс — независимые сбои: упавший баланс не должен писать «подтверждать
+        # нечем» над рабочим селектором ставки, и наоборот. Панель не падает ни от одного.
+        try:
+            for z in {o["zone"] for o in orders if o["zone"]}:   # None — сетки нет и не будет
+                grids[z] = c.tariffs(z)
+        except Exception as e:  # noqa: BLE001
+            bo_err = f"сетка тарифов: {type(e).__name__}: {e}"[:200]
+        try:
+            balance = c.balance()
+        except Exception as e:  # noqa: BLE001 — баланс информационный, подтверждать не мешает
+            bo_err = (bo_err + " · " if bo_err else "") + f"баланс: {type(e).__name__}"[:80]
     return templates.TemplateResponse(request, "queue.html", {
-        "active": "queue", "orders": orders,
+        "active": "queue", "orders": orders, "grids": grids,
+        "balance": balance, "bo_err": bo_err,
         "n_pending": sum(1 for o in orders if o["status"] == "pending_confirm"),
     })
 
@@ -377,11 +398,13 @@ def queue_add_action(domain_id: int, provider: str = Form("backorder")):
 
 
 @router.post("/queue/{order_id}/confirm")
-def queue_confirm_action(order_id: int):
+def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
     from app.services import acquisition
     try:
-        acquisition.confirm_order(order_id)
-        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт). Можно отправлять.")
+        r = acquisition.confirm_order(order_id, bid_rub or None)
+        bid = r.get("bid_rub")
+        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт)"
+                                   f"{f', ставка {bid:.0f} ₽' if bid else ''}. Можно отправлять.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
 
@@ -394,10 +417,28 @@ def queue_execute_action(order_id: int):
         if r.get("error"):
             return _back("/queue", err=r["error"])
         if r.get("status") == "failed":
-            return _back("/queue", err=f"заказ #{order_id}: {r.get('error') or 'провайдер не готов (нужны login-креды)'}")
-        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус {r.get('status')}.")
+            return _back("/queue", err=f"заказ #{order_id}: {r.get('error') or 'провайдер отверг заказ'}")
+        # paynow=on списывает с баланса: при 0 ₽ заказ создастся, но повиснет «Не оплачен» и
+        # домен НЕ будет перехвачен. Сказать это сразу, а не оставлять узнавать через поллинг.
+        note = (r.get("result") or {}).get("note") or ""
+        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус "
+                                   f"{r.get('status')}.{' ' + note if note else ''} "
+                                   "Проверь «↻ обновить статусы»: при нулевом балансе заказ "
+                                   "повиснет «Не оплачен» и домен не перехватят.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отправка: {e}")
+
+
+@router.post("/queue/poll")
+def queue_poll_action():
+    from app.services import acquisition
+    try:
+        r = acquisition.poll_orders()
+        return _back("/queue", msg=f"Сверено с провайдером: наших заказов {r['checked']} · "
+                                   f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
+                                   f"в полёте {r.get('pending', 0)}.")
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"опрос статусов: {e}")
 
 
 @router.post("/queue/{order_id}/caught")

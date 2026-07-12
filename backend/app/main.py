@@ -1,6 +1,7 @@
 """FastAPI entrypoint. Include routers from app.api as they are implemented."""
 import asyncio
 import base64
+import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlsplit
@@ -10,6 +11,10 @@ from starlette.responses import Response
 
 from app.config import settings
 from app.services import diag_cache
+
+# httpx на INFO пишет ПОЛНЫЙ URL запроса. billmgr backorder требует креды прямо в query
+# (authinfo=LOGIN:PASSWORD) — один --log-level=info, и пароль в docker-логах. Прибиваем явно.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def _diag_loop():

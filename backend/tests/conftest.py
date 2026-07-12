@@ -31,6 +31,60 @@ def _jsonb_as_json(element, compiler, **kw):  # DDL only; bind/result still json
     return "JSON"
 
 
+class LiveNetworkAttempt(BaseException):
+    """Тест полез в живую сеть. Наследник BaseException СПЕЦИАЛЬНО: прикладной код полон
+    широких `except Exception` (execute_confirmed_order, queue_view, jobs, scoring), и
+    ловушка на Exception была бы им проглочена — тест «проходил» бы зелёным ровно на том
+    роуте, который она защищает. BaseException проходит сквозь них насквозь."""
+
+
+class LivePaidOrder(BaseException):
+    """Тест чуть не отправил ЖИВОЙ ПЛАТНЫЙ заказ. Тоже BaseException — по той же причине."""
+
+
+@pytest.fixture(autouse=True)
+def _no_live_network(monkeypatch):
+    """РУБИЛЬНИК ЖИВОЙ СЕТИ. Инвариант герметичности — структурный, не «на честном слове».
+
+    До этого гвардов было два (источники + фикстура `client`), и оба дырявые: юнит-тесты
+    денежного пути не брали `client`, и сьют доказуемо ходил в боевой billmgr backorder
+    с реальными BACKORDER_LOGIN/PASSWORD из .env (`confirm_order` -> pick_tariff -> живой
+    price-JSON; `execute` -> find_order -> живой authed-запрос). Зелёный сьют держался на
+    интернете, а от списания денег отделял один забытый monkeypatch.
+
+    Рубим ТРАНСПОРТ httpx (реальные сокеты), а НЕ httpx.Client: TestClient — подкласс
+    httpx.Client и ходит через ASGITransport, панель обязана работать. Юнит-тесты транспорта
+    подменяют request/_client.request на ИНСТАНСЕ — инстанс-атрибут перекрывает классовый,
+    до транспорта не доходит. Значит фикстура ловит ровно то, что должна: настоящий выход
+    в сеть. Плюс DNS (blacklist.py ходит резолвером мимо httpx).
+    """
+    import socket
+
+    import httpx
+
+    def _boom(self, request, *a, **kw):
+        raise LiveNetworkAttempt(
+            f"живой сетевой запрос из теста: {request.method} {request.url.host}{request.url.path}. "
+            "Тесты герметичны — подмени клиент/метод через monkeypatch.")
+
+    def _boom_dns(host, *a, **kw):
+        raise LiveNetworkAttempt(f"живой DNS-запрос из теста: {host}")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _boom)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _boom)
+    monkeypatch.setattr(socket, "getaddrinfo", _boom_dns)
+    monkeypatch.setattr(socket, "gethostbyname", _boom_dns)
+    # blacklist.py при заданном DNS_RESOLVER ходит через dnspython — это СЫРЫЕ UDP-сокеты
+    # мимо getaddrinfo, патчи выше его не ловят.
+    try:
+        import dns.resolver
+        monkeypatch.setattr(dns.resolver.Resolver, "resolve",
+                            lambda self, qname, *a, **kw: _boom_dns(qname))
+    except ImportError:                       # dnspython опционален — этого пути просто нет
+        pass
+    yield
+
+
 @pytest.fixture(autouse=True)
 def sqlite_db():
     """Fresh in-memory DB per test, bound into app.db. StaticPool = one shared conn."""
@@ -88,8 +142,35 @@ def _reset_pricing_cache():
     pricing._TARIFF = saved
 
 
+def _no_live_order(self, domain, price_id, period_id):
+    raise LivePaidOrder(
+        f"живой ПЛАТНЫЙ заказ backorder из теста ({domain})! Тест, которому нужен «успех», "
+        "обязан сам подменить BackorderClient.order своим monkeypatch.")
+
+
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    """TestClient + офлайн-гвард на backorder.
+
+    Структурный гвард (как _default_sources_backorder_only). Настоящего сетевого блока в
+    харнессе НЕТ, а панель денежного пути ходит к провайдеру с БОЕВЫМИ кредами из .env:
+      /queue        -> tariffs() + balance()   (чтение)
+      /queue/poll   -> client_orders()         (чтение)
+      /queue/{}/exec-> find_order() + order()  (ПЛАТНО!)
+    Без патча любой тест на этих роутах уходил бы в живую сеть, а execute при ненулевом
+    балансе — списал бы деньги. Поэтому order() тут не «заглушка», а ловушка: падает громко.
+    Патчим на фикстуре `client`, а не autouse — юнит-тесты транспорта (test_pricing /
+    test_backorder_order) должны гонять НАСТОЯЩИЕ tariffs()/pick_tariff()/order().
+    Баланс 0 ₽ — честный дефолт: он же и на живом счету."""
     from fastapi.testclient import TestClient
+    from app.integrations.backorder import BackorderClient
     from app.main import app
+    monkeypatch.setattr(BackorderClient, "tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0},
+                            {"price_id": "4770", "period_id": "3443", "price": 400.0}])
+    monkeypatch.setattr(BackorderClient, "balance", lambda self, ttl=60.0: 0.0)
+    monkeypatch.setattr(BackorderClient, "client_orders", lambda self: [])
+    monkeypatch.setattr(BackorderClient, "find_order", lambda self, domain: None)
+    monkeypatch.setattr(BackorderClient, "order", _no_live_order)
     return TestClient(app)

@@ -196,7 +196,7 @@ def test_edit_gate_and_publish(client, monkeypatch):
     assert client.post(f"/api/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
 
 
-def test_acquisition_queue_and_gate():
+def test_acquisition_queue_and_gate(monkeypatch):
     """M2: очередь + денежный гейт — execute отказывает без подтверждения человеком."""
     from app.services import acquisition
     from app.models.domain import Domain, AcquisitionOrder
@@ -212,16 +212,27 @@ def test_acquisition_queue_and_gate():
     assert "gate" in (r.get("error") or "")
     with db.SessionLocal() as s:
         assert s.get(AcquisitionOrder, oid).status == "pending_confirm"
-    # человек подтверждает -> гейт открыт
-    acquisition.confirm_order(oid)
+    # человек подтверждает -> гейт открыт; ставка (тариф) = его же решение о деньгах,
+    # и тир замораживается прямо здесь (execute его уже не выбирает)
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.tariffs",
+                        lambda self, zone=".RU", refresh=False: [
+                            {"price_id": "4769", "period_id": "3442", "price": 190.0}])
+    acquisition.confirm_order(oid, 190)
     with db.SessionLocal() as s:
-        assert s.get(AcquisitionOrder, oid).confirmed_by_human is True
-    # execute идёт к провайдеру; транспорт не готов -> честный failed (не ложный успех)
+        o = s.get(AcquisitionOrder, oid)
+        assert o.confirmed_by_human is True and float(o.cost) == 190.0
+        assert o.result["price_id"] == "4769" and o.result["period_id"] == "3442"
+    # execute идёт к провайдеру; провайдер отверг -> честный failed (не ложный успех)
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.find_order",
+                        lambda self, domain: None)
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.order",
+                        lambda self, domain, price_id, period_id: (_ for _ in ()).throw(
+                            RuntimeError("недостаточно средств на балансе")))
     r = acquisition.execute_confirmed_order(oid)
-    assert r["status"] == "failed" and "implement" in (r.get("error") or "").lower()
+    assert r["status"] == "failed" and "недостаточно средств" in (r.get("error") or "")
 
 
-def test_queue_panel_actions(client):
+def test_queue_panel_actions(client, monkeypatch):
     """Экран /queue и действия: add из панели -> рендер -> гейт на execute -> confirm."""
     from sqlalchemy import select
     from app.models.domain import Domain, AcquisitionOrder
@@ -232,11 +243,22 @@ def test_queue_panel_actions(client):
         oid = s.execute(select(AcquisitionOrder.id)).scalar_one()
     r = client.get("/queue")
     assert r.status_code == 200 and "q-panel.ru" in r.text and "подтвердить выкуп" in r.text
+    assert 'name="bid_rub"' in r.text and "190 ₽" in r.text     # селектор ставки отрисован
+    assert "пополни счёт" in r.text                              # баланс 0 ₽ виден ДО заказа
     # execute до подтверждения -> err-flash (гейт)
     r = client.post(f"/queue/{oid}/execute", follow_redirects=False)
     assert r.status_code == 303 and "err=" in r.headers["location"]
-    # confirm -> execute (провайдер не готов, но 303 без 500)
-    client.post(f"/queue/{oid}/confirm", follow_redirects=False)
+    # confirm БЕЗ ставки -> err-flash, гейт не поднят (ставка = решение о деньгах)
+    r = client.post(f"/queue/{oid}/confirm", follow_redirects=False)
+    assert "err=" in r.headers["location"]
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).confirmed_by_human is False
+    # confirm СО ставкой -> гейт открыт; execute отдаёт 303 без 500
+    monkeypatch.setattr("app.integrations.backorder.BackorderClient.order",
+                        lambda self, domain, price_id, period_id: {"order_id": "OK"})
+    client.post(f"/queue/{oid}/confirm", data={"bid_rub": "400"}, follow_redirects=False)
+    with db.SessionLocal() as s:
+        assert float(s.get(AcquisitionOrder, oid).cost) == 400.0
     assert client.post(f"/queue/{oid}/execute", follow_redirects=False).status_code == 303
 
 
