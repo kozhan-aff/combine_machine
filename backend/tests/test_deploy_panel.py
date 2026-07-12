@@ -1,7 +1,7 @@
 """Хендлеры деплоя через TestClient: мокаем deploy-сервис, проверяем баннеры/редиректы/рендер."""
 from urllib.parse import unquote
 
-from app.services import deploy
+from app.services import deploy, diag_cache
 
 
 def test_force_pull_success_banner(client, monkeypatch):
@@ -29,6 +29,9 @@ def test_pull_rebuild_hint(client, monkeypatch):
 
 
 def test_diag_renders_status(client, monkeypatch):
+    # /diag пингует интеграции вживую — в тесте это ловушка герметичности; нас тут интересует
+    # только строка деплоя, поэтому проверки глушим.
+    monkeypatch.setattr(diag_cache, "refresh", lambda: [])
     monkeypatch.setattr(deploy, "deploy_status",
                         lambda: {"branch": "main", "hash": "abc", "subject": "s", "date": "2026-07-10",
                                  "dirty": False, "ahead": 0, "behind": 2, "detached": False})
