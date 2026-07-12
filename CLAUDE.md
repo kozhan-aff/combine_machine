@@ -106,8 +106,10 @@ docker compose run --rm backend python backend/scripts/smoke.py
 
 **Деплой из панели** (2026-07-12, ветка `feat/git-deploy-from-ui`): `services/deploy.py` —
 статус репо (ветка/хеш/dirty/ahead/behind), ff-pull, force-reset, детект «нужен ребилд»; хендлеры
-`/admin/pull|force-pull` + статус-строка в `/diag`. **Не доделано:** авто-релоад воркера через
-`watchfiles` (Задача 3 плана) — воркер после pull всё ещё требует рестарта руками.
+`/admin/pull|force-pull` + статус-строка в `/diag`; воркер обёрнут в `watchfiles` — после pull
+подхватывает код живьём, как backend с `--reload`. **Активация на боксе (один раз):**
+`docker compose up -d --build` (requirements изменились). Дальше обновление — только из UI,
+консоль нужна лишь при смене `requirements.txt`/`Dockerfile` (панель это детектит и пишет в баннер).
 
 ## Предыдущее состояние (2026-07-10)
 **Редизайн панели — холодная минимальная CMS** (2026-07-10, влит в main, коммит efa1f6b; 8 коммитов,
