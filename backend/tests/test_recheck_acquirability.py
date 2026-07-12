@@ -155,7 +155,6 @@ def test_deterministic_unknown_does_not_starve_the_queue(sqlite_db, monkeypatch)
     _add(domain="nodate.ru", status="approved", lane="bid", acquire_deadline=None)
     _add(domain="normal.ru", status="approved", lane="free")
     update_settings(max_whois_per_run=1)                 # бюджета хватает ровно на один домен
-    _whois(monkeypatch, {"nodate.ru": False, "normal.ru": True})
 
     calls = _whois(monkeypatch, {"nodate.ru": False, "normal.ru": True})
     scoring.recheck_acquirability()
@@ -268,6 +267,31 @@ def test_stalest_are_checked_first(sqlite_db, monkeypatch):
     calls = _whois(monkeypatch, {"never.ru": True, "old.ru": True, "fresh.ru": True})
     scoring.recheck_acquirability()
     assert calls == ["never.ru", "old.ru"], f"проверили не самых протухших: {calls}"
+
+
+def test_scoring_stamps_acquirability_so_recheck_does_not_redo_it(sqlite_db, monkeypatch):
+    """Скоринг УЖЕ ходит в whois на T1. Не зафиксировав это, он отдавал бы свежеотскоренный
+    домен в БД с checked_at=NULL — тот вставал бы в голову очереди перепроверки, и первый же
+    её клик жёг бы квоту A-Parser на домен, чей whois-ответ получен пять минут назад."""
+    from app.models.domain import Domain as D
+    did = _add(domain="justscored.ru", status="discovered", lane="free", referring_domains=30)
+
+    class _Wayback:
+        def snapshots(self, domain, **kw): return {"prior_flags": {}, "age_years": 9.0}
+        def first_seen(self, domain): return None
+    clients = {
+        "aparser": type("A", (), {"whois_probe": lambda self, d: {
+            "available": True, "created": datetime(2015, 1, 1, tzinfo=timezone.utc)}})(),
+        "wayback": _Wayback(),
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_listed": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: False})(),
+    }
+    scoring.score_domain(did, clients)
+    with db.SessionLocal() as s:
+        assert s.get(D, did).acquirability_checked_at is not None, \
+            "скоринг сходил в whois, но не отметил сверку — перепроверка повторит вызов"
+    assert scoring.stale_donors(days=3) == 0            # подсказка не краснеет сразу после Score
 
 
 def test_stale_donors_counter(sqlite_db):

@@ -60,8 +60,9 @@
       свободный просто помечается свежепроверенным. Домены, по которым уже оформлен заказ
       (<b>purchasing</b>/<b>purchased</b>), НЕ трогаем — ими распоряжается выкуп. Дропы,
       у которых дата освобождения ещё не наступила, «заняты» законно и остаются кандидатами.
-      Денег не тратит; бюджет вызовов — общий <code>max_whois_per_run</code> на
-      <a href="/settings">/settings</a>. Первыми проверяются самые протухшие.</div></details>
+      Денег не тратит; за прогон делает не больше <code>max_whois_per_run</code> whois-вызовов
+      (кап на <a href="/settings">/settings</a>, свой на каждый прогон). Первыми проверяются
+      самые протухшие.</div></details>
     <div class="go">
       <form method="post" action="/run/recheck" style="display:flex; gap:10px; align-items:end">
         <label class="f">доменов за запуск

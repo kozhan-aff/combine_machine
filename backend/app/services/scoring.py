@@ -162,6 +162,13 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
             return None
         pr = {"available": None, "created": None}   # bid: лейн из источника, продолжаем без возраста
 
+    # whois по этому домену только что состоялся — зафиксируем факт сверки, иначе свежеотскоренный
+    # донор уходит в БД с checked_at=NULL, встаёт в самую голову nulls_first-очереди перепроверки,
+    # и первый же её клик тратит квоту A-Parser на домен, чей whois-ответ получен пять минут назад
+    # (а подсказка «N не сверялись» краснеет сразу после Score).
+    if pr.get("available") is not None:
+        sig["acquirability_checked_at"] = now
+
     wc = pr.get("created")
     sig["whois_created"] = wc
     if wc is not None:
@@ -282,6 +289,9 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
 
         d.lane = sig.get("lane") or d.lane
         d.whois_created = sig.get("whois_created")
+        # факт сверки приобретаемости: скоринг уже сходил в whois — перепроверке незачем
+        # повторять это следующим же кликом
+        d.acquirability_checked_at = sig.get("acquirability_checked_at") or d.acquirability_checked_at
         d.prior_flags = sig.get("prior_flags")
         d.wayback_checked = bool(sig.get("wayback_checked"))
         d.first_seen = sig.get("first_seen")
@@ -386,8 +396,9 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
     from app.models.domain import Domain
     from app.services.settings import get_settings
 
-    # checked == сколько whois-вызовов реально сделали == расход бюджета, и он же = сумма
-    # free+waiting+taken+unknown. Иначе сводка в панели не сходится и врёт про квоту.
+    # checked == сколько whois-вызовов реально сделали == расход бюджета. Обычно он же = сумма
+    # free+waiting+taken+unknown; расходится ровно на домены, которые между whois и записью
+    # успели уйти в выкуп (см. декремент taken по rowcount ниже) — их отбраковки не было.
     out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
     budget = int(get_settings()["max_whois_per_run"])
     if budget <= 0:                                   # семантика та же, что в воронке:
