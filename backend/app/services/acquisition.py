@@ -145,10 +145,15 @@ def execute_confirmed_order(order_id: int) -> dict:
         db.refresh(o)
 
         d = db.get(Domain, o.domain_id)
-        # Тариф, замороженный человеком на confirm, живёт в o.result — а неудача перезаписывает
-        # result ошибкой. Несём его через ВСЕ ветки, иначе «↻ повторить» после первого отказа
-        # теряет ставку и требует переподтверждения на ровном месте.
-        saved = {k: v for k, v in (o.result or {}).items() if k in ("price_id", "period_id")}
+        # Несём через ВСЕ ветки исхода:
+        #  price_id/period_id — тариф, замороженный человеком на confirm (иначе «↻ повторить»
+        #    после отказа теряет ставку и требует переподтверждения на ровном месте);
+        #  maybe_sent — неизвестность НЕ должна сниматься сама. Если повтор снова упал (напр.
+        #    провайдер лежит и find_order не ответил), флаг обязан выжить: иначе отмена снова
+        #    разблокируется и реально оплаченный заказ можно спрятать. Снимает флаг только
+        #    правда провайдера — успешный find_order/order или poll_orders.
+        saved = {k: v for k, v in (o.result or {}).items()
+                 if k in ("price_id", "period_id", "maybe_sent")}
         try:
             if o.provider == "backorder":
                 from app.integrations.backorder import AmbiguousSend, BackorderClient
@@ -166,6 +171,7 @@ def execute_confirmed_order(order_id: int) -> dict:
                     o.provider_order_id = dup["elid"]
                     o.result = {**saved, "note": "заказ на этот домен у провайдера уже есть — "
                                                  "второй не шлём", "clear_status": dup["clear_status"]}
+                    o.result.pop("maybe_sent", None)   # провайдер ответил — неизвестности нет
                     o.ordered_at = o.ordered_at or datetime.now(timezone.utc)
                     db.commit()
                     return {"order_id": order_id, "status": o.status, "result": o.result}
@@ -186,6 +192,7 @@ def execute_confirmed_order(order_id: int) -> dict:
             o.status = "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
             o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
+            o.result.pop("maybe_sent", None)          # заказ подтверждён провайдером — снято
             o.ordered_at = datetime.now(timezone.utc)
             db.commit()
             return {"order_id": order_id, "status": o.status, "result": o.result}
@@ -235,9 +242,7 @@ def poll_orders() -> dict:
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
-    from app.integrations.backorder import BackorderClient
-
-    from app.integrations.backorder import _norm
+    from app.integrations.backorder import BackorderClient, norm_domain
 
     remote_orders = BackorderClient().client_orders()
     by_elid = {r["elid"]: r for r in remote_orders if r["elid"]}
@@ -246,7 +251,7 @@ def poll_orders() -> dict:
     # историю домена в последнюю строку и мог усыновить фантому старый аннулированный заказ.
     by_domain: dict = {}
     for r in remote_orders:
-        k = _norm(r["domain"])
+        k = norm_domain(r["domain"])
         if k not in by_domain or (by_domain[k]["state"] == "failed" and r["state"] != "failed"):
             by_domain[k] = r
     moved = {"caught": 0, "failed": 0, "pending": 0}
@@ -264,7 +269,7 @@ def poll_orders() -> dict:
             # (ретрай, ручной заказ из ЛК), и словарь по имени схлопнул бы их в последний —
             # свежий заказ получил бы статус протухшего.
             remote = by_elid.get(o.provider_order_id or "") or (
-                by_domain.get(_norm(d.domain)) if d and not o.provider_order_id else None)
+                by_domain.get(norm_domain(d.domain)) if d and not o.provider_order_id else None)
             if remote is None:
                 continue                              # провайдер ещё не показывает заказ
             matched += 1
@@ -301,11 +306,13 @@ def cancel_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": o.status,
                     "note": "снять можно только заказ в статусе pending_confirm/failed"}
         if (o.result or {}).get("maybe_sent"):
-            # cancelled из поллинга не опрашивается -> реально оплаченный заказ стал бы
-            # невидим навсегда, а домен вернулся бы в approved. Сначала снять неизвестность.
+            # cancelled из поллинга не опрашивается -> реально оплаченный заказ стал бы невидим
+            # навсегда, а домен вернулся бы в approved. Выход из неизвестности — «↻ повторить»:
+            # execute первым делом спрашивает провайдера (find_order) и либо усыновит уже
+            # существующий заказ, либо честно отправит новый (значит первого не было).
             return {"order_id": order_id, "status": o.status,
                     "error": "исход заказа неизвестен (связь оборвалась, деньги могли уйти) — "
-                             "сначала «↻ обновить статусы у провайдера», потом отменяй"}
+                             "нажми «↻ повторить»: сначала спросим провайдера, нет ли там заказа"}
         o.status = "cancelled"
         d = db.get(Domain, o.domain_id)
         if d is not None and d.status == "purchasing":

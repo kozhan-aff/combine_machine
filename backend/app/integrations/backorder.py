@@ -55,7 +55,7 @@ class AmbiguousSend(Exception):
     """
 
 
-def _norm(domain: str) -> str:
+def norm_domain(domain: str) -> str:
     """Каноническая форма домена для сравнения. Ключ идемпотентности денег — сверять
     сырые строки нельзя: фид отдаёт .РФ кириллицей, а billmgr хранит punycode."""
     d = (domain or "").strip().rstrip(".").lower()
@@ -127,12 +127,19 @@ class BackorderClient(BaseClient):
                 resp = self._client.request("GET", _BILLMGR, **kw)
                 resp.raise_for_status()
             data = resp.json()
-        except httpx.TransportError as e:
-            if money:
-                raise AmbiguousSend(f"связь оборвалась: {type(e).__name__}") from None
-            raise
         except httpx.HTTPStatusError as e:
-            msg = self._scrub(f"backorder {func}: HTTP {e.response.status_code}")
+            # 4xx = сервер ОБРАБОТАЛ этот же GET и отказал -> заказа точно нет, повтор безопасен.
+            # Иначе (5xx / 408 / 429) исход неизвестен: фронт billmgr мог отдать 502 уже ПОСЛЕ
+            # того, как заказ создан и оплачен. Не размазывать 4xx в ambiguous — кривые креды
+            # давали бы неснимаемый «фантом» на ровном месте.
+            code = e.response.status_code
+            msg = self._scrub(f"backorder {func}: HTTP {code}")
+            unknown = money and (code >= 500 or code in (408, 429))
+            raise (AmbiguousSend(msg) if unknown else RuntimeError(msg)) from None
+        except httpx.RequestError as e:
+            # RequestError, а не TransportError: DecodingError/TooManyRedirects — тоже
+            # RequestError, но НЕ TransportError, и приходят ПОСЛЕ обработки запроса сервером.
+            msg = f"backorder {func}: связь оборвалась ({type(e).__name__})"
             raise (AmbiguousSend(msg) if money else RuntimeError(msg)) from None
         except ValueError:
             msg = f"backorder {func}: ответ не JSON (страница ошибки billmgr?)"
@@ -261,9 +268,9 @@ class BackorderClient(BaseClient):
         Сравнение — по нормализованной (punycode) форме: фид отдаёт .РФ кириллицей, billmgr
         хранит punycode, и сырое сравнение строк молча пропустило бы дубль на всю зону .РФ.
         """
-        want = _norm(domain)
+        want = norm_domain(domain)
         for r in self.client_orders():
-            if _norm(r["domain"]) == want and r["state"] != "failed":
+            if norm_domain(r["domain"]) == want and r["state"] != "failed":
                 return r
         return None
 

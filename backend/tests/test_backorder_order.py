@@ -84,6 +84,39 @@ def test_ambiguous_vs_explicit_rejection():
         c.order("example.ru", price_id="1", period_id="2")
 
 
+def _raising(c, exc):
+    def fake(method, url, **kw):
+        raise exc
+    c._client.request = fake          # type: ignore[method-assign]
+    return c
+
+
+def test_4xx_is_not_ambiguous_but_5xx_is():
+    """4xx = сервер обработал ЭТОТ ЖЕ GET и отказал -> заказа нет, повтор безопасен.
+    Размазывать 4xx в ambiguous нельзя: кривые креды давали бы «фантом» на ровном месте,
+    а фантом блокирует отмену. 5xx/408/429 — исход неизвестен."""
+    def _status(code):
+        return httpx.HTTPStatusError("x", request=httpx.Request("GET", "https://x"),
+                                     response=httpx.Response(code))
+    for code in (401, 403, 404):
+        with pytest.raises(RuntimeError) as e:
+            _raising(_client({}), _status(code)).order("a.ru", price_id="1", period_id="2")
+        assert not isinstance(e.value, backorder.AmbiguousSend), f"HTTP {code} — заказа точно нет"
+    for code in (500, 502, 408, 429):
+        with pytest.raises(backorder.AmbiguousSend):
+            _raising(_client({}), _status(code)).order("a.ru", price_id="1", period_id="2")
+
+
+def test_non_transport_request_errors_are_ambiguous():
+    """DecodingError/TooManyRedirects — RequestError, но НЕ TransportError, и приходят ПОСЛЕ
+    обработки запроса сервером. Ловля по TransportError их упускала -> «повторить» вслепую."""
+    req = httpx.Request("GET", "https://x")
+    for exc in (httpx.DecodingError("битый gzip", request=req),
+                httpx.TooManyRedirects("петля", request=req)):
+        with pytest.raises(backorder.AmbiguousSend):
+            _raising(_client({}), exc).order("a.ru", price_id="1", period_id="2")
+
+
 class _BadJson:
     def json(self):
         raise ValueError("HTML, не JSON")
@@ -277,6 +310,48 @@ def test_ambiguous_send_marks_maybe_sent_not_plain_failed(sqlite_db, monkeypatch
     c = acquisition.cancel_order(oid)                   # отмена фантома запрещена сервисом
     assert "исход заказа неизвестен" in (c.get("error") or "")
     assert c["status"] == "failed"                      # не ушёл в cancelled
+
+
+def test_maybe_sent_is_not_a_dead_end(sqlite_db, monkeypatch):
+    """Из «исход неизвестен» ДОЛЖЕН быть выход: повтор безопасен (execute сперва спрашивает
+    провайдера), и он снимает неизвестность. Иначе домен навсегда залипает в purchasing —
+    ни повторить, ни отменить, ни завести заявку заново (create_order требует approved)."""
+    import app.db as db
+    from app.models.domain import AcquisitionOrder
+    _offline_grid(monkeypatch)
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: (_ for _ in ()).throw(
+                            backorder.AmbiguousSend("связь оборвалась")))
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    assert acquisition.execute_confirmed_order(oid)["maybe_sent"] is True
+
+    # Повтор при живой связи: заказа у провайдера нет -> отправляем, неизвестность снята.
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: {"order_id": "OK"})
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "ordered" and not r["result"].get("maybe_sent")
+    with db.SessionLocal() as s:
+        assert "maybe_sent" not in (s.get(AcquisitionOrder, oid).result or {})
+
+
+def test_maybe_sent_survives_a_failed_retry(sqlite_db, monkeypatch):
+    """Если повтор снова упал (провайдер лежит), неизвестность НЕ должна сняться сама:
+    иначе отмена разблокируется и реально оплаченный заказ можно спрятать навсегда."""
+    _offline_grid(monkeypatch)
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, d, price_id, period_id: (_ for _ in ()).throw(
+                            backorder.AmbiguousSend("связь оборвалась")))
+    oid, _ = _queued()
+    acquisition.confirm_order(oid, 190)
+    acquisition.execute_confirmed_order(oid)
+
+    # повтор: find_order сам падает (провайдер недоступен) -> общий except
+    monkeypatch.setattr(backorder.BackorderClient, "find_order",
+                        lambda self, domain: (_ for _ in ()).throw(RuntimeError("провайдер лёг")))
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and r["maybe_sent"] is True   # флаг выжил
+    assert "исход заказа неизвестен" in (acquisition.cancel_order(oid).get("error") or "")
 
 
 def test_explicit_rejection_stays_retryable(sqlite_db, monkeypatch):

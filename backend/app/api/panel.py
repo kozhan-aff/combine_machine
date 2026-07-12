@@ -257,16 +257,13 @@ def queue_view(request: Request):
     # Сетка ставок для селектора подтверждения + баланс счёта. Провайдер может лежать —
     # тогда очередь всё равно рендерится, а подтверждать нечем: причина видна в шапке.
     grids, balance, bo_err = {}, None, ""
+    for o in orders:                          # зона — до похода в сеть: иначе сбой на первой
+        o["zone"] = zone_of(o["domain"])      # заявке оставил бы остальные строки без зоны
     if any(o["status"] == "pending_confirm" for o in orders):
         try:
             c = BackorderClient()
-            for o in orders:
-                z = zone_of(o["domain"])
-                o["zone"] = z
-                if z is None:                 # незнакомая зона (.su/gTLD) — сетки нет и не будет;
-                    continue                  # без этого tariffs(None) тянул бы JSON на каждый рендер
-                if z not in grids:
-                    grids[z] = c.tariffs(z)
+            for z in {o["zone"] for o in orders if o["zone"]}:   # None — сетки нет и не будет
+                grids[z] = c.tariffs(z)
             balance = c.balance()
         except Exception as e:  # noqa: BLE001 — панель не должна падать из-за провайдера
             bo_err = f"{type(e).__name__}: {e}"[:200]

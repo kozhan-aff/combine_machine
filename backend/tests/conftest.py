@@ -31,6 +31,17 @@ def _jsonb_as_json(element, compiler, **kw):  # DDL only; bind/result still json
     return "JSON"
 
 
+class LiveNetworkAttempt(BaseException):
+    """Тест полез в живую сеть. Наследник BaseException СПЕЦИАЛЬНО: прикладной код полон
+    широких `except Exception` (execute_confirmed_order, queue_view, jobs, scoring), и
+    ловушка на Exception была бы им проглочена — тест «проходил» бы зелёным ровно на том
+    роуте, который она защищает. BaseException проходит сквозь них насквозь."""
+
+
+class LivePaidOrder(BaseException):
+    """Тест чуть не отправил ЖИВОЙ ПЛАТНЫЙ заказ. Тоже BaseException — по той же причине."""
+
+
 @pytest.fixture(autouse=True)
 def _no_live_network(monkeypatch):
     """РУБИЛЬНИК ЖИВОЙ СЕТИ. Инвариант герметичности — структурный, не «на честном слове».
@@ -41,19 +52,28 @@ def _no_live_network(monkeypatch):
     price-JSON; `execute` -> find_order -> живой authed-запрос). Зелёный сьют держался на
     интернете, а от списания денег отделял один забытый monkeypatch.
 
-    Рубим httpx.HTTPTransport (реальные сокеты), а НЕ httpx.Client: TestClient — подкласс
+    Рубим ТРАНСПОРТ httpx (реальные сокеты), а НЕ httpx.Client: TestClient — подкласс
     httpx.Client и ходит через ASGITransport, панель обязана работать. Юнит-тесты транспорта
     подменяют request/_client.request на ИНСТАНСЕ — инстанс-атрибут перекрывает классовый,
-    до транспорта не доходит. Значит эта фикстура ловит ровно то, что и должна: настоящий
-    выход в сеть.
+    до транспорта не доходит. Значит фикстура ловит ровно то, что должна: настоящий выход
+    в сеть. Плюс DNS (blacklist.py ходит резолвером мимо httpx).
     """
+    import socket
+
     import httpx
 
     def _boom(self, request, *a, **kw):
-        raise AssertionError(
+        raise LiveNetworkAttempt(
             f"живой сетевой запрос из теста: {request.method} {request.url.host}{request.url.path}. "
             "Тесты герметичны — подмени клиент/метод через monkeypatch.")
+
+    def _boom_dns(host, *a, **kw):
+        raise LiveNetworkAttempt(f"живой DNS-запрос из теста: {host}")
+
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _boom)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _boom)
+    monkeypatch.setattr(socket, "getaddrinfo", _boom_dns)
+    monkeypatch.setattr(socket, "gethostbyname", _boom_dns)
     yield
 
 
@@ -115,7 +135,7 @@ def _reset_pricing_cache():
 
 
 def _no_live_order(self, domain, price_id, period_id):
-    raise AssertionError(
+    raise LivePaidOrder(
         f"живой ПЛАТНЫЙ заказ backorder из теста ({domain})! Тест, которому нужен «успех», "
         "обязан сам подменить BackorderClient.order своим monkeypatch.")
 
