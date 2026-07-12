@@ -71,18 +71,35 @@ ssh box 'cd ~/vpn-portfolio && git pull && docker compose up -d --build'
 - Откат: `git revert` + `up -d --build`. Данные БД в volume, миграции — только вперёд
   (для отката данных — `alembic downgrade`).
 
-### Кнопка «Обновить из git» в панели (без консоли)
-Панель → **Диагностика** → «⇩ Обновить из git» делает `git pull --ff-only` + `alembic
-upgrade head` прямо из контейнера; код подхватывает `--reload`. Работает так:
-- `docker-compose.yml` монтирует весь репо `.:/repo` (с `.git`), в образе стоит `git`.
-- Тянем по **HTTPS с fine-grained PAT** (не монтируем SSH-ключ в контейнер). Настройка:
-  1. github.com → Settings → Developer settings → Fine-grained tokens → Generate:
-     доступ только к репо `combine_machine`, права **Contents: Read-only**.
-  2. Вписать в `.env` бокса: `GITHUB_TOKEN=github_pat_...` (и `GITHUB_REPO=kozhan-aff/combine_machine`).
-  3. `docker compose up -d --build` (Dockerfile изменился — нужен пересбор).
-- Ограничения: `--ff-only` (не затрёт локальные правки — упадёт с сообщением в баннере);
-  смена `requirements.txt`/Dockerfile всё равно требует `--build` руками. Токен в баннер не попадает.
-- Безопасность: эндпойнт POST-only, панель слушает только `127.0.0.1` (§3).
+### Обновление из панели (без консоли)
+Панель → **Диагностика** показывает статус дерева (ветка · чисто/грязно · позади/впереди origin)
+и две кнопки:
+- **⇩ Обновить из git** — `git pull --ff-only` из main + `alembic upgrade head` в контейнере.
+  backend (`--reload`) и worker (`watchfiles`) подхватывают код живьём. Безопасно: не затирает
+  локальное, при грязи/расхождении честно откажет и предложит force.
+- **⚠ Принудительно обновить** — `git fetch` + `git checkout -f -B main FETCH_HEAD`: приводит код
+  к origin/main из ЛЮБОГО состояния (грязное/разошедшееся/detached дерево). Локальные правки
+  теряются; `git clean` не вызывается → `.env` и `backend/aapanel.pem` (untracked) сохраняются.
+  Под JS-confirm.
+
+Как работает: `docker-compose.yml` монтирует весь репо `.:/repo` (с `.git`), в образе стоит `git`;
+тянем по HTTPS с fine-grained PAT (не монтируем SSH-ключ в контейнер) через `http.extraheader` —
+токен не в argv и скраббится в баннерах. Воркер обёрнут в `watchfiles`, поэтому его код тоже
+обновляется без рестарта контейнера.
+
+Настройка токена (один раз): github.com → Settings → Developer settings → Fine-grained tokens →
+Generate: доступ только к репо `combine_machine`, права **Contents: Read-only**. В `.env` бокса —
+`GITHUB_TOKEN=github_pat_...` и `GITHUB_REPO=kozhan-aff/combine_machine`.
+
+**Ограничение (единственный консольный случай):** смена `requirements.txt`/`Dockerfile` требует
+пересборки образа — панель это детектит по диффу и пишет в баннер «нужна пересборка: `docker compose
+up -d --build`».
+
+**Активация фичи на боксе (один раз):** `docker compose up -d --build` (образ получит `watchfiles`
+из requirements + воркер пересоздастся с новой командой). Дальше — всё из UI.
+
+**Безопасность:** на LAN-панели появилась деструктивная кнопка — закрой Basic-auth:
+`PANEL_USER`+`PANEL_PASS` в `.env` бокса (см. `app/main.py`).
 
 ---
 

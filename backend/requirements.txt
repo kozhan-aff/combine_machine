@@ -1,5 +1,6 @@
 fastapi>=0.115
 uvicorn[standard]>=0.32
+watchfiles>=0.24         # авто-reload воркера (см. worker command) — тянется uvicorn[standard], фиксируем явно
 sqlalchemy>=2.0
 psycopg[binary]>=3.2
 alembic>=1.13

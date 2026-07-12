@@ -65,7 +65,9 @@ services:
       - combine
     volumes:
       - ./backend:/app
-    command: python -m app.workers.scheduler
+    # watchfiles (в образе через uvicorn[standard]) перезапускает шедулер при правке *.py в /app —
+    # код воркера подхватывается после git-pull живьём, без пересборки/рестарта контейнера.
+    command: watchfiles 'python -m app.workers.scheduler' /app
 
 networks:
   combine:
