@@ -6,7 +6,19 @@ Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo 
 """
 import logging
 import math
+from datetime import timedelta
+
 from app.services import scoring_config as cfg
+
+# Запас после дедлайна дропа, прежде чем считать домен потерянным навсегда.
+#
+# `delete_date` в фиде backorder — ДАТА без времени ("2026-07-08", см. docs/api/backorder.md),
+# и discovery._parse_deadline превращает её в 00:00 UTC дня дропа. Значит уже в 00:01 того же
+# дня условие «дедлайн в будущем» ложно — а домен ещё зарегистрирован: реестр освобождает его
+# в течение дня. Без этого запаса перепроверка отбраковывала бы дроп РОВНО В ТОТ ДЕНЬ, когда
+# его можно ловить, то есть выбрасывала бы самые ценные домены. Запас покрывает и полуночное
+# усечение даты, и сдвиг релиза в реестре на сутки.
+DROP_GRACE = timedelta(days=2)
 
 
 def _clamp(x: float) -> float:
@@ -83,29 +95,39 @@ def _make_clients() -> dict:
     }
 
 
-def acquirability_verdict(available, acquire_deadline, now) -> str:
+def acquirability_verdict(available, acquire_deadline, now, lane=None) -> str:
     """whois-доступность + дедлайн ловли -> 'free' | 'taken' | 'waiting' | 'unknown'.
 
     ЕДИНСТВЕННОЕ место, где решается «можно ли ещё купить». Его зовут и воронка (T1, при
     первом скоринге), и перепроверка (recheck_acquirability, потом) — двух версий правды
     здесь быть не должно.
 
-    'waiting' — домен занят СЕЙЧАС, и это нормально: дроп ещё не наступил (дедлайн в
-    будущем). Так выглядит любой backorder-кандидат до своей delete_date.
-    'taken' — занят, и ждать больше нечего: дедлайна нет или он прошёл. Значит домен
-    продлили или перехватили. Для уже отобранного донора это и есть протухание.
+    'waiting' — домен занят СЕЙЧАС, и это нормально: дроп ещё не наступил. Так выглядит
+    любой backorder-кандидат до своей delete_date.
+    'taken' — занят, и ждать больше нечего: дедлайн с запасом прошёл (домен продлили или
+    перехватили) либо свободный домен кто-то зарегистрировал. Для отобранного донора это
+    и есть протухание.
+
+    ОСТОРОЖНО: 'taken' стоит дорого — домен уходит в rejected. Поэтому в каждом сомнении
+    отвечаем 'unknown'/'waiting', а не 'taken': потерянный ценный дроп хуже лишней проверки.
     """
     from datetime import timezone
     if available is True:
         return "free"
     if available is None:
         return "unknown"
+    # available is False — домен ЗАНЯТ сейчас. Навсегда ли — решает дедлайн дропа.
     dl = acquire_deadline
     if dl is not None and dl.tzinfo is None:          # из БД дата может прийти naive
         dl = dl.replace(tzinfo=timezone.utc)
-    if dl is not None and dl > now:
-        return "waiting"
-    return "taken"
+    if dl is None:
+        # Для bid-лейна «занят» — НОРМАЛЬНОЕ состояние: домен ждёт своего дропа, он и должен
+        # быть зарегистрирован. Без даты дропа судить не по чему, а цена ошибки — выброшенный
+        # ценный дроп. Молчим. (Дедлайн теряется, если фид отдал непарсящийся delete_date.)
+        return "unknown" if lane == "bid" else "taken"
+    if now <= dl + DROP_GRACE:
+        return "waiting"                             # дроп ещё не наступил или идёт прямо сейчас
+    return "taken"                                   # дедлайн с запасом прошёл, а домен занят
 
 
 def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
@@ -316,21 +338,25 @@ def score_pending(limit: int = 100, on_progress=None) -> int:
 _RECHECK_STATUSES = ("approved", "scored")
 
 
-def stale_donors(days: int = 3) -> int:
-    """Сколько отобранных доноров давно (или ни разу) не сверялись с whois. Для подписи кнопки."""
-    from datetime import datetime, timedelta, timezone
+def stale_donors(days: int = 3, db=None) -> int:
+    """Сколько отобранных доноров давно (или ни разу) не сверялись с whois. Для подписи кнопки.
+
+    `db` — уже открытая сессия (панель отдаёт свою из DI, чтобы не плодить соединение
+    на каждый рендер /domains)."""
+    from datetime import datetime, timezone
     from sqlalchemy import select, func, or_
     from app.db import SessionLocal
     from app.models.domain import Domain
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    with SessionLocal() as db:
-        return db.execute(
-            select(func.count(Domain.id)).where(
-                Domain.status.in_(_RECHECK_STATUSES),
-                or_(Domain.acquirability_checked_at.is_(None),
-                    Domain.acquirability_checked_at < cutoff))
-        ).scalar_one()
+    stmt = select(func.count(Domain.id)).where(
+        Domain.status.in_(_RECHECK_STATUSES),
+        or_(Domain.acquirability_checked_at.is_(None),
+            Domain.acquirability_checked_at < cutoff))
+    if db is not None:
+        return db.execute(stmt).scalar_one()
+    with SessionLocal() as s:
+        return s.execute(stmt).scalar_one()
 
 
 def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
@@ -350,53 +376,60 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
     идут через A-Parser). Самые протухшие проверяются первыми.
     """
     from datetime import datetime, timezone
-    from sqlalchemy import select
+    from sqlalchemy import select, update
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
 
+    # checked == сколько whois-вызовов реально сделали == расход бюджета, и он же = сумма
+    # free+waiting+taken+unknown. Иначе сводка в панели не сходится и врёт про квоту.
+    out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
     budget = int(get_settings()["max_whois_per_run"])
+    if budget <= 0:                                   # семантика та же, что в воронке:
+        return out                                    # 0 = whois не звать вообще
     with SessionLocal() as db:
         ids = db.execute(
             select(Domain.id).where(Domain.status.in_(_RECHECK_STATUSES))
             .order_by(Domain.acquirability_checked_at.asc().nulls_first())  # протухшие первыми
-            .limit(min(limit, budget) if budget > 0 else limit)
+            .limit(min(limit, budget))
         ).scalars().all()
 
     c = _make_clients()
-    out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
     total = len(ids)
     for i, did in enumerate(ids, 1):
         with SessionLocal() as db:
             d = db.get(Domain, did)
             if d is None or d.status not in _RECHECK_STATUSES:
                 continue                              # статус увели, пока шли (напр. в выкуп)
-            name, deadline = d.domain, d.acquire_deadline
+            name, deadline, lane = d.domain, d.acquire_deadline, d.lane
         if on_progress:
             on_progress(i - 1, total, name)           # репорт ДО вызова: whois идёт секунды
 
         now = datetime.now(timezone.utc)
+        out["checked"] += 1                           # вызов состоялся — бюджет потрачен
         try:
             pr = c["aparser"].whois_probe(name)
         except Exception:  # noqa: BLE001 — падение одного домена не топит батч
             logging.getLogger(__name__).exception("whois-перепроверка %s упала", name)
             out["unknown"] += 1
             continue                                  # отметку НЕ ставим: домен остался протухшим
-        v = acquirability_verdict(pr.get("available"), deadline, now)
+        # lane обязателен: для bid-домена «занят» — НОРМА (ждёт своего дропа), и без него
+        # вердикт отбраковал бы живой дроп.
+        v = acquirability_verdict(pr.get("available"), deadline, now, lane=lane)
+        out[v] += 1
         if v == "unknown":
-            out["unknown"] += 1
             continue                                  # whois не ответил по существу — не врём
 
+        # Атомарно и только из «наших» статусов: между whois-раундтрипом и записью человек
+        # мог отправить домен в выкуп (create_order -> purchasing). Голый UPDATE перезатёр бы
+        # его нашим rejected и разъехался с живым заказом; rowcount==0 = домен уже не наш.
         with SessionLocal() as db:
-            d = db.get(Domain, did)
-            if d is None or d.status not in _RECHECK_STATUSES:
-                continue                              # пока ходили в whois, домен ушёл в выкуп
-            d.acquirability_checked_at = now
+            vals = {"acquirability_checked_at": now}
             if v == "taken":
-                d.status = "rejected"                 # его купил кто-то другой
-                d.reject_reason = "not_acquirable"
-            out[v] += 1
-            out["checked"] += 1
+                vals |= {"status": "rejected", "reject_reason": "not_acquirable"}
+            db.execute(update(Domain)
+                       .where(Domain.id == did, Domain.status.in_(_RECHECK_STATUSES))
+                       .values(**vals))
             db.commit()
 
     if on_progress:

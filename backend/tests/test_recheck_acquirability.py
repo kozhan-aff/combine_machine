@@ -41,9 +41,32 @@ def test_verdict_free_taken_waiting_unknown():
     v = scoring.acquirability_verdict
     assert v(True, None, NOW) == "free"
     assert v(None, None, NOW) == "unknown"          # whois промолчал — не врём в обе стороны
-    assert v(False, None, NOW) == "taken"           # занят, дедлайна нет -> его выкупили
-    assert v(False, NOW - timedelta(days=1), NOW) == "taken"    # дроп прошёл, а домен занят
-    assert v(False, NOW + timedelta(days=3), NOW) == "waiting"  # дроп ещё не наступил — норма
+    assert v(False, None, NOW) == "taken"           # свободный домен занят, дедлайна нет -> выкупили
+    assert v(False, NOW - timedelta(days=5), NOW) == "taken"     # дроп давно прошёл, а домен занят
+    assert v(False, NOW + timedelta(days=3), NOW) == "waiting"   # дроп ещё не наступил — норма
+
+
+def test_verdict_does_not_reject_a_drop_on_its_drop_day():
+    """САМЫЙ ДОРОГОЙ БАГ. delete_date в фиде — ДАТА без времени, и _parse_deadline делает
+    из неё 00:00 UTC дня дропа. Значит уже в 00:01 «дедлайн в будущем» ложно, а домен ещё
+    занят — реестр освобождает его днём. Без запаса мы выбрасывали бы дроп РОВНО В ТОТ ДЕНЬ,
+    когда его можно ловить."""
+    v = scoring.acquirability_verdict
+    midnight = NOW.replace(hour=0, minute=0, second=0, microsecond=0)   # 00:00 сегодняшнего дропа
+    assert v(False, midnight, NOW, lane="bid") == "waiting", "выбросили дроп в день его дропа!"
+    # и на следующий день, если реестр задержался
+    assert v(False, midnight - timedelta(days=1), NOW, lane="bid") == "waiting"
+    # а вот когда запас исчерпан — домен действительно продлили или перехватили
+    assert v(False, midnight - timedelta(days=4), NOW, lane="bid") == "taken"
+
+
+def test_verdict_never_rejects_a_bid_domain_without_deadline():
+    """Для bid-домена «занят» — НОРМАЛЬНОЕ состояние (он ждёт своего дропа). Дедлайн теряется,
+    если фид отдал непарсящийся delete_date (_parse_deadline -> None). Судить не по чему ->
+    молчим. Иначе один дрейф формата фида отбраковал бы ВЕСЬ список дропов за прогон."""
+    v = scoring.acquirability_verdict
+    assert v(False, None, NOW, lane="bid") == "unknown"
+    assert v(False, None, NOW, lane="free") == "taken"    # а свободный домен занять — можно только выкупив
 
 
 def test_verdict_handles_naive_deadline_from_db():
@@ -88,13 +111,41 @@ def test_drop_before_its_date_is_not_rejected(sqlite_db, monkeypatch):
         assert s.get(Domain, did).status == "approved"
 
 
+def test_drop_on_its_drop_day_is_not_rejected(sqlite_db, monkeypatch):
+    """Сквозной случай самого дорогого бага: дедлайн = 00:00 СЕГОДНЯШНЕГО дня (так фид и
+    отдаёт — датой без времени), домен ещё занят. Прогон не должен его выбросить."""
+    did = _add(domain="today.ru", status="approved", lane="bid",
+               acquire_deadline=NOW.replace(hour=0, minute=0, second=0, microsecond=0))
+    _whois(monkeypatch, {"today.ru": False})
+    r = scoring.recheck_acquirability()
+    assert r["taken"] == 0 and r["waiting"] == 1
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "approved", "дроп выброшен в день, когда его можно ловить!"
+        assert d.reject_reason is None
+
+
+def test_bid_domain_without_deadline_is_never_rejected(sqlite_db, monkeypatch):
+    """Дрейф формата фида (delete_date не распарсился -> None) не должен отбраковать
+    ВЕСЬ список дропов за один прогон."""
+    did = _add(domain="nodate.ru", status="approved", lane="bid", acquire_deadline=None)
+    _whois(monkeypatch, {"nodate.ru": False})
+    r = scoring.recheck_acquirability()
+    assert r["unknown"] == 1 and r["taken"] == 0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "approved" and d.acquirability_checked_at is None
+
+
 def test_unknown_does_not_touch_status_or_stamp(sqlite_db, monkeypatch):
     """whois не ответил -> НЕ помечаем проверенным: домен остаётся протухшим и вернётся
     в следующий прогон. Иначе сбой A-Parser молча «освежил» бы весь список."""
     did = _add(domain="mute.ru", status="approved", lane="free")
     _whois(monkeypatch, {"mute.ru": None})
     r = scoring.recheck_acquirability()
-    assert r["unknown"] == 1 and r["checked"] == 0
+    # checked = сколько whois-вызовов сделали (= расход бюджета), а не сколько записали:
+    # иначе сводка в панели не сходится (free+waiting+taken+unknown != checked) и врёт про квоту.
+    assert r["unknown"] == 1 and r["checked"] == 1
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.status == "approved" and d.acquirability_checked_at is None
@@ -130,6 +181,16 @@ def test_budget_caps_whois_calls(sqlite_db, monkeypatch):
     calls = _whois(monkeypatch, {f"d{i}.ru": True for i in range(5)})
     scoring.recheck_acquirability()
     assert len(calls) == 2
+
+
+def test_zero_budget_calls_nothing(sqlite_db, monkeypatch):
+    """budget == 0 = «whois не звать вообще» — та же семантика, что в воронке. Раньше здесь
+    было наоборот (0 -> без ограничения), что молча сняло бы кран с квоты A-Parser."""
+    _add(domain="x.ru", status="approved", lane="free")
+    monkeypatch.setattr("app.services.settings.get_settings",
+                        lambda: {"max_whois_per_run": 0})
+    calls = _whois(monkeypatch, {"x.ru": True})
+    assert scoring.recheck_acquirability()["checked"] == 0 and calls == []
 
 
 def test_stalest_are_checked_first(sqlite_db, monkeypatch):

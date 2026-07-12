@@ -183,7 +183,7 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
         "active": "domains",
         "rows": rows, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": site_by_domain,
-        "stale": stale_donors(),          # сколько доноров давно не сверялись с whois
+        "stale": stale_donors(db=db),     # сколько доноров давно не сверялись с whois
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
@@ -316,15 +316,19 @@ def run_score_action(n: int = Form(5)):
 @router.post("/run/recheck")
 def run_recheck_action(n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
+    from datetime import datetime
     from app.services import scoring, jobs
 
     def _run():
         r = scoring.recheck_acquirability(
             limit=n, on_progress=lambda d, t, cur: jobs.report("recheck", d, t, cur))
+        # Сводка живёт в jobs до следующего прогона и показывается при каждом заходе на
+        # /domains — поэтому датируем её, иначе вчерашний итог неотличим от свежего.
+        stamp = datetime.now().strftime("%d.%m %H:%M")
         jobs.report("recheck", r["checked"], r["checked"], "",
                     message=f"проверено {r['checked']}: свободны {r['free']}, "
                             f"ждут дропа {r['waiting']}, ЗАНЯТЫ {r['taken']} (отбракованы), "
-                            f"не определилось {r['unknown']}")
+                            f"не определилось {r['unknown']} · {stamp}")
 
     ok = jobs.start("recheck", _run)
     return _back("/domains", msg="Перепроверка занятости запущена…" if ok else None,
