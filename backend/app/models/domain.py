@@ -56,6 +56,11 @@ class Domain(Base):
     acquire_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дедлайн ловли (backorder delete_date)
     acquire_price: Mapped[float | None] = mapped_column(Numeric)     # базовая цена выкупа (backorder тариф)
     price_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # когда в последний раз whois'ом сверяли, что домен ВСЁ ЕЩЁ можно купить. Скоринг решает
+    # приобретаемость один раз (T1) и больше не возвращается — а список доноров протухает:
+    # одобренный вчера домен сегодня может быть уже зарегистрирован кем-то другим. NULL = ни
+    # разу не перепроверяли после скоринга.
+    acquirability_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     visitors: Mapped[int | None] = mapped_column(Integer)            # инфо-сигнал из фида (вес 0)
     tic: Mapped[int | None] = mapped_column(Integer)                 # Яндекс ТИЦ из фида (вес 0)
 

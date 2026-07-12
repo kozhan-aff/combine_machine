@@ -47,6 +47,34 @@
       </form>
     </div>
   </div>
+
+  <div class="station">
+    <div class="plate">⟳ Перепроверка занятости — не выкупили ли доноров
+      <span class="mod">M1c · whois по approved/scored</span></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Список доноров <b>протухает</b>. Скоринг решает приобретаемость
+      ОДИН раз и больше к ней не возвращается — а домен, одобренный неделю назад, за это время
+      мог зарегистрировать кто-то другой. Мы бы держали его как «готов к выкупу» и однажды
+      поставили на него ставку впустую. Эта кнопка сверяет whois'ом <b>approved</b> и
+      <b>scored</b>: занятый уходит в <b>rejected</b> с причиной <b>not_acquirable</b>,
+      свободный просто помечается свежепроверенным. Домены, по которым уже оформлен заказ
+      (<b>purchasing</b>/<b>purchased</b>), НЕ трогаем — ими распоряжается выкуп. Дропы,
+      у которых дата освобождения ещё не наступила, «заняты» законно и остаются кандидатами.
+      Денег не тратит; бюджет вызовов — общий <code>max_whois_per_run</code> на
+      <a href="/settings">/settings</a>. Первыми проверяются самые протухшие.</div></details>
+    <div class="go">
+      <form method="post" action="/run/recheck" style="display:flex; gap:10px; align-items:end">
+        <label class="f">доменов за запуск
+          <input type="number" name="n" value="200" min="1" max="1000" style="width:78px"></label>
+        <button class="btn-acc" title="whois по отобранным донорам: занятые уходят в rejected/not_acquirable">⟳ Перепроверить занятость</button>
+      </form>
+      {% if stale %}
+        <span class="hint" style="color:var(--acc2)">{{ stale }} не сверялись 3+ дня (или ни разу)</span>
+      {% else %}
+        <span class="hint" style="color:var(--ok)">все доноры сверены свежо</span>
+      {% endif %}
+    </div>
+  </div>
 </div>
 
 <div id="prog" class="progress">
@@ -58,7 +86,7 @@
 // Терминальный контракт (см. services/jobs.py): error ПЕРВЫМ (иначе частичный done/total
 // маскирует падение), терминал = running==false, total==0 && running = неопределённый режим.
 // Меняем только представление — рисуем визуальный бар (см. .progress в base.html).
-var JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки'};
+var JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки', recheck:'Перепроверка занятости'};
 function bar(){ return document.getElementById('prog'); }
 // подпись строим безопасно: имя жирным + хвост текст-нодой. p.current/p.error приходят
 // с внешнего фида (имена доменов) — в innerHTML не подставляем, чтобы не пустить HTML/скрипт.
@@ -86,7 +114,9 @@ function render(job, p){
   }
   el.classList.add('done');                            // терминал без ошибки — успех
   fill.style.width='100%'; fill.style.marginLeft='0';  // добить до 100% (инлайн-ширина осталась от running)
-  setLabel(lbl, name, 'готово'); pct.textContent=p.done;
+  // message — итог джоба, если он его оставил (перепроверка: сколько занято/свободно).
+  // Через textContent, как и current: приходит из джоба, в innerHTML не подставляем.
+  setLabel(lbl, name, p.message || 'готово'); pct.textContent=p.done;
 }
 function poll(job){
   fetch('/run/'+job+'/progress').then(r=>r.json()).then(p=>{
@@ -101,9 +131,11 @@ function poll(job){
   });
 }
 // старт-проверка: если джоб уже идёт (после сабмита) — поллим; если упал, пока оператора
-// не было (перезагрузка) — показываем ошибку сразу, не тонет молча.
-['discovery','score'].forEach(j => fetch('/run/'+j+'/progress').then(r=>r.json())
-  .then(p=>{ if (p.running) poll(j); else if (p.error) render(j, p); }).catch(()=>{}));
+// не было (перезагрузка) — показываем ошибку сразу, не тонет молча. Итог (message) тоже
+// переживает перезагрузку: poll() после успеха делает reload, и без этого сводка
+// «сколько занято» мелькнула бы на 800 мс и пропала.
+['discovery','score','recheck'].forEach(j => fetch('/run/'+j+'/progress').then(r=>r.json())
+  .then(p=>{ if (p.running) poll(j); else if (p.error || p.message) render(j, p); }).catch(()=>{}));
 </script>
 
 <details class="legend">
