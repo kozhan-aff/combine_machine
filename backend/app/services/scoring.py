@@ -95,7 +95,7 @@ def _make_clients() -> dict:
     }
 
 
-def acquirability_verdict(available, acquire_deadline, now, lane=None) -> str:
+def acquirability_verdict(available, acquire_deadline, now, *, lane) -> str:
     """whois-доступность + дедлайн ловли -> 'free' | 'taken' | 'waiting' | 'unknown'.
 
     ЕДИНСТВЕННОЕ место, где решается «можно ли ещё купить». Его зовут и воронка (T1, при
@@ -110,6 +110,8 @@ def acquirability_verdict(available, acquire_deadline, now, lane=None) -> str:
 
     ОСТОРОЖНО: 'taken' стоит дорого — домен уходит в rejected. Поэтому в каждом сомнении
     отвечаем 'unknown'/'waiting', а не 'taken': потерянный ценный дроп хуже лишней проверки.
+    Именно поэтому `lane` — обязательный именованный аргумент: с дефолтом None вызывающий,
+    забывший его передать, получал бы 'taken' на bid-домене, то есть ровно тот баг.
     """
     from datetime import timezone
     if available is True:
@@ -172,7 +174,9 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None) -> str | None:
     if d.lane == "bid":
         sig["lane"] = "bid"
     else:
-        v = acquirability_verdict(pr.get("available"), d.acquire_deadline, now)
+        # сюда попадаем только при lane != "bid" (bid короткозамкнут выше), но передаём явно:
+        # вердикт судит bid-домены иначе, и умолчания здесь стоят слишком дорого
+        v = acquirability_verdict(pr.get("available"), d.acquire_deadline, now, lane=d.lane)
         if v == "free":
             sig["lane"] = "free"                    # свободен к регистрации
         elif v == "taken":
@@ -372,8 +376,9 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
     сбой) -> НЕ трогаем ни статус, ни отметку: домен остаётся протухшим и попадёт в следующий
     прогон. Денег не тратит, гейтов не касается.
 
-    Бюджет — общий `max_whois_per_run` с /settings (тот же кран, что у скоринга: whois-вызовы
-    идут через A-Parser). Самые протухшие проверяются первыми.
+    Бюджет — `max_whois_per_run` с /settings, СВОЙ на прогон (не общий со скорингом: джобы
+    single-flight по имени, поэтому Score и Перепроверка могут идти одновременно и взять по
+    капу каждый — суммарно до 2× квоты A-Parser). Самые протухшие проверяются первыми.
     """
     from datetime import datetime, timezone
     from sqlalchemy import select, update
@@ -390,7 +395,9 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
     with SessionLocal() as db:
         ids = db.execute(
             select(Domain.id).where(Domain.status.in_(_RECHECK_STATUSES))
-            .order_by(Domain.acquirability_checked_at.asc().nulls_first())  # протухшие первыми
+            # протухшие первыми; id — вторичный ключ, иначе порядок внутри NULL-корзины
+            # не определён и прогоны могут топтаться по одним и тем же доменам
+            .order_by(Domain.acquirability_checked_at.asc().nulls_first(), Domain.id.asc())
             .limit(min(limit, budget))
         ).scalars().all()
 
@@ -412,13 +419,21 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
         except Exception:  # noqa: BLE001 — падение одного домена не топит батч
             logging.getLogger(__name__).exception("whois-перепроверка %s упала", name)
             out["unknown"] += 1
-            continue                                  # отметку НЕ ставим: домен остался протухшим
+            continue        # СБОЙ (сеть/A-Parser) — транзиентен. Отметку не ставим: вернёмся.
+
         # lane обязателен: для bid-домена «занят» — НОРМА (ждёт своего дропа), и без него
         # вердикт отбраковал бы живой дроп.
         v = acquirability_verdict(pr.get("available"), deadline, now, lane=lane)
         out[v] += 1
-        if v == "unknown":
-            continue                                  # whois не ответил по существу — не врём
+        if v == "unknown" and pr.get("available") is None:
+            continue        # whois ОТВЕТИЛ, но невнятно. Не штампуем — пробуем ещё раз позже.
+        # Прочий unknown (bid без дедлайна) whois ОТВЕТИЛ по существу: «занят». Судить не по
+        # чему, но ответ ДЕТЕРМИНИРОВАННЫЙ — завтра будет ровно тот же. Такой домен обязан
+        # получить отметку, иначе он вечно висит в голове nulls_first-очереди и выедает весь
+        # бюджет: если таких доменов больше бюджета (а это ровно авария «фид сменил формат
+        # delete_date»), перепроверка никогда не дойдёт до остального списка и молча выродится
+        # в no-op. Статус не трогаем — домен остаётся кандидатом; счётчик unknown в сводке
+        # покажет оператору, что что-то не так.
 
         # Атомарно и только из «наших» статусов: между whois-раундтрипом и записью человек
         # мог отправить домен в выкуп (create_order -> purchasing). Голый UPDATE перезатёр бы
@@ -427,10 +442,12 @@ def recheck_acquirability(limit: int = 200, on_progress=None) -> dict:
             vals = {"acquirability_checked_at": now}
             if v == "taken":
                 vals |= {"status": "rejected", "reject_reason": "not_acquirable"}
-            db.execute(update(Domain)
-                       .where(Domain.id == did, Domain.status.in_(_RECHECK_STATUSES))
-                       .values(**vals))
+            res = db.execute(update(Domain)
+                             .where(Domain.id == did, Domain.status.in_(_RECHECK_STATUSES))
+                             .values(**vals))
             db.commit()
+        if v == "taken" and res.rowcount == 0:
+            out["taken"] -= 1     # домен успели увести в выкуп — отбраковки НЕ было, не врём
 
     if on_progress:
         on_progress(total, total, "")

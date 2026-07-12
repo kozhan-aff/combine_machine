@@ -39,11 +39,11 @@ def _whois(monkeypatch, by_domain: dict):
 
 def test_verdict_free_taken_waiting_unknown():
     v = scoring.acquirability_verdict
-    assert v(True, None, NOW) == "free"
-    assert v(None, None, NOW) == "unknown"          # whois промолчал — не врём в обе стороны
-    assert v(False, None, NOW) == "taken"           # свободный домен занят, дедлайна нет -> выкупили
-    assert v(False, NOW - timedelta(days=5), NOW) == "taken"     # дроп давно прошёл, а домен занят
-    assert v(False, NOW + timedelta(days=3), NOW) == "waiting"   # дроп ещё не наступил — норма
+    assert v(True, None, NOW, lane="free") == "free"
+    assert v(None, None, NOW, lane="free") == "unknown"   # whois промолчал — не врём в обе стороны
+    assert v(False, None, NOW, lane="free") == "taken"    # свободный домен занят -> его выкупили
+    assert v(False, NOW - timedelta(days=5), NOW, lane="bid") == "taken"    # дроп давно прошёл
+    assert v(False, NOW + timedelta(days=3), NOW, lane="bid") == "waiting"  # дроп впереди — норма
 
 
 def test_verdict_does_not_reject_a_drop_on_its_drop_day():
@@ -69,10 +69,19 @@ def test_verdict_never_rejects_a_bid_domain_without_deadline():
     assert v(False, None, NOW, lane="free") == "taken"    # а свободный домен занять — можно только выкупив
 
 
+def test_grace_boundary_is_pinned():
+    """Сама величина запаса зажата с обеих сторон: иначе DROP_GRACE — магическая константа,
+    которую можно сдвинуть, не уронив ни одного теста."""
+    v, g = scoring.acquirability_verdict, scoring.DROP_GRACE
+    eps = timedelta(minutes=1)
+    assert v(False, NOW - g + eps, NOW, lane="bid") == "waiting"   # ещё внутри запаса
+    assert v(False, NOW - g - eps, NOW, lane="bid") == "taken"     # запас исчерпан
+
+
 def test_verdict_handles_naive_deadline_from_db():
     """SQLite отдаёт datetime без tzinfo — сравнение с aware now упало бы TypeError."""
     naive = (NOW + timedelta(days=3)).replace(tzinfo=None)
-    assert scoring.acquirability_verdict(False, naive, NOW) == "waiting"
+    assert scoring.acquirability_verdict(False, naive, NOW, lane="bid") == "waiting"
 
 
 # --- перепроверка ---------------------------------------------------------------
@@ -127,14 +136,70 @@ def test_drop_on_its_drop_day_is_not_rejected(sqlite_db, monkeypatch):
 
 def test_bid_domain_without_deadline_is_never_rejected(sqlite_db, monkeypatch):
     """Дрейф формата фида (delete_date не распарсился -> None) не должен отбраковать
-    ВЕСЬ список дропов за один прогон."""
+    ВЕСЬ список дропов за один прогон. Но отметку он получает — см. следующий тест."""
     did = _add(domain="nodate.ru", status="approved", lane="bid", acquire_deadline=None)
     _whois(monkeypatch, {"nodate.ru": False})
     r = scoring.recheck_acquirability()
     assert r["unknown"] == 1 and r["taken"] == 0
     with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "approved"
+
+
+def test_deterministic_unknown_does_not_starve_the_queue(sqlite_db, monkeypatch):
+    """ГОЛОДАНИЕ. whois ОТВЕТИЛ («занят»), но у bid-домена нет дедлайна — судить не по чему,
+    и завтра ответ будет ТОТ ЖЕ. Не поставив отметку, мы бы навечно оставили такой домен в
+    голове nulls_first-очереди: при бюджете меньше числа таких доменов (авария «фид сменил
+    формат delete_date») перепроверка НИКОГДА не дошла бы до остального списка и молча
+    выродилась в no-op — ровно в аварии, ради которой её и укрепляли."""
+    from app.services.settings import update_settings
+    _add(domain="nodate.ru", status="approved", lane="bid", acquire_deadline=None)
+    _add(domain="normal.ru", status="approved", lane="free")
+    update_settings(max_whois_per_run=1)                 # бюджета хватает ровно на один домен
+    _whois(monkeypatch, {"nodate.ru": False, "normal.ru": True})
+
+    calls = _whois(monkeypatch, {"nodate.ru": False, "normal.ru": True})
+    scoring.recheck_acquirability()
+    assert calls == ["nodate.ru"]                        # первый прогон съел неразрешимый
+
+    calls2 = _whois(monkeypatch, {"nodate.ru": False, "normal.ru": True})
+    scoring.recheck_acquirability()
+    assert calls2 == ["normal.ru"], "неразрешимый домен навечно занял голову очереди"
+
+
+def test_transient_whois_failure_is_retried_next_run(sqlite_db, monkeypatch):
+    """А вот СБОЙ (сеть/A-Parser) транзиентен: отметку не ставим, домен возвращается в
+    следующий прогон. Иначе сбой молча «освежил» бы весь список."""
+    from app.services.settings import update_settings
+    did = _add(domain="boom.ru", status="approved", lane="free")
+    _add(domain="other.ru", status="approved", lane="free")
+    update_settings(max_whois_per_run=1)
+    _whois(monkeypatch, {"boom.ru": RuntimeError("A-Parser лёг")})
+    scoring.recheck_acquirability()
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).acquirability_checked_at is None
+
+    calls = _whois(monkeypatch, {"boom.ru": True, "other.ru": True})
+    scoring.recheck_acquirability()
+    assert calls == ["boom.ru"], "упавший домен не вернулся в очередь"
+
+
+def test_domain_taken_into_purchase_mid_run_is_not_rejected(sqlite_db, monkeypatch):
+    """ГОНКА: пока шёл whois, человек отправил домен в выкуп (create_order -> purchasing).
+    Голый UPDATE перезатёр бы его нашим rejected и разъехался с живым заказом."""
+    did = _add(domain="racing.ru", status="approved", lane="free")
+
+    def probe(self, domain):
+        with db.SessionLocal() as s:                     # имитируем клик оператора во время whois
+            s.get(Domain, did).status = "purchasing"
+            s.commit()
+        return {"available": False, "created": None}     # whois говорит «занят»
+    monkeypatch.setattr("app.integrations.aparser.AParserClient.whois_probe", probe)
+
+    r = scoring.recheck_acquirability()
+    assert r["taken"] == 0, "сводка соврала об отбраковке, которой не было"
+    with db.SessionLocal() as s:
         d = s.get(Domain, did)
-        assert d.status == "approved" and d.acquirability_checked_at is None
+        assert d.status == "purchasing" and d.reject_reason is None
 
 
 def test_unknown_does_not_touch_status_or_stamp(sqlite_db, monkeypatch):

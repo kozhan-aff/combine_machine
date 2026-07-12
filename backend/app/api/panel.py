@@ -316,7 +316,7 @@ def run_score_action(n: int = Form(5)):
 @router.post("/run/recheck")
 def run_recheck_action(n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.services import scoring, jobs
 
     def _run():
@@ -324,7 +324,8 @@ def run_recheck_action(n: int = Form(200)):
             limit=n, on_progress=lambda d, t, cur: jobs.report("recheck", d, t, cur))
         # Сводка живёт в jobs до следующего прогона и показывается при каждом заходе на
         # /domains — поэтому датируем её, иначе вчерашний итог неотличим от свежего.
-        stamp = datetime.now().strftime("%d.%m %H:%M")
+        # Явный UTC: контейнер живёт в UTC, оператор — в MSK; голое время врало бы на 3 часа.
+        stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
         jobs.report("recheck", r["checked"], r["checked"], "",
                     message=f"проверено {r['checked']}: свободны {r['free']}, "
                             f"ждут дропа {r['waiting']}, ЗАНЯТЫ {r['taken']} (отбракованы), "
