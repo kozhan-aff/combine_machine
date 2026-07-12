@@ -312,14 +312,29 @@ def test_raw_source_no_deadline_taken_is_not_acquirable():
 
 
 def test_raw_source_past_deadline_is_not_acquirable():
-    # сырой домен, whois «занят», дедлайн дропа УЖЕ ПРОШЁЛ -> реально занят, не ждём
-    past = datetime.now(timezone.utc) - timedelta(days=1)
+    # сырой домен, whois «занят», дедлайн дропа прошёл ДАВНО (за пределами DROP_GRACE)
+    # -> реально занят, ждать нечего. Было -1 день, стало -5: delete_date в фиде — ДАТА без
+    # времени (00:00 дня дропа), поэтому сутки после дедлайна ещё НЕ значат «домен потерян»
+    # (реестр освобождает его в течение дня). Запас — scoring.DROP_GRACE, см. соседний тест.
+    past = datetime.now(timezone.utc) - timedelta(days=5)
     did = _mk(domain="expired.ru", lane=None, source="cctld",
               referring_domains=10, acquire_deadline=past)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
     assert wb.calls == 0
+
+
+def test_drop_day_deadline_is_not_rejected():
+    """Дедлайн = 00:00 СЕГОДНЯШНЕГО дня (именно так фид отдаёт delete_date — датой без
+    времени), домен ещё занят: реестр освободит его в течение дня. Отбраковать здесь =
+    выбросить дроп ровно в тот день, когда его можно ловить."""
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    did = _mk(domain="dropping-today.ru", lane=None, source="cctld",
+              referring_domains=10, acquire_deadline=today)
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}))
+    assert out.get("unresolved") is True
+    assert out["status"] == "discovered", "дроп выброшен в день его дропа"
 
 
 def test_whois_budget_caps_run(monkeypatch, sqlite_db):

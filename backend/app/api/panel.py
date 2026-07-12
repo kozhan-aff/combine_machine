@@ -178,10 +178,12 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
     rows = db.execute(stmt).scalars().all()
     counts = _domain_counts(db)
     site_by_domain = dict(db.execute(select(Site.domain_id, Site.id)).all())
+    from app.services.scoring import stale_donors
     return templates.TemplateResponse(request, "domains.html", {
         "active": "domains",
         "rows": rows, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": site_by_domain,
+        "stale": stale_donors(db=db),     # сколько доноров давно не сверялись с whois
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
@@ -330,6 +332,29 @@ def run_score_action(n: int = Form(5)):
         limit=n, on_progress=lambda d, t, c: jobs.report("score", d, t, c)))
     return _back("/domains", msg="Score запущен…" if ok else None,
                  err=None if ok else "Score уже идёт")
+
+
+@router.post("/run/recheck")
+def run_recheck_action(n: int = Form(200)):
+    """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
+    from datetime import datetime, timezone
+    from app.services import scoring, jobs
+
+    def _run():
+        r = scoring.recheck_acquirability(
+            limit=n, on_progress=lambda d, t, cur: jobs.report("recheck", d, t, cur))
+        # Сводка живёт в jobs до следующего прогона и показывается при каждом заходе на
+        # /domains — поэтому датируем её, иначе вчерашний итог неотличим от свежего.
+        # Явный UTC: контейнер живёт в UTC, оператор — в MSK; голое время врало бы на 3 часа.
+        stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
+        jobs.report("recheck", r["checked"], r["checked"], "",
+                    message=f"проверено {r['checked']}: свободны {r['free']}, "
+                            f"ждут дропа {r['waiting']}, ЗАНЯТЫ {r['taken']} (отбракованы), "
+                            f"не определилось {r['unknown']} · {stamp}")
+
+    ok = jobs.start("recheck", _run)
+    return _back("/domains", msg="Перепроверка занятости запущена…" if ok else None,
+                 err=None if ok else "Перепроверка уже идёт")
 
 
 @router.get("/run/{job}/progress")
