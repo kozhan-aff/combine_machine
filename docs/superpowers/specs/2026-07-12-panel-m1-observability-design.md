@@ -93,8 +93,8 @@ Claude Design, 2026-07-12) — они держат наши токены (хол
 ### 3.2 Контракт `services/jobs.py`
 
 ```python
-jobs.track(name, *, trigger="manual", stages=None, lock=True)  # контекст-менеджер: строка в БД,
-                                                               # ловит исключение → status=failed
+jobs.track(name, *, trigger="manual", stages=None)  # контекст-менеджер: строка в БД,
+                                                     # ловит исключение → status=failed
 jobs.spawn(name, target) -> bool       # фоновый поток (как сегодня start); False = уже идёт
 jobs.report(name, done, total, current="", stage="", message="")
 jobs.cancelled(name) -> bool           # сервис спрашивает между итерациями

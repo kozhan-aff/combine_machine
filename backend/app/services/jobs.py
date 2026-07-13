@@ -117,14 +117,15 @@ def _is_stale(r) -> bool:
 
 def _as_dict(r) -> dict:
     # ДОПОЛНЕНИЕ ПРОТИВ СПЕКИ (эмпирически обнаружено, не было в брифе): started_at/finished_at
-    # отдаём ISO-строкой, не сырым datetime. Панель (backend/app/api/panel.py, вне периметра этой
-    # задачи — Task 2/3) на роуте `GET /run/{job}/progress` делает `JSONResponse(jobs.progress(job))`
-    # БЕЗ jsonable_encoder — с сырым datetime это 100% `TypeError: Object of type datetime is not
-    # JSON serializable` (воспроизведено: test_pipeline.py::test_run_score_double_start_and_
-    # progress_route). Старый _blank() отдавал только JSON-безопасные running/done/total/current/
-    # message/error — новый более широкий контракт (см. брифа «Форма dict») обязан остаться
-    # JSON-безопасным СРАЗУ, раз этот же роут его сериализует напрямую и трогать panel.py в этой
-    # задаче нельзя. ISO-строка — тот же формат, в котором это в любом случае уйдёт по HTTP.
+    # отдаём ISO-строкой, не сырым datetime. Изначально обнаружено на ныне снесённом роуте
+    # `GET /run/{job}/progress` (Task 3 его удалил) — `JSONResponse(...)` без jsonable_encoder
+    # на сыром datetime даёт 100% `TypeError: Object of type datetime is not JSON serializable`.
+    # Актуальный держатель этого решения СЕГОДНЯ — `dashboard.html` (last_runs): там `r.finished_at`
+    # рендерится сервер-сайд через Jinja срезом строки (`r.finished_at[8:10] + '.' + ...`), в обход
+    # jsonable_encoder — вернуть сюда сырой datetime сломает именно этот срез с TypeError.
+    # `/api/jobs/live` (panel.py) от формата не зависит — там jsonable_encoder есть и сам бы
+    # сериализовал datetime, не в нём подвох. ISO-строка — тот же формат, в котором это всё равно
+    # уйдёт по HTTP, так что менять её здесь не с чем.
     return {"name": r.name, "trigger": r.trigger, "status": r.status, "stage": r.stage,
             "stages": r.stages or [], "done": r.done, "total": r.total, "current": r.current,
             "message": r.message, "error": r.error, "cancel_requested": r.cancel_requested,
