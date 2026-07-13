@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Пул доменов{% endblock %}
+{% block content %}
+<h2><span class="idx">02</span> Полный реестр доменов
+  <span class="hint">все домены во всех статусах — для расследований;
+    ежедневная работа — <a href="/domains">инбокс M1</a></span></h2>
+
+<details class="legend">
+  <summary>Легенда: статусы доменов и колонки таблицы</summary>
+  <div class="legend-grid">
+    <span class="badge b-discovered">{{ 'discovered'|status_ru }}</span><span class="who">машина</span>
+      <span class="desc">найден в фиде, ещё не оценён — ждёт ▶ Запуск проверки</span>
+    <span class="badge b-scored">{{ 'scored'|status_ru }}</span><span class="who">машина</span>
+      <span class="desc">оценён, но не дотянул до авто-одобрения — реши сам: ✓ или ✗</span>
+    <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">машина / ты</span>
+      <span class="desc">чистый и годный к выкупу — купи руками у провайдера, потом отметь 🛒</span>
+    <span class="badge b-rejected">{{ 'rejected'|status_ru }}</span><span class="who">машина / ты</span>
+      <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>):
+      <code>low_rd</code> мало доноров, <code>feed_flag</code> флаг источника, <code>too_young</code>
+      моложе порога, <code>rkn</code> реестр РКН, <code>blacklist</code> блэклист,
+      <code>history_dirty</code> грязная история, <code>low_score</code> низкий скор,
+      <code>not_acquirable</code> нельзя купить (занят, не на бэкордере)</span>
+    <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span><span class="who">только ты</span>
+      <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
+    <span class="badge b-live">{{ 'live'|status_ru }}</span><span class="who">машина</span>
+      <span class="desc">сайт на домене опубликован и работает</span>
+  </div>
+  <div class="legend-grid" style="border-top:1px dashed var(--line)">
+    <span class="hint">score</span><span class="who">0–1</span>
+      <span class="desc">сводная оценка качества: история + возраст + ссылки + индекс</span>
+    <span class="hint">RD</span><span class="who">из фида</span>
+      <span class="desc">referring domains — сколько доменов ссылается (авторитетность)</span>
+    <span class="hint">echo</span><span class="who">SearXNG</span>
+      <span class="desc">✓ = домен ещё встречается в поисковом индексе (был жив)</span>
+    <span class="hint">флаги</span><span class="who">Wayback/РКН</span>
+      <span class="desc">красные метки грязной истории — любой флаг = авто-reject</span>
+    <span class="hint">⌛</span><span class="who">ссылка</span>
+      <span class="desc">открыть историю домена в Wayback — глянуть глазами перед решением</span>
+  </div>
+</details>
+
+<div class="chips">
+  <a class="chip {{ 'on' if not f_status }}" href="/domains/pool"
+     title="показать домены во всех статусах">все <b>{{ total }}</b></a>
+  <a class="chip {{ 'on' if show_all }}" href="/domains/pool?show_all=1"
+     title="показать в том числе непокупаемые (not_acquirable)">+ непокупаемые</a>
+  {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
+    {% if counts.get(st) %}
+    <a class="chip {{ 'on' if f_status==st }}" href="/domains/pool?status={{ st }}"
+       title="показать только домены в статусе {{ st }} ({{ st|status_ru }})">{{ st|status_ru }} <b>{{ counts[st] }}</b></a>
+    {% endif %}
+  {% endfor %}
+  <form method="get" action="/domains/pool" style="display:flex; gap:10px; margin-left:12px; align-items:end">
+    <input type="hidden" name="status" value="{{ f_status }}">
+    <label class="f">score от (0–1)
+      <input type="number" name="min_score" step="0.05" min="0" max="1" value="{{ f_min_score }}"
+             style="width:92px; padding:2px 8px"></label>
+    <label class="f">показать строк
+      <input type="number" name="limit" min="1" max="1000" value="{{ f_limit }}"
+             style="width:80px; padding:2px 8px"></label>
+    <button class="btn-sm" title="применить фильтр по score и лимиту">применить фильтр</button>
+  </form>
+</div>
+
+<div class="wrap">
+{% if rows %}
+<table>
+  <thead><tr>
+    <th>домен</th><th>статус</th><th>лейн</th><th class="num">цена</th><th>score</th><th class="num">RD</th>
+    <th class="num">возраст</th><th>echo</th><th>флаги истории</th><th class="num">найден</th>
+    <th>следующий шаг</th>
+  </tr></thead>
+  <tbody>
+  {% for d in rows %}
+    <tr>
+      <td class="dom">
+        <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
+          title="источник: {{ d.source or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
+          >{{ {'backorder':'bo','cctld':'cc','reg_ru':'rg','sweb':'sw'}.get(d.source, (d.source or '?')[:2]) }}</span>{{ d.domain }}
+        <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
+           title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
+      <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status|status_ru }}</span>
+        {% if d.reject_reason %}<span class="hint" title="причина отклонения (reject_reason)">{{ d.reject_reason|reject_ru }} <code>{{ d.reject_reason }}</code></span>{% endif %}</td>
+      <td><span class="hint">{{ d.lane|lane_ru or '—' }}</span></td>
+      <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
+      <td>
+        {% if d.score is not none %}{% set sc = d.score|float %}
+          <span class="meter"><i class="{{ 'm-ok' if sc>=0.6 else 'm-mid' if sc>=0.35 else 'm-low' }}"
+                style="width:{{ (sc*100)|round|int }}%"></i></span><span class="num">{{ '%.2f'|format(sc) }}</span>
+        {% else %}<span class="hint">—</span>{% endif %}
+      </td>
+      <td class="num">{{ d.referring_domains if d.referring_domains is not none else '—' }}</td>
+      <td class="num">{{ '%.1f'|format(d.age_years|float) if d.age_years is not none else '—' }}</td>
+      <td>{% if d.indexed_echo %}<span style="color:var(--ok)" title="домен встречается в поисковом индексе">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td>
+        {% set pf = d.prior_flags or {} %}
+        {% for k in ['adult','pharma','casino','gambling','spam','topic_switch'] %}
+          {% if pf.get(k) %}<span class="flag">{{ k }}</span>{% endif %}
+        {% endfor %}
+        {% if d.rkn_listed %}<span class="flag">РКН</span>{% endif %}
+        {% if d.blacklisted %}<span class="flag">blacklist</span>{% endif %}
+      </td>
+      <td class="num hint">{{ d.discovered_at.strftime('%m-%d') if d.discovered_at else '—' }}</td>
+      <td>
+        {# контекстные действия: на каждом статусе видно только осмысленный следующий шаг #}
+        {% if d.status == 'discovered' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать проверки только для этого домена (≈5 с)">▶ отскорить</button></form>
+        {% elif d.status == 'scored' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm btn-ok" title="одобрить: домен годен, пойдёт в очередь на покупку">✓ одобрить</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="отклонить: домен не годится, убрать из воронки">✗ отклонить</button></form>
+        {% elif d.status == 'approved' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+            <button class="btn-sm btn-acc" title="поставить в очередь выкупа (M2): заявка → подтверждение → отправка провайдеру">＋ в очередь выкупа</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="purchased">
+            <button class="btn-sm btn-buy" title="быстрый путь: я уже купил домен руками у провайдера (система деньги не тратит)">🛒 отметить купленным</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="передумал: убрать из очереди на покупку">✗ отклонить</button></form>
+        {% elif d.status == 'purchasing' %}
+          <a class="btn btn-sm" href="/queue"
+             title="домен в очереди выкупа — управлять заказом там">→ в очереди выкупа</a>
+        {% elif d.status == 'purchased' %}
+          {% if site_by_domain.get(d.id) %}
+            <a class="btn btn-sm btn-acc" href="/sites/{{ site_by_domain[d.id] }}"
+               title="открыть карточку сайта этого домена">открыть сайт →</a>
+          {% else %}
+            <form class="inline" method="post" action="/domains/{{ d.id }}/make-site">
+              <button class="btn-sm btn-acc" title="завести карточку сайта: дальше провижн, контент, публикация">＋ создать сайт</button></form>
+          {% endif %}
+        {% elif d.status == 'rejected' %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm" title="вернуть домен в статус approved (годен к покупке)">↩ вернуть в approved</button></form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни со станции
+  «↻ Поиск дропов» — фид принесёт свежие дропы, затем «▶ Запуск проверки» их оценит.</div>
+{% endif %}
+</div>
+
+{% endblock %}

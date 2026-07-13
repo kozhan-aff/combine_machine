@@ -77,7 +77,7 @@ def test_api_limit_huge_does_not_error(client):
 
 def test_panel_limit_clamped_high(client):
     """Панель клампит верх до 1000 — в поле фильтра отражается 1000, не миллионы."""
-    r = client.get("/domains?limit=100000000")
+    r = client.get("/domains/pool?limit=100000000")
     assert r.status_code == 200 and 'value="1000"' in r.text
 
 
@@ -98,7 +98,7 @@ def test_panel_domains_renders_reject_reason_badge(client):
         s.add(Domain(domain="why-rejected-panel.ru", source="backorder", status="rejected",
                      reject_reason="history_dirty"))
         s.commit()
-    r = client.get("/domains?status=rejected")
+    r = client.get("/domains/pool?status=rejected")
     assert r.status_code == 200 and "history_dirty" in r.text
 
 
@@ -195,9 +195,9 @@ def test_domains_hides_not_acquirable_by_default(client, sqlite_db):
             Domain(domain="ok.ru", source="backorder", status="approved", lane="bid"),
             Domain(domain="no.ru", source="cctld", status="rejected", reject_reason="not_acquirable"),
         ]); s.commit()
-    body = client.get("/domains").text
+    body = client.get("/domains/pool").text
     assert "ok.ru" in body and "no.ru" not in body            # по умолчанию скрыт
-    assert "no.ru" in client.get("/domains?show_all=1").text   # под фильтром виден
+    assert "no.ru" in client.get("/domains/pool?show_all=1").text   # под фильтром виден
 
 
 def test_refresh_prices_route(client, monkeypatch):
@@ -233,7 +233,7 @@ def test_domains_localized_labels(client, sqlite_db):
         s.add(Domain(domain="rej.ru", source="cctld", status="rejected",
                      reject_reason="not_acquirable"))
         s.commit()
-    html = client.get("/domains?show_all=1").text
+    html = client.get("/domains/pool?show_all=1").text
     # бейдж: класс на СЫРОМ значении, текст локализован — проверяем именно разметку
     # бейджа/лейна/reject, а не «слово где-то на странице» (иначе тест не отличит
     # локализацию от совпадения со старой прозой).

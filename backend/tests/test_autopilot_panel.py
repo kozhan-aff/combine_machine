@@ -60,7 +60,7 @@ def test_gates_counts(client):
         site = Site(domain_id=d.id, status="content"); s.add(site); s.commit()
         s.add(Page(site_id=site.id, url_path="/", status="draft")); s.commit()
     html = client.get("/autopilot").text
-    assert "/domains?status=scored" in html and "/queue" in html
+    assert 'href="/domains"' in html and "/queue" in html
 
 
 def test_dashboard_shows_autopilot_strip(client):
@@ -75,7 +75,7 @@ def test_domains_filter_chips_localized(client):
     with db.SessionLocal() as s:
         s.add(Domain(domain="chip.ru", source="backorder", status="approved"))
         s.commit()
-    html = client.get("/domains").text
+    html = client.get("/domains/pool").text
     # чип статуса: видимый текст локализован, счётчик на месте
     assert "одобрен" in html                       # approved -> одобрен (через status_ru)
     assert ">approved <b>" not in html             # сырой английский в тексте чипа исчез

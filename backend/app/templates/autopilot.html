@@ -7,7 +7,7 @@
 <div class="funnel" style="margin-bottom:6px">
   <div class="fgroup"><div class="fg-h">Ждёт тебя</div>
     <div class="fg-cells">
-      <a class="fcell {{ 'gate' if gates.curate }}" href="/domains?status=scored" title="на курацию (гейт отбора): реши ✓ approve / ✗ reject">
+      <a class="fcell {{ 'gate' if gates.curate }}" href="/domains" title="на курацию (гейт отбора): реши ✓ approve / ✗ reject">
         <div class="v">{{ gates.curate }}</div><div class="k">на курацию</div></a>
       <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="на подтверждение (денежный гейт, только ты): ждут выкупа">
         <div class="v">{{ gates.money }}</div><div class="k">подтвердить</div></a>

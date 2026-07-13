@@ -61,13 +61,13 @@
     <div class="fg-cells">
       <a class="fcell" href="/offers" title="офферы: бренды и партнёрские ссылки — вход машины">
         <div class="v">{{ offers_active }}</div><div class="k">офферы</div></a>
-      <a class="fcell" href="/domains?status=discovered" title="найдены в фиде, ещё не оценены — ждут ▶ Проверку">
+      <a class="fcell" href="/domains/pool?status=discovered" title="найдены в фиде, ещё не оценены — ждут ▶ Проверку">
         <div class="v">{{ dc.get('discovered', 0) }}</div><div class="k">найдено</div></a>
-      <a class="fcell {{ 'gate' if dc.get('scored') }}" href="/domains?status=scored" title="оценены машиной — ждут твоего ✓/✗">
+      <a class="fcell {{ 'gate' if dc.get('scored') }}" href="/domains" title="оценены машиной — ждут твоего ✓/✗">
         <div class="v">{{ dc.get('scored', 0) }}</div><div class="k">на решении</div></a>
-      <a class="fcell" href="/domains?status=approved" title="одобрены — купить руками у провайдера">
+      <a class="fcell" href="/domains" title="одобрены — купить руками у провайдера">
         <div class="v">{{ dc.get('approved', 0) }}</div><div class="k">одобрено</div></a>
-      <a class="fcell" href="/domains?status=purchased" title="куплены — дальше создать сайт">
+      <a class="fcell" href="/domains/pool?status=purchased" title="куплены — дальше создать сайт">
         <div class="v">{{ dc.get('purchased', 0) }}</div><div class="k">куплено</div></a>
     </div></div>
   <div class="fgroup"><div class="fg-h">M2 · Выкуп</div>

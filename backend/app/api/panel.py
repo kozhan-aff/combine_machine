@@ -83,16 +83,16 @@ def _next_steps(db: Session) -> list[dict]:
     if not offers_active:
         steps.append({"href": "/offers", "text": "Добавь оффер — это вход машины: без него контенту не на что ссылаться."})
     if dc.get("discovered"):
-        steps.append({"href": "/domains?status=discovered", "text": f"{dc['discovered']} доменов ждут скоринга — запусти ▶ Score (лучшие по RD пойдут первыми)."})
+        steps.append({"href": "/domains/pool?status=discovered", "text": f"{dc['discovered']} доменов ждут скоринга — запусти ▶ Score (лучшие по RD пойдут первыми)."})
     if dc.get("scored"):
-        steps.append({"href": "/domains?status=scored", "text": f"{dc['scored']} отскорено — просмотри и реши ✓ approve / ✗ reject."})
+        steps.append({"href": "/domains", "text": f"{dc['scored']} отскорено — просмотри и реши ✓ approve / ✗ reject."})
     if dc.get("approved"):
-        steps.append({"href": "/domains?status=approved", "text": f"{dc['approved']} одобрено — купи домен руками у провайдера, потом отметь 🛒 куплен."})
+        steps.append({"href": "/domains", "text": f"{dc['approved']} одобрено — купи домен руками у провайдера, потом отметь 🛒 куплен."})
     purchased_no_site = db.execute(
         select(Domain).where(Domain.status == "purchased")
         .where(~Domain.id.in_(select(Site.domain_id)))).scalars().all()
     if purchased_no_site:
-        steps.append({"href": "/domains?status=purchased", "text": f"{len(purchased_no_site)} купленных без сайта — нажми «создать сайт»."})
+        steps.append({"href": "/domains/pool?status=purchased", "text": f"{len(purchased_no_site)} купленных без сайта — нажми «создать сайт»."})
     for s in db.execute(select(Site).where(Site.status == "provisioning")).scalars().all():
         steps.append({"href": f"/sites/{s.id}", "text": f"Сайт #{s.id}: запусти Provision (Cloudflare + aaPanel)."})
     for s in db.execute(select(Site).where(Site.status == "content")).scalars().all():
@@ -166,10 +166,69 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
     })
 
 
+_URGENT_DAYS = 3        # «дроп на носу» — столько же, сколько DROP_GRACE в scoring, с запасом
+
+
+def _urgent(d, soon) -> bool:
+    """Дедлайн дропа на носу. Срочность = БЛИЗКИЙ дедлайн, а не наличие дедлайна: у каждого
+    backorder-домена дедлайн есть всегда, и «янтарная полоса у всех» ничего не выделяет.
+
+    Дату нормализуем: SQLite отдаёт acquire_deadline naive, PostgreSQL — tz-aware; голое
+    сравнение с now(tz) роняет TypeError. Тот же приём — в scoring.acquirability_verdict."""
+    from datetime import timezone
+    dl = d.acquire_deadline
+    if dl is None:
+        return False
+    if dl.tzinfo is None:
+        dl = dl.replace(tzinfo=timezone.utc)
+    return dl <= soon
+
+
 @router.get("/domains", response_class=HTMLResponse)
-def domains_view(request: Request, status: str | None = None, min_score: float | None = None,
-                 limit: int = 200, show_all: bool = False, db: Session = Depends(get_session)):
-    limit = max(1, min(limit, 1000))   # серверный кап: не тянуть всю таблицу в память
+def domains_view(request: Request, db: Session = Depends(get_session)):
+    """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import jobs
+    from app.services.scoring import blind_reason, stale_donors
+
+    # срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым
+    order = (Domain.acquire_deadline.asc().nulls_last(), Domain.score.desc().nulls_last())
+    inbox = db.execute(select(Domain).where(Domain.status == "scored").order_by(*order)).scalars().all()
+    ready = db.execute(select(Domain).where(Domain.status == "approved").order_by(*order)).scalars().all()
+    counts = _domain_counts(db)
+    soon = datetime.now(timezone.utc) + timedelta(days=_URGENT_DAYS)
+    urgent = sum(1 for d in inbox + ready if _urgent(d, soon))
+    reasons = dict(db.execute(
+        select(Domain.reject_reason, func.count()).where(Domain.status == "rejected")
+        .group_by(Domain.reject_reason)).all())
+    # «отсеял ПОРОГ» и «объективная грязь» — разные природы отказа: первое крутится на
+    # /settings, второе не крутится ничем. Считаем здесь, а не в Jinja.
+    thr = sum(n for code, n in reasons.items() if code in ("low_rd", "too_young", "low_score"))
+    return templates.TemplateResponse(request, "domains.html", {
+        "active": "domains",
+        # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
+        # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
+        "inbox": [(d, blind_reason(d), _urgent(d, soon)) for d in inbox],
+        "ready": ready,
+        "counts": counts, "total": sum(counts.values()),
+        "gates": _gates(db),
+        "offers_active": db.scalar(select(func.count()).select_from(Offer)
+                                   .where(Offer.active.is_(True))) or 0,
+        "urgent": urgent, "urgent_days": _URGENT_DAYS,
+        "stale": stale_donors(db=db),
+        "reasons": reasons, "reasons_total": sum(reasons.values()), "reasons_thr": thr,
+        "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
+        # переживает location.reload() поллера: без этого упавшая discovery/score/recheck
+        # молча исчезает из виду после того, как #machine схлопнется на busy->idle (Task 4).
+        "last_runs": {name: jobs.last(name) for name in ("discovery", "score", "recheck")},
+    })
+
+
+@router.get("/domains/pool", response_class=HTMLResponse)
+def domains_pool_view(request: Request, status: str | None = None, min_score: float | None = None,
+                      limit: int = 200, show_all: bool = False, db: Session = Depends(get_session)):
+    """Полный реестр — для расследований, а не для ежедневной работы."""
+    limit = max(1, min(limit, 1000))            # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
         stmt = stmt.where(Domain.status == status)
@@ -178,20 +237,47 @@ def domains_view(request: Request, status: str | None = None, min_score: float |
                               Domain.reject_reason != "not_acquirable"))
     if min_score is not None:
         stmt = stmt.where(Domain.score >= min_score)
-    stmt = stmt.order_by(Domain.score.desc().nulls_last(),
-                         Domain.referring_domains.desc().nulls_last()).limit(limit)
-    rows = db.execute(stmt).scalars().all()
+    rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
+                                    Domain.referring_domains.desc().nulls_last())
+                      .limit(limit)).scalars().all()
     counts = _domain_counts(db)
-    site_by_domain = dict(db.execute(select(Site.domain_id, Site.id)).all())
-    from app.services.scoring import stale_donors
-    return templates.TemplateResponse(request, "domains.html", {
-        "active": "domains",
-        "rows": rows, "counts": counts, "total": sum(counts.values()),
-        "site_by_domain": site_by_domain,
-        "stale": stale_donors(db=db),     # сколько доноров давно не сверялись с whois
+    return templates.TemplateResponse(request, "pool.html", {
+        "active": "domains", "rows": rows, "counts": counts, "total": sum(counts.values()),
+        "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
+
+
+def _bulk_candidates(db: Session, min_score: float):
+    """(чистые к одобрению, сколько отсеяно как «вслепую»)."""
+    from app.services.scoring import blind_reason
+    rows = db.execute(select(Domain).where(Domain.status == "scored",
+                                           Domain.score >= min_score)).scalars().all()
+    clean = [d for d in rows if not blind_reason(d)]
+    return clean, len(rows) - len(clean)
+
+
+@router.get("/domains/bulk-preview")
+def bulk_preview(min_score: float = 0.8, db: Session = Depends(get_session)):
+    from fastapi.responses import JSONResponse
+    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    return JSONResponse({"n": len(clean), "blind": blind})
+
+
+@router.post("/domains/bulk-approve")
+def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_session)):
+    """Пакетное одобрение — это КЛИК ЧЕЛОВЕКА, гейт курации на месте (деньги не тратятся:
+    approved != куплен). Домены, оценённые вслепую (Wayback лежал), в пакет НЕ попадают —
+    иначе пакет стал бы обходом того самого гейта, ради которого он существует."""
+    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    for d in clean:
+        d.status = "approved"
+    db.commit()
+    msg = f"Одобрено пакетом: {len(clean)}"
+    if blind:
+        msg += f" · пропущено «вслепую»: {blind} — их реши руками"
+    return _back("/domains", msg=msg)
 
 
 @router.get("/diag", response_class=HTMLResponse)
