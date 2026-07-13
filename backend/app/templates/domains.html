@@ -120,6 +120,11 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           <div class="hint" style="font-size:10px; letter-spacing:.08em">СРОК ДРОПА</div>
           <div style="font-weight:700; {{ 'color:var(--acc2)' if urgent else 'color:var(--mut)' }}">
             {{ d.acquire_deadline.strftime('%d.%m') }}</div>
+          {# окно дропа закрыто — домен уже не купить. Без метки его одобряют и идут покупать
+             покойника: перепроверка вынесет ему not_acquirable, но позже и молча. #}
+          {% if d.id in expired_ids %}
+            <div class="hint" style="color:var(--bad)" title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</div>
+          {% endif %}
         {% else %}<span class="hint">— без дедлайна</span>{% endif %}
       </td>
       <td class="dom">
@@ -177,7 +182,10 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
     <tr>
       <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span></td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
-      <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}</td>
+      <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}
+        {# отсюда ИДУТ ПОКУПАТЬ — метка «окно закрыто» тут дороже всего #}
+        {% if d.id in expired_ids %}<br><span class="hint" style="color:var(--bad)"
+          title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</span>{% endif %}</td>
       <td>
         <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
           <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>

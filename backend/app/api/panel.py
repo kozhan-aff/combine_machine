@@ -204,17 +204,22 @@ def _urgent(d, soon, now) -> bool:
 def domains_view(request: Request, db: Session = Depends(get_session)):
     """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool."""
     from datetime import datetime, timedelta, timezone
-    from app.services import jobs
-    from app.services.scoring import blind_reason, stale_donors
-
     from sqlalchemy import case
-    from app.services.scoring import DROP_GRACE
+    from app.services import jobs
+    from app.services.scoring import blind_reason, stale_donors, DROP_GRACE
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
     # НО «ближайший дедлайн» ASC — это самая РАННЯЯ дата, то есть УПУЩЕННЫЙ дроп: он встал бы
-    # первой строкой инбокса и звал бы решать судьбу покойника. Ярус — раньше даты (тот же приём,
-    # что в scoring.score_pending): живое окно → упущенные → без даты.
+    # первой строкой инбокса и звал бы решать судьбу покойника. Значит ярус — раньше даты:
+    #   0 — окно дропа живое (ловится сейчас или впереди)  ← ради них экран и существует
+    #   1 — даты нет (сырьё): купить ещё можно, просто неизвестно когда
+    #   2 — окно ЗАКРЫТО: купить уже нельзя, решать нечего
+    #
+    # ВНИМАНИЕ: пара 1↔2 здесь ПЕРЕВЁРНУТА относительно scoring.score_pending — и это осознанно,
+    # не рассинхрон. Там ярус ранжирует ТРАТУ WHOIS (на покойника whois ещё имеет смысл — он его
+    # и отбракует; на бездатное сырьё — в последнюю очередь). Здесь ярус ранжирует ВНИМАНИЕ
+    # ОПЕРАТОРА, а покойник внимания не стоит вовсе. Не «выравнивай» их.
     tier = case((Domain.acquire_deadline.is_(None), 1),
                 (Domain.acquire_deadline < now - DROP_GRACE, 2),   # окно закрыто — купить нельзя
                 else_=0)
@@ -235,6 +240,10 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
         # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now)) for d in inbox],
+        # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
+        # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
+        # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
+        "expired_ids": {d.id for d in inbox + ready if _expired(d, now)},
         "ready": ready,
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),

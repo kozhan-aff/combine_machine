@@ -142,3 +142,15 @@ def test_expired_drop_is_not_urgent_and_not_first(client):
     assert html.index("alive.ru") < html.index("dead.ru"), "покойник обогнал живой дроп"
     assert html.count('class="urgent"') == 1            # срочный ровно один — живой
     assert "дроп: 1" in html
+
+
+def test_expired_domain_is_marked_in_inbox_and_in_ready(client):
+    """Покойник уехал вниз и не «срочный», но без метки выглядит обычным кандидатом: его одобрят
+    (в т.ч. пакетом) и пойдут ПОКУПАТЬ. Перепроверка вынесет ему not_acquirable — но позже."""
+    now = datetime.now(timezone.utc)
+    _add(domain="dead.ru", status="scored", score=0.9, lane="bid",
+         acquire_deadline=now - timedelta(days=30))
+    _add(domain="deadready.ru", status="approved", score=0.9, lane="bid",
+         acquire_deadline=now - timedelta(days=30))
+    html = client.get("/domains").text
+    assert html.count("окно закрыто") == 2      # и в инбоксе, и в «готовы к выкупу»
