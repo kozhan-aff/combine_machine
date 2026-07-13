@@ -31,25 +31,35 @@
       <button class="btn btn-sm" title="перечитать базовую цену бэкордера">цены</button></form>
     <span class="sep"></span>
     <form class="inline" method="post" action="/run/score" style="display:flex; gap:8px; align-items:center">
-      <label class="f">проверить <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
-      <button class="btn btn-acc" title="прогнать N доменов через воронку скоринга">▶ Запустить</button>
+      <label class="f">оценить <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
+      <button class="btn btn-acc" title="прогнать N найденных доменов через воронку: RD → whois-возраст → РКН/блэклист → эхо → история. ТОЛЬКО отсюда домены попадают «на решение» (~15-20 с на домен)">▶ Оценить домены</button>
     </form>
     <form class="inline" method="post" action="/run/score">
       <input type="hidden" name="n" value="100000">
-      <button class="btn" title="весь пул discovered; бюджет — max_whois_per_run на /settings">весь пул</button></form>
+      <button class="btn" title="оценить весь пул найденных; бюджет whois — max_whois_per_run на /settings. При тысячах доменов это часы">весь пул</button></form>
     <span class="sep"></span>
     <form class="inline" method="post" action="/run/recheck">
       <input type="hidden" name="n" value="200">
-      <button class="btn" title="whois по донорам: занятые уходят в rejected">⟳ Перепроверить занятость</button></form>
+      <button class="btn" title="whois по УЖЕ оценённым донорам: не выкупил ли их кто-то. Пока инбокс пуст — проверять нечего">⟳ Перепроверить занятость</button></form>
     {% if stale %}<span class="hint" style="color:var(--acc2)">{{ stale }} не сверялись 3+ дня</span>{% endif %}
-    {% for key, ru in [('discovery','Поиск дропов'), ('score','Проверка'), ('recheck','Перепроверка')] %}
-      {% set r = last_runs.get(key) %}
-      {% if r and r.status == 'failed' %}
-        <span class="hint" style="color:var(--bad)">⚠ {{ ru }} упала: {{ r.error }}</span>
-      {% endif %}
-    {% endfor %}
     <a class="hint" href="/domains/pool" style="margin-left:auto">полный реестр — все домены →</a>
   </div>
+
+  {# итог последнего прогона КАЖДОЙ задачи — не только падения. Пустой прогон («проверять
+     нечего») обязан быть виден: молчаливое 0/0 за 41 мс неотличимо от сломанной кнопки —
+     ровно на этом оператор решил, что перепроверка не работает (дебаг 2026-07-13). #}
+  {% for key, ru in [('discovery','Поиск дропов'), ('score','Оценка'), ('recheck','Перепроверка')] %}
+    {% set r = last_runs.get(key) %}
+    {% if r and r.status == 'failed' %}
+      <div class="hint" style="color:var(--bad)">⚠ {{ ru }} упала: {{ r.error }}</div>
+    {% elif r and r.message %}
+      <div class="hint">✓ {{ ru }}: {{ r.message }}</div>
+    {% endif %}
+  {% endfor %}
+  {% if not last_runs.get('score') and counts.get('discovered') %}
+    <div class="hint" style="color:var(--acc)">▶ Найдено {{ counts['discovered'] }} доменов, но воронка не запускалась
+      ни разу — они не попадут «на решение», пока не нажать «Оценить домены».</div>
+  {% endif %}
   <details class="what"><summary>что делают эти три действия</summary>
     <div class="what-body">
       <b>Поиск дропов</b> забирает освобождающиеся домены из включённых источников

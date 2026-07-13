@@ -69,6 +69,24 @@ def test_verdict_never_rejects_a_bid_domain_without_deadline():
     assert v(False, None, NOW, lane="free") == "taken"    # а свободный домен занять — можно только выкупив
 
 
+def test_verdict_never_rejects_a_domain_whose_lane_is_unknown():
+    """САМЫЙ ДОРОГОЙ БАГ №2 (найден на живом боксе 2026-07-13). lane заполняется только с
+    коммита 69ef659; у записей старше него он NULL. Старый вердикт трактовал ЛЮБОЙ не-bid
+    лейн как free («домен обязан быть свободен, а он занят -> его выкупили») и слал в
+    rejected/not_acquirable. Так утекли лучшие домены базы: clara-c.ru (score 0.89, RD 2219,
+    возраст 16 лет) и ещё 28 — все с lane=NULL.
+
+    NULL — это «лейн НЕИЗВЕСТЕН», а не «домен свободный». Занятость судим только там, где
+    точно знаем, что домен ОБЯЗАН быть свободен, то есть при lane == "free"."""
+    v = scoring.acquirability_verdict
+    assert v(False, None, NOW, lane=None) == "unknown", "выбросили домен с неизвестным лейном!"
+    # lane="free" по-прежнему судим: там занятость — реальный сигнал «кто-то зарегистрировал»
+    assert v(False, None, NOW, lane="free") == "taken"
+    # а вот когда дедлайн ЕСТЬ, судить есть по чему — лейн уже не важен
+    assert v(False, NOW - timedelta(days=99), NOW, lane=None) == "taken"
+    assert v(False, NOW + timedelta(days=3), NOW, lane=None) == "waiting"
+
+
 def test_grace_boundary_is_pinned():
     """Сама величина запаса зажата с обеих сторон: иначе DROP_GRACE — магическая константа,
     которую можно сдвинуть, не уронив ни одного теста."""

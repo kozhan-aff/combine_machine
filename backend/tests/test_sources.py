@@ -404,3 +404,31 @@ def test_cctld_ping_false_when_no_zip_href(monkeypatch):
         text = "<html>ничего нет</html>"
     monkeypatch.setattr(c, "request", lambda method, url, **kw: _Resp())
     assert c.ping() is False
+
+
+def test_cctld_carries_drop_deadline_from_zip_name(monkeypatch):
+    """Дата дропа cctld живёт В ИМЕНИ архива (RUDelList20260714.zip) — и обязана доехать до
+    домена. Без неё whois говорит «занят» (домен ДО дропа и должен быть занят), вердикт судить
+    не по чему, и весь реестр (~9.5 тыс.) уезжает в rejected/not_acquirable, ни разу не
+    дождавшись дропа. Ровно это и было на живом боксе (дебаг 2026-07-13)."""
+    from datetime import datetime, timezone
+    from app.integrations.cctld import CctldClient
+
+    c = CctldClient()
+    monkeypatch.setattr(c, "_zip_urls", lambda: ["https://cctld.ru/files/RUDelList20260714.zip"])
+    monkeypatch.setattr(c, "_domains_from_zip", lambda url: ["alpha.ru", "beta.ru"])
+    rows = c.list_dropping()
+    assert [r["domain"] for r in rows] == ["alpha.ru", "beta.ru"]
+    assert all(r["acquire_deadline"] == datetime(2026, 7, 14, tzinfo=timezone.utc) for r in rows)
+
+
+def test_cctld_unparsable_zip_name_yields_no_deadline(monkeypatch):
+    """Разметка съехала — домены всё равно едут, просто без дедлайна (и вердикт их не
+    выбрасывает, а ждёт). Тихо ронять источник целиком тут нельзя."""
+    from app.integrations.cctld import CctldClient
+
+    c = CctldClient()
+    monkeypatch.setattr(c, "_zip_urls", lambda: ["https://cctld.ru/files/mystery.zip"])
+    monkeypatch.setattr(c, "_domains_from_zip", lambda url: ["alpha.ru"])
+    assert c.list_dropping() == [{"domain": "alpha.ru", "source": "cctld",
+                                  "referring_domains": None, "acquire_deadline": None}]

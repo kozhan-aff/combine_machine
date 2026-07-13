@@ -243,8 +243,15 @@ def test_too_young_fallback_from_wayback_when_whois_fails():
     assert wb.calls == 1            # фолбэк-возраст пришёл именно из Wayback
 
 
-def test_raw_registered_rejects_not_acquirable_before_wayback(monkeypatch, sqlite_db):
-    """Сырой домен, whois=занят → not_acquirable, Wayback НЕ вызывался."""
+def test_raw_registered_without_deadline_waits_instead_of_rejecting(monkeypatch, sqlite_db):
+    """БЫЛО: сырой домен, whois=занят, дедлайна нет → not_acquirable (выброс).
+    СТАЛО: остаётся discovered. Wayback по-прежнему НЕ вызывается (ранний выход тот же).
+
+    Почему изменено (дебаг 2026-07-13): cctld — реестр ОСВОБОЖДАЮЩИХСЯ доменов, и до своего
+    дропа такой домен ОБЯЗАН быть занят. Трактовать это как «занят навсегда» — значит слать
+    в rejected весь реестр (~9.5 тыс. строк), ни разу не дождавшись дропа. Дедлайн теперь
+    приходит из имени архива (integrations/cctld.py), а домен без дедлайна и без лейна —
+    случай «судить не по чему»: молчим и ждём, а не выбрасываем."""
     from app.services import scoring
     import app.db as db
     from app.models.domain import Domain
@@ -255,8 +262,8 @@ def test_raw_registered_rejects_not_acquirable_before_wayback(monkeypatch, sqlit
                      referring_domains=None)); s.commit()
         did = s.execute(_id_of("taken.ru")).scalar_one()
     out = scoring.score_domain(did, clients)
-    assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
-    assert wb.calls == 0
+    assert out["status"] == "discovered" and out.get("unresolved") is True
+    assert wb.calls == 0                      # дорогой Wayback по-прежнему не тронут
 
 
 def test_raw_free_gets_free_lane(monkeypatch, sqlite_db):
@@ -303,11 +310,13 @@ def test_raw_source_future_deadline_stays_discovered():
     assert wb.calls == 0                      # дорогой Wayback не тронут
 
 
-def test_raw_source_no_deadline_taken_is_not_acquirable():
+def test_raw_source_no_deadline_is_not_rejected():
+    """Парная регрессия к тесту выше: без дедлайна и без лейна домен НЕ выбрасывается.
+    Занятость сырого домена до дропа — норма, а не приговор (дебаг 2026-07-13)."""
     did = _mk(domain="taken.ru", lane=None, source="cctld", referring_domains=10)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
-    assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
+    assert out["status"] == "discovered" and out.get("unresolved") is True
     assert wb.calls == 0
 
 

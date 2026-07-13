@@ -86,7 +86,35 @@ def test_domains_shows_last_run_failure(client):
         with jobs.track("score"):
             raise RuntimeError("A-Parser timeout")
     html = client.get("/domains").text
-    assert "Проверка упала" in html and "timeout" in html
+    assert "Оценка упала" in html and "timeout" in html
+
+
+def test_empty_recheck_explains_itself(client, monkeypatch):
+    """Дебаг 2026-07-13: перепроверка на пустом инбоксе завершалась за 41 мс со сводкой
+    «проверено 0: свободны 0, ЗАНЯТЫ 0...» — оператор прочитал это как сломанную кнопку.
+    Пустой прогон обязан назвать причину и следующий шаг."""
+    from app.services import jobs, scoring
+    out = scoring.recheck_acquirability(limit=10)
+    assert out["checked"] == 0
+    msg = jobs.last("recheck")["message"]
+    assert "проверять нечего" in msg and "Оценить домены" in msg
+
+
+def test_domains_nudges_when_funnel_never_ran(client):
+    """Корень «машина не работает»: 5605 доменов найдено, воронку не запускали НИ РАЗУ
+    (в реестре score=null), а инбокс пуст — и панель об этом молчала."""
+    _add(domain="raw.ru", status="discovered")
+    html = client.get("/domains").text
+    assert "не запускалась" in html and "Оценить домены" in html
+
+
+def test_domains_shows_last_run_summary(client):
+    """Не только падения: успешный прогон тоже обязан оставить след — иначе «ничего не
+    произошло» и «всё сломалось» выглядят одинаково."""
+    from app.services import jobs
+    with jobs.track("score"):
+        jobs.report("score", done=3, total=3, message="прогнано 3 доменов через воронку")
+    assert "прогнано 3 доменов" in client.get("/domains").text
 
 
 def test_reject_reasons_split_threshold_from_dirt(client):
