@@ -8,6 +8,8 @@
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import app.db as db
 from app.models.domain import Domain
 from app.services import scoring
@@ -124,21 +126,28 @@ def _casino_before_the_drop() -> list[tuple[str, str, str]]:
     return caps
 
 
-def _clean_root_inner_casino() -> list[tuple[str, str, str]]:
+def _clean_root_inner_casino(n_urls: int = 40) -> list[tuple[str, str, str]]:
     """Корень остался заглушкой-новостником, а казино жило на внутренних страницах и
     поддомене. Точный матч по домену такого не видит — нужен matchType=domain.
 
-    Архив ПЛОТНЫЙ, как у живого старого сайта: у сорока безобидных внутренних URL — по дюжине
+    Архив ПЛОТНЫЙ, как у живого старого сайта: у `n_urls` безобидных внутренних URL — по дюжине
     капчур каждый, и алфавитно они РАНЬШЕ `/casino/`. Domain-окно CDX отдаёт поток в порядке
-    urlkey, значит без `collapse=urlkey` лимит целиком съедают капчуры `/arch00/…`, и ни
+    urlkey, значит без `collapse=urlkey` лимит целиком съедают капчуры `/arch0000/…`, и ни
     `/casino/`, ни `play.old.ru` в выборку не попадают ВОВСЕ (замер ревьюера на живом клиенте).
     Разреженная фикстура из трёх URL этого не ловила — тест обещал больше, чем гарантировал код.
+
+    `n_urls` параметризован НЕ ради разнообразия: `collapse=urlkey` покупает N РАЗНЫХ URL, но N
+    ограничено лимитом CDX-запроса — сам по себе `collapse` потолок не снимает, только поднимает
+    точку, где он начинает резать алфавит. При `n_urls=40` (старый потолок фикстуры) это ниже
+    ЛЮБОГО разумного лимита и не отличило бы «лимит снят» от «лимит просто ещё не задет» — ровно
+    та подмена, которую здесь и правим. 150 и 400 — числа, на которых ревьюер поймал регресс
+    живым замером.
     """
     caps = [(_ts(datetime(2004, 1, 1) + timedelta(days=60 * i)), "http://old.ru/", CLEAN)
             for i in range(135)]                                          # 2004-01 … 2026-02
-    caps += [(_ts(datetime(2024, 3, 1) + timedelta(days=30 * j)), f"http://old.ru/arch{i:02d}/",
+    caps += [(_ts(datetime(2024, 3, 1) + timedelta(days=30 * j)), f"http://old.ru/arch{i:04d}/",
               CLEAN)
-             for i in range(40) for j in range(12)]        # 480 капчур, все алфавитно < /casino/
+             for i in range(n_urls) for j in range(12)]    # N*12 капчур, все алфавитно < /casino/
     caps += [(_ts(datetime(2025, 6, 1) + timedelta(days=10 * i)), "http://old.ru/casino/", CASINO)
              for i in range(30)]                                          # 2025-06 … 2026-03
     caps += [(_ts(datetime(2025, 7, 1) + timedelta(days=30 * i)), "http://play.old.ru/", CASINO)
@@ -183,9 +192,15 @@ def test_late_casino_dirties_the_history():
     assert any(ts == last for ts, _ in arch.fetched), "последний снимок не скачивали"
 
 
-def test_domain_match_catches_inner_casino_under_clean_root():
-    """Корень чист, казино — на /casino/ и поддомене: точный матч слеп, нужен matchType=domain."""
-    arch = _Archive(_clean_root_inner_casino())
+@pytest.mark.parametrize("n_urls", [40, 150, 400])
+def test_domain_match_catches_inner_casino_under_clean_root(n_urls):
+    """Корень чист, казино — на /casino/ и поддомене: точный матч слеп, нужен matchType=domain.
+
+    Потолок domain-окна поднят (`_DOMAIN_WINDOW_LIMIT`), но не убран — старая фикстура (40 URL)
+    сидела ПОД любым разумным потолком и не отличала «лимит снят» от «лимит ещё не задет». 150 и
+    400 — числа живого замера ревьюера: >=100 безобидных URL в опасном окне для старого донора
+    норма, не экзотика, и на нынешнем (2026-07-13) HEAD они давали ложное «история чистая»."""
+    arch = _Archive(_clean_root_inner_casino(n_urls))
     c = _client(arch)
     snaps = c.get_snapshots("old.ru")
     assert any(s["original"].endswith("/casino/") for s in snaps), "внутренние URL не в выборке"
@@ -193,6 +208,38 @@ def test_domain_match_catches_inner_casino_under_clean_root():
 
     h = c.classify_history("old.ru", polite=0)
     assert h["prior_flags"]["casino"] is True
+
+
+def test_domain_window_ceiling_is_higher_but_still_real():
+    """Потолок domain-окна не снят — он ПОДНЯТ. `collapse=urlkey` покупает N РАЗНЫХ URL, но N —
+    это `_DOMAIN_WINDOW_LIMIT`, число конечное: ровно на нём казино ещё видно, сразу за ним —
+    снова срезается алфавитом (root < archNNNN < casino по urlkey). Пришиваем ЧИСЛО тестом, чтобы
+    следующий читатель не открывал потолок заново эмпирически, как это сделал ревьюер живым
+    замером на 99/150/400 URL."""
+    from app.integrations.wayback import _DOMAIN_WINDOW_LIMIT
+
+    def fixture(n_inner: int) -> list[tuple[str, str, str]]:
+        # root: рождение + capture НА ГРАНИЦЕ опасного окна — держит "last" домена и сам входит
+        # в urlkey-набор ровно одной записью (без дублей — collapse её и так схлопнёт).
+        caps = [(_ts(datetime(2004, 1, 1)), "http://old.ru/", CLEAN),
+                (_ts(datetime(2026, 4, 1)), "http://old.ru/", CLEAN)]
+        caps += [(_ts(datetime(2024, 6, 1)), f"http://old.ru/arch{i:05d}/", CLEAN)
+                 for i in range(n_inner)]                      # все алфавитно < /casino/
+        caps += [(_ts(datetime(2025, 6, 1)), "http://old.ru/casino/", CASINO)]
+        return caps
+
+    # urlkey-порядок в опасном окне: root(1) + arch(n_inner) + casino(1) = n_inner + 2 записей.
+    # На самой границе лимита (n_inner = LIMIT - 2) казино — последняя влезающая запись.
+    within = _Archive(fixture(_DOMAIN_WINDOW_LIMIT - 2))
+    snaps = _client(within).get_snapshots("old.ru")
+    assert any(s["original"].endswith("/casino/") for s in snaps), \
+        "казино ровно на границе потолка обязано быть видно"
+
+    # на один безобидный URL больше — казино алфавитно уходит ЗА лимит.
+    over = _Archive(fixture(_DOMAIN_WINDOW_LIMIT - 1))
+    snaps = _client(over).get_snapshots("old.ru")
+    assert not any(s["original"].endswith("/casino/") for s in snaps), \
+        "потолок должен быть настоящим — если казино видно и здесь, тест не пришивает число"
 
 
 def test_mid_sample_is_picked_by_time_not_by_index():

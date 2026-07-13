@@ -12,6 +12,18 @@ from app.integrations.base import BaseClient
 _RECENT_DAYS = 730          # 24 месяца
 _MID_SPAN_DAYS = 180        # окно «середины жизни» — по полгода в каждую сторону от медианы
 
+# Домен-окно (matchType=domain, collapse=urlkey) считает лимит в РАЗНЫХ URL, а не в капчурах —
+# и дефицитный ресурс тут ЗАПРОС, а не строка ответа: число CDX-запросов на домен от этой цифры
+# не зависит (то же одно окно #4), меняется только сколько URL в нём видно. Общий `per_window`
+# (100) для трёх ОСТАЛЬНЫХ окон рассчитан на капчуры точного матча и достаточен; для опасного
+# окна он занижен — у старого плотно архивируемого донора счёт РАЗНЫХ внутренних URL легко идёт
+# на сотни, и `/casino/` (алфавитно позже архивных путей вроде `/arch0000/…`) срезался бы вместе
+# с ними, отдавая ложное «история чистая» (живой замер ревьюера: 99+ безобидных URL перед
+# /casino/ уже топят вердикт при потолке 100). 1000 — на порядок с запасом ценой той же одной
+# строки ответа CDX; потолок этим НЕ снят, только поднят — закрыт числом в
+# test_domain_window_ceiling_is_higher_but_still_real (test_wayback_window.py).
+_DOMAIN_WINDOW_LIMIT = 1000
+
 # stop-words per category (EN + RU). Coarse but real; tune against data.
 # Высокосигнальные маркеры на категорию (EN + RU, упор на RU — дропы .ru). Держим
 # ДЛИННЫЕ/однозначные токены (фразы, бренды), а не короткие общие слова: список — это
@@ -120,8 +132,15 @@ class WaybackClient(BaseClient):
         там `timestamp:8` бесполезен: лимит целиком съедают капчуры алфавитно-первого URL
         (`/arch000/…`), а `/casino/` в выборку не попадает ВООБЩЕ. `collapse=urlkey` схлопывает
         соседние (= однородные по URL) записи -> лимит покупает N РАЗНЫХ URL, ради которых
-        domain-окно и запрашивается. Потолок остаётся: >N URL в опасном окне — хвост алфавита
-        всё равно срежется."""
+        domain-окно и запрашивается. Потолок остаётся (см. `_DOMAIN_WINDOW_LIMIT`): >N URL в
+        опасном окне — хвост алфавита всё равно срежется.
+
+        Другая цена того же `collapse`: он оставляет ПЕРВУЮ запись каждого URL в urlkey-потоке —
+        то есть САМУЮ РАННЮЮ капчуру этого URL внутри окна, а не финальное состояние страницы
+        перед дропом. Для внутренних URL это слепая зона (домен-окно видит «URL существовал»,
+        не «чем он стал под конец»); корень её не разделяет — он приходит отдельным точным
+        хвостовым окном (#2 в `get_snapshots`, `limit=-N`), которое по построению берёт САМЫЙ
+        ПОСЛЕДНИЙ capture."""
         params: dict = {
             "url": domain, "output": "json", "fl": "timestamp,original,statuscode",
             "filter": ["statuscode:200", "mimetype:text/html"],
@@ -152,6 +171,8 @@ class WaybackClient(BaseClient):
           3. середина    — окно from/to вокруг медианы жизни;
           4. опасное окно — последние 24 месяца жизни, matchType=domain: поддомены и
              внутренние URL. Корень мог остаться заглушкой, пока казино жило на /casino/.
+             Свой, БОЛЬШИЙ лимит — `_DOMAIN_WINDOW_LIMIT` (см. его докстринг): здесь лимит
+             покупает РАЗНЫЕ URL, а не капчуры, и общий `per_window` для него занижен.
 
         ВАЖНО: хвостовой лимит (-N) годится ТОЛЬКО для точного матча. У matchType=domain
         живой CDX сортирует записи по urlkey, а не по времени, и «последние N» там — это
@@ -172,7 +193,7 @@ class WaybackClient(BaseClient):
             snaps += self._cdx(domain, limit=per_window,
                                frm=_day(mid - timedelta(days=_MID_SPAN_DAYS)),
                                to=_day(mid + timedelta(days=_MID_SPAN_DAYS)))
-            snaps += self._cdx(domain, limit=per_window, match_type="domain",
+            snaps += self._cdx(domain, limit=_DOMAIN_WINDOW_LIMIT, match_type="domain",
                                frm=_day(last - timedelta(days=_RECENT_DAYS)), to=_day(last))
         uniq = {(s["timestamp"], s["original"]): s for s in snaps}
         return sorted(uniq.values(), key=lambda s: s["timestamp"])
