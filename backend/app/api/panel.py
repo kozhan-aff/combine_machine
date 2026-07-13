@@ -166,21 +166,37 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
     })
 
 
-_URGENT_DAYS = 3        # «дроп на носу» — столько же, сколько DROP_GRACE в scoring, с запасом
+_URGENT_DAYS = 3        # «дроп на носу»: окно ловли (DROP_GRACE=2 дня) плюс сутки запаса
 
 
-def _urgent(d, soon) -> bool:
-    """Дедлайн дропа на носу. Срочность = БЛИЗКИЙ дедлайн, а не наличие дедлайна: у каждого
-    backorder-домена дедлайн есть всегда, и «янтарная полоса у всех» ничего не выделяет.
-
-    Дату нормализуем: SQLite отдаёт acquire_deadline naive, PostgreSQL — tz-aware; голое
-    сравнение с now(tz) роняет TypeError. Тот же приём — в scoring.acquirability_verdict."""
+def _deadline_utc(d):
+    """acquire_deadline, приведённый к aware-UTC. SQLite отдаёт naive, PostgreSQL — aware;
+    голое сравнение с now(tz) роняет TypeError. Тот же приём — в scoring.acquirability_verdict."""
     from datetime import timezone
     dl = d.acquire_deadline
-    if dl is None:
-        return False
-    if dl.tzinfo is None:
+    if dl is not None and dl.tzinfo is None:
         dl = dl.replace(tzinfo=timezone.utc)
+    return dl
+
+
+def _expired(d, now) -> bool:
+    """Окно дропа ЗАКРЫТО — домен уже упущен (его продлили или перехватили).
+
+    Такой домен доезжает до инбокса и живёт там до перепроверки: для lane='bid' воронка T1
+    короткозамыкает лейном и приобретаемость на скоринге не судит вовсе. Держать его наверху
+    как «срочный» — значит звать оператора решать судьбу покойника (ревью 2026-07-13)."""
+    from app.services.scoring import DROP_GRACE
+    dl = _deadline_utc(d)
+    return dl is not None and dl < now - DROP_GRACE
+
+
+def _urgent(d, soon, now) -> bool:
+    """Дедлайн дропа на носу. Срочность = БЛИЗКИЙ дедлайн, а не наличие дедлайна: у каждого
+    backorder-домена дедлайн есть всегда, и «янтарная полоса у всех» ничего не выделяет.
+    Просроченный дедлайн — НЕ срочность: купить уже нельзя, торопиться некуда."""
+    dl = _deadline_utc(d)
+    if dl is None or _expired(d, now):
+        return False
     return dl <= soon
 
 
@@ -191,13 +207,23 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from app.services import jobs
     from app.services.scoring import blind_reason, stale_donors
 
-    # срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым
-    order = (Domain.acquire_deadline.asc().nulls_last(), Domain.score.desc().nulls_last())
+    from sqlalchemy import case
+    from app.services.scoring import DROP_GRACE
+
+    now = datetime.now(timezone.utc)
+    # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
+    # НО «ближайший дедлайн» ASC — это самая РАННЯЯ дата, то есть УПУЩЕННЫЙ дроп: он встал бы
+    # первой строкой инбокса и звал бы решать судьбу покойника. Ярус — раньше даты (тот же приём,
+    # что в scoring.score_pending): живое окно → упущенные → без даты.
+    tier = case((Domain.acquire_deadline.is_(None), 1),
+                (Domain.acquire_deadline < now - DROP_GRACE, 2),   # окно закрыто — купить нельзя
+                else_=0)
+    order = (tier, Domain.acquire_deadline.asc(), Domain.score.desc().nulls_last())
     inbox = db.execute(select(Domain).where(Domain.status == "scored").order_by(*order)).scalars().all()
     ready = db.execute(select(Domain).where(Domain.status == "approved").order_by(*order)).scalars().all()
     counts = _domain_counts(db)
-    soon = datetime.now(timezone.utc) + timedelta(days=_URGENT_DAYS)
-    urgent = sum(1 for d in inbox + ready if _urgent(d, soon))
+    soon = now + timedelta(days=_URGENT_DAYS)
+    urgent = sum(1 for d in inbox + ready if _urgent(d, soon, now))
     reasons = dict(db.execute(
         select(Domain.reject_reason, func.count()).where(Domain.status == "rejected")
         .group_by(Domain.reject_reason)).all())
@@ -208,7 +234,7 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         "active": "domains",
         # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
         # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
-        "inbox": [(d, blind_reason(d), _urgent(d, soon)) for d in inbox],
+        "inbox": [(d, blind_reason(d), _urgent(d, soon, now)) for d in inbox],
         "ready": ready,
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),
@@ -479,6 +505,8 @@ def score_one_action(domain_id: int):
                                 "попробуйте позже",
                 "whois_unclear": "whois ответил, но ответ не разобран (формат TLD?) — "
                                  "домен остался в поиске, занятость НЕ установлена",
+                "taken_undated": "домен занят, но дата его дропа неизвестна — вернёмся к нему "
+                                 "по расписанию (раз в сутки), вдруг освободится",
                 "budget": "исчерпан бюджет whois на прогон (см. max_whois_per_run в /settings) — "
                           "домен остался в поиске",
             }.get(out.get("why"), "приобретаемость не определена — домен остался в поиске"))

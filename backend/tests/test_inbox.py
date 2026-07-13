@@ -127,3 +127,18 @@ def test_reject_reasons_split_threshold_from_dirt(client):
     assert "Мало доноров" in html and "Грязная история" in html
     assert "режет порог" in html and "не трогать" in html
     assert "настроить пороги" in html
+
+
+def test_expired_drop_is_not_urgent_and_not_first(client):
+    """Ревью 2026-07-13. «Ближайший дедлайн» ASC — это самая РАННЯЯ дата, то есть УПУЩЕННЫЙ дроп.
+    Он вставал первой строкой инбокса и метился «срочным» (_urgent: dl <= now+3д, для прошедшей
+    даты всегда True) — оператора звали решать судьбу покойника, которого уже не купить."""
+    now = datetime.now(timezone.utc)
+    _add(domain="dead.ru", status="scored", score=0.95, lane="bid",
+         acquire_deadline=now - timedelta(days=30))     # дроп упущен месяц назад
+    _add(domain="alive.ru", status="scored", score=0.50, lane="bid",
+         acquire_deadline=now + timedelta(days=1))      # дропается завтра — вот он и важен
+    html = client.get("/domains").text
+    assert html.index("alive.ru") < html.index("dead.ru"), "покойник обогнал живой дроп"
+    assert html.count('class="urgent"') == 1            # срочный ровно один — живой
+    assert "дроп: 1" in html

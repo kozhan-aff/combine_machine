@@ -286,7 +286,16 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
             # там этой ветки просто не видно, и сообщение «домен занят» было бы ложью о факте,
             # которого мы не устанавливали.
             sig["acquirability_unresolved"] = True
-            sig["unresolved_why"] = "waiting" if v == "waiting" else "whois_unclear"
+            if v == "waiting":
+                sig["unresolved_why"] = "waiting"          # занят, но дроп впереди — норма
+            elif pr.get("available") is None:
+                sig["unresolved_why"] = "whois_unclear"    # ответ пришёл, но НЕ разобран
+            else:
+                # whois РАЗОБРАН и сказал «занят», но лейн/дата дропа неизвестны (вся масса
+                # cctld/витрин: discovery ставит lane только backorder'у). Занятость установлена,
+                # неизвестно ДРУГОЕ — когда домен освободится. Назвать это «не разобрали» значило
+                # бы послать оператора чинить несуществующую поломку парсинга A-Parser на .ru.
+                sig["unresolved_why"] = "taken_undated"
             return None
 
     if job:

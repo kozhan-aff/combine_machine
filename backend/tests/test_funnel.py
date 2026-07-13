@@ -631,3 +631,16 @@ def test_unresolved_reports_why_it_could_not_decide(sqlite_db):
     did2 = _mk(domain="down.ru", lane=None, source="cctld", referring_domains=10)
     out2 = scoring.score_domain(did2, _clients(whois_raises=True, wayback=_Wayback()))
     assert out2["why"] == "whois_failed"
+
+
+def test_taken_undated_is_not_reported_as_unparsed_whois(sqlite_db):
+    """Ревью 2026-07-13. Вердикт 'unknown' имеет ДВА источника: whois не разобран (available=None)
+    и whois РАЗОБРАН («занят»), но дата дропа и лейн неизвестны. Склеив их, панель писала бы
+    «ответ не разобран (формат TLD?)» про всю массу cctld/витрин (lane=NULL) — и оператор пошёл
+    бы чинить несуществующую поломку парсинга A-Parser на .ru."""
+    from app.services import scoring
+    did = _mk(domain="undated.ru", lane=None, source="cctld", referring_domains=10)  # дедлайна нет
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None},
+                                             wayback=_Wayback()))
+    assert out["unresolved"] is True
+    assert out["why"] == "taken_undated"      # занят — это УСТАНОВЛЕННЫЙ факт, а не «не разобрали»
