@@ -554,3 +554,33 @@ def test_empty_score_run_explains_why(sqlite_db, monkeypatch):
     assert scoring.score_pending(limit=50) == 0
     msg = jobs.last("score")["message"]
     assert "оценивать нечего" in msg and "ждут своего дропа" in msg
+
+
+def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
+    """Ревью 2026-07-13, Important 1. Кулдаун вернул бездедлайновым доменам ПРАВО на скоринг, но
+    без приоритета они отбирают у drop-day доменов ОЧЕРЕДЬ: RD есть только у backorder, у cctld/
+    витрин он NULL, и при n=5 суточный пул (тысячи строк) вытеснял бы домен, дропнувшийся СЕГОДНЯ,
+    не «поздно», а никогда. Срочность обязана быть первым ключом сортировки."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        for i in range(6):                      # кулдаун-пул: без даты, давно не сверялись
+            s.add(Domain(domain=f"pool{i}.ru", source="reg_ru", status="discovered", lane=None,
+                         acquire_deadline=None,
+                         acquirability_checked_at=now - timedelta(days=3)))
+        s.add(Domain(domain="dropstoday.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=now))     # дроп СЕГОДНЯ — его нельзя пропустить
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=2)              # места мало — очередь решает всё
+
+    with db.SessionLocal() as s:
+        picked = [s.get(Domain, i).domain for i in seen]
+    assert picked[0] == "dropstoday.ru", f"drop-day домен вытеснен кулдаун-пулом: {picked}"

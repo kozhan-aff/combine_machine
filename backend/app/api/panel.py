@@ -467,12 +467,17 @@ def score_one_action(domain_id: int):
     try:
         out = scoring.score_domain(domain_id)
         if out.get("unresolved"):
-            # ЧЕСТНО: «на следующем прогоне» — уже неправда. scorable() не возьмёт домен, чей
-            # дроп впереди, до самой даты дропа (это и есть экономия квоты), а домен без даты —
-            # не чаще раза в RECHECK_EVERY. Не обещаем того, чего воронка не сделает.
-            return _back("/domains", msg=f"{out.get('domain', domain_id)}: домен ещё занят — "
-                                         "дроп не наступил. Воронка вернётся к нему в день дропа "
-                                         "(а если дата неизвестна — на следующие сутки)")
+            name = out.get("domain", domain_id)
+            # unresolved бывает ДВУХ природ, и путать их нельзя: whois мог не ответить вовсе —
+            # тогда про сам домен мы не установили НИЧЕГО, и утверждать «занят, дроп не наступил»
+            # было бы ложью (именно за это правился прежний текст).
+            if any(str(e).startswith("whois:") for e in (out.get("errors") or [])):
+                return _back("/domains", msg=f"{name}: whois не ответил (A-Parser) — "
+                                             "домен остался в поиске, попробуйте позже")
+            # А здесь whois ответил по существу: домен занят. «На следующем прогоне» — уже
+            # неправда: scorable() вернётся к нему в день дропа, а без даты — в течение суток.
+            return _back("/domains", msg=f"{name}: домен ещё занят — дроп не наступил. Воронка "
+                                         "вернётся к нему в день дропа (без даты — в течение суток)")
         return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
                                      f"{out.get('status')} ({out.get('score')})")
     except Exception as e:  # noqa: BLE001

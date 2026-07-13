@@ -370,12 +370,16 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             # приобретаемость не определена (whois сбой/непонятно/бюджет) — статус НЕ трогаем,
             # домен остаётся discovered, следующий прогон перепробьёт (см. спек §D).
             #
-            # Но если whois ОТВЕТИЛ по существу («занят» — а дроп ещё впереди либо судить не по
-            # чему), ответ ДЕТЕРМИНИРОВАННЫЙ: завтра будет ровно тот же. Факт сверки надо
-            # запомнить, иначе каждый следующий прогон платит whois'ом за уже известный ответ —
-            # а таких доменов теперь МАССА: cctld везёт дедлайн, и весь реестр (~9.5 тыс.)
-            # законно ждёт своего дропа в discovered. Ровно ту же аварию уже лечили в
-            # recheck_acquirability (см. ниже) — второй раз наступать на неё не будем.
+            # Но если whois ОТВЕТИЛ по существу («занят»), факт сверки надо запомнить: иначе
+            # каждый следующий прогон платит whois'ом за уже полученный ответ, а таких доменов
+            # теперь МАССА — cctld везёт дедлайн, и весь реестр (~9.5 тыс.) законно ждёт своего
+            # дропа в discovered. Ту же аварию уже лечили в recheck_acquirability (см. ниже).
+            #
+            # ОСТОРОЖНО, здесь легко ошибиться (и я ошибся — ревью 2026-07-13): штамп НЕ значит
+            # «больше не спрашиваем». Он значит «спросили, знаем когда вернуться». Когда дата
+            # дропа известна, ответ предсказуем по ДАТЕ, и scorable() ждёт её. Когда даты нет,
+            # «занят сегодня» не говорит ничего про завтра — там кулдаун RECHECK_EVERY, а не
+            # один шанс, иначе домен никогда не увидит собственного дропа.
             if sig.get("acquirability_checked_at"):
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
                 db.commit()
@@ -430,20 +434,26 @@ def score_pending(limit: int = 100) -> int:
     Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
     Оркестратор пишет это в counts свипа — врать ему нельзя."""
     from datetime import datetime, timezone
-    from sqlalchemy import select
+    from sqlalchemy import select, func
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services import jobs
     from app.services.settings import get_settings
-
-    from sqlalchemy import func
 
     st = get_settings()
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         rows = db.execute(
             select(Domain.id, Domain.domain).where(Domain.status == "discovered", scorable(now))
-            .order_by(Domain.referring_domains.desc().nulls_last())
+            # СРОЧНОСТЬ ПЕРВЫМ КЛЮЧОМ, не RD. RD есть только у backorder-фида; у cctld/витрин он
+            # NULL — и домен, дропнувшийся СЕГОДНЯ (whois впервые может сказать «свободен»),
+            # лежал бы вперемешку со всем суточным кулдаун-пулом, а порядок между равными решала
+            # бы БД. При n=5 (кнопка) и cap_score=20 (автопилот) пул вытеснял бы drop-day домены
+            # не «поздно», а НИКОГДА. Сначала те, у кого дата известна, ближайшая — первой;
+            # RD разводит уже равных по срочности.
+            .order_by(Domain.acquire_deadline.is_(None),
+                      Domain.acquire_deadline.asc().nulls_last(),
+                      Domain.referring_domains.desc().nulls_last())
             .limit(limit)
         ).all()
         # ПОЧЕМУ пусто — теперь это ШТАТНОЕ состояние: после scorable() домены, чей дроп ещё
@@ -452,16 +462,28 @@ def score_pending(limit: int = 100) -> int:
         # ЗДЕСЬ, пока сессия открыта.
         idle_msg = None
         if not rows:
-            pending = db.scalar(select(func.count()).select_from(Domain)
-                                .where(Domain.status == "discovered")) or 0
+            # Считаем РАЗДЕЛЬНО: «ждут дропа» (дата известна, она в будущем) и «дата неизвестна»
+            # (кулдаун). Свалить их в одно число значило бы обещать дроп там, где о нём никто
+            # ничего не знает.
+            waiting = db.scalar(select(func.count()).select_from(Domain)
+                                .where(Domain.status == "discovered",
+                                       Domain.acquire_deadline > now)) or 0
+            undated = db.scalar(select(func.count()).select_from(Domain)
+                                .where(Domain.status == "discovered",
+                                       Domain.acquire_deadline.is_(None))) or 0
             nearest = db.scalar(select(func.min(Domain.acquire_deadline))
                                 .where(Domain.status == "discovered",
-                                       Domain.acquire_deadline.is_not(None),
                                        Domain.acquire_deadline > now))
-            idle_msg = ("оценивать нечего: найденных доменов нет — сначала «Найти дропы»"
-                        if not pending else
-                        f"оценивать нечего: {pending} домен(ов) ждут своего дропа"
-                        + (f", ближайший — {nearest:%d.%m}" if nearest else ""))
+            if not (waiting or undated):
+                idle_msg = "оценивать нечего: найденных доменов нет — сначала «Найти дропы»"
+            else:
+                parts = []
+                if waiting:
+                    parts.append(f"{waiting} ждут своего дропа"
+                                 + (f" (ближайший — {nearest:%d.%m})" if nearest else ""))
+                if undated:
+                    parts.append(f"{undated} без даты дропа — вернусь к ним в течение суток")
+                idle_msg = "оценивать нечего: " + ", ".join(parts)
     stages = [dict(s) for s in FUNNEL_STAGES]
     if int(st["max_ahrefs_per_run"]) == 0:
         stages[-1]["state"] = "skip"           # платная стадия выключена — так и покажем
