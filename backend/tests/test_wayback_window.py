@@ -34,7 +34,11 @@ class _Archive:
     * `matchType=domain` — записи в порядке urlkey, а НЕ по времени (проверено: «хвост»
       domain-матча — это алфавитно-последние URL, а не свежие капчуры). Значит по домену
       ходить можно ТОЛЬКО окнами `from`/`to`, а не хвостовым лимитом;
-    * `from`/`to` — YYYYMMDD, фильтр по времени.
+    * `from`/`to` — YYYYMMDD, фильтр по времени;
+    * `collapse=ПОЛЕ` схлопывает СОСЕДНИЕ (в порядке выдачи) записи с одинаковым значением
+      поля, оставляя первую, и применяется ДО лимита. Отсюда и весь смысл `collapse=urlkey`
+      на domain-окне: поток отсортирован по urlkey, значит соседние записи одного URL — это
+      его капчуры, и лимит покупает N РАЗНЫХ URL вместо N капчур алфавитно-первого.
     """
 
     def __init__(self, captures: list[tuple[str, str, str]]):
@@ -67,9 +71,27 @@ class _Archive:
             hit = [c for c in hit if c[0][:8] >= p["from"]]
         if p.get("to"):
             hit = [c for c in hit if c[0][:8] <= p["to"]]
+        hit = _collapse(hit, p.get("collapse"))
         n = int(p["limit"])
         hit = hit[:n] if n > 0 else hit[n:]
         return [["timestamp", "original", "statuscode"]] + [[c[0], c[1], "200"] for c in hit]
+
+
+_COLLAPSE_KEYS = {"urlkey": lambda c: c[1], "timestamp:8": lambda c: c[0][:8]}
+
+
+def _collapse(rows, field):
+    """Схлопнуть соседние записи с одинаковым значением поля (первая выживает) — как CDX."""
+    if not field:
+        return rows
+    key = _COLLAPSE_KEYS[field]                   # неизвестное поле = тест врёт про живой CDX
+    out, prev = [], object()
+    for c in rows:
+        k = key(c)
+        if k != prev:
+            out.append(c)
+            prev = k
+    return out
 
 
 def _host(url: str) -> str:
@@ -104,13 +126,34 @@ def _casino_before_the_drop() -> list[tuple[str, str, str]]:
 
 def _clean_root_inner_casino() -> list[tuple[str, str, str]]:
     """Корень остался заглушкой-новостником, а казино жило на внутренних страницах и
-    поддомене. Точный матч по домену такого не видит — нужен matchType=domain."""
+    поддомене. Точный матч по домену такого не видит — нужен matchType=domain.
+
+    Архив ПЛОТНЫЙ, как у живого старого сайта: у сорока безобидных внутренних URL — по дюжине
+    капчур каждый, и алфавитно они РАНЬШЕ `/casino/`. Domain-окно CDX отдаёт поток в порядке
+    urlkey, значит без `collapse=urlkey` лимит целиком съедают капчуры `/arch00/…`, и ни
+    `/casino/`, ни `play.old.ru` в выборку не попадают ВОВСЕ (замер ревьюера на живом клиенте).
+    Разреженная фикстура из трёх URL этого не ловила — тест обещал больше, чем гарантировал код.
+    """
     caps = [(_ts(datetime(2004, 1, 1) + timedelta(days=60 * i)), "http://old.ru/", CLEAN)
             for i in range(135)]                                          # 2004-01 … 2026-02
+    caps += [(_ts(datetime(2024, 3, 1) + timedelta(days=30 * j)), f"http://old.ru/arch{i:02d}/",
+              CLEAN)
+             for i in range(40) for j in range(12)]        # 480 капчур, все алфавитно < /casino/
     caps += [(_ts(datetime(2025, 6, 1) + timedelta(days=10 * i)), "http://old.ru/casino/", CASINO)
              for i in range(30)]                                          # 2025-06 … 2026-03
     caps += [(_ts(datetime(2025, 7, 1) + timedelta(days=30 * i)), "http://play.old.ru/", CASINO)
              for i in range(8)]
+    return caps
+
+
+def _laundered_before_the_drop() -> list[tuple[str, str, str]]:
+    """Казино 2008–2020, отмытая витрина последних лет. Плотный архив (капчура раз в 2 дня,
+    2004→2026): ровно тот профиль, на котором ревьюер замерил, что окно «середины жизни»
+    оплачивается CDX-запросом, но не классифицируется никогда."""
+    caps, day, end = [], datetime(2004, 1, 1), datetime(2026, 4, 1)
+    while day <= end:
+        caps.append((_ts(day), "http://old.ru/", CASINO if 2008 <= day.year <= 2020 else CLEAN))
+        day += timedelta(days=2)
     return caps
 
 
@@ -152,6 +195,34 @@ def test_domain_match_catches_inner_casino_under_clean_root():
     assert h["prior_flags"]["casino"] is True
 
 
+def test_mid_sample_is_picked_by_time_not_by_index():
+    """РЕГРЕССИЯ: «середина жизни» бралась по ИНДЕКСУ склеенного списка (`snaps[len//2]`), а
+    список — это 4 блока по ~100 записей, поэтому индексная медиана падала на ГРАНИЦУ блоков —
+    в опасное окно, а не в середину жизни. Замер ревьюера на этом профиле: CDX-запрос №3
+    (from=20140902 to=20150828) вернул 100 записей, скачано из них 0; реально скачаны
+    ['200401', '202404', '202604', '202604', '202604'] — 19 из 22 лет домена не смотрел никто,
+    хотя запрос за них уплачен. Отмытое перед дропом казино снова получало «история чистая»."""
+    arch = _Archive(_laundered_before_the_drop())
+    h = _client(arch).classify_history("old.ru", polite=0)
+
+    years = sorted(ts[:4] for ts, _ in arch.fetched)
+    assert any("2008" <= y <= "2020" for y in years), f"середина жизни не смотрена: {years}"
+    assert h["prior_flags"]["casino"] is True, "казино 2008–2020 не увидено"
+
+
+def test_small_sample_still_looks_at_the_end_of_life():
+    """`classify_history(sample=...)` — публичная ручка экономии квоты. При sample<=2 последний
+    capture выпадал из выборки (список добивался до отказа ещё рождением и серединой) — попытка
+    сэкономить тихо возвращала ровно тот баг, который здесь чинится: смотрим на молодость."""
+    for sample in (1, 2):
+        arch = _Archive(_casino_before_the_drop())
+        _client(arch).classify_history("old.ru", sample=sample, polite=0)
+
+        last = arch.captures[-1][0]
+        assert any(ts == last for ts, _ in arch.fetched), f"sample={sample}: конец жизни не смотрен"
+        assert len(arch.fetched) <= sample, f"sample={sample}: скачано {len(arch.fetched)}"
+
+
 def test_cdx_budget_stays_small():
     """Несколько окон — норма, десятки запросов на домен — нет (воронка и так ~60 с/домен)."""
     arch = _Archive(_casino_before_the_drop())
@@ -169,6 +240,48 @@ def test_sparse_archive_survives_windowing():
     snaps = _client(arch).get_snapshots("thin.ru")
     assert [s["timestamp"] for s in snaps] == [c[0] for c in caps]
     assert len(arch.cdx) == 3, "весь архив влез в первое окно — хвостовой запрос холостой"
+
+
+# --- выбор снимков на скачивание ---------------------------------------------------------
+
+def test_pick_spends_every_slot_on_a_different_snapshot():
+    """РЕГРЕССИЯ: первый цикл дедуплицировал только по `original`, но не проверял, что снимок
+    уже взят, — и мог добавить рождение/середину ВТОРОЙ раз; финальный `uniq` дубль схлопывал.
+    Property-прогон ревьюера: 788 из 3000 случайных архивов давали len(_pick) < sample, то есть
+    качалось 3–4 снимка вместо 5. А при `checked = ok >= sample//2 + 1` одного 429 от archive.org
+    тогда хватает, чтобы вердикт слетел в «история не проверена»."""
+    from app.integrations.wayback import _pick
+
+    snaps = [{"timestamp": _ts(datetime(*d)), "original": u} for d, u in [
+        ((2019, 1, 1), "http://old.ru/"),
+        ((2020, 1, 1), "http://old.ru/"),
+        ((2024, 6, 1), "http://old.ru/"),
+        ((2024, 7, 1), "http://old.ru/inner/"),   # индексная медиана И самая свежая капчура /inner/
+        ((2024, 8, 1), "http://old.ru/"),
+        ((2025, 1, 1), "http://old.ru/"),
+        ((2026, 1, 1), "http://old.ru/"),
+    ]]
+    got = _pick(snaps, 5)
+
+    assert len(got) == 5, f"слот потрачен на дубликат: скачаем {len(got)} снимков вместо 5"
+    assert len({(s["timestamp"], s["original"]) for s in got}) == 5
+
+
+def test_thin_danger_window_still_fills_the_sample():
+    """Второй источник той же недостачи: опасное окно ТОНКОЕ (архив редкий — одна капчура за
+    последние 2 года). Оба хвостовых цикла черпали только из хвоста, он кончался, и выборка
+    молча схлопывалась до 3 снимков из 5 — при `checked = ok >= sample//2 + 1` одного 429
+    хватает, чтобы вердикт слетел в «история не проверена». Добираем из остальной жизни:
+    `sample` — это и есть бюджет на скачивание, недобор его не экономит, а только слепит."""
+    from app.integrations.wayback import _pick
+
+    snaps = [{"timestamp": _ts(datetime(2006, 1, 1) + timedelta(days=90 * i)),
+              "original": "http://old.ru/"} for i in range(60)]        # 2006 … 2020
+    snaps.append({"timestamp": _ts(datetime(2026, 1, 1)), "original": "http://old.ru/"})
+
+    got = _pick(snaps, 5)
+
+    assert len(got) == 5, f"хвост тоньше бюджета: скачаем {len(got)} снимков вместо 5"
 
 
 # --- evidence ---------------------------------------------------------------------------

@@ -64,24 +64,41 @@ def _day(dt: datetime) -> str:
 def _pick(snaps: list[dict], sample: int) -> list[dict]:
     """Какие снимки СКАЧИВАТЬ. Не «равномерно по индексу»: равномерность отдаёт выборку тому
     окну, где записей больше (у плотно архивируемого домена — молодости), а платим мы за то,
-    чем домен был В КОНЦЕ. Берём рождение + середину, остальное — из опасного окна, ОБЯЗАТЕЛЬНО
-    включая последний capture; в хвосте предпочитаем РАЗНЫЕ URL (domain-матч приносит поддомены
-    и внутренние страницы — корень мог остаться заглушкой, пока казино жило на /casino/)."""
+    чем домен был В КОНЦЕ. Берём конец жизни + рождение + середину, остальное — из опасного
+    окна; в хвосте предпочитаем РАЗНЫЕ URL (domain-матч приносит поддомены и внутренние
+    страницы — корень мог остаться заглушкой, пока казино жило на /casino/).
+
+    Три правила, каждое оплачено багом:
+      * последний capture — ПЕРВЫМ в очереди: экономный `sample` (1–2) не должен выкидывать
+        конец жизни, ровно тот, ради которого всё и затевалось;
+      * середина — ближайший по ВРЕМЕНИ к `(first+last)/2`, а НЕ `snaps[len//2]`: список склеен
+        из четырёх CDX-окон по ~100 записей, и индексная медиана падает на границу блоков (в
+        опасное окно), оставляя середину жизни неклассифицированной — при том что CDX-запрос
+        за неё уже уплачен;
+      * бюджет `sample` выбирается ЦЕЛИКОМ: URL, уже попавший в выборку, второй капчурой слот
+        не занимает (иначе `uniq` схлопнет дубль), а если опасное окно тоньше бюджета (редкий
+        архив), недостающее добирается из остальной жизни, а не теряется. Недобор ничего не
+        экономит — он только слепит: при `checked = ok >= sample//2 + 1` выборка из 3 снимков
+        вместо 5 роняет вердикт в «история не проверена» с одного 429 от archive.org.
+    """
     if len(snaps) <= sample:
         return list(snaps)
-    edge = _day(_ts(snaps[-1]["timestamp"]) - timedelta(days=_RECENT_DAYS))
+    first, last = _ts(snaps[0]["timestamp"]), _ts(snaps[-1]["timestamp"])
+    middle = first + (last - first) / 2
+    mid = min(snaps, key=lambda s: abs(_ts(s["timestamp"]) - middle))
+    edge = _day(last - timedelta(days=_RECENT_DAYS))
     tail = [s for s in snaps if s["timestamp"][:8] >= edge] or snaps[-1:]
 
-    chosen = [snaps[0], snaps[len(snaps) // 2]]
-    seen: set[str] = set()
-    for s in reversed(tail):                      # от последнего capture к более ранним
+    chosen = [snaps[-1], snaps[0], mid][:max(sample, 1)]
+    seen: set[str] = {s["original"] for s in chosen}
+    for s in reversed(tail):                      # опасное окно: сперва РАЗНЫЕ URL
         if len(chosen) >= sample:
             break
         if s["original"] not in seen:
             seen.add(s["original"])
             chosen.append(s)
-    for s in reversed(tail):                      # разных URL не хватило — добираем по времени
-        if len(chosen) >= sample:
+    for s in reversed(snaps):                     # добираем по времени, от свежих к старым
+        if len(chosen) >= sample:                 # (опасное окно может быть тоньше бюджета)
             break
         if s not in chosen:
             chosen.append(s)
@@ -95,12 +112,21 @@ class WaybackClient(BaseClient):
 
     def _cdx(self, domain: str, *, limit: int, frm: str | None = None, to: str | None = None,
              match_type: str | None = None) -> list[dict]:
-        """Один CDX-запрос. HTML-200, одна запись в день (collapse). Семантика лимита —
-        живая (проверено на web.archive.org): limit=N — ПЕРВЫЕ N, limit=-N — ПОСЛЕДНИЕ N."""
+        """Один CDX-запрос. HTML-200. Семантика лимита — живая (проверено на web.archive.org):
+        limit=N — ПЕРВЫЕ N, limit=-N — ПОСЛЕДНИЕ N.
+
+        Схлопываем по-разному, потому что поток отсортирован по-разному. Точный матч идёт по
+        времени -> `collapse=timestamp:8` (одна запись в день). Domain-матч идёт по urlkey, и
+        там `timestamp:8` бесполезен: лимит целиком съедают капчуры алфавитно-первого URL
+        (`/arch000/…`), а `/casino/` в выборку не попадает ВООБЩЕ. `collapse=urlkey` схлопывает
+        соседние (= однородные по URL) записи -> лимит покупает N РАЗНЫХ URL, ради которых
+        domain-окно и запрашивается. Потолок остаётся: >N URL в опасном окне — хвост алфавита
+        всё равно срежется."""
         params: dict = {
             "url": domain, "output": "json", "fl": "timestamp,original,statuscode",
             "filter": ["statuscode:200", "mimetype:text/html"],
-            "collapse": "timestamp:8", "limit": str(limit),
+            "collapse": "urlkey" if match_type == "domain" else "timestamp:8",
+            "limit": str(limit),
         }
         if match_type:
             params["matchType"] = match_type
