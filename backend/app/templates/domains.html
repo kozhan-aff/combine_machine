@@ -110,7 +110,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 <div class="wrap">
 <table>
   <tbody>
-  {% for d, blind, urgent, hist, evidence in inbox %}
+  {% for d, blind, urgent, hist, evidence, ok in inbox %}
     {# полоса срочности — только у БЛИЗКОГО дедлайна: у backorder-домена дедлайн есть всегда,
        и полоса «у всех» перестала бы что-либо выделять. Признак посчитан в panel.py (там же
        нормализация tz — SQLite отдаёт дату naive). #}
@@ -138,8 +138,10 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }} лет
         </div>
         {# «история чистая» — заявление о ФАКТЕ, а не отсутствие ошибок: его вправе нести только
-           домен, чью историю Wayback реально прочитал (hist == 'clean'). Пустой архив ошибки не
-           даёт — раньше такой домен и получал эту подпись (аудит F2). #}
+           домен, для которого пакетное одобрение реально сработает. `ok` — это bulk_ok(d),
+           СЧИТАННЫЙ в Python (panel.py) тем же кодом, что решает _bulk_candidates — строка НЕ
+           реконструирует условие из blind/hist сама, иначе два места могут разъехаться молча
+           (аудит F2 поймал именно такое расхождение). #}
         {% if blind %}
           <div class="blind" title="машина не смогла проверить этот сигнал — одобрять вслепую нельзя">
             ⚠ {{ blind }}
@@ -148,7 +150,8 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           </div>
         {% elif hist == 'dirty' %}
           <div class="hint" style="color:var(--bad)">история грязная — смотри снимки</div>
-        {% else %}<div class="hint" style="color:var(--ok)">история чистая</div>{% endif %}
+        {% elif ok %}<div class="hint" style="color:var(--ok)">история чистая</div>
+        {% else %}<div class="hint" style="color:var(--acc2)">история не подтверждена</div>{% endif %}
         {# УЛИКИ — снимки, которые машина скачала и по которым вынесла вердикт. Вердикт
            ошибается; куратор перепроверяет его глазами, а не верит подписи над ним. #}
         {% if evidence %}

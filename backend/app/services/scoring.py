@@ -95,6 +95,8 @@ def history_evidence(d) -> list[dict]:
     out = []
     for e in (d.score_breakdown or {}).get("history_evidence") or []:
         url, ts = e.get("url") or "", str(e.get("timestamp") or "")
+        if not url or len(ts) < 8:   # пустые url/timestamp -> битая ссылка web.archive.org/web//
+            continue
         out.append({
             "link": f"https://web.archive.org/web/{ts}/{url}",
             "url": url,
@@ -118,12 +120,28 @@ def blind_reason(d) -> str | None:
             # снимки есть, но прочитать удалось меньшинство (троттлинг archive.org) —
             # вердикт по паре страниц был бы гаданием
             return "история НЕ проверена: прочитано слишком мало снимков"
-        return "история НЕ проверена: снимков в Wayback нет — судить не по чему"
+        # sampled==0 — Wayback В ЭТОМ прогоне честно доложил «архив пуст», это факт.
+        # sampled отсутствует (None) — домен отскорен ДО того, как это поле стали писать
+        # (либо иначе не заполнено): «архива нет» здесь было бы ДОГАДКОЙ, а не фактом.
+        if (d.score_breakdown or {}).get("sampled") == 0:
+            return "история НЕ проверена: снимков в Wayback нет — судить не по чему"
+        return "история НЕ проверена: улик нет в базе — перепроверь"
     for e in errors:
         head = e.split(":", 1)[0]
         if head in _BLIND_RU:
             return _BLIND_RU[head]
     return None
+
+
+def bulk_ok(d) -> bool:
+    """Домен годится для ПАКЕТНОГО одобрения и вправе носить подпись «история чистая».
+
+    ОДИН предикат для panel._bulk_candidates (что реально становится `approved`) и для
+    строки инбокса (что рисуется как «чистая»): если эти два места переизобретают условие
+    порознь, они разъедутся ровно в режиме бага, который это и чинит (аудит F2) — расхождение
+    всплывёт молча, когда `history_verdict`/`blind_reason` обрастут новым значением/веткой.
+    """
+    return history_verdict(d) == "clean" and not blind_reason(d)
 
 
 def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
@@ -394,6 +412,10 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         # чем именно подтверждён вердикт истории — снимки, которые реально смотрели. Кладём
         # ДО возможного выхода в history_dirty: отказ — тоже вердикт, и он тоже ошибается.
         sig["history_evidence"] = hist.get("evidence") or []
+        # сколько снимков РЕАЛЬНО скачали в ЭТОМ прогоне — 0 отличает «архив честно пуст» от
+        # «этот прогон вообще не оставил числа» (см. blind_reason: домены, отскоренные до
+        # появления этого поля, не имеют права носить утверждение о пустом архиве).
+        sig["sampled"] = hist.get("sampled")
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
@@ -501,7 +523,8 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         d.score = result["score"]
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
                              "ahrefs_backlinks": sig.get("ahrefs_backlinks"),
-                             "history_evidence": sig.get("history_evidence", [])}
+                             "history_evidence": sig.get("history_evidence", []),
+                             "sampled": sig.get("sampled")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()

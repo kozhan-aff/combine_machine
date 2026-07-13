@@ -98,6 +98,33 @@ def test_inbox_warns_instead_of_claiming_clean(client):
     assert "история чистая" not in html          # ложное «чисто» — то самое, что штамповали
 
 
+# ---- предикат не имеет права раздвоиться (ревью Task 2, «С правками») ----
+
+def test_row_and_bulk_share_one_predicate(client, monkeypatch):
+    """Раньше `_bulk_candidates` и подпись «история чистая» в строке инбокса реконструировали
+    одно и то же условие НЕЗАВИСИМО (Python в panel.py, Jinja в domains.html). Сегодня они
+    совпадают только потому, что `blind_reason` гарантированно возвращает не-None для КАЖДОГО
+    'unknown' — свяжись этот факт (новый ранний `return None`, четвёртое значение вердикта),
+    и строка сказала бы «история чистая» ровно там, где пакет домен уже не берёт.
+
+    Симулируем эту будущую регрессию монки-патчем `blind_reason` -> всегда None, оставляя
+    историю НЕПРОЧИТАННОЙ (`wayback_checked=False`, значит `history_verdict == 'unknown'`).
+    `bulk_ok` обязан остаться False (он сверяет ЕЩЁ И history_verdict, не только blind_reason),
+    и строка не имеет права нести «история чистая» для домена, которого пакет не берёт.
+    """
+    _add(domain="ghost2.ru", status="scored", score=0.9, wayback_checked=False,
+         prior_flags={}, score_breakdown={"errors": []})
+    monkeypatch.setattr(scoring, "blind_reason", lambda d: None)
+    # решающая проверка: строка инбокса и пакет обязаны совпасть — ни то ни другое не
+    # признаёт этот домен «чистым», хотя blind_reason (искусственно) молчит.
+    assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 0, "blind": 1}
+    html = client.get("/domains").text
+    assert "история чистая" not in html
+    # и предикат в изоляции — тот же вывод, без похода через HTTP/шаблон
+    unread = Domain(wayback_checked=False, prior_flags={}, score_breakdown={"errors": []})
+    assert scoring.bulk_ok(unread) is False
+
+
 # ---- улики ----
 
 def test_inbox_shows_wayback_evidence(client):

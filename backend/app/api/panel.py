@@ -206,7 +206,7 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import (blind_reason, history_evidence, history_verdict,
+    from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_verdict,
                                       stale_donors, DROP_GRACE)
 
     now = datetime.now(timezone.utc)
@@ -244,8 +244,12 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # вещи, а подпись «история чистая» не имеет права стоять ни под тем, ни под другим.
         # Улики (снимки Wayback, по которым машина судила) едут всегда, когда они есть: вердикт
         # ошибается — куратор должен мочь перепроверить и «грязно», и «чисто».
+        # `ok` — РЕЗУЛЬТАТ bulk_ok(d), ТОТ ЖЕ предикат, что решает пакетное одобрение
+        # (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
+        # а не реконструировать условие из blind/hist на месте — иначе два места молча
+        # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
-                   history_evidence(d)) for d in inbox],
+                   history_evidence(d), bulk_ok(d)) for d in inbox],
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
@@ -293,15 +297,16 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
 def _bulk_candidates(db: Session, min_score: float):
     """(чистые к одобрению, сколько отсеяно как «вслепую»).
 
-    Гейт истории — ОТДЕЛЬНЫМ условием, а не через blind_reason: в пакет идут только домены,
-    чью историю Wayback реально прочитал ('clean'). Полагаться на то, что blind_reason сам
-    вернёт что-нибудь для непроверенных, — ровно та связка, на которой аудит поймал F2
-    (пустой Wayback ошибки не даёт → «вслепую» не определялось → штамповали как чистое).
+    Гейт истории — через `scoring.bulk_ok`, ОДИН предикат для пакета и для подписи «история
+    чистая» в строке инбокса (см. domains_view). Раньше это условие было реконструировано
+    здесь И в Jinja независимо — ровно та связка, на которой аудит поймал F2 (пустой Wayback
+    ошибки не даёт → «вслепую» не определялось → штамповали как чистое); любое новое значение
+    вердикта/причины отсева развело бы их снова, молча.
     """
-    from app.services.scoring import blind_reason, history_verdict
+    from app.services.scoring import bulk_ok
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
-    clean = [d for d in rows if history_verdict(d) == "clean" and not blind_reason(d)]
+    clean = [d for d in rows if bulk_ok(d)]
     return clean, len(rows) - len(clean)
 
 
