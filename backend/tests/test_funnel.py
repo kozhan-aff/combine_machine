@@ -584,3 +584,50 @@ def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
     with db.SessionLocal() as s:
         picked = [s.get(Domain, i).domain for i in seen]
     assert picked[0] == "dropstoday.ru", f"drop-day домен вытеснен кулдаун-пулом: {picked}"
+
+
+def test_expired_drop_does_not_outrank_todays_drop(sqlite_db, monkeypatch):
+    """Ревью 2026-07-13, финал. «Ближайший дедлайн» ASC — это САМАЯ РАННЯЯ дата, то есть
+    ПРОТУХШИЙ дроп месячной давности. Он вставал в голову очереди перед сегодняшним и жёг на
+    покойника полный дорогой путь (whois+РКН+Wayback ≈ 60 с); для lane='bid' воронка его даже
+    не отбракует — T1 короткозамкнут лейном. Ярус срочности обязан идти раньше самой даты."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="expired.ru", source="backorder", status="discovered", lane="bid",
+                     referring_domains=9999,                       # ещё и жирный — соблазн взять
+                     acquire_deadline=now - timedelta(days=30)))   # дроп УПУЩЕН месяц назад
+        s.add(Domain(domain="todays.ru", source="backorder", status="discovered", lane="bid",
+                     referring_domains=10,
+                     acquire_deadline=now))                        # дроп СЕГОДНЯ
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=1)                                 # место ровно одно
+
+    with db.SessionLocal() as s:
+        picked = [s.get(Domain, i).domain for i in seen]
+    assert picked == ["todays.ru"], f"упущенный дроп обогнал сегодняшний: {picked}"
+
+
+def test_unresolved_reports_why_it_could_not_decide(sqlite_db):
+    """Панель не должна угадывать причину сниффингом errors: ветка «whois ответил, но ответ не
+    разобрали» (available=None) исключения не бросает и в errors ничего не пишет — а панель
+    заявляла бы «домен занят», то есть факт, которого никто не устанавливал."""
+    from app.services import scoring
+
+    did = _mk(domain="murky.ru", lane=None, source="cctld", referring_domains=10)
+    out = scoring.score_domain(did, _clients(whois={"available": None, "created": None},
+                                             wayback=_Wayback()))
+    assert out["unresolved"] is True and out["why"] == "whois_unclear"
+    assert not out["errors"]              # исключения НЕ было — errors пуст, сниффинг слеп
+
+    did2 = _mk(domain="down.ru", lane=None, source="cctld", referring_domains=10)
+    out2 = scoring.score_domain(did2, _clients(whois_raises=True, wayback=_Wayback()))
+    assert out2["why"] == "whois_failed"

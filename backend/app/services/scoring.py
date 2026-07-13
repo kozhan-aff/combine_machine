@@ -236,6 +236,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     # T1 — приобретаемость + возраст (ОДИН whois-вызов, под бюджетом)
     if whois_budget is not None and whois_budget[0] <= 0:
         sig["acquirability_unresolved"] = True     # бюджет whois на прогон исчерпан — оставить discovered
+        sig["unresolved_why"] = "budget"
         return None
     age_known = False
     try:
@@ -246,6 +247,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         sig["errors"].append(f"whois:{type(e).__name__}")
         if d.lane != "bid":                         # сырому источнику whois нужен для лейна
             sig["acquirability_unresolved"] = True
+            sig["unresolved_why"] = "whois_failed"
             return None
         pr = {"available": None, "created": None}   # bid: лейн из источника, продолжаем без возраста
 
@@ -277,8 +279,14 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
             return "not_acquirable"                 # занят, купить нельзя
         else:
             # waiting — дроп ещё не наступил (перепробуем после даты);
-            # unknown — whois не дал ответа. И то и другое: оставить discovered.
+            # unknown — whois ОТВЕТИЛ, но ответ не разобрали (available=None: нестандартный TLD,
+            #   пустой ответ A-Parser, страница лимита — исключения при этом НЕТ, и в errors
+            #   тоже ничего). И то и другое: оставить discovered.
+            # Причину называем ЯВНО: панель не должна угадывать её сниффингом строк в errors —
+            # там этой ветки просто не видно, и сообщение «домен занят» было бы ложью о факте,
+            # которого мы не устанавливали.
             sig["acquirability_unresolved"] = True
+            sig["unresolved_why"] = "waiting" if v == "waiting" else "whois_unclear"
             return None
 
     if job:
@@ -384,7 +392,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
                 db.commit()
             return {"domain": d.domain, "status": d.status, "unresolved": True,
-                    "errors": sig.get("errors", [])}
+                    "why": sig.get("unresolved_why"), "errors": sig.get("errors", [])}
 
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
@@ -434,7 +442,7 @@ def score_pending(limit: int = 100) -> int:
     Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
     Оркестратор пишет это в counts свипа — врать ему нельзя."""
     from datetime import datetime, timezone
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, case, and_
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services import jobs
@@ -443,17 +451,24 @@ def score_pending(limit: int = 100) -> int:
     st = get_settings()
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
+        # ЯРУС СРОЧНОСТИ — первым ключом, не RD и не голая дата.
+        #
+        # RD есть только у backorder; у cctld/витрин он NULL — значит по RD домен, дропающийся
+        # СЕГОДНЯ, лёг бы вперемешку с кулдаун-пулом, и при n=5 пул вытеснял бы его НИКОГДА не
+        # доскоренным. Но и голая дата ASC неверна: «самая ранняя» — это ПРОТУХШИЙ дедлайн
+        # месячной давности, то есть дроп, который мы уже упустили. Он встал бы впереди
+        # сегодняшнего и жёг бы полный дорогой путь (whois+РКН+Wayback ≈ 60 с) на покойника —
+        # для lane='bid' воронка его даже не отбракует (T1 короткозамкнут лейном).
+        expired = and_(Domain.acquire_deadline.is_not(None),
+                       Domain.acquire_deadline < now - DROP_GRACE)
+        tier = case((Domain.acquire_deadline.is_(None), 2),   # дата неизвестна — кулдаун-пул
+                    (expired, 1),                             # окно дропа закрыто — уже упустили
+                    else_=0)                                  # окно открыто/впереди — вот они и важны
         rows = db.execute(
             select(Domain.id, Domain.domain).where(Domain.status == "discovered", scorable(now))
-            # СРОЧНОСТЬ ПЕРВЫМ КЛЮЧОМ, не RD. RD есть только у backorder-фида; у cctld/витрин он
-            # NULL — и домен, дропнувшийся СЕГОДНЯ (whois впервые может сказать «свободен»),
-            # лежал бы вперемешку со всем суточным кулдаун-пулом, а порядок между равными решала
-            # бы БД. При n=5 (кнопка) и cap_score=20 (автопилот) пул вытеснял бы drop-day домены
-            # не «поздно», а НИКОГДА. Сначала те, у кого дата известна, ближайшая — первой;
-            # RD разводит уже равных по срочности.
-            .order_by(Domain.acquire_deadline.is_(None),
-                      Domain.acquire_deadline.asc().nulls_last(),
-                      Domain.referring_domains.desc().nulls_last())
+            .order_by(tier,
+                      Domain.acquire_deadline.asc(),          # внутри яруса — ближайший дроп первым
+                      Domain.referring_domains.desc().nulls_last())   # равных по сроку разводит RD
             .limit(limit)
         ).all()
         # ПОЧЕМУ пусто — теперь это ШТАТНОЕ состояние: после scorable() домены, чей дроп ещё
