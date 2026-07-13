@@ -332,6 +332,9 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         pf = hist.get("prior_flags") or {}
         sig["prior_flags"] = pf
         sig["wayback_checked"] = hist.get("wayback_checked")     # сохраняем ДО возможного выхода
+        # чем именно подтверждён вердикт истории — снимки, которые реально смотрели. Кладём
+        # ДО возможного выхода в history_dirty: отказ — тоже вердикт, и он тоже ошибается.
+        sig["history_evidence"] = hist.get("evidence") or []
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
@@ -435,7 +438,8 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
-                             "ahrefs_backlinks": sig.get("ahrefs_backlinks")}
+                             "ahrefs_backlinks": sig.get("ahrefs_backlinks"),
+                             "history_evidence": sig.get("history_evidence", [])}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()
