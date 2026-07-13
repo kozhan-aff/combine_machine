@@ -80,6 +80,29 @@
     </div>
   </div>
   <div class="station">
+    <div class="plate">Веса критериев — <b>по чему машина судит донора</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Итоговый скор — взвешенная сумма пяти сигналов. Здесь задаётся,
+      что важнее. Сумма весов может быть любой: доля каждого считается от суммы (справа), так
+      что шкала 0..1 и пороги approve/manual не «плывут» от сдвига одного ползунка.
+      Действует со следующего прогона; уже оценённые домены не пересчитываются.</div></details>
+    {% for key, ru, note in [
+        ('history_cleanliness', 'чистота истории', 'Wayback: адалт/фарма/казино/спам в прошлом'),
+        ('rd_proxy',            'доноры (RD)',      'ссылающиеся домены, лог-шкала'),
+        ('age',                 'возраст домена',   'из whois, полный балл к 8 годам'),
+        ('indexed_echo',        'эхо в индексе',    'домен ещё находится в поиске'),
+        ('authority',           'DR (Ahrefs)',      'ПЛАТНО и только для доменов БЕЗ RD из фида — у backorder DR не запрашивается, балл = 0')] %}
+    <div class="go">
+      <span class="f" style="min-width:150px">{{ ru }}</span>
+      <input type="range" name="w_{{ key }}" min="0" max="1" step="0.01"
+             value="{{ s.weights[key] }}" oninput="wv()" style="flex:1 1 160px">
+      <b id="wv_{{ key }}">{{ '%.2f'|format(s.weights[key]) }}</b>
+      <b class="hint" id="wp_{{ key }}"></b>
+      <span class="hint">{{ note }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="station">
     <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
     <details class="what"><summary>зачем это</summary>
       <div class="what-body">Выключенный источник просто не опрашивается при ↻ Discovery;
@@ -108,6 +131,18 @@
       onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
 
 <script>
+const W_KEYS = ['history_cleanliness','rd_proxy','age','indexed_echo','authority'];
+function wv() {
+  // доля = вес / сумма весов: ровно так же нормирует compute_score, поэтому оператор видит
+  // РЕАЛЬНЫЙ вклад критерия, а не сырое число ползунка
+  const vals = W_KEYS.map(k => parseFloat(document.querySelector('[name=w_'+k+']').value) || 0);
+  const sum = vals.reduce((a, b) => a + b, 0);
+  W_KEYS.forEach((k, i) => {
+    document.getElementById('wv_'+k).textContent = vals[i].toFixed(2);
+    document.getElementById('wp_'+k).textContent =
+      sum > 0 ? '= ' + Math.round(vals[i] / sum * 100) + '%' : '— все нули: вернутся дефолты';
+  });
+}
 const PV_MAP = {rd:'min_referring_domains', age:'min_age_years', approve:'approve_at', manual:'manual_review_at'};
 function pv() {
   for (const k of ['rd','age','approve','manual']) {
@@ -125,5 +160,6 @@ function pv() {
     document.getElementById('c_manual').textContent = c.manual;
   });
 }
+wv();          // доли весов — сразу при загрузке, не только после сдвига
 </script>
 {% endblock %}

@@ -20,5 +20,10 @@ class ScoringSettings(Base):
     max_whois_per_run: Mapped[int] = mapped_column(Integer, default=200)  # кап whois-вызовов за прогон
     max_ahrefs_per_run: Mapped[int] = mapped_column(Integer, default=50)  # кап платных Ahrefs-вызовов (капча) за прогон
     sources_enabled: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # веса критериев оценки донора (history_cleanliness/age/rd_proxy/indexed_echo/authority).
+    # Были зашиты в scoring_config.WEIGHTS — оператор видел, ПО ЧЕМУ его судят, но не мог
+    # изменить НИ ОДИН вес (жалоба 2026-07-13). Сумма не обязана быть 1.0: compute_score
+    # нормирует её сам, иначе один сдвинутый ползунок ломал бы шкалу 0..1.
+    weights: Mapped[dict] = mapped_column(JSONB, default=dict)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
                                                         server_default=func.now(), onupdate=func.now())

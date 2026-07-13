@@ -78,8 +78,13 @@ def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float)
     return status
 
 
-def compute_score(sig: dict) -> dict:
-    """Pure: signals -> {score, status, breakdown}. No I/O. See scoring_config for knobs."""
+def compute_score(sig: dict, weights: dict | None = None) -> dict:
+    """Pure: signals -> {score, status, breakdown}. No I/O. See scoring_config for knobs.
+
+    `weights` — рантайм-веса с /settings (None -> дефолты из scoring_config). Сумма НЕ обязана
+    быть 1.0: нормируем на неё, иначе оператор, подвинувший один ползунок, незаметно менял бы
+    масштаб всей шкалы 0..1 — и пороги approve/manual начали бы значить не то, что показывают.
+    """
     pf = sig.get("prior_flags") or {}
 
     # --- hard rejects (Stage E) ---
@@ -108,10 +113,12 @@ def compute_score(sig: dict) -> dict:
                            / math.log10(n["RD_FULL"] + 1)),
         "indexed_echo": 1.0 if sig.get("indexed_echo") else 0.0,
     }
-    score = round(_clamp(sum(cfg.WEIGHTS[k] * comp[k] for k in cfg.WEIGHTS)), 4)
+    w = {k: float(v) for k, v in (weights or cfg.WEIGHTS).items() if k in comp}
+    norm = sum(w.values()) or 1.0
+    score = round(_clamp(sum(w[k] * comp[k] for k in w) / norm), 4)
     status = _decide(score, sig, cfg.DECISION["approve_at"], cfg.DECISION["manual_review_at"])
     return {"score": score, "status": status,
-            "breakdown": {"components": comp, "weights": cfg.WEIGHTS}}
+            "breakdown": {"components": comp, "weights": w}}
 
 
 def _make_clients() -> dict:
@@ -330,7 +337,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
         else:
             sig.setdefault("referring_domains", d.referring_domains)
-            result = compute_score(sig)
+            result = compute_score(sig, st.get("weights"))     # веса — рантайм, с /settings
             if "hard_reject" not in result["breakdown"]:
                 # Finding 1 (2026-07 review): re-decide with the RUNTIME /settings thresholds
                 # (not just cfg.DECISION) so the approve/manual-review sliders actually govern

@@ -13,13 +13,13 @@ rejected/not_acquirable. Так утекли ЛУЧШИЕ домены базы 
      пересудила. Домены с lane='bid' и прошедшим дедлайном НЕ трогаем: их отбраковка законна
      (дроп прошёл, домен занят), и возврат гонял бы их по кругу.
 
-Revision ID: 0008_lane_backfill
-Revises: 0007_job_run
+Revision ID: 0008
+Revises: 0007
 """
 from alembic import op
 
-revision = "0008_lane_backfill"
-down_revision = "0007_job_run"
+revision = "0008"
+down_revision = "0007"
 branch_labels = None
 depends_on = None
 

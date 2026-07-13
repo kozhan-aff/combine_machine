@@ -26,7 +26,25 @@ def _defaults() -> dict:
         "max_whois_per_run": cfg.MAX_WHOIS_PER_RUN,
         "max_ahrefs_per_run": cfg.MAX_AHREFS_PER_RUN,
         "sources_enabled": dict(cfg.SOURCES_ENABLED),
+        "weights": dict(cfg.WEIGHTS),
     }
+
+
+def _clean_weights(raw) -> dict:
+    """Веса с UI -> валидный словарь. Ключи — только известные компоненты (чужие игнорим:
+    неизвестный ключ не с чем перемножать, compute_score упал бы на KeyError).
+
+    Вырожденный набор (всё по нулю / мусор) НЕ записываем: он обнулил бы score всем доменам
+    разом и тихо превратил бы воронку в «всё отклонено». В таком случае — дефолты."""
+    if not isinstance(raw, dict):
+        return dict(cfg.WEIGHTS)
+    out = {}
+    for k in cfg.WEIGHTS:                       # порядок и состав ключей задаёт код, не форма
+        try:
+            out[k] = max(0.0, min(1.0, float(raw.get(k, cfg.WEIGHTS[k]))))
+        except (TypeError, ValueError):
+            out[k] = cfg.WEIGHTS[k]
+    return out if sum(out.values()) > 0 else dict(cfg.WEIGHTS)
 
 
 def _row(db):
@@ -54,6 +72,8 @@ def get_settings() -> dict:
             "max_whois_per_run": int(r.max_whois_per_run),
             "max_ahrefs_per_run": int(r.max_ahrefs_per_run),
             "sources_enabled": dict(r.sources_enabled or cfg.SOURCES_ENABLED),
+            # пусто (миграция 0009 засеяла {}) -> дефолты из кода, а не нулевая шкала
+            "weights": _clean_weights(r.weights or cfg.WEIGHTS),
         }
 
 
@@ -70,6 +90,8 @@ def update_settings(**kw) -> dict:
         if "sources_enabled" in kw and isinstance(kw["sources_enabled"], dict):
             r.sources_enabled = {s: bool(kw["sources_enabled"].get(s, False))
                                  for s in cfg.SOURCES_ENABLED}
+        if "weights" in kw and kw["weights"] is not None:
+            r.weights = _clean_weights(kw["weights"])
         if r.max_whois_per_run < 1:
             r.max_whois_per_run = 1                 # 0 глушил бы скоринг целиком
         if r.approve_at < r.manual_review_at:

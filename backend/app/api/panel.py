@@ -750,13 +750,24 @@ def settings_save(min_referring_domains: int = Form(...), min_age_years: float =
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
                   max_whois_per_run: int = Form(200), max_ahrefs_per_run: int = Form(50),
                   backorder: str = Form(""), cctld: str = Form(""),
-                  reg_ru: str = Form(""), sweb: str = Form("")):
+                  reg_ru: str = Form(""), sweb: str = Form(""),
+                  w_history_cleanliness: float | None = Form(None),
+                  w_rd_proxy: float | None = Form(None), w_age: float | None = Form(None),
+                  w_indexed_echo: float | None = Form(None),
+                  w_authority: float | None = Form(None)):
     from app.services import settings as st
+    # веса — опциональны: форма без них (старый шаблон, curl из скрипта) не должна ОБНУЛЯТЬ
+    # шкалу оценки. None -> ключ не передаём, update_settings оставит прежние.
+    weights = {k: v for k, v in (("history_cleanliness", w_history_cleanliness),
+                                 ("rd_proxy", w_rd_proxy), ("age", w_age),
+                                 ("indexed_echo", w_indexed_echo),
+                                 ("authority", w_authority)) if v is not None}
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
                        max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,
                        sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
-                                        "reg_ru": bool(reg_ru), "sweb": bool(sweb)})
+                                        "reg_ru": bool(reg_ru), "sweb": bool(sweb)},
+                       weights=weights or None)
     return _back("/settings", msg="Настройки сохранены")
 
 
