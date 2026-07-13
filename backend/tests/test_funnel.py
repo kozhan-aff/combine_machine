@@ -503,3 +503,54 @@ def test_unresolved_domain_remembers_it_was_checked(sqlite_db):
         assert d.status == "discovered"                   # статус не тронут
         assert d.acquirability_checked_at is not None     # но сверку запомнили
     assert wb.calls == 0
+
+
+def test_domain_without_deadline_gets_rechecked_after_cooldown(sqlite_db, monkeypatch):
+    """Ревью 2026-07-13, CRITICAL. «Спросили один раз — больше не спрашиваем» здесь смертельно:
+    витрины reg.ru/sweb дату дропа НЕ отдают, а «занят сегодня» без даты не говорит ничего о том,
+    когда домен освободится. С одним шансом такой домен НИКОГДА не увидел бы собственного дропа —
+    вся популяция reg.ru/sweb навсегда оседала бы в discovered. Поэтому здесь КУЛДАУН."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="fresh.ru", source="reg_ru", status="discovered", lane=None,
+                     acquire_deadline=None, acquirability_checked_at=None))       # ни разу
+        s.add(Domain(domain="cooled.ru", source="reg_ru", status="discovered", lane=None,
+                     acquire_deadline=None,
+                     acquirability_checked_at=now - scoring.RECHECK_EVERY - timedelta(hours=1)))
+        s.add(Domain(domain="justnow.ru", source="sweb", status="discovered", lane=None,
+                     acquire_deadline=None,
+                     acquirability_checked_at=now - timedelta(minutes=5)))        # только что
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=50)
+    with db.SessionLocal() as s:
+        picked = {s.get(Domain, i).domain for i in seen}
+    # свежий и остывший — берём (вдруг дроп уже случился); только что спрошенный — нет
+    assert picked == {"fresh.ru", "cooled.ru"}, picked
+
+
+def test_empty_score_run_explains_why(sqlite_db, monkeypatch):
+    """Пустой прогон Score теперь ШТАТЕН (все ждут дропа) и обязан назвать причину — тот же
+    стандарт, что уже применён к перепроверке."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import jobs, scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    future = datetime.now(timezone.utc) + timedelta(days=9)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="waits.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=future))
+        s.commit()
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    assert scoring.score_pending(limit=50) == 0
+    msg = jobs.last("score")["message"]
+    assert "оценивать нечего" in msg and "ждут своего дропа" in msg

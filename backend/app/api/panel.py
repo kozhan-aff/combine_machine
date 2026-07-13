@@ -467,8 +467,12 @@ def score_one_action(domain_id: int):
     try:
         out = scoring.score_domain(domain_id)
         if out.get("unresolved"):
-            return _back("/domains", msg=f"{out.get('domain', domain_id)}: whois не определил — "
-                                         "домен остался в поиске, перепроверю на следующем прогоне")
+            # ЧЕСТНО: «на следующем прогоне» — уже неправда. scorable() не возьмёт домен, чей
+            # дроп впереди, до самой даты дропа (это и есть экономия квоты), а домен без даты —
+            # не чаще раза в RECHECK_EVERY. Не обещаем того, чего воронка не сделает.
+            return _back("/domains", msg=f"{out.get('domain', domain_id)}: домен ещё занят — "
+                                         "дроп не наступил. Воронка вернётся к нему в день дропа "
+                                         "(а если дата неизвестна — на следующие сутки)")
         return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
                                      f"{out.get('status')} ({out.get('score')})")
     except Exception as e:  # noqa: BLE001

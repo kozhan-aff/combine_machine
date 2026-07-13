@@ -20,6 +20,16 @@ from app.services import scoring_config as cfg
 # усечение даты, и сдвиг релиза в реестре на сутки.
 DROP_GRACE = timedelta(days=2)
 
+# Как часто перепробовать домен, у которого дедлайна НЕТ (витрины reg.ru/sweb дропов дату не
+# отдают; у cctld она может не разобраться из имени архива).
+#
+# Соблазн «спросили один раз — больше не спрашиваем» здесь СМЕРТЕЛЕН: «занят сегодня» без даты
+# дропа не говорит НИЧЕГО про то, когда домен освободится. Один шанс = домен никогда не увидит
+# собственного дропа и навсегда осядет в discovered (ревью 2026-07-13, Critical 1). Детерминизм
+# есть только там, где дата известна — там мы и не переспрашиваем (см. scorable, ветка 2).
+# Сутки: дропы происходят ежедневно, а расход сверху ограничен max_whois_per_run.
+RECHECK_EVERY = timedelta(days=1)
+
 
 def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
@@ -187,16 +197,20 @@ def scorable(now):
 
     Берём, значит, только тех, у кого есть шанс:
       · lane='bid' — backorder: T1 короткозамкнут лейном, whois нужен ради возраста;
-      · дроп НАСТУПИЛ (с запасом DROP_GRACE) — сегодня whois впервые может сказать «свободен»;
-      · дедлайна нет И ни разу не сверялись — один шанс: вдруг домен уже свободен. Ответ
-        запоминается (acquirability_checked_at), второй раз за него не платим.
+      · дроп НАСТУПИЛ (с запасом DROP_GRACE) — сегодня whois впервые может сказать «свободен».
+        До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке;
+      · дедлайна НЕТ — раз в RECHECK_EVERY. Здесь одним шансом обойтись нельзя: «занят сегодня»
+        без даты дропа не говорит ничего про день освобождения, и домен (вся популяция
+        reg.ru/sweb) никогда не увидел бы собственного дропа.
     """
     from app.models.domain import Domain
     from sqlalchemy import or_, and_
     return or_(
         Domain.lane == "bid",
         and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now + DROP_GRACE),
-        and_(Domain.acquire_deadline.is_(None), Domain.acquirability_checked_at.is_(None)),
+        and_(Domain.acquire_deadline.is_(None),
+             or_(Domain.acquirability_checked_at.is_(None),
+                 Domain.acquirability_checked_at < now - RECHECK_EVERY)),
     )
 
 
@@ -422,6 +436,8 @@ def score_pending(limit: int = 100) -> int:
     from app.services import jobs
     from app.services.settings import get_settings
 
+    from sqlalchemy import func
+
     st = get_settings()
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
@@ -430,6 +446,22 @@ def score_pending(limit: int = 100) -> int:
             .order_by(Domain.referring_domains.desc().nulls_last())
             .limit(limit)
         ).all()
+        # ПОЧЕМУ пусто — теперь это ШТАТНОЕ состояние: после scorable() домены, чей дроп ещё
+        # впереди, законно ждут своей даты. «Прогнано 0 доменов» без объяснения — ровно та
+        # немота, из-за которой оператор решил, что перепроверка сломана. Считаем причину
+        # ЗДЕСЬ, пока сессия открыта.
+        idle_msg = None
+        if not rows:
+            pending = db.scalar(select(func.count()).select_from(Domain)
+                                .where(Domain.status == "discovered")) or 0
+            nearest = db.scalar(select(func.min(Domain.acquire_deadline))
+                                .where(Domain.status == "discovered",
+                                       Domain.acquire_deadline.is_not(None),
+                                       Domain.acquire_deadline > now))
+            idle_msg = ("оценивать нечего: найденных доменов нет — сначала «Найти дропы»"
+                        if not pending else
+                        f"оценивать нечего: {pending} домен(ов) ждут своего дропа"
+                        + (f", ближайший — {nearest:%d.%m}" if nearest else ""))
     stages = [dict(s) for s in FUNNEL_STAGES]
     if int(st["max_ahrefs_per_run"]) == 0:
         stages[-1]["state"] = "skip"           # платная стадия выключена — так и покажем
@@ -451,7 +483,7 @@ def score_pending(limit: int = 100) -> int:
                 logging.getLogger(__name__).exception("score_domain %s упал", name)
             done = i
         jobs.report("score", done=total, total=total, current="",
-                    message=f"прогнано {total} доменов через воронку")
+                    message=idle_msg or f"прогнано {total} доменов через воронку")
     return done
 
 
