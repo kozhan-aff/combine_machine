@@ -50,18 +50,77 @@ FUNNEL_STAGES = [
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Гарды в _decide не дают авто-approve
 # без Wayback — домен уходит в scored, то есть В ИНБОКС К ЧЕЛОВЕКУ, и там неотличим от честно
 # проверенного. Человек штампует непроверенное, думая, что машина посмотрела историю.
+#
+# ИСТОРИИ ЗДЕСЬ НЕТ НАМЕРЕННО: её вердикт считает history_verdict (см. ниже). Раньше она жила
+# тут ключом "wayback" — и это был баг (аудит, F2): «вслепую» выводилось из ФАКТА ОШИБКИ, а
+# Wayback, не нашедший ни одного снимка, ошибки не бросает (`wayback_checked=False`, errors
+# пуст). Домен, чью историю никто не смотрел, приезжал в инбокс с подписью «история чистая».
 _BLIND_RU = {
-    "wayback": "история НЕ проверена: Wayback был недоступен",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
     "searxng": "эхо в индексе НЕ проверено",
 }
 
+# Категории прошлого домена — по-русски (панель русская; улики показываются куратору).
+_CATS_RU = {"adult": "взрослое", "pharma": "фарма", "casino": "казино",
+            "gambling": "ставки", "spam": "спам", "topic_switch": "смена темы"}
+
+
+def history_verdict(d) -> str:
+    """Что машина РЕАЛЬНО знает об истории домена: 'clean' | 'dirty' | 'unknown'.
+
+    ЕДИНСТВЕННЫЙ источник правды о чистоте истории — и для инбокса, и для пакетного одобрения,
+    и для JSON. Три состояния, а не два: «не проверяли» — это НЕ «чисто». Домен становится
+    'clean' только там, где Wayback реально прочитал большинство выборки (`wayback_checked`);
+    пустой архив, троттлинг archive.org и упавший запрос дают 'unknown' — и такой домен
+    исключён из пакета (см. panel._bulk_candidates).
+
+    'dirty' проверяется ПЕРВЫМ: известная грязь главнее незнания.
+    """
+    pf = d.prior_flags or {}
+    if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+        return "dirty"
+    if not d.wayback_checked:
+        return "unknown"
+    return "clean"
+
+
+def history_evidence(d) -> list[dict]:
+    """Снимки, по которым машина судила историю, — готовые к показу (ссылка, дата, категории).
+
+    Вердикт ошибается (это и доказал аудит), поэтому куратор обязан мочь ПЕРЕПРОВЕРИТЬ его
+    глазами: улики пишутся в score_breakdown.history_evidence (Задача 1) — здесь они
+    превращаются в ссылки на web.archive.org.
+    """
+    out = []
+    for e in (d.score_breakdown or {}).get("history_evidence") or []:
+        url, ts = e.get("url") or "", str(e.get("timestamp") or "")
+        out.append({
+            "link": f"https://web.archive.org/web/{ts}/{url}",
+            "url": url,
+            "when": f"{ts[6:8]}.{ts[4:6]}.{ts[:4]}" if len(ts) >= 8 else ts,
+            "cats": ", ".join(_CATS_RU.get(c, c) for c in e.get("cats") or []),
+        })
+    return out
+
 
 def blind_reason(d) -> str | None:
-    """Домен оценён при недоступной проверке — в пакет одобрения он не идёт (спека §1.5)."""
-    for e in (d.score_breakdown or {}).get("errors") or []:
-        head = str(e).split(":", 1)[0]
+    """Домен оценён при недоступной/несостоявшейся проверке — в пакет одобрения он не идёт.
+
+    История идёт первой строкой: она — главный инвариант проекта («домены берём за чистую
+    историю»), и именно она молча выдавала непроверенное за чистое.
+    """
+    errors = [str(e) for e in ((d.score_breakdown or {}).get("errors") or [])]
+    if history_verdict(d) == "unknown":
+        if any(e.startswith("wayback:") for e in errors):
+            return "история НЕ проверена: Wayback был недоступен"
+        if (d.score_breakdown or {}).get("history_evidence"):
+            # снимки есть, но прочитать удалось меньшинство (троттлинг archive.org) —
+            # вердикт по паре страниц был бы гаданием
+            return "история НЕ проверена: прочитано слишком мало снимков"
+        return "история НЕ проверена: снимков в Wayback нет — судить не по чему"
+    for e in errors:
+        head = e.split(":", 1)[0]
         if head in _BLIND_RU:
             return _BLIND_RU[head]
     return None
@@ -435,6 +494,9 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             d.dr = sig["dr"]
         if sig.get("referring_domains") is not None:
             d.referring_domains = sig["referring_domains"]
+        # ЛЕГАСИ-КОЛОНКА. Имя врёт: это «не отклонён», а не «чистая история» — по нему нельзя
+        # судить о прошлом домена (JSON-двойник так и делал, аудит F2). Чистоту истории
+        # спрашивать ТОЛЬКО у history_verdict(). Колонка доживает до ближайшей миграции.
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),

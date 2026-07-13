@@ -63,8 +63,12 @@ def test_discovery_stages_are_sources(monkeypatch):
 
 
 def test_blind_reason_flags_unverified_history():
-    """Wayback лежал -> домен оценён вслепую; штамповать его нельзя (спека §1.5)."""
+    """Wayback лежал -> домен оценён вслепую; штамповать его нельзя (спека §1.5).
+
+    «Чистый» домен обязан нести wayback_checked=True: отсутствие ошибок чистотой НЕ является
+    (аудит F2 — пустой архив ошибки не даёт). Три состояния истории — в test_history_verdict."""
     d = Domain(domain="x.ru", score_breakdown={"errors": ["wayback:ConnectError"]})
     assert "Wayback" in scoring.blind_reason(d)
-    clean = Domain(domain="y.ru", score_breakdown={"errors": []})
+    clean = Domain(domain="y.ru", wayback_checked=True, prior_flags={},
+                   score_breakdown={"errors": []})
     assert scoring.blind_reason(clean) is None

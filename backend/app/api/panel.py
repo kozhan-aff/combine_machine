@@ -206,7 +206,8 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import blind_reason, stale_donors, DROP_GRACE
+    from app.services.scoring import (blind_reason, history_evidence, history_verdict,
+                                      stale_donors, DROP_GRACE)
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
@@ -237,9 +238,14 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     thr = sum(n for code, n in reasons.items() if code in ("low_rd", "too_young", "low_score"))
     return templates.TemplateResponse(request, "domains.html", {
         "active": "domains",
-        # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
-        # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
-        "inbox": [(d, blind_reason(d), _urgent(d, soon, now)) for d in inbox],
+        # строка инбокса: домен + причина «вслепую» + срочность + вердикт истории + улики.
+        # Все решения приняты в Python — в Jinja нет ни tz-нормализации, ни доступа к скорингу.
+        # Вердикт едет ОТДЕЛЬНО от blind: «не проверяли» и «проверили, и там грязь» — разные
+        # вещи, а подпись «история чистая» не имеет права стоять ни под тем, ни под другим.
+        # Улики (снимки Wayback, по которым машина судила) едут всегда, когда они есть: вердикт
+        # ошибается — куратор должен мочь перепроверить и «грязно», и «чисто».
+        "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
+                   history_evidence(d)) for d in inbox],
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
@@ -285,11 +291,17 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
 
 
 def _bulk_candidates(db: Session, min_score: float):
-    """(чистые к одобрению, сколько отсеяно как «вслепую»)."""
-    from app.services.scoring import blind_reason
+    """(чистые к одобрению, сколько отсеяно как «вслепую»).
+
+    Гейт истории — ОТДЕЛЬНЫМ условием, а не через blind_reason: в пакет идут только домены,
+    чью историю Wayback реально прочитал ('clean'). Полагаться на то, что blind_reason сам
+    вернёт что-нибудь для непроверенных, — ровно та связка, на которой аудит поймал F2
+    (пустой Wayback ошибки не даёт → «вслепую» не определялось → штамповали как чистое).
+    """
+    from app.services.scoring import blind_reason, history_verdict
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
-    clean = [d for d in rows if not blind_reason(d)]
+    clean = [d for d in rows if history_verdict(d) == "clean" and not blind_reason(d)]
     return clean, len(rows) - len(clean)
 
 
