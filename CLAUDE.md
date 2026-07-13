@@ -69,7 +69,7 @@ docker compose run --rm backend python backend/scripts/smoke.py
 
 ## Текущее состояние (2026-07-13)
 **Наблюдаемость машины + M1 как инбокс решений** (2026-07-13, ветка `feat/panel-m1-observability`,
-12 коммитов, 8 задач под SDD — 7 кодовых прошли `combine-reviewer` (opus) с 0 Critical/Important
+13 коммитов, 8 задач под SDD — 7 кодовых прошли `combine-reviewer` (opus) с 0 Critical/Important
 находок на КАЖДОЙ, 305 тестов (было 276), pyflakes чист): три симптома одного корня — «машина не
 рассказывает, что делает». Прогресс-бар перепроверки не работал вовсе (роут пускал только
 `discovery|score|sweep`, `recheck` ловил 404); Пульт физически не мог видеть автопилот — свип
