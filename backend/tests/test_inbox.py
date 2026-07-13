@@ -89,7 +89,7 @@ def test_domains_shows_last_run_failure(client):
     assert "Оценка упала" in html and "timeout" in html
 
 
-def test_empty_recheck_explains_itself(client, monkeypatch):
+def test_empty_recheck_explains_itself(client):
     """Дебаг 2026-07-13: перепроверка на пустом инбоксе завершалась за 41 мс со сводкой
     «проверено 0: свободны 0, ЗАНЯТЫ 0...» — оператор прочитал это как сломанную кнопку.
     Пустой прогон обязан назвать причину и следующий шаг."""

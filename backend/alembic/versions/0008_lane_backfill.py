@@ -28,9 +28,18 @@ def upgrade() -> None:
     # ПОРЯДОК ВАЖЕН: возврат ищет домены ПО lane IS NULL — сделай backfill первым, и искать
     # станет нечего (все backorder уже были бы 'bid'), а испорченные записи остались бы в
     # rejected навсегда.
+    # Возвращаем ТОЛЬКО тех, кого есть чем судить после возврата:
+    #   · source='backorder' — следующая строка проставит им lane='bid', а дедлайн у них есть
+    #     из delete_date (это и есть 29 потерянных: clara-c.ru и Co.);
+    #   · либо дедлайн уже известен — вердикт сможет сказать waiting/taken по дате.
+    # Легаси сырых витрин БЕЗ дедлайна не воскрешаем: взять дату им неоткуда (старые zip-листы
+    # cctld не переиздаются, дозаполнение в discovery._insert сработает только для домена из
+    # ТЕКУЩЕГО листа), вердикт вечно отвечал бы 'unknown', и домен навсегда осел бы в discovered
+    # балластом — накручивая плитку «найдено» и налог на квоту A-Parser.
     op.execute("""
         UPDATE domains SET status = 'discovered', reject_reason = NULL
         WHERE status = 'rejected' AND reject_reason = 'not_acquirable' AND lane IS NULL
+          AND (source = 'backorder' OR acquire_deadline IS NOT NULL)
     """)
     op.execute("UPDATE domains SET lane = 'bid' WHERE source = 'backorder' AND lane IS NULL")
 

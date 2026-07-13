@@ -448,3 +448,58 @@ def test_ahrefs_failure_does_not_crash_funnel():
     assert ah.calls == 1
     assert any(e.startswith("ahrefs:") for e in out["errors"])
     assert out["breakdown"]["components"]["authority"] == 0.0   # сбой -> dr=None -> 0, не крэш
+
+
+# --- квота: воронка не платит whois'ом дважды за детерминированный ответ ---------
+
+def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkeypatch):
+    """Ревью 2026-07-13, Important 1. Не-bid домен ДО своего дропа гарантированно занят
+    (реестр освобождающихся на то и реестр) — вердикт вернёт waiting, домен останется
+    discovered. Брать его в прогон = купить whois'ом ответ, который уже известен. С cctld,
+    везущим дедлайн, таких доменов ~9.5 тыс.: один «весь пул» выжигал бы весь max_whois_per_run
+    на них с нулевым продвижением."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    future = datetime.now(timezone.utc) + timedelta(days=10)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="waits.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=future))                      # дроп впереди -> не берём
+        s.add(Domain(domain="today.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=datetime.now(timezone.utc)))  # дроп настал -> берём
+        s.add(Domain(domain="bid.ru", source="backorder", status="discovered", lane="bid",
+                     referring_domains=50, acquire_deadline=future))  # bid -> берём всегда
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain",
+                        lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=50)
+
+    with db.SessionLocal() as s:
+        picked = {s.get(Domain, i).domain for i in seen}
+    assert picked == {"today.ru", "bid.ru"}, f"взяли лишнее/потеряли нужное: {picked}"
+
+
+def test_unresolved_domain_remembers_it_was_checked(sqlite_db):
+    """Whois ОТВЕТИЛ («занят», дроп впереди) — ответ детерминированный, завтра будет тот же.
+    Факт сверки обязан осесть в БД, иначе следующий прогон платит за него заново."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    future = datetime.now(timezone.utc) + timedelta(days=10)
+    did = _mk(domain="waits.ru", lane=None, source="cctld", referring_domains=10,
+              acquire_deadline=future)
+    wb = _Wayback()
+    out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
+    assert out.get("unresolved") is True
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered"                   # статус не тронут
+        assert d.acquirability_checked_at is not None     # но сверку запомнили
+    assert wb.calls == 0

@@ -30,20 +30,25 @@ def _defaults() -> dict:
     }
 
 
-def _clean_weights(raw) -> dict:
+def _clean_weights(raw, base: dict | None = None) -> dict:
     """Веса с UI -> валидный словарь. Ключи — только известные компоненты (чужие игнорим:
     неизвестный ключ не с чем перемножать, compute_score упал бы на KeyError).
 
+    `base` — на что опираться для НЕ переданных ключей. Из UI приходят все пять, но частичный
+    POST (API, скрипт) не должен молча ронять остальные веса к дефолтам: база — то, что сейчас
+    записано, а не то, что зашито в коде.
+
     Вырожденный набор (всё по нулю / мусор) НЕ записываем: он обнулил бы score всем доменам
     разом и тихо превратил бы воронку в «всё отклонено». В таком случае — дефолты."""
+    b = {**cfg.WEIGHTS, **(base or {})}
     if not isinstance(raw, dict):
-        return dict(cfg.WEIGHTS)
+        return {k: b[k] for k in cfg.WEIGHTS}
     out = {}
     for k in cfg.WEIGHTS:                       # порядок и состав ключей задаёт код, не форма
         try:
-            out[k] = max(0.0, min(1.0, float(raw.get(k, cfg.WEIGHTS[k]))))
+            out[k] = max(0.0, min(1.0, float(raw.get(k, b[k]))))
         except (TypeError, ValueError):
-            out[k] = cfg.WEIGHTS[k]
+            out[k] = b[k]
     return out if sum(out.values()) > 0 else dict(cfg.WEIGHTS)
 
 
@@ -91,7 +96,7 @@ def update_settings(**kw) -> dict:
             r.sources_enabled = {s: bool(kw["sources_enabled"].get(s, False))
                                  for s in cfg.SOURCES_ENABLED}
         if "weights" in kw and kw["weights"] is not None:
-            r.weights = _clean_weights(kw["weights"])
+            r.weights = _clean_weights(kw["weights"], base=dict(r.weights or {}))
         if r.max_whois_per_run < 1:
             r.max_whois_per_run = 1                 # 0 глушил бы скоринг целиком
         if r.approve_at < r.manual_review_at:

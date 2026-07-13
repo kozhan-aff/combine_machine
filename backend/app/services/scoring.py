@@ -175,6 +175,31 @@ def acquirability_verdict(available, acquire_deadline, now, *, lane) -> str:
     return "taken"                                   # дедлайн с запасом прошёл, а домен занят
 
 
+def scorable(now):
+    """SQL-условие «этот домен МОЖЕТ пройти T1 прямо сейчас» — фильтр выборки score_pending.
+
+    Без него воронка платит whois'ом за ответ, который уже знает. Не-bid домен до своего дропа
+    ГАРАНТИРОВАННО занят (реестр освобождающихся на то и реестр), вердикт вернёт `waiting`, домен
+    останется discovered — и следующий прогон купит тот же ответ заново. Пока такие домены
+    терминально уезжали в rejected (баг с lane=NULL), пул не копился; теперь cctld везёт дедлайн,
+    и весь реестр (~9.5 тыс.) законно ждёт дропа неделями. Один `весь пул` выжигал бы
+    max_whois_per_run на одних и тех же строках с нулевым продвижением.
+
+    Берём, значит, только тех, у кого есть шанс:
+      · lane='bid' — backorder: T1 короткозамкнут лейном, whois нужен ради возраста;
+      · дроп НАСТУПИЛ (с запасом DROP_GRACE) — сегодня whois впервые может сказать «свободен»;
+      · дедлайна нет И ни разу не сверялись — один шанс: вдруг домен уже свободен. Ответ
+        запоминается (acquirability_checked_at), второй раз за него не платим.
+    """
+    from app.models.domain import Domain
+    from sqlalchemy import or_, and_
+    return or_(
+        Domain.lane == "bid",
+        and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now + DROP_GRACE),
+        and_(Domain.acquire_deadline.is_(None), Domain.acquirability_checked_at.is_(None)),
+    )
+
+
 def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
@@ -328,8 +353,18 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, job=job)
 
         if sig.get("acquirability_unresolved"):
-            # приобретаемость не определена (whois сбой/непонятно/бюджет) — НЕ пишем,
+            # приобретаемость не определена (whois сбой/непонятно/бюджет) — статус НЕ трогаем,
             # домен остаётся discovered, следующий прогон перепробьёт (см. спек §D).
+            #
+            # Но если whois ОТВЕТИЛ по существу («занят» — а дроп ещё впереди либо судить не по
+            # чему), ответ ДЕТЕРМИНИРОВАННЫЙ: завтра будет ровно тот же. Факт сверки надо
+            # запомнить, иначе каждый следующий прогон платит whois'ом за уже известный ответ —
+            # а таких доменов теперь МАССА: cctld везёт дедлайн, и весь реестр (~9.5 тыс.)
+            # законно ждёт своего дропа в discovered. Ровно ту же аварию уже лечили в
+            # recheck_acquirability (см. ниже) — второй раз наступать на неё не будем.
+            if sig.get("acquirability_checked_at"):
+                d.acquirability_checked_at = sig["acquirability_checked_at"]
+                db.commit()
             return {"domain": d.domain, "status": d.status, "unresolved": True,
                     "errors": sig.get("errors", [])}
 
@@ -380,6 +415,7 @@ def score_pending(limit: int = 100) -> int:
 
     Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
     Оркестратор пишет это в counts свипа — врать ему нельзя."""
+    from datetime import datetime, timezone
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -387,9 +423,10 @@ def score_pending(limit: int = 100) -> int:
     from app.services.settings import get_settings
 
     st = get_settings()
+    now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         rows = db.execute(
-            select(Domain.id, Domain.domain).where(Domain.status == "discovered")
+            select(Domain.id, Domain.domain).where(Domain.status == "discovered", scorable(now))
             .order_by(Domain.referring_domains.desc().nulls_last())
             .limit(limit)
         ).all()

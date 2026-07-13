@@ -52,6 +52,9 @@
     {% set r = last_runs.get(key) %}
     {% if r and r.status == 'failed' %}
       <div class="hint" style="color:var(--bad)">⚠ {{ ru }} упала: {{ r.error }}</div>
+    {% elif r and r.status == 'cancelled' %}
+      {# остановленную человеком нельзя рисовать галочкой: она НЕ доделала работу #}
+      <div class="hint" style="color:var(--acc2)">⦸ {{ ru }} остановлена: {{ r.done }} из {{ r.total }}</div>
     {% elif r and r.message %}
       <div class="hint">✓ {{ ru }}: {{ r.message }}</div>
     {% endif %}
