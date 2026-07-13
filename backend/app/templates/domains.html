@@ -14,6 +14,11 @@
       <span class="fcell {{ 'gate' if inbox }}" title="ждут твоего решения — список ниже"><div class="v">{{ inbox|length }}</div><div class="k">на решении</div></span>
       <span class="fcell" title="одобрены — можно ставить в очередь выкупа"><div class="v">{{ ready|length }}</div><div class="k">одобрено</div></span>
       <a class="fcell" href="/domains/pool?status=purchased" title="куплены — дальше создать сайт"><div class="v">{{ counts.get('purchased', 0) }}</div><div class="k">куплено</div></a>
+      {# type="button" обязателен: без него это submit, и первая же обёртка в <form> отправит её #}
+      <button type="button" class="fcell" onclick="document.getElementById('why').showModal()"
+              title="разобрать, почему домены не прошли воронку">
+        <div class="v" style="color:var(--bad)">{{ counts.get('rejected', 0) }}</div>
+        <div class="k">отклонено</div></button>
     </div></div>
 </div>
 
@@ -175,5 +180,39 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 {% else %}
 <div class="card empty">Одобренных доменов нет — они появятся здесь после твоего решения в инбоксе.</div>
 {% endif %}
+
+{% set RU = {'low_rd': ('Мало доноров', 'thr'), 'too_young': ('Молодой домен', 'thr'),
+             'low_score': ('Низкий скор', 'thr'), 'history_dirty': ('Грязная история', 'dirt'),
+             'rkn': ('РКН', 'dirt'), 'blacklist': ('Блэклист', 'dirt'),
+             'feed_flag': ('Флаг источника', 'dirt'),
+             'not_acquirable': ('Занят', 'taken')} %}
+<dialog id="why" class="modal">
+  <form method="dialog" style="display:flex; align-items:start">
+    <div style="flex:1">
+      <h3 style="margin:0">Отклонено — разбор причин</h3>
+      <div class="hint">почему домены не прошли воронку · всего
+        <b style="color:var(--bad)">{{ reasons_total }}</b></div>
+    </div>
+    <button class="btn-sm" title="закрыть">×</button>
+  </form>
+  <div class="why-grid">
+    {% for code, n in reasons.items()|sort(attribute='1', reverse=true) %}
+      {# фолбэк на (code or 'без причины'), а не на голый code: у старых строк reject_reason
+         бывает NULL, и RU.get(None, (None, ...)) отрендерил бы оператору слово «None» #}
+      {% set ru, kind = RU.get(code, (code or 'без причины', 'taken')) %}
+      <div class="why-nm">{{ ru }} <code>{{ code or '—' }}</code></div>
+      <div class="why-bar"><i class="k-{{ kind }}"
+           style="width:{{ (n / reasons_total * 100)|round|int if reasons_total else 0 }}%"></i></div>
+      <div class="num"><b>{{ n }}</b>
+        <span class="hint">{{ (n / reasons_total * 100)|round|int if reasons_total else 0 }}%</span></div>
+    {% endfor %}
+  </div>
+  <div class="why-foot">
+    <span><i class="sw k-thr"></i> режет порог — <b>{{ reasons_thr }}</b>
+      ({{ (reasons_thr / reasons_total * 100)|round|int if reasons_total else 0 }}%): можно ослабить</span>
+    <span><i class="sw k-dirt"></i> грязь/РКН — не трогать</span>
+    <a class="btn btn-acc btn-sm" href="/settings" style="margin-left:auto">⚙ настроить пороги →</a>
+  </div>
+</dialog>
 
 {% endblock %}

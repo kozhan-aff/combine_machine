@@ -87,3 +87,15 @@ def test_domains_shows_last_run_failure(client):
             raise RuntimeError("A-Parser timeout")
     html = client.get("/domains").text
     assert "Проверка упала" in html and "timeout" in html
+
+
+def test_reject_reasons_split_threshold_from_dirt(client):
+    """Разбор обязан различать «отсеял мой порог» и «объективная грязь» — иначе непонятно,
+    что вообще можно крутить на /settings."""
+    _add(domain="a.ru", status="rejected", reject_reason="low_rd")
+    _add(domain="b.ru", status="rejected", reject_reason="low_rd")
+    _add(domain="c.ru", status="rejected", reject_reason="history_dirty")
+    html = client.get("/domains").text
+    assert "Мало доноров" in html and "Грязная история" in html
+    assert "режет порог" in html and "не трогать" in html
+    assert "настроить пороги" in html
