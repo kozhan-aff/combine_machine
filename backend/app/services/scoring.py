@@ -359,8 +359,12 @@ def scorable(now):
 
     Берём, значит, только тех, у кого есть шанс:
       · lane='bid' — backorder: T1 короткозамкнут лейном, whois нужен ради возраста;
-      · дроп НАСТУПИЛ (с запасом DROP_GRACE) — сегодня whois впервые может сказать «свободен».
-        До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке;
+      · дроп НАСТУПИЛ (`deadline <= now`) — сегодня whois впервые может сказать «свободен».
+        До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке. F20 (аудит
+        2026-07-14): здесь стоял `<= now + DROP_GRACE` — не «наступил с запасом», а «наступит
+        В ПРЕДЕЛАХ DROP_GRACE ВПЕРЕДИ», то есть дроп ЗАВТРА/послезавтра уже проходил сюда, хотя
+        такой домен гарантированно ещё занят. DROP_GRACE здесь не нужен вообще — это ДРУГАЯ
+        граница, чем верхний запас ПОСЛЕ дропа в acquirability_verdict, путать нельзя;
       · дедлайна НЕТ — раз в RECHECK_EVERY. Здесь одним шансом обойтись нельзя: «занят сегодня»
         без даты дропа не говорит ничего про день освобождения, и домен (вся популяция
         reg.ru/sweb) никогда не увидел бы собственного дропа.
@@ -369,7 +373,7 @@ def scorable(now):
     from sqlalchemy import or_, and_
     return or_(
         Domain.lane == "bid",
-        and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now + DROP_GRACE),
+        and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now),
         and_(Domain.acquire_deadline.is_(None),
              or_(Domain.acquirability_checked_at.is_(None),
                  Domain.acquirability_checked_at < now - RECHECK_EVERY)),

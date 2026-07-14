@@ -484,6 +484,59 @@ def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkey
     assert picked == {"today.ru", "bid.ru"}, f"взяли лишнее/потеряли нужное: {picked}"
 
 
+def test_scorable_excludes_domain_whose_drop_is_tomorrow(sqlite_db, monkeypatch):
+    """F20 (аудит 2026-07-14). `scorable()` сравнивал `acquire_deadline <= now + DROP_GRACE` —
+    это не «дроп наступил с запасом», а «дроп наступит В ПРЕДЕЛАХ DROP_GRACE ВПЕРЕДИ». С
+    DROP_GRACE=2 дня дроп ЗАВТРА уже проходил в выборку, хотя такой домен гарантированно ещё
+    занят (реестр освобождающихся на то и реестр) — whois впустую. `DROP_GRACE` здесь вообще
+    не нужен: окно ловли открывается РОВНО когда `acquire_deadline <= now`, это другая граница,
+    чем верхний запас в acquirability_verdict (там DROP_GRACE — окно ПОСЛЕ дропа, не трогаем)."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="tomorrow.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=now + timedelta(days=1)))    # дроп ЗАВТРА — ещё занят
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=50)
+
+    with db.SessionLocal() as s:
+        picked = {s.get(Domain, i).domain for i in seen}
+    assert picked == set(), f"дроп ЗАВТРА не должен браться в скоринг: {picked}"
+
+
+def test_scorable_includes_domain_whose_drop_already_happened(sqlite_db, monkeypatch):
+    """Обратная сторона теста выше: дроп УЖЕ наступил (несколько часов назад) — окно ловли
+    открыто, whois впервые может ответить «свободен». Фикс не обязан перегибать в другую
+    сторону и терять уже созревший дроп."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+    import app.db as db
+    from app.models.domain import Domain
+
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="just-dropped.ru", source="cctld", status="discovered", lane=None,
+                     acquire_deadline=now - timedelta(hours=3)))   # дроп уже случился
+        s.commit()
+
+    seen = []
+    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {})
+    scoring.score_pending(limit=50)
+
+    with db.SessionLocal() as s:
+        picked = {s.get(Domain, i).domain for i in seen}
+    assert picked == {"just-dropped.ru"}, f"созревший дроп должен уйти в скоринг: {picked}"
+
+
 def test_unresolved_domain_remembers_it_was_checked(sqlite_db):
     """Whois ОТВЕТИЛ («занят», дроп впереди) — ответ детерминированный, завтра будет тот же.
     Факт сверки обязан осесть в БД, иначе следующий прогон платит за него заново."""
