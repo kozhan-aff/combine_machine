@@ -1,5 +1,7 @@
 """Cloudflare Control Center P0 — mirror-модель. См. docs/superpowers/plans/2026-07-14-cloudflare-p0.md,
 задача 1: 8 mirror-таблиц, UNIQUE Site.domain_id, импорт legacy .env-connection."""
+import pathlib
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 
@@ -113,3 +115,37 @@ def test_import_legacy_connection_empty_token_is_noop(monkeypatch):
         result = cf_legacy.import_legacy_connection(db)
         assert result is None
         assert db.query(CloudflareConnection).count() == 0
+
+
+def test_migration_0016_dedup_partitions_collisions_by_keeper_and_url_path():
+    """Текст-гард на дедуп-DELETE миграции 0016 — по образцу
+    test_page_uniqueness.py::test_migration_deletes_index_history_before_pages (0014):
+    сама миграция Postgres-only и в pytest-сьюте не гоняется (SQLite-харнесс — create_all, а
+    не alembic upgrade), поэтому единственный автоматический сторож — текст.
+
+    Инвариант: коллизия url_path обязана считаться ROW_NUMBER()-ом, партиционированным СРАЗУ по
+    (keeper, url_path) для ВСЕХ страниц, которые метят в keeper (и страниц самого keeper, и
+    страниц любого числа проигравших) — а не проверяться попарно "проигравший против keeper".
+    При 3+ Site-дублях на один домен два РАЗНЫХ проигравших могут делить url_path, которого нет
+    у keeper: старая (до фикса ревью Задачи 1) форма это не ловила, коллизия доживала до
+    `UPDATE pages SET site_id = keeper` и падала на `uq_page_per_path` (0014) — UniqueViolation
+    рвал транзакцию миграции и ронял git-pull-деплой (F-migration-0016, воспроизведено на живом
+    Postgres 16, см. отчёт ревью). Откат к старой форме молча проходит весь остальной сьют —
+    ни одного другого теста, который это заметил бы, нет.
+    """
+    path = (pathlib.Path(__file__).resolve().parents[1] / "alembic" / "versions"
+            / "0016_cloudflare_mirrors.py")
+    src = path.read_text(encoding="utf-8")
+    up = src[src.index("def upgrade"):src.index("def downgrade")]
+
+    first = up.find("op.execute(")
+    assert first != -1, "миграция обязана дедуплицировать Page ДО UNIQUE(sites.domain_id)"
+    second = up.find("op.execute(", first + 1)
+    assert second != -1, "ожидались минимум два op.execute (дедуп-DELETE, затем перенос UPDATE)"
+    dedup_query = up[first:second]
+
+    assert "PARTITION BY r.keeper, pg.url_path" in dedup_query, (
+        "первый op.execute обязан ранжировать ROW_NUMBER() по ЕДИНОЙ группе (keeper, url_path) "
+        "по всем страницам сразу — иначе два РАЗНЫХ проигравших с общим url_path не поймаются "
+        "как коллизия, и перенос ниже уронит uq_page_per_path на живом Postgres"
+    )
