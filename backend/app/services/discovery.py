@@ -93,6 +93,12 @@ def _collect(enabled: dict, run=None) -> list[dict]:
     for name, Client in _sources().items():
         if not enabled.get(name):
             continue
+        # Между источниками (не внутри — один источник это один сетевой поход) спрашиваем
+        # реестр: нажали ли «стоп». Тот же контракт, что уже держат score_pending/recheck_
+        # acquirability/run_sweep — кнопка рисуется ЛЮБОЙ живой задаче, а до сих пор её слушал
+        # только score/recheck (F18): discovery доезжал до конца независимо от кнопки.
+        if jobs.cancelled(run):
+            raise jobs.Cancelled()
         jobs.report(run, stage=name, current=f"собираю: {_SOURCE_RU.get(name, name)}")
         before = len(rows)
         try:
