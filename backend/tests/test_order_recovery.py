@@ -197,18 +197,112 @@ def test_poll_leaves_a_live_send_alone(sqlite_db, monkeypatch):
 
 
 def test_queue_shows_the_stuck_send(client, monkeypatch):
-    """Очередь обязана НАЗВАТЬ застрявшую отправку и дать из неё выход.
+    """Очередь обязана НАЗВАТЬ застрявшую отправку, дать из неё выход — и не путать её с живой.
 
     До фикса строка рендерилась сырым `ordering` без единой кнопки: статус, которого нет в
     словаре подписей, и пустая колонка действия. Единственный экран денежного пути молчал о том,
     что заказ мог уйти."""
     _did, oid = _send_and_die(monkeypatch)
+
+    # СВЕЖИЙ claim — это ЖИВАЯ отправка, и очередь обязана назвать срок ожидания вслух: до
+    # STUCK_CLAIM_MIN сверка честно отвечает «не трогали», и оператор, которому пообещали «пару
+    # минут», решит, что кнопка сломана (ревью Задачи 8, минор 3).
+    live = client.get("/queue").text
+    assert "заказ уходит провайдеру" in live, "живую отправку показали как обрыв — паника на ровном месте"
+    assert "отправка оборвалась" not in live         # (слово живёт и в JS прогресса — метим строку заказа)
+    assert f"через {acquisition.STUCK_CLAIM_MIN} мин" in live, (
+        "сколько ждать разбора — не сказано; UI и сверка обязаны судить по одному сроку")
+
     _age_the_claim(oid)
 
     html = client.get("/queue").text
     assert "отправляется" in html, "сырой `ordering` в UI — машина говорит на своём языке, не на нашем"
     assert "отправка оборвалась — исход неизвестен" in html
     assert "↻ сверить с провайдером" in html, "из застрявшей отправки нет выхода — строка-могила"
+
+
+def test_poll_report_names_both_kinds_of_stuck_send(client, monkeypatch):
+    """Рапорт сверки — всё, что оператор видит после нажатия; про застрявшие отправки он обязан
+    сказать ОБЕ новости: труп разобран, живую не трогали.
+
+    Формы ответа поллинга не сторожил ни один тест (ревью Задачи 8, минор 4): переименуй ключ —
+    и баннер молча схлопнется в «сверено 0», то есть в «кнопка не работает» ровно в том случае,
+    ради которого её и жмут.
+    """
+    _did, dead = _send_and_die(monkeypatch, "lost.ru")
+    _age_the_claim(dead)                              # труп: процесс убили давно
+    _send_and_die(monkeypatch, "live.ru")             # живая отправка: claim свежий
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [])
+
+    html = client.post("/queue/poll", follow_redirects=True).text
+
+    assert "застрявших отправок разобрано 1" in html, "разбор трупа прошёл молча"
+    assert "отправок в полёте 1" in html, "про нетронутую живую отправку не сказали ни слова"
+
+
+def test_poll_does_not_clobber_the_row_a_live_retry_just_paid_for(sqlite_db, monkeypatch):
+    """Сверка судит по СНИМКУ, а execute тем временем клеймит ту же строку — снимок протухает.
+
+    Гонка живая и дешёвая: «↻ обновить статусы» и «↻ повторить» — два sync-роута панели, FastAPI
+    гоняет их в threadpool ПАРАЛЛЕЛЬНО. Строки сверка выбирает ОДНИМ SELECT'ом до цикла, а пишет по
+    одной; между снимком и записью человек жмёт «повторить», и `failed`-строка уезжает в 'ordering',
+    а оттуда — в 'ordered' с ОПЛАЧЕННЫМ заказом.
+
+    До фикса сверка дописывала своё поверх — слепым UPDATE'ом по первичному ключу. У провайдера по
+    этому домену лежит СТАРАЯ failed-запись («Перекрыт» с прошлого цикла), и её elid садился на
+    только что оплаченную строку. Дальше цепочка достраивалась сама: следующая сверка судит строку
+    по ЧУЖОМУ мёртвому заказу → 'failed' → в очереди снова «↻ повторить» → ВТОРОЙ платный заказ,
+    пока первый в полёте.
+
+    Всё живым кодом: старую запись отдаёт ОДИН фейк транспорта (`client_orders`) — тот самый, из
+    которого читает и `find_order` (remote-`failed` он за живой заказ не считает, потому и шлёт
+    новый), а 'ordered' рождает НАСТОЯЩИЙ execute, а не рука теста.
+    """
+    _grid(monkeypatch)
+    # .РФ здесь не экзотика, а физика денег: фид отдаёт кириллицу, billmgr — punycode (для этого
+    # norm_domain и написан). Она же — точка врезки: по КИРИЛЛИЦЕ сверка зовёт norm_domain ровно
+    # из своего цикла, уже сняв снимок; запись провайдера приходит punycode'ом — на ней не срываемся.
+    ours, theirs = "сайт.рф", "xn--80aswg.xn--p1ai"
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [
+        {"elid": "777", "domain": theirs, "id_status": "3", "clear_status": "Перекрыт",
+         "state": "failed", "tariff": "190"}])
+
+    def _refused(self, domain, price_id, period_id):
+        raise RuntimeError("провайдер отказал: приём заказов закрыт")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _refused)
+
+    did = _approved(ours)
+    oid = acquisition.create_order(did, "backorder")
+    acquisition.confirm_order(oid, 190)               # ГЕЙТ поднимает человек
+    acquisition.execute_confirmed_order(oid)          # отказ провайдера -> failed, выход = «повторить»
+    assert _orders(did)[0].status == "failed"
+
+    # Повтор УДАЁТСЯ: настоящий find_order старую failed-запись за живой заказ не считает — заказ
+    # уходит, ДЕНЬГИ СПИСЫВАЮТСЯ, у строки появляется свой elid.
+    monkeypatch.setattr(backorder.BackorderClient, "order",
+                        lambda self, domain, price_id, period_id: {"order_id": "999"})
+    real_norm, raced = backorder.norm_domain, {}
+
+    def racing_norm(domain):
+        if domain == ours and not raced:              # мы уже внутри цикла сверки: снимок снят
+            raced["yes"] = True
+            acquisition.execute_confirmed_order(oid)  # ДРУГОЙ клик: «↻ повторить» — заказ ушёл
+        return real_norm(domain)
+
+    monkeypatch.setattr(backorder, "norm_domain", racing_norm)
+    acquisition.poll_orders()
+
+    assert raced, "гонку не воспроизвели — тест ничего не доказывает"
+    o = _orders(did)[0]
+    assert o.status == "ordered", "сверка переписала исход оплаченного заказа"
+    assert o.provider_order_id == "999", (
+        "на оплаченную строку сел elid ЧУЖОГО мёртвого заказа — машина следит не за тем заказом")
+
+    # ...и вот чем это кончалось: следующая сверка судила бы строку по мёртвому «Перекрыт» и
+    # вернула бы в очередь кнопку «↻ повторить».
+    acquisition.poll_orders()
+    assert _orders(did)[0].status == "ordered", (
+        "оплаченный заказ помечен «не вышло» — оператор нажмёт «повторить» и заплатит второй раз")
 
 
 # --- F12: отмена, приехавшая после отправки ------------------------------------------------
@@ -221,11 +315,15 @@ def test_cancel_does_not_bury_an_order_that_was_just_sent(sqlite_db, monkeypatch
     гоняет их в threadpool ПАРАЛЛЕЛЬНО; отправка ходит в сеть (сотни мс), отмена — нет. Человек,
     передумавший в последний момент, воспроизводит её одним лишним кликом.
 
-    Момент гонки вживляем точно: чужой execute коммитится между чтением статуса в `cancel_order` и
-    его записью. Хук вешаем на `_open_order_id` — это и есть та точка внутри отмены (тот же приём,
-    что в test_order_uniqueness). Отправку делает НАСТОЯЩИЙ execute — состояние `ordered` рождает
-    живой код, а не рука теста.
+    Момент гонки вживляем точно: чужой execute коммитится между чтением строки в `cancel_order` и
+    её записью. Хук — на самом чтении (`Session.get`): это ЕДИНСТВЕННАЯ точка внутри отмены до
+    захвата строки. Всё остальное (кто ещё держит домен) отмена спрашивает уже ПОД ЗАМКОМ, взятым
+    условным UPDATE'ом (ревью Задачи 8, минор 1), и туда никакой параллельный execute не влезет —
+    в этом и смысл замка. Отправку делает НАСТОЯЩИЙ execute — состояние `ordered` рождает живой
+    код, а не рука теста.
     """
+    from sqlalchemy.orm import Session
+
     _grid(monkeypatch)
     monkeypatch.setattr(backorder.BackorderClient, "find_order", lambda self, domain: None)
     monkeypatch.setattr(backorder.BackorderClient, "order",
@@ -235,19 +333,20 @@ def test_cancel_does_not_bury_an_order_that_was_just_sent(sqlite_db, monkeypatch
     oid = acquisition.create_order(did, "backorder")
     acquisition.confirm_order(oid, 190)               # гейт поднят человеком: заказ готов уйти
 
-    real_guard = acquisition._open_order_id
+    real_get = Session.get
     raced: dict = {}
 
-    def racing_guard(sess, domain_id, except_id=None):
-        answer = real_guard(sess, domain_id, except_id)
-        if not raced:                                 # ровно один раз: это гонка, а не цикл
+    def racing_get(self, entity, ident, *a, **kw):
+        row = real_get(self, entity, ident, *a, **kw)
+        if entity is AcquisitionOrder and not raced:  # отмена прочитала строку — гонка ровно здесь
             raced["yes"] = True
             acquisition.execute_confirmed_order(oid)  # ДРУГОЙ клик: заказ ушёл, деньги списаны
-        return answer
+        return row
 
-    monkeypatch.setattr(acquisition, "_open_order_id", racing_guard)
+    monkeypatch.setattr(Session, "get", racing_get)
     r = acquisition.cancel_order(oid)                 # до фикса: слепой UPDATE ... WHERE id=N
 
+    assert raced, "гонку не воспроизвели — тест ничего не доказывает"
     o = _orders(did)[0]
     assert o.status == "ordered", (
         "отмена похоронила ОПЛАЧЕННЫЙ заказ: `cancelled` поллинг не опрашивает — заказ исчез бы "

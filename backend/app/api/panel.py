@@ -462,6 +462,11 @@ def queue_view(request: Request):
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
         "balance": balance, "bo_err": bo_err,
+        # Сколько машина ЖДЁТ, прежде чем счесть отправку оборвавшейся. Из константы, а не числом
+        # в шаблоне: очередь обязана называть оператору тот же срок, по которому судит сверка
+        # (ревью Задачи 8, минор 3) — разъедься они, и человек в промежутке решит, что кнопка
+        # сломана: бейдж пишет «заказ уходит провайдеру…», а сверка отвечает «не трогали».
+        "stuck_after_min": acquisition.STUCK_CLAIM_MIN,
         "n_pending": sum(1 for o in orders if o["status"] == "pending_confirm"),
     })
 
