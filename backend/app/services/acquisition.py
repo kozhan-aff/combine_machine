@@ -15,10 +15,34 @@ backorder заказывается живьём (uniservice.order). execute ид
 реализован — execute это честно репортит (status='failed'), не делая вид, что купил.
 """
 _PROVIDERS = {"backorder", "optimizator"}
-# Статусы, при которых по домену уже есть незакрытый заказ — второй не плодим. Список живёт в
-# МОДЕЛИ (`OPEN_ORDER_STATUSES`): из него же собран предикат уникального индекса, и разъехаться
-# они не могут — проверка в коде и запрет в БД обязаны говорить об одном и том же. Импорт —
-# внутри функций, как весь `app.*` в этом модуле (self-check ниже гоняется без БД и без пути).
+# Открытые статусы заказа — `OPEN_ORDER_STATUSES` в app/models/domain.py (оттуда же собран
+# предикат уникального индекса: код и БД обязаны говорить об одном и том же).
+
+
+def _open_order_id(db, domain_id: int, except_id: int | None = None) -> int | None:
+    """id ДРУГОГО открытого заказа на этот домен — или None. Гард инварианта БД.
+
+    Индекс `uq_open_order_per_domain` запирает `pending_confirm|ordering|ordered` — а писателей,
+    двигающих заказ В открытый статус, трое: `create_order` (новая заявка), `execute_confirmed_
+    order` (ретрай `failed` -> `ordering`) и `poll_orders` (фантом `failed` -> `ordered`, заказ
+    всё-таки долетел). Первый упирается в политику статусов домена, двум последним ничто не
+    мешает: строка `failed` МОЖЕТ соседствовать с открытым заказом того же домена — легаси-дубли,
+    которые старый код принимал до индекса и которые схлопывает миграция 0010 (выживший остаётся
+    открытым, дубль уезжает в `failed`+`maybe_sent`). Слепой UPDATE ловил там IntegrityError:
+    поллинг ронял ВСЮ пачку, ретрай — SQL-трейс в баннер панели (ревью Задачи 7).
+
+    Спрашивать БД до записи, а не ловить IntegrityError постфактум, — потому что оба вызывающих
+    обязаны СКАЗАТЬ человеку, почему движения не будет, а не просто уцелеть.
+    """
+    from sqlalchemy import select
+    from app.models.domain import OPEN_ORDER_STATUSES, AcquisitionOrder
+
+    q = select(AcquisitionOrder.id).where(
+        AcquisitionOrder.domain_id == domain_id,
+        AcquisitionOrder.status.in_(OPEN_ORDER_STATUSES))
+    if except_id is not None:
+        q = q.where(AcquisitionOrder.id != except_id)
+    return db.execute(q).scalars().first()
 
 
 def create_order(domain_id: int, provider: str = "backorder") -> int:
@@ -26,18 +50,10 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
 
     Возвращает id заказа (существующего открытого или нового). Не тратит денег —
     только заявка, ждущая подтверждения человеком."""
-    from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
-    from app.models.domain import OPEN_ORDER_STATUSES, Domain, AcquisitionOrder
+    from app.models.domain import Domain, AcquisitionOrder
     from app.services import transitions
-
-    def _open_order(db):
-        return db.execute(
-            select(AcquisitionOrder).where(
-                AcquisitionOrder.domain_id == domain_id,
-                AcquisitionOrder.status.in_(OPEN_ORDER_STATUSES))
-        ).scalar_one_or_none()
 
     if provider not in _PROVIDERS:
         raise ValueError(f"unknown provider {provider!r} (ожидается {_PROVIDERS})")
@@ -52,9 +68,9 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         # лежит РКН-домен (ревью Задачи 6, Important 4). Денег это не тратит — но тихим успехом
         # быть не должно.
         transitions.refuse_dirty(d)
-        existing = _open_order(db)
-        if existing:
-            return existing.id                      # уже в очереди — не дублируем
+        existing = _open_order_id(db, domain_id)
+        if existing is not None:
+            return existing                         # уже в очереди — не дублируем
         # approved -> purchasing через политику (services/transitions): она проверяет и ИСХОДНЫЙ
         # статус (как раньше — только approved), и ГРЯЗЬ (ещё раз — set_status зовёт тот же
         # refuse_dirty). Отклонённый за РКН домен доезжал сюда отмытым кнопкой «↩ вернуть в
@@ -76,10 +92,10 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
             # SELECT: отдаём чужой id. Домен победитель уже перевёл в purchasing (наш UPDATE
             # откатился вместе с INSERT), так что состояние согласовано.
             db.rollback()
-            existing = _open_order(db)
+            existing = _open_order_id(db, domain_id)
             if existing is None:                    # индекс сработал, а заказа нет — не наш случай
                 raise
-            return existing.id
+            return existing
         db.refresh(order)
         return order.id
 
@@ -184,6 +200,20 @@ def execute_confirmed_order(order_id: int) -> dict:
         d = db.get(Domain, o.domain_id)
         if d is not None:
             transitions.refuse_dirty(d)              # TransitionDenied -> роут покажет причину
+
+        # ОДНА ОТКРЫТАЯ ЗАЯВКА НА ДОМЕН (uq_open_order_per_domain, см. _open_order_id).
+        # «↻ повторить» двигает заказ из 'failed' в 'ordering' — ОТКРЫТЫЙ статус. Если домен
+        # уже держит другой открытый заказ (схлопнутый дубль легаси-базы соседствует с
+        # выжившим), claim ниже падал IntegrityError'ом МИМО try — SQL-трейсом в баннер панели.
+        # Отвечаем человеку словами: повторять нечего, пока жив первый заказ. Выход у строки
+        # есть — когда выживший закроется (пойман / не вышло / снят), повтор и поллинг снова
+        # станут ей доступны.
+        blocker = _open_order_id(db, o.domain_id, except_id=order_id)
+        if blocker is not None:
+            return {"order_id": order_id, "status": o.status,
+                    "error": f"у домена уже есть открытый заказ #{blocker} — второй в полёте "
+                             f"держать нельзя (это прямой путь заплатить дважды). Разбери "
+                             f"#{blocker} («↻ обновить статусы»), потом вернись к этому."}
 
         # Атомарный claim: из двух параллельных кликов (sync-роуты в threadpool) в 'ordering'
         # переведёт РОВНО один — второй увидит rowcount 0 и не пошлёт второй живой заказ.
@@ -303,6 +333,7 @@ def poll_orders() -> dict:
     остаётся (провайдер может молчать). Оркестратор эту функцию не зовёт.
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
     from app.integrations.backorder import BackorderClient, norm_domain
@@ -319,6 +350,7 @@ def poll_orders() -> dict:
             by_domain[k] = r
     moved = {"caught": 0, "failed": 0, "pending": 0}
     matched = 0
+    conflicts = 0
     with SessionLocal() as db:
         # 'failed' опрашиваем тоже: там может лежать ФАНТОМ — заказ, который на самом деле
         # ушёл (ambiguous-таймаут), и провайдер его знает. Иначе он невидим, а домен потерян.
@@ -336,30 +368,65 @@ def poll_orders() -> dict:
             if remote is None:
                 continue                              # провайдер ещё не показывает заказ
             matched += 1
-            if not o.provider_order_id and remote["elid"]:
-                o.provider_order_id = remote["elid"]  # усыновляем фантом: теперь он отслеживаем
             state = remote["state"]
-            moved[state] = moved.get(state, 0) + 1
-            o.result = {**(o.result or {}), "clear_status": remote["clear_status"]}
-            o.result.pop("maybe_sent", None)          # неопределённость снята правдой провайдера
-            if state == "caught":
-                o.status = "caught"
-                if d is not None:
-                    d.status = "purchased"            # домен наш — путь в M3
-            elif state == "failed":
-                o.status = "failed"
-            else:
-                o.status = "ordered"                  # в полёте (в т.ч. поднимает фантом из failed)
-        db.commit()
-    return {"checked": matched, **moved}
+
+            # ОДНА ОТКРЫТАЯ ЗАЯВКА НА ДОМЕН (uq_open_order_per_domain, см. _open_order_id).
+            # Поднять 'failed' обратно в 'ordered' — это движение В ОТКРЫТЫЙ статус, и если домен
+            # уже держит другой открытый заказ (схлопнутый дубль легаси-базы рядом с выжившим),
+            # UPDATE ловил IntegrityError. Оставляем строку в 'failed' и говорим ЗАЧЕМ: заказ у
+            # провайдера жив, мы его видим, но вторым открытым в нашей БД он быть не может.
+            # Строка не мертва — когда выживший закроется, следующий поллинг поднимет и её.
+            # `maybe_sent` НЕ снимаем: деньги за дубль могли уйти, и отмена обязана остаться
+            # запертой (иначе реально оплаченный заказ можно спрятать). elid не усыновляем —
+            # матч мог прийти по имени домена, а у домена сейчас ДВА заказа: чужой elid = ложь.
+            blocker = (_open_order_id(db, o.domain_id, except_id=o.id)
+                       if state == "pending" and o.status == "failed" else None)
+            try:
+                if blocker is not None:
+                    conflicts += 1
+                    # Старую ошибку отправки выбрасываем: провайдер только что сказал, что заказ
+                    # ЖИВ, — текст «не отправился» протух. Плюс в очереди колонка показывает
+                    # `error or note` (queue.html), и стухшая ошибка перекрыла бы эту пометку —
+                    # оператор так и не узнал бы, почему дубль не поднимается.
+                    keep = {k: v for k, v in (o.result or {}).items() if k != "error"}
+                    o.result = {**keep, "clear_status": remote["clear_status"],
+                                "note": f"провайдер держит этот заказ в полёте, но у домена уже "
+                                        f"есть открытый заказ #{blocker} — вторым открытым этот "
+                                        f"быть не может (иначе платим дважды). Разбери #{blocker}; "
+                                        f"когда он закроется, поллинг поднимет и этот."}
+                    db.commit()
+                    continue
+
+                if not o.provider_order_id and remote["elid"]:
+                    o.provider_order_id = remote["elid"]   # усыновляем фантом: теперь он отслеживаем
+                o.result = {**(o.result or {}), "clear_status": remote["clear_status"]}
+                o.result.pop("maybe_sent", None)      # неопределённость снята правдой провайдера
+                if state == "caught":
+                    o.status = "caught"
+                    if d is not None:
+                        d.status = "purchased"        # домен наш — путь в M3
+                elif state == "failed":
+                    o.status = "failed"
+                else:
+                    o.status = "ordered"              # в полёте (в т.ч. поднимает фантом из failed)
+                # КОММИТ ПОСТРОЧНО, а не один на весь цикл. Одна больная строка (инвариант,
+                # гонка с параллельным execute) не должна отменять синхронизацию ВСЕГО портфеля:
+                # раньше IntegrityError на дубле ронял пачку целиком — ни один заказ не
+                # обновлялся, и так на каждом нажатии. Заказов у портфеля десятки, не миллионы;
+                # цена лишних коммитов ничтожна рядом с ценой потерянной сверки.
+                db.commit()
+                moved[state] = moved.get(state, 0) + 1
+            except IntegrityError:                    # ремень поверх гарда: гонку он не закрывает
+                db.rollback()                         # (SELECT и UPDATE — разные запросы)
+                conflicts += 1
+    return {"checked": matched, "conflicts": conflicts, **moved}
 
 
 def cancel_order(order_id: int) -> dict:
     """Снять заявку (pending_confirm/failed -> cancelled). Домен возвращаем в 'approved',
     если по нему не осталось других открытых заказов. Денег это не касается."""
-    from sqlalchemy import select
     from app.db import SessionLocal
-    from app.models.domain import OPEN_ORDER_STATUSES, Domain, AcquisitionOrder
+    from app.models.domain import Domain, AcquisitionOrder
 
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
@@ -379,14 +446,8 @@ def cancel_order(order_id: int) -> dict:
         o.status = "cancelled"
         d = db.get(Domain, o.domain_id)
         if d is not None and d.status == "purchasing":
-            other_open = db.execute(
-                select(AcquisitionOrder.id).where(
-                    AcquisitionOrder.domain_id == o.domain_id,
-                    AcquisitionOrder.id != order_id,
-                    AcquisitionOrder.status.in_(OPEN_ORDER_STATUSES))
-            ).first()
-            if other_open is None:                    # больше ничего не держит домен в очереди
-                d.status = "approved"
+            if _open_order_id(db, o.domain_id, except_id=order_id) is None:
+                d.status = "approved"                 # домен больше ничем не держится в очереди
         db.commit()
         return {"order_id": order_id, "status": "cancelled", "domain_id": o.domain_id}
 

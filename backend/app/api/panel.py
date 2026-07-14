@@ -675,9 +675,14 @@ def queue_poll_action():
     from app.services import acquisition
     try:
         r = acquisition.poll_orders()
+        # Конфликт — не «ошибка сверки», а найденный дубль: провайдер держит заказ в полёте, а
+        # домен уже занят другим открытым заказом (одна открытая заявка на домен). Молчать о нём
+        # нельзя: за такой строкой стоят деньги, которые могли уйти.
+        dup = (f" · дублей не поднято {r['conflicts']} (у домена уже есть открытый заказ — "
+               f"смотри пометку в очереди)") if r.get("conflicts") else ""
         return _back("/queue", msg=f"Сверено с провайдером: наших заказов {r['checked']} · "
                                    f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                                   f"в полёте {r.get('pending', 0)}.")
+                                   f"в полёте {r.get('pending', 0)}.{dup}")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"опрос статусов: {e}")
 
