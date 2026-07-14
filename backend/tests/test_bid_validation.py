@@ -2,12 +2,13 @@
 
 Репро на a6ab6ab: `confirm_order` держит два гарда — `if not bid_rub` и `if bid_rub <= 0`.
 `float('nan')` проходит ОБА: `not nan` -> False (nan truthy), `nan <= 0` -> False (любое
-сравнение с nan ложно). `float('inf')`/`float('-inf')` проходят по той же причине (inf truthy,
-`-inf <= 0` -> True — но `-inf` не ловится первым гардом и добирается до `pick_tariff`, где
-`t["price"] >= bid_rub` истинно для ПЕРВОГО тира — это ловится существующим "больше нуля" гардом
-только если сам ноль/отрицательное конечно; -inf и +inf ускользают именно от isfinite-проверки,
-которой не было). Дальше `pick_tariff` не находит тир с ценой >= bid_rub (nan/+inf) и молча
-возвращает `grid[-1]` — верхний тир сетки (в проде 5 000 000 ₽).
+сравнение с nan ложно). `float('inf')` — тоже (inf truthy, `inf <= 0` -> False). Дальше
+`pick_tariff` не находит тир с ценой >= bid_rub и молча возвращает `grid[-1]` — верхний тир
+сетки (в проде 5 000 000 ₽).
+
+`-inf` — единственный из трёх, кто ловился и ДО фикса: гард `bid_rub <= 0` для него истинен.
+Здесь он закреплён под новым, правильным поводом (неконечность), а не по знаку — чтобы гард
+нельзя было ослабить до «только про знак», не уронив тест.
 
 Ставка выше сетки — то же самое молчание: `pick_tariff` возвращал верхний тир вместо явной
 ошибки, поэтому опечатка (лишний ноль) списывала счёт по максимальному тарифу без единого слова.
@@ -61,11 +62,16 @@ def test_confirm_rejects_non_finite_bid(sqlite_db, monkeypatch, bad_bid):
         assert o.cost is None, "мусорная ставка не должна долететь до cost"
 
 
-def test_confirm_rejects_zero_bid(sqlite_db, monkeypatch):
+@pytest.mark.parametrize("bad_bid, why", [(0, "не выбрана ставка"),
+                                          (-5.0, "больше нуля")])
+def test_confirm_rejects_zero_or_negative_bid(sqlite_db, monkeypatch, bad_bid, why):
+    """Ноль и отрицательное ловились и ДО фикса — но каждое своим гардом, и сторожить надо
+    именно повод. Без `match=` тест остался бы зелёным, даже если снести isfinite-проверку:
+    ноль всё равно упал бы на «не выбрана ставка», и дыра для nan/inf проехала бы незамеченной."""
     _offline_grid(monkeypatch)
     oid = _queued()
-    with pytest.raises(ValueError):
-        acquisition.confirm_order(oid, 0)
+    with pytest.raises(ValueError, match=why):
+        acquisition.confirm_order(oid, bad_bid)
 
 
 def test_confirm_rejects_bid_above_top_tier(sqlite_db, monkeypatch):
