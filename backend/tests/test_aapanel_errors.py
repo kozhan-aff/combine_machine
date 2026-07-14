@@ -40,6 +40,12 @@ NO_SUCH_FILE = {"status": False, "msg": "Configuration file not exist"}
 SAVE_OK = {"status": True, "msg": "Saved successfully!"}
 CREATE_OK = {"status": True, "msg": "Created successfully!"}
 LIST_EMPTY = {"data": [], "where": "type_id=0", "page": "<div>...</div>"}   # НЕ отказ: сайтов нет
+LIST_EX_RU = {"data": [{"id": 7, "name": "ex.ru", "status": "1", "path": "/www/wwwroot/ex.ru"}],
+              "where": "type_id=0", "page": "<div>...</div>"}
+# AddSite на существующем домене: docs/api/aapanel.md §WEBSITE-add — «status/msg error (Chinese
+# text like "网站已存在"/site already exists)». Текст НЕ выдуман и НЕ английский — именно поэтому
+# отличать его от настоящего отказа по подстроке нельзя.
+SITE_EXISTS = {"status": False, "msg": "网站已存在"}
 
 
 @pytest.fixture(autouse=True)
@@ -60,8 +66,11 @@ def _loopback_panel(monkeypatch):
 class _Panel:
     """Живая панель на HTTP-уровне: 200 на всё, правда — в теле. Считает запросы."""
 
-    def __init__(self, list_body=None, add=None, create=None, save=None):
+    def __init__(self, list_body=None, add=None, create=None, save=None, list_after_add=None):
         self.list_body = LIST_EMPTY if list_body is None else list_body
+        # чем панель отвечает на getData ПОСЛЕ AddSite: так изображается гонка (сайт создал
+        # параллельный свип/оператор ровно между нашим списком и нашим AddSite).
+        self.list_after_add = list_after_add
         self.add = add or ADD_OK
         self.create = create or CREATE_OK
         self.save = save or SAVE_OK
@@ -70,7 +79,8 @@ class _Panel:
     def request(self, method, url, **kw):
         self.calls.append(url)
         if "getData" in url:
-            body = self.list_body
+            body = (self.list_after_add
+                    if self.list_after_add is not None and self.n("AddSite") else self.list_body)
         elif "AddSite" in url:
             body = self.add
         elif "CreateFile" in url:
@@ -135,9 +145,32 @@ def test_list_sites_empty_is_not_a_failure():
 
 def test_ensure_site_still_skips_existing():
     """Контроль идемпотентности: сайт уже есть -> AddSite не зовём вовсе (и ничего не падает)."""
-    p = _Panel(list_body={"data": [{"id": 7, "name": "ex.ru", "path": "/www/wwwroot/ex.ru"}]})
+    p = _Panel(list_body=LIST_EX_RU)
     assert _client(p).ensure_site("ex.ru", "/www/wwwroot/ex.ru") == {"exists": True, "name": "ex.ru"}
     assert p.n("AddSite") == 0, p.calls
+
+
+def test_ensure_site_survives_site_already_exists():
+    """РЕГРЕССИЯ (минор ревью). Отказ «сайт уже есть» — это ДОСТИГНУТОЕ ЖЕЛАЕМОЕ СОСТОЯНИЕ, а не
+    сбой. Сайт появился между нашим списком и нашим AddSite (параллельный свип, оператор руками;
+    плюс каверат docs/api/aapanel.md: getData на части сборок показывает не все проекты) — и
+    строгий фикс Задачи 9 стал ронять RuntimeError на ровном месте: сайт запирался в вечном
+    `provisioning`, а свип каждый прогон писал одну и ту же ошибку.
+
+    Отличить этот отказ от настоящего по тексту НЕЛЬЗЯ (msg китайский), поэтому спрашиваем
+    панель ещё раз — она и есть источник правды."""
+    p = _Panel(add=SITE_EXISTS, list_after_add=LIST_EX_RU)
+    assert _client(p).ensure_site("ex.ru", "/www/wwwroot/ex.ru") == {"exists": True, "name": "ex.ru"}
+    assert p.n("AddSite") == 1 and p.n("getData") == 2, p.calls   # спросили до и после
+
+
+def test_ensure_site_still_raises_when_site_really_absent():
+    """ГРАНИЦА. Перепроверка не смеет глотать НАСТОЯЩИЙ отказ: панель отказала (протух api_sk) —
+    сайта в ней не появилось, и повторный список это подтверждает. RuntimeError летит наверх."""
+    p = _Panel(add=AUTH_FAIL, list_after_add=LIST_EMPTY)
+    with pytest.raises(RuntimeError, match="Secret key verification failed"):
+        _client(p).ensure_site("ex.ru", "/www/wwwroot/ex.ru")
+    assert p.n("AddSite") == 1, p.calls          # и повторять AddSite не пытаемся
 
 
 def test_write_file_refusal_raises():
@@ -249,9 +282,10 @@ def test_provision_aapanel_refusal_keeps_site_in_provisioning(monkeypatch):
 
 
 def test_provision_after_failure_finishes_on_retry(monkeypatch):
-    """Идемпотентность жива: оператор чинит причину, жмёт Provision ещё раз — и провижн
-    доводит дело. Сайт из прошлого теста уже есть в панели (list его находит) — AddSite не
-    зовётся вовсе, дубликата не будет."""
+    """Провижн ДОВОДИТ дело: оператор чинит причину (обновляет api_sk), жмёт Provision ещё раз —
+    и сайт доезжает до `content` с того же места. Первый заход упал на AddSite, то есть сайта в
+    панели НЕ создалось: список по-прежнему пуст, и AddSite на повторе законно зовётся — теперь
+    успешно. (Про «сайт уже есть, AddSite не зовём» — соседний тест ниже.)"""
     from app.services import provisioning
     _panel_env(monkeypatch, getData=LIST_EMPTY, AddSite=AUTH_FAIL)
     sid = _seed_site()
@@ -267,6 +301,26 @@ def test_provision_after_failure_finishes_on_retry(monkeypatch):
         site = s.get(Site, sid)
         assert site.status == "content" and site.aapanel_site_name == "ex.ru"
         assert site.ssl_error is None
+
+
+def test_provision_of_existing_site_never_calls_addsite(monkeypatch):
+    """СТОРОЖ ИДЕМПОТЕНТНОСТИ ПРОВИЖНА (а не регрессия бага: она держится и на 0265ac3 — но
+    держалась НИ ОДНИМ тестом не прикрытой). Правило проекта «провижн идемпотентен» опирается
+    ровно на этот путь: свип зовёт provision повторно, оператор жмёт кнопку второй раз, прошлый
+    заход умер ПОСЛЕ AddSite (сайт в панели есть, а Site так и висит в `provisioning`).
+
+    Маршрут AddSite тесту не дан ВОВСЕ: сентинел `_fake_post` уронит AssertionError, если клиент
+    к нему полезет. Дубликата сайта в панели быть не может."""
+    from app.services import provisioning
+    _panel_env(monkeypatch, getData=LIST_EX_RU)          # AddSite не объявлен — вызов = провал теста
+    sid = _seed_site()
+
+    out = provisioning.provision(sid)
+
+    assert out["status"] == "provisioned"
+    with db.SessionLocal() as s:
+        site = s.get(Site, sid)
+        assert site.status == "content" and site.aapanel_site_name == "ex.ru"
 
 
 def test_provision_records_ssl_error(monkeypatch):
@@ -303,6 +357,26 @@ def test_provision_clears_ssl_error_when_ssl_recovers(monkeypatch):
     assert "ssl_error" not in out
     with db.SessionLocal() as s:
         assert s.get(Site, sid).ssl_error is None
+
+
+def test_sweep_reports_ssl_failure_instead_of_clean_done(monkeypatch):
+    """РЕГРЕССИЯ (минор ревью). На автопилоте провал SSL ЗВУЧИТ. Провижн сайта с упавшим
+    set_ssl — это `done` (vhost поднят, ронять нечего), и отчёт свипа выглядел безупречно
+    чистым: «провижн: 1, ошибок нет». Между тем HTTPS под вопросом. След был в БД и на карточке
+    сайта — но именно автопилотный прогон, который этот сайт и трогал, о нём молчал.
+    Счётчик рядом с `queue_dirty`: стадия отчитывается не только числом сделанного."""
+    from app.services import autonomy, orchestrator
+    cf = _CF(ssl_boom=RuntimeError("Cloudflare 403: Authentication error"))
+    _panel_env(monkeypatch, cf=cf, getData=LIST_EMPTY, AddSite=ADD_OK)
+    _seed_site()
+    autonomy.update_autonomy(autopilot_on=True, auto_provision=True)
+
+    out = orchestrator.run_sweep(trigger="cron")
+
+    assert out["counts"]["provision"] == 1        # vhost поднят — это не ошибка стадии
+    assert out["counts"]["ssl_failed"] == 1       # ...но и не чистый успех, и свип это говорит
+    assert out["errors"] == []
+    assert orchestrator.COUNT_RU["ssl_failed"]    # у счётчика есть русская подпись в журнале
 
 
 def test_site_card_shows_ssl_error(client, monkeypatch):

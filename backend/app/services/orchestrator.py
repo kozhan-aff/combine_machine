@@ -139,7 +139,7 @@ def _stage_provision(cap):
     from app.models.site import Site
     from app.services import provisioning
 
-    done, errs = 0, []
+    done, errs, ssl_failed = 0, [], 0
     with SessionLocal() as db:
         purchased = [r[0] for r in db.execute(
             select(Domain.id).where(Domain.status == "purchased",
@@ -159,11 +159,16 @@ def _stage_provision(cap):
         if done >= cap:
             break
         try:
-            provisioning.provision(sid)
+            out = provisioning.provision(sid)
             done += 1
+            # vhost поднят (провижн не упал), а SSL-режим Cloudflare не переключился. Считать
+            # это чистым `done` — врать в отчёте свипа: HTTPS под вопросом, а сводка идеальна.
+            # След есть в БД и на карточке сайта, но автопилотный прогон обязан сказать вслух.
+            if isinstance(out, dict) and out.get("ssl_error"):
+                ssl_failed += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
-    return done, errs
+    return done, errs, {"ssl_failed": ssl_failed} if ssl_failed else {}
 
 
 def _stage_generate(cap):
@@ -248,8 +253,9 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
             "check_index": "индексация"}
 
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
-# стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной.
-COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена"}
+# стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной,
+# `ssl_failed` — у скольких сайтов vhost поднят, а SSL-режим Cloudflare не переключился.
+COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:

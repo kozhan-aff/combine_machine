@@ -198,10 +198,31 @@ class AaPanelClient(BaseClient):
         ), "AddSite")
 
     def ensure_site(self, domain: str, path: str, **kw) -> dict:
-        """Idempotent create: skip if a site named `domain` already exists."""
+        """Idempotent create: skip if a site named `domain` already exists.
+
+        Отказ AddSite ещё не значит «провижн сорван». Самый частый его повод — «сайт уже есть»
+        (docs/api/aapanel.md: AddSite на существующем домене отвечает status/msg-ошибкой, текст
+        китайский — «网站已存在»), то есть ЖЕЛАЕМОЕ СОСТОЯНИЕ УЖЕ ДОСТИГНУТО. Так бывает, когда
+        сайт появился МЕЖДУ нашим списком и AddSite (параллельный свип, оператор руками) или
+        когда getData его не показал (там же, каверат: на части сборок список видит не все типы
+        проектов). Уронить тут RuntimeError — значит запереть сайт в вечном `provisioning`:
+        каждый прогон свипа будет заново звать AddSite и заново получать тот же отказ.
+
+        Судить об этом по ТЕКСТУ msg нельзя — он локализован, и это ровно тот урок, ради
+        которого валидатор смотрит на булев `status` (см. _fail_msg). Поэтому спрашиваем
+        панель ещё раз: сайт есть — значит есть, кто бы что ни ответил. Панель остаётся
+        источником правды, локаль ни при чём. Настоящий отказ (нет прав, протух api_sk, кончилось
+        место) сайта не породит — второй `site_exists` вернёт False, и RuntimeError полетит
+        наверх, как и должен.
+        """
         if self.site_exists(domain):
             return {"exists": True, "name": domain}
-        return self.add_site(domain, path, **kw)
+        try:
+            return self.add_site(domain, path, **kw)
+        except RuntimeError:
+            if not self.site_exists(domain):
+                raise
+            return {"exists": True, "name": domain}
 
     def apply_ssl(self, domain: str, site_name: str) -> dict:
         """Issue + deploy an origin cert. Успех -> dict, ЛЮБОЙ отказ -> RuntimeError.
@@ -220,7 +241,9 @@ class AaPanelClient(BaseClient):
             (s.get("id") for s in self.list_sites() if s.get("name") == site_name), None
         )
         if site_id is None:
-            raise RuntimeError(f"aaPanel SetSSL: site not found: {site_name}")
+            # шаг называем ТОТ, на котором встали: до SetSSL дело не дошло, упали на поиске id
+            # в списке сайтов — иначе оператор пойдёт чинить не ту ручку.
+            raise RuntimeError(f"aaPanel apply_ssl: site not found: {site_name}")
 
         # Step 1 — issue Let's Encrypt cert (http-01: domain must already resolve here).
         issued = _ok(self._post(
