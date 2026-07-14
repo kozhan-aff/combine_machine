@@ -62,6 +62,8 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
     принимает человек здесь же, на гейте, а не система. Кладём в AcquisitionOrder.cost.
 
     Только ставит confirmed_by_human=True; заказ провайдеру НЕ шлёт (это execute)."""
+    import math
+
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
 
@@ -77,8 +79,13 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         domain = d.domain if d else None
     if provider == "backorder" and not bid_rub:
         raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
-    if bid_rub is not None and bid_rub <= 0:
-        raise ValueError(f"ставка должна быть больше нуля, получено {bid_rub}")
+    # `not math.isfinite` ловит nan/inf/-inf: `not bid_rub` их не видит (nan truthy, `nan<=0`
+    # ложно для ЛЮБОГО сравнения) — без этой проверки мусор долетал до pick_tariff и молча
+    # оседал верхним тиром сетки (в проде 5 000 000 ₽). Проверка ДО сетевого pick_tariff —
+    # решение о деньгах фиксируется здесь, а не в форме панели (Pydantic разбирает строки
+    # "nan"/"inf"/"1e400" в float молча, гард в UI ничего бы не поймал).
+    if bid_rub is not None and (not math.isfinite(bid_rub) or bid_rub <= 0):
+        raise ValueError(f"ставка должна быть конечным числом больше нуля, получено {bid_rub}")
 
     tier = None
     if provider == "backorder":
