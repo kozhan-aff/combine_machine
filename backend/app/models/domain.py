@@ -21,6 +21,11 @@ from app.db import Base
 # IntegrityError (ревью Задачи 7). Раньше здесь было написано «домен под failed заперт политикой
 # статусов» — это половина правды, выданная за всю.
 #
+# `ordering` из этого списка выходит ДВУМЯ путями: своим execute (он же его и поставил) и — если
+# execute убили в полёте — поллингом, по протухшему `claimed_at` (аудит F11, см. ниже). Спрашивать
+# `_open_order_id` поллингу тут не о чем: `ordering` УЖЕ открыт, то есть эта строка и есть
+# единственный открытый заказ домена, а `ordering` -> `ordered` остаётся внутри предиката индекса.
+#
 # МЕНЯЕШЬ ЭТОТ КОРТЕЖ — ПИШИ НОВУЮ МИГРАЦИЮ: живой PostgreSQL держит предикат из 0010 и сам его
 # не перечитает (в тестах `create_all` берёт предикат отсюда — и разъезд был бы не виден).
 # Сторожит test_order_uniqueness.py::test_index_predicate_matches_the_migration.
@@ -104,6 +109,17 @@ class AcquisitionOrder(Base):
     cost: Mapped[float | None] = mapped_column(Numeric)
     confirmed_by_human: Mapped[bool] = mapped_column(Boolean, default=False)  # HARD GATE
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # КОГДА execute ЗАБРАЛ строку на отправку (claim `-> ordering`). `ordering` — статус
+    # ТРАНЗИЕНТНЫЙ: он живёт секунды между claim'ом и ответом провайдера. Убей процесс в этом
+    # окне (деплой перезапустил контейнер, OOM, docker restart) — и строка останется в
+    # `ordering` НАВСЕГДА: execute её не берёт (claim пускает только pending_confirm/failed),
+    # cancel не снимает (тоже только эти два), поллинг её не видел вовсе. Домен под ней вечно
+    # висит в `purchasing`, а деньги, возможно, ушли (аудит F11).
+    # Отметка времени и отличает ЖИВУЮ отправку от трупа: пока claim свеж — строку держит живой
+    # execute, и трогать её нельзя (забрать чужой заказ = заплатить дважды); протухший claim
+    # (acquisition.STUCK_CLAIM_MIN) разбирает поллинг ПРАВДОЙ ПРОВАЙДЕРА. NULL у `ordering` =
+    # claim старого кода (до миграции 0011) = заведомо переживший рестарт труп, см. 0011.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result: Mapped[dict | None] = mapped_column(JSONB)
 
     domain: Mapped["Domain"] = relationship(back_populates="orders")

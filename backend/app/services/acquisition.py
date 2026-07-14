@@ -18,6 +18,41 @@ _PROVIDERS = {"backorder", "optimizator"}
 # Открытые статусы заказа — `OPEN_ORDER_STATUSES` в app/models/domain.py (оттуда же собран
 # предикат уникального индекса: код и БД обязаны говорить об одном и том же).
 
+# Через сколько минут claim `ordering` считается ТРУПОМ, а не живой отправкой.
+#
+# `ordering` живёт ровно столько, сколько execute ходит к провайдеру. Считаем ПОТОЛОК этого
+# похода по таймаутам транспорта (integrations/base.py + backorder.py):
+#   find_order -> client_orders -> _billmgr(retry=True): BaseClient.request = 3 попытки по
+#     httpx-таймауту 30 с + бэкоффы (~2 с и ~4 с, wait_exponential max=10) ≈ 96 с;
+#   order() -> _billmgr(retry=False): один запрос, тот же таймаут 30 с (ретрая нет намеренно —
+#     повтор платного заказа = второе списание).
+# Итого живой execute физически не переживает ~2 минут. 15 минут — семикратный запас (и та же
+# величина, что STALE_MIN у job_run: «running без обновлений = контейнер убили»). Ошибиться
+# ДОЛГИМ порогом дёшево: оператор подождёт и нажмёт «сверить» ещё раз. Ошибиться КОРОТКИМ —
+# значит разобрать строку, которую прямо сейчас держит живой execute: он допишет свой исход
+# поверх, а мы успеем открыть строке путь на повтор. Это прямой путь заплатить дважды.
+STUCK_CLAIM_MIN = 15
+
+
+def _claim_expired(o) -> bool:
+    """Claim `ordering` протух: строку держит не живой execute, а труп процесса.
+
+    NULL = claim СТАРОГО кода (до миграции 0011, колонки не было) — заведомо труп: та строка
+    пережила деплой, который эту колонку и добавил, а деплой перезапускает контейнеры вместе со
+    всеми execute в полёте.
+
+    Дату нормализуем: SQLite отдаёт naive datetime, PostgreSQL — tz-aware; голое сравнение с
+    now(tz) роняет TypeError (тот же приём — в jobs._is_stale и scoring.acquirability_verdict).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    t = getattr(o, "claimed_at", None)
+    if t is None:
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t < datetime.now(timezone.utc) - timedelta(minutes=STUCK_CLAIM_MIN)
+
 
 def _open_order_id(db, domain_id: int, except_id: int | None = None) -> int | None:
     """id ДРУГОГО открытого заказа на этот домен — или None. Гард инварианта БД.
@@ -254,13 +289,20 @@ def execute_confirmed_order(order_id: int) -> dict:
         # переведёт РОВНО один — второй увидит rowcount 0 и не пошлёт второй живой заказ.
         # confirmed_by_human остаётся в SQL-условии — денежный гейт держится и здесь.
         # Допуск 'failed' в claim = рабочий ретрай (кнопка «↻ повторить»).
+        #
+        # claimed_at — ЧАСЫ НА CLAIM'Е (аудит F11). Без них 'ordering' — вечная камера: убитый в
+        # момент отправки процесс оставлял строку, которую не берёт ни execute (claim пускает
+        # только pending_confirm/failed), ни cancel, ни поллинг, а домен под ней навсегда заперт
+        # в 'purchasing'. Отметка позволяет поллингу отличить ЖИВУЮ отправку (свежий claim —
+        # руками не трогать, execute сейчас в полёте) от трупа (протух -> разбираем правдой
+        # провайдера). Ставим В ТОМ ЖЕ UPDATE, что и статус: claim и его время — один факт.
         try:
             claim = db.execute(
                 update(AcquisitionOrder)
                 .where(AcquisitionOrder.id == order_id,
                        AcquisitionOrder.status.in_(("pending_confirm", "failed")),
                        AcquisitionOrder.confirmed_by_human.is_(True))
-                .values(status="ordering")
+                .values(status="ordering", claimed_at=datetime.now(timezone.utc))
             )
             db.commit()
         except IntegrityError:
@@ -280,6 +322,13 @@ def execute_confirmed_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": o.status,
                     "note": "заказ уже обрабатывается или обработан"}
         db.refresh(o)
+        # CLAIM ЗАКРЫВАЕТСЯ ВМЕСТЕ С ИСХОДОМ — одной строкой на все ветки ниже (их пять: дубль
+        # усыновлён / отправлено / ambiguous / транспорта нет / сбой провайдера). Каждая из них
+        # заканчивается db.commit(), и этот None уезжает в тот же UPDATE: строка вышла из
+        # 'ordering', живого execute за ней больше нет. Отдельной строчкой в каждой ветке было бы
+        # пять мест забыть. А если процесс умрёт ДО коммита — изменение просто не доедет до базы,
+        # claimed_at останется стоять, и поллинг увидит труп ровно тогда, когда claim протухнет.
+        o.claimed_at = None
 
         # Несём через ВСЕ ветки исхода:
         #  price_id/period_id — тариф, замороженный человеком на confirm (иначе «↻ повторить»
@@ -379,6 +428,14 @@ def poll_orders() -> dict:
     id_status. Это НЕ обход денежного гейта: деньги уже потрачены на execute за подтверждением
     человека, а поимка — факт со стороны провайдера, а не наше решение. Ручной mark_caught
     остаётся (провайдер может молчать). Оркестратор эту функцию не зовёт.
+
+    ЗДЕСЬ ЖЕ — ЕДИНСТВЕННЫЙ ВЫХОД ИЗ ЗАСТРЯВШЕЙ ОТПРАВКИ (аудит F11). Строка в 'ordering', чей
+    claim протух (процесс убили между claim'ом и ответом провайдера), не видна больше НИКОМУ:
+    execute claim'ит только pending_confirm/failed, cancel снимает только их же. Разбираем её тем
+    же способом, что и фантом-'failed', — ПРАВДОЙ ПРОВАЙДЕРА, а не догадкой: заказ у него есть →
+    усыновляем (домен ловится, деньги не потеряны); заказа нет → 'failed', и человек волен
+    повторить или снять. Свежий claim НЕ ТРОГАЕМ: за ним стоит живой execute, и отобрать у него
+    строку значит открыть ей путь на повторную отправку — второе списание.
     """
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
@@ -399,14 +456,27 @@ def poll_orders() -> dict:
     moved = {"caught": 0, "failed": 0, "pending": 0}
     matched = 0
     conflicts = 0
+    sending = 0                                       # живые отправки: их пропускаем, см. ниже
+    lost = 0                                          # застрявшие отправки, о которых провайдер не знает
     with SessionLocal() as db:
         # 'failed' опрашиваем тоже: там может лежать ФАНТОМ — заказ, который на самом деле
         # ушёл (ambiguous-таймаут), и провайдер его знает. Иначе он невидим, а домен потерян.
+        # 'ordering' — тоже: там лежит ЗАСТРЯВШАЯ отправка (процесс убили в момент заказа),
+        # которую больше не разберёт никто (аудит F11).
         rows = db.execute(
-            select(AcquisitionOrder).where(AcquisitionOrder.provider == "backorder",
-                                           AcquisitionOrder.status.in_(("ordered", "failed")))
+            select(AcquisitionOrder).where(
+                AcquisitionOrder.provider == "backorder",
+                AcquisitionOrder.status.in_(("ordered", "failed", "ordering")))
         ).scalars().all()
         for o in rows:
+            # ЖИВУЮ ОТПРАВКУ НЕ ТРОГАЕМ. Свежий claim = execute прямо сейчас в полёте у
+            # провайдера (или вот-вот допишет исход). Разобрать такую строку значит вынести за
+            # него вердикт и открыть строке путь на «↻ повторить» — а его заказ в это время
+            # долетает и списывает деньги. Ждём, пока claim протухнет (STUCK_CLAIM_MIN): труп
+            # никуда не убежит, а живой execute допишет исход сам.
+            if o.status == "ordering" and not _claim_expired(o):
+                sending += 1
+                continue
             d = db.get(Domain, o.domain_id)
             # Матч по elid, а не по домену: заказов на один домен может быть несколько
             # (ретрай, ручной заказ из ЛК), и словарь по имени схлопнул бы их в последний —
@@ -414,7 +484,26 @@ def poll_orders() -> dict:
             remote = by_elid.get(o.provider_order_id or "") or (
                 by_domain.get(norm_domain(d.domain)) if d and not o.provider_order_id else None)
             if remote is None:
-                continue                              # провайдер ещё не показывает заказ
+                if o.status != "ordering":
+                    continue                          # провайдер ещё не показывает заказ
+                # ЗАСТРЯВШАЯ ОТПРАВКА, КОТОРОЙ ПРОВАЙДЕР НЕ ЗНАЕТ. Он ОТВЕТИЛ (список заказов
+                # пришёл) и этого домена в нём нет — значит заказа у него нет и деньги не ушли.
+                # Это ровно тот ответ, на основании которого execute считает себя вправе ТРАТИТЬ
+                # (find_order -> None -> шлём новый заказ): один источник правды, одно доверие к
+                # нему. Отсюда и `maybe_sent` снимается, если он там был от прошлой ambiguous-
+                # попытки: неизвестность снята той же правдой провайдера.
+                # Ставим 'failed' — и у строки СНОВА ЕСТЬ ВЫХОД: «↻ повторить» (сперва спросит
+                # провайдера) или «✗ отменить» (домен вернётся в approved). До этого фикса выхода
+                # не было вовсе: домен оставался в 'purchasing' навечно.
+                o.status = "failed"
+                o.claimed_at = None                   # claim закрыт: живого execute за строкой нет
+                o.result = {**{k: v for k, v in (o.result or {}).items() if k != "maybe_sent"},
+                            "error": "отправка оборвалась (процесс перезапустили?), а провайдер "
+                                     "этого заказа не знает — до него не долетело, деньги не "
+                                     "ушли. Можно повторить или снять заявку."}
+                db.commit()
+                lost += 1
+                continue
             matched += 1
             state = remote["state"]
 
@@ -427,6 +516,11 @@ def poll_orders() -> dict:
             # `maybe_sent` НЕ снимаем: деньги за дубль могли уйти, и отмена обязана остаться
             # запертой (иначе реально оплаченный заказ можно спрятать). elid не усыновляем —
             # матч мог прийти по имени домена, а у домена сейчас ДВА заказа: чужой elid = ложь.
+            # ...а вот 'ordering' спрашивать не о чем: он САМ открытый статус, то есть эта строка
+            # и есть тот единственный открытый заказ домена (uq_open_order_per_domain это
+            # гарантирует, а миграция 0010 схлопнула легаси-дубли). 'ordering' -> 'ordered'
+            # остаётся внутри предиката индекса, второй открытой заявки не появляется. Ремень
+            # (except IntegrityError ниже) всё равно на месте — гонку SELECT не закрывает.
             blocker = (_open_order_id(db, o.domain_id, except_id=o.id)
                        if state == "pending" and o.status == "failed" else None)
             try:
@@ -449,6 +543,7 @@ def poll_orders() -> dict:
                     o.provider_order_id = remote["elid"]   # усыновляем фантом: теперь он отслеживаем
                 o.result = {**(o.result or {}), "clear_status": remote["clear_status"]}
                 o.result.pop("maybe_sent", None)      # неопределённость снята правдой провайдера
+                o.claimed_at = None                   # исход есть -> claim закрыт (для 'ordering')
                 if state == "caught":
                     o.status = "caught"
                     if d is not None:
@@ -467,12 +562,21 @@ def poll_orders() -> dict:
             except IntegrityError:                    # ремень поверх гарда: гонку он не закрывает
                 db.rollback()                         # (SELECT и UPDATE — разные запросы)
                 conflicts += 1
-    return {"checked": matched, "conflicts": conflicts, **moved}
+    # `sending`/`lost` — про застрявшие отправки (F11), и молчать о них нельзя: оператор жмёт
+    # «сверить» ИМЕННО из-за такой строки. `sending` — «не тронули, там живой execute»,
+    # `lost` — «разобрали: провайдер про заказ не знает». Без них поллинг отвечал бы «сверено 0»
+    # и выглядел сломанным ровно в том случае, ради которого его и позвали.
+    return {"checked": matched, "conflicts": conflicts, "sending": sending, "lost": lost, **moved}
 
 
 def cancel_order(order_id: int) -> dict:
     """Снять заявку (pending_confirm/failed -> cancelled). Домен возвращаем в 'approved' только
-    если по нему не осталось НИ открытого заказа, НИ заказа с неизвестным исходом. Денег не тратит."""
+    если по нему не осталось НИ открытого заказа, НИ заказа с неизвестным исходом. Денег не тратит.
+
+    Снятие — УСЛОВНЫЙ UPDATE с проверкой rowcount (как claim в execute), а не ORM-запись по PK:
+    иначе отмена, начатая до отправки, доезжает ПОСЛЕ неё и хоронит оплаченный заказ (аудит F12).
+    """
+    from sqlalchemy import update
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
 
@@ -496,7 +600,41 @@ def cancel_order(order_id: int) -> dict:
         blocker = _open_order_id(db, o.domain_id, except_id=order_id)
         unresolved = _unresolved_money_id(db, o.domain_id, except_id=order_id)
 
-        o.status = "cancelled"
+        # ЗДЕСЬ ХОРОНИЛИ ОПЛАЧЕННЫЙ ЗАКАЗ (аудит F12). Проверки выше — это ЧТЕНИЕ, а `o.status =
+        # 'cancelled'` было слепой ORM-записью по первичному ключу: UPDATE ... WHERE id=N, без
+        # единого слова о том, в каком статусе строка была, когда мы решались. Между чтением и
+        # записью помещается ВЕСЬ execute (кнопки «отправить» и «отменить» — два sync-роута,
+        # панель гоняет их в threadpool параллельно; отправка ходит в сеть, отмена — нет, и легко
+        # приезжает второй): заказ уходит провайдеру, деньги списываются, строка становится
+        # 'ordered' — и наша отмена молча переписывает её в 'cancelled'. А 'cancelled' поллинг не
+        # опрашивает: оплаченный заказ исчезает из машины навсегда, домен уезжает обратно в
+        # approved и будет куплен ВТОРОЙ РАЗ.
+        # Условие в SQL делает снятие атомарным: строку снимает тот, кто застал её открытой для
+        # снятия. Проиграл — не пишем ничего и говорим человеку, что статус изменился.
+        cancelled = db.execute(
+            update(AcquisitionOrder)
+            .where(AcquisitionOrder.id == order_id,
+                   AcquisitionOrder.status.in_(("pending_confirm", "failed")))
+            .values(status="cancelled")
+        )
+        if cancelled.rowcount != 1:
+            db.rollback()
+            fresh = db.get(AcquisitionOrder, order_id)
+            return {"order_id": order_id, "status": fresh.status if fresh else "gone",
+                    "note": "заказ изменил статус, пока мы его снимали (его отправили или уже "
+                            "обработали) — снять можно только pending_confirm/failed"}
+        # ...и ту же гонку перечитываем для `maybe_sent`: провайдер мог лечь, «↻ повторить» —
+        # обернуться мгновенным AmbiguousSend (connect refused), и строка стать «деньги могли
+        # уйти» между нашим db.get и этим UPDATE. Теперь строку держит НАШ замок (UPDATE взял её
+        # до коммита), так что перечитанный result — последняя правда, а не гонка. Флаг всплыл —
+        # откатываемся: прятать заказ, про который неизвестно, оплачен ли он, нельзя.
+        db.expire(o)
+        if (o.result or {}).get("maybe_sent"):
+            db.rollback()
+            fresh = db.get(AcquisitionOrder, order_id)
+            return {"order_id": order_id, "status": fresh.status if fresh else "gone",
+                    "error": "исход заказа неизвестен (связь оборвалась, деньги могли уйти) — "
+                             "нажми «↻ повторить»: сначала спросим провайдера, нет ли там заказа"}
         d = db.get(Domain, o.domain_id)
         note = None
         if d is not None and d.status == "purchasing":
@@ -536,6 +674,10 @@ def list_orders() -> list[dict]:
     `dirty` — причина, по которой домен НЕЛЬЗЯ покупать (или None). Очередь — последний экран
     перед деньгами, и до этого фикса грязный домен выглядел здесь обычной строкой со ставкой:
     reject_reason в базе был, но в UI денежного пути его не показывал никто (аудит F13).
+
+    `stuck` — отправка ЗАСТРЯЛА: claim протух, живого execute за строкой нет (F11). Отличать её
+    от идущей прямо сейчас отправки обязана и очередь: «отправляется» и «отправка оборвалась,
+    исход неизвестен» — разные новости для человека, у которого на кону деньги.
     """
     from sqlalchemy import select
     from app.db import SessionLocal
@@ -552,7 +694,8 @@ def list_orders() -> list[dict]:
                         "confirmed": o.confirmed_by_human,
                         "bid": float(o.cost) if o.cost is not None else None,
                         "result": o.result, "domain_id": o.domain_id,
-                        "dirty": dirty_reason(d) if d is not None else None})
+                        "dirty": dirty_reason(d) if d is not None else None,
+                        "stuck": o.status == "ordering" and _claim_expired(o)})
     return out
 
 

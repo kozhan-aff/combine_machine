@@ -2,7 +2,7 @@
 {% block title %}Выкуп · M2{% endblock %}
 {% block content %}
 
-{% set _b = {'pending_confirm':'b-scored','ordered':'b-purchased','caught':'b-live','failed':'b-rejected','cancelled':'b-default'} %}
+{% set _b = {'pending_confirm':'b-scored','ordering':'b-purchasing','ordered':'b-purchased','caught':'b-live','failed':'b-rejected','cancelled':'b-default'} %}
 
 <h2><span class="idx">M2</span> Очередь выкупа
   <span class="hint">структурный путь: заявка → подтверждение человеком → отправка провайдеру</span></h2>
@@ -59,7 +59,7 @@
          а у провайдера он ЖИВ и «в полёте». Правду поллинг кладёт в result.clear_status — вешаем
          её бейджу в title, иначе статус-колонка расходится с реальностью (ревью Задачи 7). #}
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
-            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}{% if o.result and o.result.clear_status %} · у провайдера: {{ o.result.clear_status }}{% endif %}">{{ o.status|status_ru }}</span></td>
+            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordering':'заказ отправляется провайдеру — исход пока неизвестен','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}{% if o.result and o.result.clear_status %} · у провайдера: {{ o.result.clear_status }}{% endif %}">{{ o.status|status_ru }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
       <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} ₽{% else %}<span class="hint">—</span>{% endif %}</td>
@@ -102,6 +102,18 @@
           {% endif %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">
             <button class="btn-sm" title="повторить: перед отправкой спросим провайдера, нет ли уже заказа на этот домен — второй раз не заплатим">↻ повторить</button></form>
+        {% elif o.status == 'ordering' %}
+          {# Строка в отправке. В норме её никто не видит — статус живёт секунды. Видишь её в
+             очереди — значит процесс убили ровно в момент отправки (деплой, перезапуск), и
+             исход НЕИЗВЕСТЕН: заказ мог уйти и деньги списаться. Раньше такая строка была
+             могилой (ни отправить, ни снять, домен навсегда в purchasing — аудит F11); теперь
+             её разбирает сверка ПРАВДОЙ провайдера. Кнопка одна и та же, что в шапке (общий
+             поллинг): живую отправку он не трогает и честно об этом скажет. #}
+          <div class="deny"
+               title="Заказ забран на отправку. Если строка висит здесь дольше пары минут — процесс убили между отправкой и ответом провайдера. Сверка спросит backorder: заказ у него есть → строка станет «отправлен» (домен ловится, деньги не потеряны); заказа нет → «ошибка», и её можно снять или повторить. Пока отправка идёт прямо сейчас, сверка её не тронет — и так и скажет.">
+            {% if o.stuck %}⚠ отправка оборвалась — исход неизвестен{% else %}заказ уходит провайдеру…{% endif %}</div>
+          <form class="inline" method="post" action="/queue/poll">
+            <button class="btn-sm" title="спросить провайдера, есть ли у него этот заказ (денег не тратит) — только его правда решает исход застрявшей отправки">↻ сверить с провайдером</button></form>
         {% elif o.status == 'ordered' %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/caught"
                 onsubmit="return confirm('Домен {{ o.domain }} пойман провайдером? Переведём его в purchased.')">
@@ -113,7 +125,7 @@
           <form class="inline" method="post" action="/queue/{{ o.id }}/cancel"
                 onsubmit="return confirm('Снять заявку на {{ o.domain }}? Домен вернётся в approved.')">
             <button class="btn-sm btn-bad" title="снять заявку, вернуть домен в approved">✗ отменить</button></form>
-        {% elif o.status not in ['ordered'] and not (o.result and o.result.maybe_sent) %}<span class="hint">—</span>{% endif %}
+        {% elif o.status not in ['ordered', 'ordering'] and not (o.result and o.result.maybe_sent) %}<span class="hint">—</span>{% endif %}
       </td>
       {# только человекочитаемое: ошибка / заметка / статус у провайдера. price_id/period_id —
          служебные (замороженный тариф), в UI им делать нечего: ставка есть отдельной колонкой. #}
