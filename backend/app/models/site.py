@@ -14,6 +14,12 @@ class Site(Base):
     # provisioning | content | published | monitoring | pruned
 
     cf_zone_id: Mapped[str | None] = mapped_column(String(64))
+    # Cloudflare Control Center P0 (docs/superpowers/plans/2026-07-14-cloudflare-p0.md, задача 1):
+    # заводятся ПУСТЫМИ — mirror-таблицы на момент миграции 0016 ещё не наблюдали ни одной зоны.
+    # Backfill из legacy cf_zone_id делает cf_sync._backfill_site_links (задача 4), когда зоны уже
+    # синхронизированы. cloudflare_account_id — ВНЕШНИЙ hex Cloudflare (см. models/cloudflare.py).
+    cf_zone_mirror_id: Mapped[int | None] = mapped_column(ForeignKey("cloudflare_zone_mirrors.id"))
+    cloudflare_account_id: Mapped[str | None] = mapped_column(String(64))
     origin_ip: Mapped[str | None] = mapped_column(String(64))
     aapanel_site_name: Mapped[str | None] = mapped_column(String(255))
     doc_root: Mapped[str | None] = mapped_column(String(512))
@@ -34,6 +40,13 @@ class Site(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     pages: Mapped[list["Page"]] = relationship(back_populates="site")
+
+    # ОДИН САЙТ НА ДОМЕН (миграция 0016). Гонка panel/worker (кнопка провижна против
+    # автопилотного свипа — РАЗНЫЕ ПРОЦЕССЫ) могла завести два Site на один Domain так же,
+    # как 0014 ловила дубли Page: SELECT «сайт уже есть» под READ COMMITTED не видит чужую
+    # незакоммиченную строку. Cloudflare-привязка (cf_zone_mirror_id) обязана указывать на
+    # ОДИН сайт домена, иначе backfill не знал бы, какой из дублей обновлять.
+    __table_args__ = (Index("uq_site_per_domain", "domain_id", unique=True),)
 
 
 class Page(Base):
