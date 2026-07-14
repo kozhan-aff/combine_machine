@@ -1,9 +1,20 @@
 """Domain candidates, their scoring, and acquisition orders. See BUILD_SPEC.md §5 + docs/DONORS.md."""
 from datetime import datetime
-from sqlalchemy import String, Integer, Numeric, Boolean, Text, ForeignKey, DateTime, func
+from sqlalchemy import String, Integer, Numeric, Boolean, Text, ForeignKey, DateTime, Index, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
+
+# Заказ ещё НЕ закрыт: он либо ждёт человека (pending_confirm), либо уходит провайдеру
+# (ordering — транзиентный claim), либо уже у него (ordered). Пока такой есть — второй заказ
+# на тот же домен завести нельзя: это прямой путь заплатить за домен дважды.
+# ЕДИНСТВЕННЫЙ источник истины: отсюда и предикат индекса, и проверка в services/acquisition.
+# (`failed` тут нет намеренно — это состояние ретрая, и повтор идемпотентен по деньгам:
+# execute сперва спрашивает провайдера find_order'ом. Домен под `failed`+`maybe_sent` заперт
+# не индексом, а политикой статусов: отмена запрещена -> домен висит в `purchasing` -> из
+# `purchasing` заявку не заводят.)
+OPEN_ORDER_STATUSES = ("pending_confirm", "ordering", "ordered")
+_OPEN_ORDER_SQL = "status IN (%s)" % ", ".join(f"'{s}'" for s in OPEN_ORDER_STATUSES)
 
 
 class Domain(Base):
@@ -85,3 +96,16 @@ class AcquisitionOrder(Base):
     result: Mapped[dict | None] = mapped_column(JSONB)
 
     domain: Mapped["Domain"] = relationship(back_populates="orders")
+
+    # ОДИН открытый заказ на домен — инвариант БД, а не удача SELECT'а в create_order (аудит F10).
+    # «Нет ли уже заявки» и вставка новой — два разных запроса, а писателей у очереди двое И В
+    # РАЗНЫХ ПРОЦЕССАХ: кнопка «в очередь» (панель) и стадия queue автопилотного свипа (worker).
+    # Под READ COMMITTED чужая незакоммиченная строка не видна — обе транзакции честно видят
+    # «заказа нет» и обе вставляют. Дальше человек подтверждает КАЖДУЮ заявку и платит дважды.
+    # Частичный уникальный индекс — тот же приём, что single-flight у job_run; предикат обоим
+    # диалектам, иначе тест зелен на SQLite, а прод дыряв (или наоборот).
+    __table_args__ = (
+        Index("uq_open_order_per_domain", "domain_id", unique=True,
+              postgresql_where=text(_OPEN_ORDER_SQL),
+              sqlite_where=text(_OPEN_ORDER_SQL)),
+    )

@@ -15,9 +15,10 @@ backorder заказывается живьём (uniservice.order). execute ид
 реализован — execute это честно репортит (status='failed'), не делая вид, что купил.
 """
 _PROVIDERS = {"backorder", "optimizator"}
-# статусы, при которых по домену уже есть незакрытый заказ — второй не плодим
-# ('ordering' — транзиентный claim во время отправки провайдеру, тоже «открыт»)
-_OPEN_STATUSES = {"pending_confirm", "ordering", "ordered"}
+# Статусы, при которых по домену уже есть незакрытый заказ — второй не плодим. Список живёт в
+# МОДЕЛИ (`OPEN_ORDER_STATUSES`): из него же собран предикат уникального индекса, и разъехаться
+# они не могут — проверка в коде и запрет в БД обязаны говорить об одном и том же. Импорт —
+# внутри функций, как весь `app.*` в этом модуле (self-check ниже гоняется без БД и без пути).
 
 
 def create_order(domain_id: int, provider: str = "backorder") -> int:
@@ -26,9 +27,17 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
     Возвращает id заказа (существующего открытого или нового). Не тратит денег —
     только заявка, ждущая подтверждения человеком."""
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
-    from app.models.domain import Domain, AcquisitionOrder
+    from app.models.domain import OPEN_ORDER_STATUSES, Domain, AcquisitionOrder
     from app.services import transitions
+
+    def _open_order(db):
+        return db.execute(
+            select(AcquisitionOrder).where(
+                AcquisitionOrder.domain_id == domain_id,
+                AcquisitionOrder.status.in_(OPEN_ORDER_STATUSES))
+        ).scalar_one_or_none()
 
     if provider not in _PROVIDERS:
         raise ValueError(f"unknown provider {provider!r} (ожидается {_PROVIDERS})")
@@ -43,11 +52,7 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         # лежит РКН-домен (ревью Задачи 6, Important 4). Денег это не тратит — но тихим успехом
         # быть не должно.
         transitions.refuse_dirty(d)
-        existing = db.execute(
-            select(AcquisitionOrder).where(
-                AcquisitionOrder.domain_id == domain_id,
-                AcquisitionOrder.status.in_(_OPEN_STATUSES))
-        ).scalar_one_or_none()
+        existing = _open_order(db)
         if existing:
             return existing.id                      # уже в очереди — не дублируем
         # approved -> purchasing через политику (services/transitions): она проверяет и ИСХОДНЫЙ
@@ -60,7 +65,21 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         order = AcquisitionOrder(domain_id=domain_id, provider=provider,
                                  status="pending_confirm", confirmed_by_human=False)
         db.add(order)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # ПРОИГРАЛИ ГОНКУ. Между нашим SELECT и этим COMMIT заявку на тот же домен успел
+            # закоммитить ДРУГОЙ писатель — их двое и в разных процессах (кнопка «в очередь» в
+            # панели и стадия queue автопилотного свипа в воркере), а под READ COMMITTED чужая
+            # незакоммиченная строка невидима: оба честно видели «заказа нет». Уникальный индекс
+            # оставил в живых ровно один заказ — ведём себя ровно так, как если бы увидели его в
+            # SELECT: отдаём чужой id. Домен победитель уже перевёл в purchasing (наш UPDATE
+            # откатился вместе с INSERT), так что состояние согласовано.
+            db.rollback()
+            existing = _open_order(db)
+            if existing is None:                    # индекс сработал, а заказа нет — не наш случай
+                raise
+            return existing.id
         db.refresh(order)
         return order.id
 
@@ -340,7 +359,7 @@ def cancel_order(order_id: int) -> dict:
     если по нему не осталось других открытых заказов. Денег это не касается."""
     from sqlalchemy import select
     from app.db import SessionLocal
-    from app.models.domain import Domain, AcquisitionOrder
+    from app.models.domain import OPEN_ORDER_STATUSES, Domain, AcquisitionOrder
 
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
@@ -364,7 +383,7 @@ def cancel_order(order_id: int) -> dict:
                 select(AcquisitionOrder.id).where(
                     AcquisitionOrder.domain_id == o.domain_id,
                     AcquisitionOrder.id != order_id,
-                    AcquisitionOrder.status.in_(_OPEN_STATUSES))
+                    AcquisitionOrder.status.in_(OPEN_ORDER_STATUSES))
             ).first()
             if other_open is None:                    # больше ничего не держит домен в очереди
                 d.status = "approved"
