@@ -149,3 +149,36 @@ def test_migration_0016_dedup_partitions_collisions_by_keeper_and_url_path():
         "по всем страницам сразу — иначе два РАЗНЫХ проигравших с общим url_path не поймаются "
         "как коллизия, и перенос ниже уронит uq_page_per_path на живом Postgres"
     )
+
+
+def test_migration_0016_deletes_children_before_parents():
+    """Текст-гард по образцу test_page_uniqueness.py::test_migration_deletes_index_history_before_pages
+    (0014) — миграция 0016 Postgres-only и в pytest-сьюте не гоняется, единственный автоматический
+    сторож — текст.
+
+    Два FK в этой миграции — NO ACTION (без ondelete), PostgreSQL их энфорсит:
+      · `index_history.page_id -> pages.id` — DELETE FROM pages (коллизионные страницы
+        проигравших) обязан идти ПОСЛЕ того, как их строки index_history уже удалены. У
+        published-дубля дети есть штатно (publish.check_index пишет IndexHistory для КАЖДОЙ
+        published-страницы, см. 0014).
+      · `site_offers.site_id -> sites.id` — DELETE FROM sites (сайты-проигравшие) обязан идти
+        ПОСЛЕ того, как их site_offers уже перенесены на keeper (или удалены).
+    Без этого порядка DELETE поднимает ForeignKeyViolation, откатывает ВСЮ транзакцию миграции и
+    обрывает git-pull-деплой — тот самый провал, ради защиты от которого дедуп и написан (F-migration-
+    0016 Critical #1/#2, ревью Задачи 1). Живой Postgres-репро имплементера прошёл только потому,
+    что в фикстуре не было ни одной строки index_history/site_offers.
+    """
+    path = (pathlib.Path(__file__).resolve().parents[1] / "alembic" / "versions"
+            / "0016_cloudflare_mirrors.py")
+    src = path.read_text(encoding="utf-8")
+    up = src[src.index("def upgrade"):src.index("def downgrade")]
+
+    ih = up.find("DELETE FROM index_history")
+    pg = up.find("DELETE FROM pages")
+    assert ih != -1, "миграция не чистит index_history проигравших коллизионных страниц — FK уронит деплой"
+    assert 0 <= ih < pg, "index_history надо удалить ДО DELETE FROM pages (FK: дети раньше родителя)"
+
+    so = up.find("site_offers")
+    st = up.find("DELETE FROM sites")
+    assert so != -1, "миграция не обрабатывает site_offers сайтов-проигравших — FK уронит деплой"
+    assert 0 <= so < st, "site_offers надо обработать ДО DELETE FROM sites (FK: дети раньше родителя)"
