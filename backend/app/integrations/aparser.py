@@ -86,11 +86,36 @@ class AParserClient(BaseClient):
         self.password = settings.APARSER_API_KEY
 
     def _call(self, action: str, data: dict | None = None) -> dict:
+        """Один вызов /API. Отказ A-Parser -> RuntimeError (см. ниже) — глотать его нельзя.
+
+        A-Parser отвечает **HTTP 200 даже на отказ**: сбой живёт в КОНВЕРТЕ, а не в статусе
+        ({"success":0,"msg":"Auth failed"} — docs/api/aparser.md). `raise_for_status` такого
+        не видит, и раньше тело возвращалось наверх как обычный результат: `resultString`
+        пуст -> whois честно докладывал «ничего не разобрал» ({available: None, created: None})
+        -> возраст None -> гейт `too_young` **не применялся вовсе**, а `errors` оставался пуст,
+        так что и метка «оценён вслепую» молчала. Машина не отличала «домену 16 лет» от
+        «я не смог спросить» (аудит F6).
+
+        Проверяем ТОЛЬКО конверт, НЕ содержимое. `success:1` с пустым `resultString` — законный
+        ответ «ничего не нашлось» (домена нет в whois, SERP пуст, Ahrefs не знает домена), и
+        объявить ошибкой ЕГО значило бы обменять одну немоту на другую: воронка стала бы
+        считать сбоем каждый ненайденный домен. Ошибка — это когда A-Parser сказал «нет»,
+        а не когда он сказал «пусто».
+        """
         body: dict = {"password": self.password, "action": action}
         if data is not None:
             body["data"] = data
         r = self.request("POST", f"{self.base_url}/API", json=body)
-        return r.json()
+        res = r.json()
+        if not isinstance(res, dict) or res.get("success") != 1:
+            # тело без `success` — это не «пустой результат», а НЕ ТОТ ответ (редирект на
+            # логин, прокси, сменившийся API): принять его молча — снова выдавать незнание
+            # за знание. `msg` — то, что A-Parser сам сказал о причине; несём его наверх,
+            # иначе /diag краснеет без объяснения.
+            msg = (res.get("msg") if isinstance(res, dict) else None) \
+                or f"неожиданный ответ: {str(res)[:120]}"
+            raise RuntimeError(f"A-Parser {action}: {msg}")
+        return res
 
     def info(self) -> dict:
         """Version + installed parsers list."""
@@ -145,7 +170,9 @@ class AParserClient(BaseClient):
     def whois_probe(self, domain: str) -> dict:
         """Один Net::Whois-вызов -> доступность + дата регистрации.
         available: True свободен / False занят / None не определить. created: дата или None.
-        Сетевой/транспортный сбой пробрасывается — ловит вызывающий код (_funnel -> sig["errors"])."""
+        Сетевой сбой И отказ A-Parser (конверт success:0, см. _call) пробрасываются — ловит
+        вызывающий код (_funnel -> sig["errors"] -> метка «вслепую» + запрет авто-approve).
+        None-ы здесь означают ТОЛЬКО «A-Parser ответил, но разобрать нечего», а не «не спросили»."""
         res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
                                         "configPreset": "default", "preset": "default"})
         text = self._result_string(res)
@@ -160,8 +187,10 @@ class AParserClient(BaseClient):
         2026-07-08 — см. docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).
         Дорогой вызов (платная капча) — вызывающий код решает, КОГДА его делать
         (scoring.py _funnel: только для доменов без RD из фида, T3-выжившие, под
-        runtime-бюджетом max_ahrefs_per_run). Сетевой/транспортный сбой пробрасывается —
-        ловит вызывающий код (как whois_probe)."""
+        runtime-бюджетом max_ahrefs_per_run). Сетевой сбой И отказ A-Parser (конверт success:0,
+        напр. не решилась капча) пробрасываются — ловит вызывающий код (как whois_probe).
+        Ретрая здесь нет: _call поднимает RuntimeError УЖЕ ПОСЛЕ request(), вне его ретрай-обёртки,
+        иначе один отказ конверта стоил бы трёх платных решений капчи."""
         res = self._call("oneRequest", {
             "query": domain,
             "parser": "Rank::Ahrefs",
