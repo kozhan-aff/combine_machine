@@ -678,11 +678,15 @@ def queue_poll_action():
         # Конфликт — не «ошибка сверки», а найденный дубль: провайдер держит заказ в полёте, а
         # домен уже занят другим открытым заказом (одна открытая заявка на домен). Молчать о нём
         # нельзя: за такой строкой стоят деньги, которые могли уйти.
-        dup = (f" · дублей не поднято {r['conflicts']} (у домена уже есть открытый заказ — "
+        #
+        # `checked` — сколько НАШИХ строк провайдер вообще знает, и конфликтные среди них: они
+        # тоже нашлись, просто не поехали. Поэтому «из них», а не отдельным слагаемым — иначе
+        # дубль считался бы дважды и разбивка не сходилась с итогом (ревью Задачи 7, минор 4).
+        dup = (f" · из них дублей не поднято {r['conflicts']} (у домена уже есть открытый заказ — "
                f"смотри пометку в очереди)") if r.get("conflicts") else ""
         return _back("/queue", msg=f"Сверено с провайдером: наших заказов {r['checked']} · "
                                    f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                                   f"в полёте {r.get('pending', 0)}.{dup}")
+                                   f"в полёте {r.get('pending', 0)}{dup}.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"опрос статусов: {e}")
 
@@ -701,8 +705,15 @@ def queue_caught_action(order_id: int):
 def queue_cancel_action(order_id: int):
     from app.services import acquisition
     try:
-        acquisition.cancel_order(order_id)
-        return _back("/queue", msg=f"Заказ #{order_id} снят — домен возвращён в approved.")
+        r = acquisition.cancel_order(order_id)
+        # Отмена НЕ всегда возвращает домен в approved (его может держать открытый заказ или
+        # заказ с неизвестным исходом — деньги могли уйти), и отменить она может не всё
+        # (maybe_sent заперт). Сказать это словами, а не рапортовать успех вслепую.
+        if r.get("error"):
+            return _back("/queue", err=f"отмена заказа #{order_id}: {r['error']}")
+        if r.get("status") != "cancelled":
+            return _back("/queue", err=f"заказ #{order_id}: {r.get('note') or 'снять нельзя'}")
+        return _back("/queue", msg=f"Заказ #{order_id} снят — {r.get('note') or 'домен не тронут'}.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отмена: {e}")
 

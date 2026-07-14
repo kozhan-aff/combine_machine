@@ -54,8 +54,12 @@
       <td class="dom">{{ o.domain }}
         {% if o.dirty %}<div><span class="flag">{{ o.dirty|reject_ru }}</span></div>{% endif %}</td>
       <td class="hint">{{ o.provider }}</td>
+      {# Статус НАШЕЙ строки и правда ПРОВАЙДЕРА — разные вещи, и бейдж («ошибка») об этом молчал:
+         схлопнутый дубль лежит у нас в failed, потому что домен уже держит другой открытый заказ,
+         а у провайдера он ЖИВ и «в полёте». Правду поллинг кладёт в result.clear_status — вешаем
+         её бейджу в title, иначе статус-колонка расходится с реальностью (ревью Задачи 7). #}
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
-            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status|status_ru }}</span></td>
+            title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}{% if o.result and o.result.clear_status %} · у провайдера: {{ o.result.clear_status }}{% endif %}">{{ o.status|status_ru }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
       <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} ₽{% else %}<span class="hint">—</span>{% endif %}</td>

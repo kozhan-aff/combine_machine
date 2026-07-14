@@ -43,6 +43,13 @@ def _collapsed_pair(name="dup.ru") -> tuple[int, int, int]:
     которые схлопывает миграция 0010. Проверено перечислением ВСЕХ писателей `AcquisitionOrder.
     status` (все в services/acquisition.py) и политики `MANUAL_TRANSITIONS`.
 
+    `error` у дубля — не украшение: миграция МЕРЖИТ result (`result || jsonb_build_object(...)`),
+    старые ключи переживают схлопывание. Строка с этим текстом реальна дважды: `ordering`, в
+    котором заказ застрял после ретрая ambiguous-отправки (claim `failed`->`ordering` result не
+    чистит), и легаси-гонка F10, где один из двух заказов домена честно упал в AmbiguousSend.
+    Именно этот протухший текст поллинг обязан выбросить, подняв на его место свою пометку, —
+    иначе оператор в очереди читает «не отправился» о заказе, который у провайдера в полёте.
+
     Гарды в коде при этом общие — они сторожат ИНВАРИАНТ БД, а не «строки от миграции»: любой
     писатель, двигающий заказ из `failed` в открытый статус, обязан спросить, свободен ли домен.
     """
@@ -57,8 +64,9 @@ def _collapsed_pair(name="dup.ru") -> tuple[int, int, int]:
         loser = AcquisitionOrder(  # ровно то, что пишет 0010: status=failed + note + maybe_sent
             domain_id=d.id, provider="backorder", status="failed", provider_order_id="222",
             confirmed_by_human=True,
-            result={**tier, "maybe_sent": True, "note": "дубль открытого заказа на домен, "
-                                                        "закрыт миграцией 0010"})
+            result={**tier, "error": "исход неизвестен: ReadTimeout",   # пережил схлопывание
+                    "maybe_sent": True, "note": "дубль открытого заказа на домен, "
+                                                "закрыт миграцией 0010"})
         s.add_all([winner, loser])
         s.commit()
         return d.id, winner.id, loser.id
@@ -225,6 +233,126 @@ def test_retry_refuses_while_another_order_is_open(sqlite_db, monkeypatch):
     assert by_id[lose].status == "failed"                # дубль не тронут — ни статус, ни флаг
     assert (by_id[lose].result or {}).get("maybe_sent") is True
     assert by_id[win].status == "ordered"
+
+
+def test_retry_race_answers_with_words_not_sql(sqlite_db, monkeypatch):
+    """Ремень поверх гарда: SELECT «нет ли открытого заказа» и claim — РАЗНЫЕ запросы, и между
+    ними чужой клик успевает занять домен.
+
+    Живой путь: у домена ДВЕ `failed`-строки (легаси-пара, обе отправки не вышли), человек жмёт
+    «↻ повторить» на обеих (две вкладки; sync-роуты панели идут в threadpool параллельно). Гард
+    пропускает ОБЕ — открытых заказов действительно нет; в 'ordering' индекс пустит одного, а
+    проигравший до фикса получал IntegrityError прямо в баннер. У поллинга такой ремень был, у
+    ретрая — нет (ревью Задачи 7, минор 1).
+    """
+    def _no_money(self, domain, price_id, period_id):
+        raise AssertionError("проигравший гонку обязан отказать ДО провайдера — деньги не трогаем")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _no_money)
+
+    did, win, lose = _collapsed_pair()
+    with db.SessionLocal() as s:                         # выживший тоже упал: обе строки failed
+        s.get(AcquisitionOrder, win).status = "failed"
+        s.commit()
+
+    real_guard = acquisition._open_order_id
+    raced: dict = {}
+
+    def racing_guard(sess, domain_id, except_id=None):
+        answer = real_guard(sess, domain_id, except_id)
+        if not raced:                                    # ровно один раз: это гонка, а не цикл
+            raced["yes"] = True
+            with db.SessionLocal() as other:             # ДРУГОЙ клик: свой сеанс, свой коммит
+                other.get(AcquisitionOrder, win).status = "ordering"
+                other.commit()
+        return answer
+
+    monkeypatch.setattr(acquisition, "_open_order_id", racing_guard)
+    r = acquisition.execute_confirmed_order(lose)        # до фикса — IntegrityError наружу
+
+    assert f"#{win}" in r["error"], "проигравший обязан узнать, кто занял домен"
+    by_id = {o.id: o for o in _orders(did)}
+    assert by_id[lose].status == "failed"                # claim откатился — строка не тронута
+    assert (by_id[lose].result or {}).get("maybe_sent") is True
+    assert by_id[win].status == "ordering"               # домен держит победитель гонки
+
+
+# --- отмена: домен не возвращается в очередь, пока рядом лежат ЧУЖИЕ деньги (ревью 7, Important)
+
+
+def test_cancel_does_not_free_a_domain_with_unresolved_money(sqlite_db):
+    """`cancel_order` запирает отмену maybe_sent-строк — но обходился через СОСЕДНЮЮ строку.
+
+    Состояние — наследство миграции 0010 (см. `_collapsed_pair`): выживший открытый заказ + дубль
+    `failed`+`maybe_sent`. Выживший получает ЯВНЫЙ отказ провайдера (`failed` без maybe_sent —
+    его снимать можно), человек жмёт «✗ отменить». Гард смотрел только на ОТКРЫТЫЕ заказы, а
+    дубль открытым не является — домен уезжал в `approved` и снова вставал в очередь выкупа,
+    имея на борту строку, про которую известно: деньги МОГЛИ уйти. Там его подтвердят и оплатят
+    второй раз, не зная, оплачен ли он уже.
+    """
+    did, win, lose = _collapsed_pair()
+    with db.SessionLocal() as s:                         # выживший: явный отказ провайдера
+        w = s.get(AcquisitionOrder, win)
+        w.status = "failed"
+        w.result = {**(w.result or {}), "error": "backorder: приём заказа по домену закрыт"}
+        s.commit()
+
+    r = acquisition.cancel_order(win)
+    assert r["status"] == "cancelled"                    # саму заявку снять можно — денег за ней нет
+    assert f"#{lose}" in (r.get("note") or ""), "человеку должны СКАЗАТЬ, что домен держит и почему"
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "purchasing", (
+            "домен вернулся в очередь выкупа, имея заказ с неизвестным исходом — его оплатят второй раз")
+    with pytest.raises(transitions.TransitionDenied):    # и заявку на него не завести
+        acquisition.create_order(did, "backorder")
+
+
+def test_resolved_unknown_finally_frees_the_domain(sqlite_db, monkeypatch):
+    """...и узником домен от этого не становится: путь разбора — «↻ обновить статусы у провайдера».
+
+    Продолжение сценария выше. Поллинг спрашивает backorder про дубль: тот отвечает «аннулирован»
+    — неизвестность снята ПРАВДОЙ провайдера (maybe_sent убран), деньги не ушли. Теперь дубль
+    снимается обычной «✗ отменить», и домен возвращается в approved. Проверяем ЖИВЫМИ кнопками,
+    а не верой в комментарий.
+    """
+    did, win, lose = _collapsed_pair()
+    with db.SessionLocal() as s:
+        w = s.get(AcquisitionOrder, win)
+        w.status = "failed"
+        w.result = {**(w.result or {}), "error": "backorder: приём заказа по домену закрыт"}
+        s.commit()
+    acquisition.cancel_order(win)                        # домен держится дублем — см. тест выше
+
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [
+        {"elid": "222", "domain": "dup.ru", "id_status": "4", "clear_status": "Аннулирован",
+         "state": "failed", "tariff": "190"},
+    ])
+    acquisition.poll_orders()                            # «↻ обновить статусы у провайдера»
+
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, lose)
+        assert o.status == "failed" and "maybe_sent" not in (o.result or {}), \
+            "правда провайдера обязана снять неизвестность — иначе выхода из неё нет"
+    assert acquisition.cancel_order(lose)["status"] == "cancelled"
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "approved"   # домен свободен и снова покупаем
+    acquisition.create_order(did, "backorder")           # путь в очередь открыт — не узник
+
+
+def test_queue_badge_carries_the_provider_truth(client):
+    """Бейдж строки говорит «ошибка», пока провайдер держит заказ В ПОЛЁТЕ (схлопнутый дубль).
+
+    Правда провайдера лежит в `result.clear_status` (её кладёт поллинг) — статус-колонка обязана
+    её нести, иначе расходится с реальностью денег (ревью Задачи 7, минор 2)."""
+    did, win, lose = _collapsed_pair()
+    with db.SessionLocal() as s:                         # ровно то, что пишет конфликтная ветка поллинга
+        o = s.get(AcquisitionOrder, lose)
+        o.result = {**(o.result or {}), "clear_status": "Не оплачен",
+                    "note": f"провайдер держит этот заказ в полёте, но у домена уже есть "
+                            f"открытый заказ #{win}"}
+        s.commit()
+
+    html = client.get("/queue").text
+    assert "у провайдера: Не оплачен" in html, "бейдж «ошибка» молчит о том, что заказ жив"
 
 
 def test_index_predicate_matches_the_migration(sqlite_db):

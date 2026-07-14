@@ -45,6 +45,40 @@ def _open_order_id(db, domain_id: int, except_id: int | None = None) -> int | No
     return db.execute(q).scalars().first()
 
 
+def _unresolved_money_id(db, domain_id: int, except_id: int | None = None) -> int | None:
+    """id заказа этого домена, про который известно «деньги МОГЛИ уйти» (`failed`+`maybe_sent`).
+
+    ОТКРЫТЫМ такой заказ не считается (в индекс не входит) — и не должен: домен под ним и так
+    заперт политикой статусов, он висит в `purchasing`, а заявку заводят только из `approved`.
+    Но домен он ДЕРЖИТ, и вот зачем про него спрашивает `cancel_order`: у домена может оказаться
+    ВТОРАЯ строка — открытый заказ (легаси-пара, которую схлопывает миграция 0010: выживший
+    остаётся открытым, дубль уезжает в `failed`+`maybe_sent`). Сняв выжившего, отмена смотрела
+    только на ОТКРЫТЫЕ заказы, дубль открытым не был — и домен уезжал в `approved`, то есть
+    обратно в очередь выкупа, где его подтвердят и оплатят ВТОРОЙ раз, не зная, оплачен ли он
+    уже. Ровно от этого `cancel_order` запирает отмену САМИХ maybe_sent-строк; через соседнюю
+    строку запрет обходился (ревью Задачи 7, Important).
+
+    Узником домен от этого не становится: у неизвестности есть выход, и он тот же, что у самой
+    maybe_sent-строки, — «↻ обновить статусы у провайдера» (`poll_orders` спрашивает backorder по
+    elid и снимает флаг ПРАВДОЙ провайдера) или «↻ повторить» (`execute` сперва зовёт find_order).
+    Как только флаг снят, эта строка снимается обычной отменой и домен возвращается в `approved`.
+
+    Ходим по строкам, а не фильтруем JSON в SQL: заказов у домена единицы, а `result->>'maybe_sent'`
+    — диалект PG, тесты же крутятся на SQLite (правда БД обязана быть одна на обеих).
+    """
+    from sqlalchemy import select
+    from app.models.domain import AcquisitionOrder
+
+    q = select(AcquisitionOrder).where(AcquisitionOrder.domain_id == domain_id,
+                                       AcquisitionOrder.status == "failed")
+    if except_id is not None:
+        q = q.where(AcquisitionOrder.id != except_id)
+    for o in db.execute(q).scalars():
+        if (o.result or {}).get("maybe_sent"):
+            return o.id
+    return None
+
+
 def create_order(domain_id: int, provider: str = "backorder") -> int:
     """Поставить approved-домен в очередь выкупа (pending_confirm). Идемпотентно по домену.
 
@@ -175,6 +209,7 @@ def execute_confirmed_order(order_id: int) -> dict:
     в этом случае помечаем 'failed' с причиной, а не выдаём ложный успех."""
     from datetime import datetime, timezone
     from sqlalchemy import update
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
     from app.services import transitions
@@ -219,14 +254,27 @@ def execute_confirmed_order(order_id: int) -> dict:
         # переведёт РОВНО один — второй увидит rowcount 0 и не пошлёт второй живой заказ.
         # confirmed_by_human остаётся в SQL-условии — денежный гейт держится и здесь.
         # Допуск 'failed' в claim = рабочий ретрай (кнопка «↻ повторить»).
-        claim = db.execute(
-            update(AcquisitionOrder)
-            .where(AcquisitionOrder.id == order_id,
-                   AcquisitionOrder.status.in_(("pending_confirm", "failed")),
-                   AcquisitionOrder.confirmed_by_human.is_(True))
-            .values(status="ordering")
-        )
-        db.commit()
+        try:
+            claim = db.execute(
+                update(AcquisitionOrder)
+                .where(AcquisitionOrder.id == order_id,
+                       AcquisitionOrder.status.in_(("pending_confirm", "failed")),
+                       AcquisitionOrder.confirmed_by_human.is_(True))
+                .values(status="ordering")
+            )
+            db.commit()
+        except IntegrityError:
+            # РЕМЕНЬ ПОВЕРХ ГАРДА (такой же, как у поллинга): гонку SELECT-гард не закрывает —
+            # это разные запросы. Два клика «↻ повторить» по ДВУМ `failed`-строкам одного домена
+            # (легаси-пара) оба честно видят «открытого заказа нет» и оба claim'ят 'ordering';
+            # индекс оставляет одного. Проигравший обязан получить слова, а не SQL-трейс в баннер.
+            db.rollback()
+            other = _open_order_id(db, o.domain_id, except_id=order_id)
+            return {"order_id": order_id, "status": db.get(AcquisitionOrder, order_id).status,
+                    "error": (f"домен только что занял другой заказ "
+                              f"{f'#{other} ' if other else ''}— второй в полёте держать нельзя "
+                              f"(это прямой путь заплатить дважды). Разбери его "
+                              f"(«↻ обновить статусы»), потом вернись к этому.")}
         if claim.rowcount != 1:                       # уже забрал другой клик / уже обработан
             db.refresh(o)
             return {"order_id": order_id, "status": o.status,
@@ -423,8 +471,8 @@ def poll_orders() -> dict:
 
 
 def cancel_order(order_id: int) -> dict:
-    """Снять заявку (pending_confirm/failed -> cancelled). Домен возвращаем в 'approved',
-    если по нему не осталось других открытых заказов. Денег это не касается."""
+    """Снять заявку (pending_confirm/failed -> cancelled). Домен возвращаем в 'approved' только
+    если по нему не осталось НИ открытого заказа, НИ заказа с неизвестным исходом. Денег не тратит."""
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
 
@@ -443,13 +491,34 @@ def cancel_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": o.status,
                     "error": "исход заказа неизвестен (связь оборвалась, деньги могли уйти) — "
                              "нажми «↻ повторить»: сначала спросим провайдера, нет ли там заказа"}
+        # Что ЕЩЁ держит домен, кроме снимаемой строки. Спрашиваем ДО мутации: except_id и так
+        # исключает наш заказ, но состояние читается одно и то же и до, и после — так честнее.
+        blocker = _open_order_id(db, o.domain_id, except_id=order_id)
+        unresolved = _unresolved_money_id(db, o.domain_id, except_id=order_id)
+
         o.status = "cancelled"
         d = db.get(Domain, o.domain_id)
+        note = None
         if d is not None and d.status == "purchasing":
-            if _open_order_id(db, o.domain_id, except_id=order_id) is None:
+            if blocker is None and unresolved is None:
                 d.status = "approved"                 # домен больше ничем не держится в очереди
+                note = "домен возвращён в approved"
+            elif blocker is not None:
+                note = (f"домен остаётся в очереди (purchasing): его держит открытый заказ "
+                        f"#{blocker}")
+            else:
+                # НЕ возвращаем в approved: рядом лежит строка «деньги МОГЛИ уйти». Вернуть домен
+                # в очередь выкупа = позвать человека подтвердить и оплатить его второй раз, не
+                # зная, оплачен ли он уже. Отмену самих maybe_sent-строк мы запрещаем ровно от
+                # этого — через соседнюю строку запрет обходился (ревью Задачи 7, Important).
+                # Путь разбора у человека есть — он назван прямо здесь, в тексте (см. также
+                # _unresolved_money_id): правда провайдера снимает неизвестность.
+                note = (f"домен остаётся в очереди (purchasing): у заказа #{unresolved} неизвестен "
+                        f"исход — деньги могли уйти. Разбери его кнопкой «↻ обновить статусы у "
+                        f"провайдера»: она спросит backorder и снимет неизвестность, после чего "
+                        f"заказ снимается, а домен возвращается в approved")
         db.commit()
-        return {"order_id": order_id, "status": "cancelled", "domain_id": o.domain_id}
+        return {"order_id": order_id, "status": "cancelled", "domain_id": o.domain_id, "note": note}
 
 
 def list_orders() -> list[dict]:
