@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # cloudflare
     CLOUDFLARE_API_TOKEN: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_SECRETS_DIR: str = ""  # allowlisted read-only каталог для file:BASENAME secret_ref
 
     # aapanel
     AAPANEL_URL: str = ""
