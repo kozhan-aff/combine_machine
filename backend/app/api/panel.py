@@ -12,7 +12,7 @@ Recheck/Sweep) уходят в фон через services.jobs — роут от
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
-from fastapi import APIRouter, Request, Depends, Form
+from fastapi import APIRouter, Request, Depends, Form, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -410,6 +410,19 @@ def diag_refresh(request: Request):
     return _back(back, msg="Статусы внешних инструментов перепроверены")
 
 
+def _require_cf_write(request: Request) -> None:
+    """Hard gate: любой CF-write требует НАСТРОЕННЫЙ panel auth. Same-origin недостаточен
+    (аудит §11/§15) — панель живёт на LAN, а same-origin ничего не доказывает про то, кто
+    физически может достучаться до порта. Транспортная Basic-проверка (если включена) стоит
+    отдельно; здесь проверяется, что auth ВООБЩЕ сконфигурирован — иначе плоская LAN-экспозиция
+    открывает Cloudflare-мутации кому угодно, кто знает IP. `request` не используется сейчас —
+    параметр под будущие роуты-потребители (P1+ мутации), которые зовут этот гейт первой строкой,
+    как и запуск sync (задача 5)."""
+    if not (settings.PANEL_USER and settings.PANEL_PASS):
+        raise HTTPException(status_code=403,
+                            detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_view(request: Request, db: Session = Depends(get_session)):
     from app.services import settings as st
@@ -552,7 +565,6 @@ def run_recheck_action(request: Request, n: int = Form(200)):
 
 @router.post("/run/{job}/cancel")
 def run_cancel_action(request: Request, job: str):
-    from fastapi import HTTPException
     from app.services import jobs
     if job not in _JOBS:
         raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
