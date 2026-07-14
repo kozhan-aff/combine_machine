@@ -1,6 +1,6 @@
 """Provisioned sites and their content pages. See BUILD_SPEC.md §5."""
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime, func
+from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime, Index, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
@@ -54,3 +54,12 @@ class Page(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     site: Mapped["Site"] = relationship(back_populates="pages")
+
+    # ОДНА СТРАНИЦА НА ПУТЬ (миграция 0014). Не косметика: url_path — это ФАЙЛ на сервере
+    # (`_target_path` в publish.py: docroot + url_path + /index.html). Две строки с одним путём
+    # рендерятся В ОДИН И ТОТ ЖЕ файл, и опубликованной оказывается та, что записалась последней:
+    # человек редактирует одну страницу, а в интернет уезжает другая — и панель показывает обе
+    # как настоящие. Дубли заводились гонкой генерации (кнопка в панели против стадии generate
+    # в воркере — РАЗНЫЕ ПРОЦЕССЫ; SELECT «страница уже есть» в content.generate_site их не
+    # разводит: чужая незакоммиченная строка под READ COMMITTED невидима).
+    __table_args__ = (Index("uq_page_per_path", "site_id", "url_path", unique=True),)

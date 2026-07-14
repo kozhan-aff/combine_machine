@@ -16,8 +16,8 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
     _seed(1)
     seen = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
-        jobs.report(job, stage="whois")                  # так репортит _funnel
+    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
+        jobs.report(run, stage="whois")                  # так репортит _funnel
         seen.append(jobs.progress("score")["stage"])
         return {"domain": "d0.ru"}
 
@@ -35,7 +35,7 @@ def test_score_pending_stops_on_cancel(monkeypatch):
     _seed(5)
     scored = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
+    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
         scored.append(did)
         jobs.request_cancel("score")                      # человек нажал «стоп» на первом домене
         return {}

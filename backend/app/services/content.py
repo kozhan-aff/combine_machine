@@ -69,6 +69,7 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
     По умолчанию off — сеть не дёргается в тестах/скриптах; панель включает явно.
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.offer import Offer, SiteOffer
@@ -121,7 +122,23 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
                         status="draft", body=body))
             created += 1
         site.status = "content"
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # uq_page_per_path (site_id, url_path) — миграция 0014. Сюда попадаем НЕ от кривых
+            # данных, а от гонки двух ПРОЦЕССОВ: кнопка «сгенерировать» в панели и стадия
+            # generate автопилотного свипа в воркере вошли одновременно, SELECT «страница уже
+            # есть» выше у обоих честно ответил «нет» (чужая незакоммиченная строка под READ
+            # COMMITTED невидима), и оба вставили один и тот же путь. Инвариант отбил вторую
+            # вставку — и оператор обязан прочитать это словами, а не SQL-трейсом в сводке свипа.
+            #
+            # Откатываем ВЕСЬ батч, а не досыпаем остаток: страницы этого сайта прямо сейчас
+            # пишет другой прогон, и он допишет их целиком. Потерянные токены LLM — цена
+            # честная: альтернатива (вторая копия страницы) стоит дороже, см. модель Page.
+            db.rollback()
+            raise ValueError(
+                f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
+                f"генерация пропущена, дубли не заводим") from None
         return created
 
 

@@ -119,8 +119,8 @@ def test_domains_shows_last_run_summary(client):
     """Не только падения: успешный прогон тоже обязан оставить след — иначе «ничего не
     произошло» и «всё сломалось» выглядят одинаково."""
     from app.services import jobs
-    with jobs.track("score"):
-        jobs.report("score", done=3, total=3, message="прогнано 3 доменов через воронку")
+    with jobs.track("score") as run:
+        jobs.report(run, done=3, total=3, message="прогнано 3 доменов через воронку")
     assert "прогнано 3 доменов" in client.get("/domains").text
 
 

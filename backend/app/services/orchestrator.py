@@ -4,41 +4,35 @@
 (2) вызов существующего безопасного сервиса, (3) учёт. Три человеческих гейта (курация,
 деньги, редактура) он НЕ трогает — см. _FORBIDDEN в докстринге run_sweep.
 """
-from datetime import datetime, timezone, timedelta
-
-STALE_MIN = 15   # «running»-строка старше этого — крашнутый воркер, замок протух
+from datetime import datetime, timezone
 
 
-def _acquire_lock(trigger: str) -> int | None:
-    """Single-flight: атомарно вставить running-строку, если нет свежей незавершённой.
+def _start_run(trigger: str) -> int:
+    """Открыть ЖУРНАЛЬНУЮ строку свипа. ЗАМКА ЗДЕСЬ БОЛЬШЕ НЕТ (аудит F17, шаг 4).
 
-    Один INSERT..SELECT..WHERE NOT EXISTS — окно гонки сужено до одной SQL-команды; остаточная
-    гонка READ COMMITTED (~мс) остаётся, но последствия ограничены капами и STALE_MIN. При >1
-    воркере добавить partial unique index или ON CONFLICT. Возвращает id новой строки или None
-    (замок занят).
+    Раньше это был второй, самостоятельный single-flight: INSERT..WHERE NOT EXISTS(свежий
+    running) с отсечкой по `started_at`. Он был строго СЛАБЕЕ реестрового:
+      · судил по НАЧАЛУ прогона, а не по признакам жизни, — любой свип длиннее 15 минут (а это
+        норма: одна стадия `generate` — это LLM по пяти сайтам) сам себя объявлял протухшим и
+        пускал второй свип поверх живого;
+      · «атомарность» держалась на INSERT..SELECT под READ COMMITTED — то есть на удаче, о чём
+        честно предупреждал его собственный докстринг.
+    Всё, что он охранял, охраняет частичный уникальный индекс job_run (name) WHERE running —
+    настоящий запрет БД, к тому же теперь с сердцебиением (services/jobs.py). Второго мнения о
+    том, идёт ли свип, быть не должно: два замка с разными критериями расходятся, и расходились.
+
+    AutonomyRun остаётся тем, чем он полезен: ЖУРНАЛОМ (счётчики по стадиям и ошибки на
+    /autopilot) и отметкой времени для throttle шедулера (last_finished_sweep_at).
     """
-    from sqlalchemy import select, exists, insert, literal
     from app.db import SessionLocal
     from app.models.autonomy import AutonomyRun
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=STALE_MIN)
-    fresh = select(AutonomyRun.id).where(
-        AutonomyRun.status == "running", AutonomyRun.started_at > cutoff)
-    src = select(
-        literal(now, AutonomyRun.started_at.type),
-        literal(trigger, AutonomyRun.trigger.type),
-        literal("running", AutonomyRun.status.type),
-        literal({}, AutonomyRun.counts.type),
-        literal([], AutonomyRun.errors.type),
-    ).where(~exists(fresh))
-    stmt = insert(AutonomyRun).from_select(
-        ["started_at", "trigger", "status", "counts", "errors"], src
-    ).returning(AutonomyRun.id)
     with SessionLocal() as db:
-        run_id = db.execute(stmt).scalar_one_or_none()
+        r = AutonomyRun(started_at=datetime.now(timezone.utc), trigger=trigger,
+                        status="running", counts={}, errors=[])
+        db.add(r)
         db.commit()
-        return run_id
+        return r.id
 
 
 def _finish_run(run_id: int, status: str, counts: dict, errors: list) -> None:
@@ -283,44 +277,65 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     cfg = get_autonomy()
     if respect_master and not cfg["autopilot_on"]:
         return {"skipped": "autopilot_off"}
-    run_id = _acquire_lock(trigger)
-    if run_id is None:
-        return {"skipped": "already_running"}
 
     enabled = [s for s in STAGES if cfg[s[1]]]
     stages = [{"key": k, "label": STAGE_RU[k],
                "state": "pending" if cfg[flag] else "skip"} for k, flag, _, _ in STAGES]
     total = len(enabled)
     counts, errors, status = {}, [], "done"
+    run_id = None
     try:
+        # ЕДИНСТВЕННЫЙ замок свипа (шаг 4 F17): его держит реестр — уникальным индексом и
+        # сердцебиением. Занято -> AlreadyRunning, и журнальной строки НЕ ЗАВОДИМ: свипа не
+        # было. Раньше здесь писался прогон со статусом done — он попадал в журнал как
+        # состоявшийся И двигал last_finished_sweep_at, из-за чего шедулер откладывал
+        # СЛЕДУЮЩИЙ свип, приняв несостоявшийся за только что отработавший.
         with jobs.track("sweep", trigger="auto" if trigger == "cron" else "manual",
-                        stages=stages):
-            for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
-                jobs.report("sweep", done=i, total=total, stage=key,
-                            current=STAGE_RU[key])
-                cap = cfg[cap_attr] if cap_attr else None
-                try:
-                    # третий элемент — доп.счётчики стадии (см. контракт handler выше);
-                    # у стадий без него распаковка даёт пустой хвост.
-                    n, errs, *extra = handler(cap)
-                    counts[key] = n
-                    if extra:
-                        counts.update(extra[0])
-                    errors += [f"{key}: {e}" for e in errs]
-                except jobs.AlreadyRunning:
-                    # ЗАМОК СРАБОТАЛ ШТАТНО, а не сломался: оператор прямо сейчас гоняет свой
-                    # score/discovery, и второй прогон поверх — ровно то, что мы запрещали
-                    # (двое жгут квоту A-Parser). Пропустить стадию и сказать об этом честно;
-                    # красить весь свип в failed = кричать волком на собственную защиту.
-                    errors.append(f"{key}: пропущена — занята ручным прогоном")
-                except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
-                    errors.append(f"{key}: {type(e).__name__}: {e}")
-                    status = "failed"
-            jobs.report("sweep", done=total, total=total, current="",
-                        message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
+                        stages=stages) as run:
+            run_id = _start_run(trigger)
+            try:
+                for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
+                    # Между стадиями (не внутри — стадия атомарна для нас) спрашиваем реестр:
+                    # нажали ли «стоп» и НАШ ЛИ ЕЩЁ ЗАМОК. Второе — фенсинг: если нас сочли
+                    # трупом и отдали замок другому процессу, продолжать = гнать конвейер
+                    # ВТОРЫМ (дубли страниц, двойной счёт LLM). Тот же контракт, по которому
+                    # между доменами останавливается score_pending, — новой логики нет.
+                    if jobs.cancelled(run):
+                        raise jobs.Cancelled()
+                    jobs.report(run, done=i, total=total, stage=key, current=STAGE_RU[key])
+                    cap = cfg[cap_attr] if cap_attr else None
+                    try:
+                        # третий элемент — доп.счётчики стадии (см. контракт handler выше);
+                        # у стадий без него распаковка даёт пустой хвост.
+                        n, errs, *extra = handler(cap)
+                        counts[key] = n
+                        if extra:
+                            counts.update(extra[0])
+                        errors += [f"{key}: {e}" for e in errs]
+                    except jobs.AlreadyRunning:
+                        # ЗАМОК СРАБОТАЛ ШТАТНО, а не сломался: оператор прямо сейчас гоняет свой
+                        # score/discovery, и второй прогон поверх — ровно то, что мы запрещали
+                        # (двое жгут квоту A-Parser). Пропустить стадию и сказать об этом честно;
+                        # красить весь свип в failed = кричать волком на собственную защиту.
+                        errors.append(f"{key}: пропущена — занята ручным прогоном")
+                    except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
+                        errors.append(f"{key}: {type(e).__name__}: {e}")
+                        status = "failed"
+                jobs.report(run, done=total, total=total, current="",
+                            message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
+            except jobs.Cancelled:
+                status = "cancelled"
+                errors.append("свип остановлен — стоп-кнопка или потерянный замок")
+                raise                      # track закроет прогон как cancelled, не как failed
+            except BaseException:          # noqa: BLE001 — оборвался сам свип, а не стадия
+                status = "failed"
+                raise
+            finally:
+                # ЖУРНАЛ ПИШЕМ ВСЕГДА, чем бы всё ни кончилось: свип, оборвавшийся на середине,
+                # обязан оставить в /autopilot то, что успел сделать, — иначе счётчики врут
+                # молчанием. Частичные counts честнее пустого места.
+                _finish_run(run_id, status, counts, errors)
     except jobs.AlreadyRunning:
         # а ЭТОТ AlreadyRunning — от самого track("sweep"): свип уже идёт в другом процессе.
-        _finish_run(run_id, "done", {}, ["sweep: реестр занят другим прогоном"])
         return {"skipped": "already_running"}
-    _finish_run(run_id, status, counts, errors)
     return {"run_id": run_id, "status": status, "counts": counts, "errors": errors}

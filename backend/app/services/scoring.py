@@ -376,7 +376,7 @@ def scorable(now):
     )
 
 
-def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> str | None:
+def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
     источников (backorder объявляет lane=bid сам). Дорогой Wayback (T3) — только для
@@ -385,16 +385,14 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     from app.services import jobs
     now = datetime.now(timezone.utc)
 
-    if job:
-        jobs.report(job, stage="rd")
+    jobs.report(run, stage="rd")
     # T0 — фид (0 стоимости)
     if d.feed_flags and any(d.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
         return "feed_flag"
     if d.referring_domains is not None and d.referring_domains < st["min_referring_domains"]:
         return "low_rd"
 
-    if job:
-        jobs.report(job, stage="whois")
+    jobs.report(run, stage="whois")
     # T1 — приобретаемость + возраст (ОДИН whois-вызов, под бюджетом)
     if whois_budget is not None and whois_budget[0] <= 0:
         sig["acquirability_unresolved"] = True     # бюджет whois на прогон исчерпан — оставить discovered
@@ -461,8 +459,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
                 sig["unresolved_why"] = "taken_undated"
             return None
 
-    if job:
-        jobs.report(job, stage="risk")
+    jobs.report(run, stage="risk")
     # T2 — риск (средне): РКН + Spamhaus
     try:
         sig["rkn_listed"] = c["rkn"].is_listed(d.domain)
@@ -479,16 +476,14 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
 
-    if job:
-        jobs.report(job, stage="echo")
+    jobs.report(run, stage="echo")
     # indexed_echo
     try:
         sig["indexed_echo"] = c["searxng"].indexed_echo(d.domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
-    if job:
-        jobs.report(job, stage="history")
+    jobs.report(run, stage="history")
     # T3 — история (дорого): только для приобретаемых выживших
     try:
         hist = c["wayback"].classify_history(d.domain)
@@ -518,8 +513,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
         return "too_young"
 
-    if job:
-        jobs.report(job, stage="ahrefs")
+    jobs.report(run, stage="ahrefs")
     # T3b — Ahrefs (дорого, капча за деньги): ТОЛЬКО если фид не дал RD (cctld/reg_ru/
     # sweb — у backorder RD уже есть, повторно не проверяем) и бюджет жив.
     # ahrefs_budget=None -> НЕ вызываем (в отличие от whois_budget=None=безлимит — Ahrefs
@@ -538,7 +532,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
-                 ahrefs_budget=None, job: str | None = None) -> dict:
+                 ahrefs_budget=None, run: int | None = None) -> dict:
     """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита).
     job — имя прогона в реестре (jobs.py): если задан, _funnel репортит текущую стадию."""
     from app.db import SessionLocal
@@ -554,7 +548,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             return {"domain": d.domain, "status": d.status, "skipped": "status"}
         c = clients or _make_clients()
         sig: dict = {"errors": []}
-        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, job=job)
+        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, run=run)
 
         if sig.get("acquirability_unresolved"):
             # приобретаемость не определена (whois сбой/непонятно/бюджет) — статус НЕ трогаем,
@@ -713,20 +707,20 @@ def score_pending(limit: int = 100) -> int:
     whois_budget = [int(st["max_whois_per_run"])]
     ahrefs_budget = [int(st["max_ahrefs_per_run"])]
     total, done = len(rows), 0
-    with jobs.track("score", stages=stages):
+    with jobs.track("score", stages=stages) as run:
         for i, (did, name) in enumerate(rows, 1):
             # ПОРЯДОК ВАЖЕН: репорт ДО проверки стопа. done = i-1 — это ровно столько доменов,
             # сколько уже дошли до конца. Проверь стоп раньше репорта — и в реестре останется
             # done от прошлой итерации, то есть «остановлена на 0 / 5» после одного домена.
-            jobs.report("score", done=i - 1, total=total, current=name)
-            if jobs.cancelled("score"):
+            jobs.report(run, done=i - 1, total=total, current=name)
+            if jobs.cancelled(run):
                 raise jobs.Cancelled()
             try:
-                score_domain(did, clients, whois_budget, ahrefs_budget, job="score")
+                score_domain(did, clients, whois_budget, ahrefs_budget, run=run)
             except Exception:  # noqa: BLE001 — падение одного домена не топит батч
                 logging.getLogger(__name__).exception("score_domain %s упал", name)
             done = i
-        jobs.report("score", done=total, total=total, current="",
+        jobs.report(run, done=total, total=total, current="",
                     message=idle_msg or f"прогнано {total} доменов через воронку")
     return done
 
@@ -789,13 +783,13 @@ def recheck_acquirability(limit: int = 200) -> dict:
     # free+waiting+taken+unknown; расходится ровно на домены, которые между whois и записью
     # успели уйти в выкуп (см. декремент taken по rowcount ниже) — их отбраковки не было.
     out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
-    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]):
-        jobs.report("recheck", stage="whois")
+    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]) as run:
+        jobs.report(run, stage="whois")
         budget = int(get_settings()["max_whois_per_run"])
         if budget <= 0:
             # ВНУТРИ track, а не до него: иначе прогон завершался бы, не создав строки реестра,
             # и кнопка «Перепроверить» выглядела бы сломанной — ровно та болезнь, которую лечим.
-            jobs.report("recheck", message="whois-бюджет = 0, проверять нечем (см. /settings)")
+            jobs.report(run, message="whois-бюджет = 0, проверять нечем (см. /settings)")
             return out
         with SessionLocal() as db:
             ids = db.execute(
@@ -809,15 +803,15 @@ def recheck_acquirability(limit: int = 200) -> dict:
         c = _make_clients()
         total = len(ids)
         for i, did in enumerate(ids, 1):
-            jobs.report("recheck", done=i - 1, total=total)   # ДО стопа — см. score_pending
-            if jobs.cancelled("recheck"):
+            jobs.report(run, done=i - 1, total=total)         # ДО стопа — см. score_pending
+            if jobs.cancelled(run):
                 raise jobs.Cancelled()
             with SessionLocal() as db:
                 d = db.get(Domain, did)
                 if d is None or d.status not in _RECHECK_STATUSES:
                     continue                      # статус увели, пока шли (напр. в выкуп)
                 name, deadline, lane = d.domain, d.acquire_deadline, d.lane
-            jobs.report("recheck", current=name)  # репорт ДО вызова: whois идёт секунды
+            jobs.report(run, current=name)        # репорт ДО вызова: whois идёт секунды
 
             now = datetime.now(timezone.utc)
             out["checked"] += 1                           # вызов состоялся — бюджет потрачен
@@ -865,7 +859,7 @@ def recheck_acquirability(limit: int = 200) -> dict:
                f"не определилось {out['unknown']}") if total else (
             "проверять нечего: нет доменов «на решении» или «одобрен». "
             "Сначала оцени найденные — кнопка «Оценить домены»")
-        jobs.report("recheck", done=total, total=total, current="", message=msg)
+        jobs.report(run, done=total, total=total, current="", message=msg)
     return out
 
 
