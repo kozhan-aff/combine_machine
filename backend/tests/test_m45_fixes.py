@@ -119,12 +119,17 @@ def test_check_index_matches_by_host(monkeypatch):
     site_id = _make_site(domain="mydomain.ru", status="published")
     _add(Page(site_id=site_id, url_path="/", title="home", status="published", body="<p>x</p>"))
 
+    # мок отдаёт ответ SearXNG целиком (results + unresponsive_engines) — check_index читает
+    # здоровье движков из того же ответа, что и результаты. Пустой список «мёртвых» = движки
+    # ответили, значит пустая выдача — законное «нет», а не «не знаю» (см. test_index_truth.py).
+    def _serp(results):
+        monkeypatch.setattr("app.integrations.searxng.SearxngClient.search_full",
+                            lambda self, q, **kw: {"results": results, "unresponsive_engines": []})
+
     # a foreign URL that merely CONTAINS the domain as a substring must NOT count as indexed
-    monkeypatch.setattr("app.integrations.searxng.SearxngClient.search",
-                        lambda self, q, **kw: [{"url": "https://notmydomain.ru.evil.com/"}])
+    _serp([{"url": "https://notmydomain.ru.evil.com/"}])
     assert check_index(site_id)["pages"]["/"] == "not_indexed"
 
     # the real host does count
-    monkeypatch.setattr("app.integrations.searxng.SearxngClient.search",
-                        lambda self, q, **kw: [{"url": "https://mydomain.ru/"}])
+    _serp([{"url": "https://mydomain.ru/"}])
     assert check_index(site_id)["pages"]["/"] == "indexed"

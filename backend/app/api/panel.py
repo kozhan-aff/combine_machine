@@ -104,10 +104,20 @@ def _next_steps(db: Session) -> list[dict]:
     if pc.get("edited"):
         steps.append({"href": "/", "text": f"{pc['edited']} отредактировано — публикуй сайт (M5)."})
     if pc.get("published"):
-        unknown = db.scalar(select(func.count()).select_from(Page).where(
-            Page.status == "published", Page.index_status != "indexed")) or 0
-        if unknown:
-            steps.append({"href": "/", "text": f"{unknown} опубликованных ещё не в индексе — проверяй «индексация» (site:)."})
+        # Три РАЗНЫХ состояния, и валить их в одно «ещё не в индексе» — врать: «не спросили»,
+        # «спросили и не выяснили» и «спросили, в индексе нет» требуют разных действий оператора.
+        def _idx(*cond):
+            return db.scalar(select(func.count()).select_from(Page).where(
+                Page.status == "published", *cond)) or 0
+        never = _idx(Page.index_status == "unknown", Page.index_checked_at.is_(None))
+        blind = _idx(Page.index_status == "unknown", Page.index_checked_at.isnot(None))
+        missing = _idx(Page.index_status == "not_indexed")
+        if never:
+            steps.append({"href": "/", "text": f"{never} опубликованных страниц ещё не проверялись на индексацию — запусти «индексация» (site:)."})
+        if blind:
+            steps.append({"href": "/diag", "text": f"{blind} страниц проверить не удалось: движки SearXNG не ответили (CAPTCHA/лимит). Это про поисковик, а не про сайт — почини SearXNG и повтори проверку."})
+        if missing:
+            steps.append({"href": "/", "text": f"{missing} опубликованных страниц нет в индексе — попадание занимает дни, проверяй периодически."})
     if not steps:
         steps.append({"href": "/domains", "text": "Очередь пуста: запусти ↻ Discovery за свежими дропами."})
     return steps

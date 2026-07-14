@@ -216,13 +216,18 @@ def _stage_publish(cap):
 
 
 def _stage_check_index(cap):
-    """Сайты с published-страницами -> check_index (site: через SearXNG)."""
+    """Сайты с published-страницами -> check_index (site: через SearXNG).
+
+    Страницы, про которые проверка ничего не выяснила (движки SearXNG не ответили — CAPTCHA/
+    лимит), считаем ОТДЕЛЬНО: сайт тут ни при чём, сломан поисковик, и молчаливое «сделано N»
+    выдало бы незнание за проделанную работу. Прецедент — `queue_dirty`/`ssl_failed`.
+    """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.services import publish
 
-    done, errs = 0, []
+    done, errs, blind = 0, [], 0
     with SessionLocal() as db:
         ids = [r[0] for r in db.execute(
             select(Site.id).where(Site.id.in_(
@@ -230,11 +235,12 @@ def _stage_check_index(cap):
             .order_by(Site.id).limit(cap)).all()]
     for sid in ids:
         try:
-            publish.check_index(sid)
+            out = publish.check_index(sid)
             done += 1
+            blind += sum(1 for st in (out.get("pages") or {}).values() if st == "unknown")
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
-    return done, errs
+    return done, errs, {"index_unknown": blind} if blind else {}
 
 
 # порядок конвейера — единственный источник истины оркестратора
@@ -254,8 +260,10 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
 
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
 # стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной,
-# `ssl_failed` — у скольких сайтов vhost поднят, а SSL-режим Cloudflare не переключился.
-COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился"}
+# `ssl_failed` — у скольких сайтов vhost поднят, а SSL-режим Cloudflare не переключился,
+# `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат).
+COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
+            "index_unknown": "индекс не выяснен"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
