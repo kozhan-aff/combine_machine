@@ -91,17 +91,28 @@ def history_evidence(d) -> list[dict]:
     Вердикт ошибается (это и доказал аудит), поэтому куратор обязан мочь ПЕРЕПРОВЕРИТЬ его
     глазами: улики пишутся в score_breakdown.history_evidence (Задача 1) — здесь они
     превращаются в ссылки на web.archive.org.
+
+    `unread` — снимок скачался, но видимого текста на нём НЕТ (редирект-заглушка, frameset,
+    SPA-оболочка; см. wayback.MIN_TEXT_CHARS). Без этой пометки строка улики выглядела бы в
+    инбоксе ровно как честно прочитанная и чистая («категорий не найдено»), хотя не прочитано
+    вообще ничего. Улики без `chars` — из прогонов ДО этой пометки: догадываться о них нельзя,
+    считаем прочитанными (как их и трактовал тогдашний вердикт).
     """
+    from app.integrations.wayback import MIN_TEXT_CHARS
+
     out = []
     for e in (d.score_breakdown or {}).get("history_evidence") or []:
         url, ts = e.get("url") or "", str(e.get("timestamp") or "")
         if not url or len(ts) < 8:   # пустые url/timestamp -> битая ссылка web.archive.org/web//
             continue
+        chars = e.get("chars")
         out.append({
             "link": f"https://web.archive.org/web/{ts}/{url}",
             "url": url,
             "when": f"{ts[6:8]}.{ts[4:6]}.{ts[:4]}" if len(ts) >= 8 else ts,
             "cats": ", ".join(_CATS_RU.get(c, c) for c in e.get("cats") or []),
+            "chars": chars,
+            "unread": isinstance(chars, int) and chars < MIN_TEXT_CHARS,
         })
     return out
 

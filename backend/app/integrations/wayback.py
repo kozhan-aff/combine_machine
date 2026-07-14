@@ -61,7 +61,52 @@ STOPWORDS = {
 }
 _MIN_HITS = 2  # stop-word hits in a snapshot to flag its category
 
+# Сколько видимого текста должно быть на снимке, чтобы считать его ПРОЧИТАННЫМ.
+#
+# Цена переезда на видимый текст (аудит F3): у страницы-редиректа (meta-refresh / `location.href`),
+# у frameset'а и у SPA-оболочки видимого текста НЕТ ВООБЩЕ. Раньше их случайно ловил шум разметки
+# (в `location.href="…/casino/"` — два «casino»), теперь они дают НОЛЬ сигнала. А это ровно те
+# снимки, в которые домен превращают ПЕРЕД СДАЧЕЙ — в опасном окне `_RECENT_DAYS`: заглушка с
+# редиректом на казино отдаёт 200 + text/html и проходит все фильтры CDX.
+#
+# Пустая страница — это не «чистая страница»: «нечего было прочитать» ≠ «чисто» (аудит F2).
+# Такой снимок НЕ инкрементит покрытие (ведёт себя как упавшая закачка) -> покрытие падает ->
+# `wayback_checked=False` -> вердикт 'unknown' -> blind_reason -> домен исключён из пакетного
+# одобрения и несёт в инбоксе пометку «история НЕ проверена».
+#
+# Порог, а не `if not text`: «Loading…», «301 Moved Permanently», «Домен продаётся» — тоже ноль
+# сигнала. Читается публично (services/scoring.history_evidence подписывает такие улики).
+MIN_TEXT_CHARS = 32
+
 _TAG = re.compile(r"<[^>]*>")
+# Кодировка из самой страницы: ловит и `<meta charset=cp1251>`, и старую форму
+# `<meta http-equiv="Content-Type" content="text/html; charset=windows-1251">` — обе содержат
+# `charset=`. Ищем в БАЙТАХ: до декодирования строки ещё нет.
+_META_CHARSET = re.compile(rb"""<meta[^>]*?charset\s*=\s*["']?\s*([\w.:-]+)""", re.I)
+
+
+def _decode(raw: bytes, header_charset: str | None) -> str:
+    """Байты архивного снимка -> текст. Кодировку берём У СТРАНИЦЫ, а не у httpx.
+
+    Архивные .ru-страницы 2000-х — windows-1251, и Wayback далеко не всегда отдаёт charset в
+    заголовке. `Response.text` в этом случае молча раскодирует их как utf-8 (errors=replace) —
+    получается мозаика, в которой не найдётся НИ ОДНОГО русского стоп-слова. А RU-словарь —
+    несущая половина классификатора: портфель собирается из .ru-дропов. Русское казино тихо
+    проходило бы как «история чистая» (аудит 2026-07-14, ревью Задачи 3).
+
+    Порядок: charset заголовка -> `<meta>` самой страницы -> utf-8 -> cp1251. Строгий utf-8 на
+    кириллице cp1251 надёжно падает (её буквы 0xC0–0xFF не образуют валидных продолжений), так
+    что фолбэк срабатывает именно там, где нужен. Битая кодировка НЕ роняет проверку истории
+    целиком: последний шаг — cp1251 с errors='replace'.
+    """
+    meta = _META_CHARSET.search(raw[:4096])
+    for enc in (header_charset, meta.group(1).decode("ascii", "ignore") if meta else None, "utf-8"):
+        if enc:
+            try:
+                return raw.decode(enc)
+            except (LookupError, UnicodeDecodeError, ValueError):
+                continue
+    return raw.decode("cp1251", errors="replace")
 
 
 def _visible_text(raw_html: str) -> str:
@@ -104,7 +149,11 @@ def _classify_text(text: str) -> set[str]:
 
 
 def _classify_html(raw_html: str) -> set[str]:
-    """Снимок из архива -> категории его ВИДИМОГО текста. Единственный вход для classify_history."""
+    """Снимок из архива -> категории его ВИДИМОГО текста.
+
+    Композиция двух шагов. `classify_history` делает их по отдельности: ему нужна ещё и ДЛИНА
+    видимого текста — пустой снимок он обязан отличать от чистого (см. MIN_TEXT_CHARS).
+    """
     return _classify_text(_visible_text(raw_html))
 
 
@@ -244,7 +293,9 @@ class WaybackClient(BaseClient):
     def _fetch_raw(self, timestamp: str, original: str) -> str:
         # id_ = original archived bytes (no Wayback banner/rewrites) -> best for text classify
         r = self.request("GET", f"{self.base_url}/web/{timestamp}id_/{original}")
-        return r.text
+        # именно БАЙТЫ, а не r.text: архивные .ru — windows-1251, и без charset в заголовке
+        # httpx раскодирует их utf-8 в мозаику, убивая весь русский словарь (см. _decode).
+        return _decode(r.content, r.charset_encoding)
 
     def classify_history(self, domain: str, sample: int = 5, polite: float = 1.0) -> dict:
         """Sample snapshots across the timeline, classify -> prior_flags + age + first_seen."""
@@ -259,16 +310,25 @@ class WaybackClient(BaseClient):
 
         cats_by_time: list[set[str]] = []
         evidence: list[dict] = []      # ЧТО именно смотрели — куратор обязан мочь перепроверить
-        ok = 0  # реально скачанные и классифицированные снапшоты (не попытки)
+        ok = 0  # реально ПРОЧИТАННЫЕ снапшоты (скачался И было что классифицировать)
         for s in _pick(snaps, sample):
             try:
-                cats = _classify_html(self._fetch_raw(s["timestamp"], s["original"]))
-                cats_by_time.append(cats)
-                evidence.append({"url": s["original"], "timestamp": s["timestamp"],
-                                 "cats": sorted(cats)})
-                ok += 1
+                text = _visible_text(self._fetch_raw(s["timestamp"], s["original"]))
             except Exception:  # noqa: BLE001  # one bad snapshot must not sink the check
                 cats_by_time.append(set())
+                time.sleep(polite)
+                continue
+            # Снимок скачался, но читать нечего (редирект-заглушка/frameset/SPA — см.
+            # MIN_TEXT_CHARS): это НЕ «страница без грязи», это ОТСУТСТВИЕ данных. Ведём себя
+            # ровно как на упавшей закачке — покрытие не растёт, — но снимок кладём в улики
+            # (с длиной текста), чтобы куратор видел «читать было нечего», а не «чисто».
+            read = len(text) >= MIN_TEXT_CHARS
+            cats = _classify_text(text) if read else set()
+            cats_by_time.append(cats)
+            evidence.append({"url": s["original"], "timestamp": s["timestamp"],
+                             "cats": sorted(cats), "chars": len(text)})
+            if read:
+                ok += 1
             time.sleep(polite)
 
         checked = ok >= (sample // 2 + 1)      # «проверено» только при покрытии большинства
@@ -316,4 +376,10 @@ if __name__ == "__main__":  # pure classifier self-check (no network)
     assert _classify_html(furniture + "<!-- casino casino -->") == set()
     assert "casino" in _classify_html("<title>Казино онлайн</title><p>игровые автоматы</p>")
     assert "casino" in _classify_html("<td>игровые</td><td>автоматы</td><p>игровые\nавтоматы</p>")
+
+    # снимок-редирект на казино: видимого текста НЕТ -> classify_history не считает его
+    # прочитанным (MIN_TEXT_CHARS), а не выдаёт за чистый (ревью Задачи 3)
+    assert _visible_text('<script>location.href="http://kazino.ru/casino/";</script>') == ""
+    # архивная .ru — windows-1251; без честного декодирования весь RU-словарь мёртв
+    assert "казино" in _decode("<p>Вулкан казино: игровые автоматы</p>".encode("cp1251"), None)
     print("wayback _classify_html ok")

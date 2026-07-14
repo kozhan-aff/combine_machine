@@ -19,8 +19,14 @@ CASINO = "Игровые автоматы и казино онлайн: джек
 
 
 class _Resp:
+    """Ответ настолько, насколько его видит клиент: CDX читает `.json()`, снимок — БАЙТЫ
+    (`.content` + charset заголовка). Байты, а не `.text`: архивные .ru приходят в cp1251,
+    и раскодировать их — работа клиента (wayback._decode), а не httpx."""
+
     def __init__(self, json_=None, text=""):
-        self._json, self.text = json_, text
+        self._json = json_
+        self.content = text.encode("utf-8")
+        self.charset_encoding = "utf-8"
 
     def json(self):
         return self._json

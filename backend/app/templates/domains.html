@@ -161,7 +161,11 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
               {% for e in evidence %}
                 <li><span class="when">{{ e.when }}</span>
                   <a href="{{ e.link }}" target="_blank" rel="noopener" title="открыть снимок в Wayback">{{ e.url }}</a>
+                  {# «чисто» вправе носить только снимок, который БЫЛО ЧЕМ прочитать: у
+                     редирект-заглушки/frameset/SPA видимого текста нет вовсе, и подпись «чисто»
+                     под ней — то самое ложное «проверено» (ревью Задачи 3). #}
                   {% if e.cats %}<span class="cat">{{ e.cats }}</span>
+                  {% elif e.unread %}<span class="hint" title="на снимке нет видимого текста (редирект-заглушка, frameset или SPA) — классифицировать было нечего">без текста — не читан</span>
                   {% else %}<span class="hint">чисто</span>{% endif %}</li>
               {% endfor %}
             </ul>

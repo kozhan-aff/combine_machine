@@ -143,6 +143,18 @@ def test_inbox_shows_wayback_evidence(client):
     assert "12.03.2019" in html and "казино" in html    # дата и категория — по-русски
 
 
+def test_inbox_never_labels_a_textless_snapshot_as_clean(client):
+    """Снимок-редирект (казино за meta-refresh/`location.href`) скачивается с 200 + text/html,
+    но видимого текста на нём НЕТ. В строке улик он не имеет права выглядеть как прочитанный
+    и чистый — иначе куратор штампует ровно то, что машина не смотрела (ревью Задачи 3)."""
+    _add(domain="stub.ru", status="scored", score=0.87, wayback_checked=False, prior_flags={},
+         score_breakdown={"errors": [], "sampled": 0, "history_evidence": [
+             {"url": "http://stub.ru/", "timestamp": "20250601000000", "cats": [], "chars": 0}]})
+    html = client.get("/domains").text
+    assert "без текста — не читан" in html
+    assert "история чистая" not in html
+
+
 # ---- сквозь воронку и наружу в JSON ----
 
 def test_funnel_marks_history_unknown_without_errors(client):
