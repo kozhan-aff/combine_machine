@@ -305,6 +305,81 @@ def test_poll_does_not_clobber_the_row_a_live_retry_just_paid_for(sqlite_db, mon
         "оплаченный заказ помечен «не вышло» — оператор нажмёт «повторить» и заплатит второй раз")
 
 
+def test_poll_does_not_drop_the_maybe_sent_a_racing_retry_just_set(sqlite_db, monkeypatch):
+    """ABA: строка вернулась в ТОТ ЖЕ статус — и сторож по статусу пропустил её насквозь.
+
+    Сторож сверки был условным UPDATE'ом `WHERE id=N AND status=<статус из снимка>`. Но параллельный
+    «↻ повторить», кончившийся `AmbiguousSend`, гоняет строку по кругу `failed -> ordering -> failed`:
+    статус ТОТ ЖЕ, условие проходит — и сверка дописывает своё, собранное из ПРОТУХШЕГО снимка.
+
+    Роняет она при этом ровно то, что охраняет деньги:
+      * `maybe_sent` — флаг «заказ мог уйти, деньги могли списаться», поставленный секунду назад.
+        Основная ветка снимает его правдой провайдера — но правда прочитана ДО цикла, то есть ДО
+        того, как повтор отправил новый заказ: про него она не знает ничего. Флаг гаснет →
+        `cancel_order` перестаёт запирать строку → домен уезжает в `approved`, обратно в очередь
+        выкупа, где его подтвердят и оплатят ВТОРОЙ раз (класс ущерба — тот же, что у F12).
+      * elid — на строку садится номер ЧУЖОГО мёртвого заказа («Перекрыт» с прошлого цикла), и
+        машина дальше следит не за тем заказом.
+
+    Всё живым кодом: `failed` рождает настоящий отказ провайдера, `maybe_sent` — настоящий
+    `AmbiguousSend` в настоящем `execute` (гейт поднимает человек, как в жизни), а врезка в цикл
+    сверки — реальный вызов `norm_domain` из него же, уже после снимка. Домен кириллический не для
+    экзотики: по нему сверка зовёт `norm_domain` ИЗ ЦИКЛА, а запись провайдера лежит punycode'ом —
+    так хук не срабатывает раньше времени, на до-цикловой сборке `by_domain`.
+    """
+    _grid(monkeypatch)
+    ours, theirs = "касса.рф", "xn--80aa2a3aa.xn--p1ai"
+    # У провайдера по домену лежит СТАРАЯ МЁРТВАЯ запись — без неё `remote is None` и сверка молча
+    # пропускает строку (`continue`), то есть дыры нет. Она и есть второе условие ABA.
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [
+        {"elid": "777", "domain": theirs, "id_status": "3", "clear_status": "Перекрыт",
+         "state": "failed", "tariff": "190"}])
+
+    def _refused(self, domain, price_id, period_id):
+        raise RuntimeError("провайдер отказал: приём заказов закрыт")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _refused)
+
+    did = _approved(ours)
+    oid = acquisition.create_order(did, "backorder")
+    acquisition.confirm_order(oid, 190)               # ГЕЙТ поднимает человек
+    acquisition.execute_confirmed_order(oid)          # явный отказ -> failed, БЕЗ неизвестности
+    assert "maybe_sent" not in (_orders(did)[0].result or {}), (
+        "снимок обязан быть ЧИСТЫМ: весь смысл ABA в том, что флаг появляется ПОСЛЕ него")
+
+    # ...а повтор кончится НЕИЗВЕСТНОСТЬЮ: ответ не дошёл, заказ мог уйти и деньги списаться.
+    def _ambiguous(self, domain, price_id, period_id):
+        raise backorder.AmbiguousSend("таймаут: ответ провайдера не дошёл")
+    monkeypatch.setattr(backorder.BackorderClient, "order", _ambiguous)
+
+    real_norm, raced = backorder.norm_domain, {}
+
+    def racing_norm(domain):
+        if domain == ours and not raced:              # мы уже внутри цикла сверки: снимок снят
+            raced["yes"] = True
+            acquisition.execute_confirmed_order(oid)  # ДРУГОЙ клик: failed -> ordering -> failed
+        return real_norm(domain)
+
+    monkeypatch.setattr(backorder, "norm_domain", racing_norm)
+    acquisition.poll_orders()
+
+    assert raced, "гонку не воспроизвели — тест ничего не доказывает"
+    o = _orders(did)[0]
+    assert o.status == "failed" and (o.result or {}).get("maybe_sent"), (
+        "сверка погасила флаг «деньги могли уйти», которого не было в её снимке: она сверялась с "
+        "провайдером ДО того, как повтор отправил заказ, — про него ей знать неоткуда")
+    assert o.provider_order_id != "777", (
+        "на строку сел elid ЧУЖОГО мёртвого заказа — машина следит не за тем заказом")
+
+    # ...и вот чем это кончалось: неизвестность снята, отмена разблокирована, домен возвращается
+    # в очередь кандидатов — с возможно оплаченным заказом на борту.
+    assert acquisition.cancel_order(oid).get("error"), (
+        "отмена не заперта: `cancelled` сверка не опрашивает — возможно оплаченный заказ исчез бы "
+        "из машины навсегда")
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "purchasing", (
+            "домен вернулся в approved с возможно оплаченным заказом — подтвердим и купим второй раз")
+
+
 # --- F12: отмена, приехавшая после отправки ------------------------------------------------
 
 
