@@ -126,57 +126,103 @@ def _stage_queue(cap):
 
 def _stage_provision(cap):
     """Две под-операции под общим капом: (а) purchased без сайта -> create_site_for;
-    (б) сайт в provisioning -> provision (идемпотентен, awaiting_ns = норм, повторим)."""
+    (б) сайт в provisioning -> provision (идемпотентен, awaiting_ns = норм, повторим).
+
+    ФЕЙРНЕСС (аудит F19, пункт А): под-операцию (б) больше НЕ выбираем через SQL
+    `LIMIT(cap)`. `provisioning.provision()` НЕ двигает `site.status`, пока зона Cloudflare
+    не станет `active` (NS у регистратора правит человек — недели, не минуты) — то есть
+    запрос `Site.status=='provisioning' ORDER BY id LIMIT cap` каждый свип возвращал ОДНИ И
+    ТЕ ЖЕ первые по id сайты, и раз `awaiting_ns` считался `done += 1`, они честно съедали
+    весь кап навсегда: сайты с бОльшим id не получали ни одного шанса, пока первые не
+    задеплоятся сами (ждать которых машине нечего — там ждёт человек). Провижн — маленький
+    курируемый набор (как `approved` в `_stage_queue`, не масштаб discovery в тысячи строк),
+    полная выборка тут дешёвая — ровно тот же приём, что уже применён в `_stage_queue`.
+    Кап теперь бьёт не по «попыткам», а по ЗАВЕРШЁННЫМ работам (`succeeded`, цикл ниже):
+    `awaiting_ns` бюджет не тратит и цикл не останавливает, поэтому в ОДНОМ И ТОМ ЖЕ свипе
+    очередь доходит до сайтов дальше по id, которые реально могут задеплоиться.
+    """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.models.site import Site
     from app.services import provisioning
 
-    done, errs, ssl_failed = 0, [], 0
+    succeeded, errs, awaiting, ssl_failed = 0, [], 0, 0
     with SessionLocal() as db:
         purchased = [r[0] for r in db.execute(
             select(Domain.id).where(Domain.status == "purchased",
                                     ~Domain.id.in_(select(Site.domain_id)))
             .order_by(Domain.id).limit(cap)).all()]
         prov_ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.status == "provisioning").order_by(Site.id).limit(cap)).all()]
+            select(Site.id).where(Site.status == "provisioning").order_by(Site.id)).all()]
     for did in purchased:
-        if done >= cap:
+        if succeeded >= cap:
             break
         try:
             provisioning.create_site_for(did)
-            done += 1
+            succeeded += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"domain#{did}: {type(e).__name__}: {e}")
     for sid in prov_ids:
-        if done >= cap:
+        if succeeded >= cap:
             break
         try:
             out = provisioning.provision(sid)
-            done += 1
+            st = out.get("status") if isinstance(out, dict) else None
+            if st == "awaiting_ns":
+                # ждёт человека (NS у регистратора) — не успех и не отказ; кап и `errors` не
+                # трогаем, продолжаем цикл дальше по списку (см. докстринг выше — фейрнесс).
+                awaiting += 1
+                continue
+            if st == "error":
+                # раньше тихо считалось `done += 1` (напр. VPS_ORIGIN_IP не задан) — это отказ,
+                # а не успех: оператор обязан увидеть его в ошибках свипа, не в идеальной сводке.
+                errs.append(f"site#{sid}: {out.get('error', 'провижн вернул ошибку')}")
+                continue
+            succeeded += 1
             # vhost поднят (провижн не упал), а SSL-режим Cloudflare не переключился. Считать
-            # это чистым `done` — врать в отчёте свипа: HTTPS под вопросом, а сводка идеальна.
+            # это чистым успехом — врать в отчёте свипа: HTTPS под вопросом, а сводка идеальна.
             # След есть в БД и на карточке сайта, но автопилотный прогон обязан сказать вслух.
-            if isinstance(out, dict) and out.get("ssl_error"):
+            if out.get("ssl_error"):
                 ssl_failed += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
-    return done, errs, {"ssl_failed": ssl_failed} if ssl_failed else {}
+    extra = {}
+    if awaiting:
+        extra["provision_awaiting"] = awaiting
+    if ssl_failed:
+        extra["ssl_failed"] = ssl_failed
+    return succeeded, errs, extra
 
 
 def _stage_generate(cap):
-    """Сайты status=content без страниц -> generate_site(use_competitor=True)."""
-    from sqlalchemy import select
+    """Сайты status=content, где страниц МЕНЬШЕ ожидаемого -> generate_site(use_competitor=True).
+
+    Раньше селектор был «у сайта вообще нет страниц» (аудит F19, пункт Б): `scaffold()` даёт
+    фиксированный набор страниц (3 спеки) за вызов, но если хотя бы одна LLM-генерация
+    вернула пустое тело (`if not body.strip(): continue` в content.py — не крах батча, а
+    пропуск ОДНОЙ страницы), у сайта появляется >=1 Page при < ожидаемого, и старый селектор
+    ("нет ни одной") больше НИКОГДА его не выбирал — сайт застревал с недостающими страницами
+    навсегда. `generate_site()` для КАЖДОЙ спеки сам проверяет «уже есть» (`Page.url_path`) и
+    пропускает существующие — повторный вызов на сайте с частью страниц ДОЗАПОЛНЯЕТ
+    недостающие, а не дублирует (а гонку двух процессов на одном пути дополнительно ловит
+    `uq_page_per_path`, миграция 0014 — см. content.generate_site/IntegrityError)."""
+    from sqlalchemy import select, func
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.services import content
 
+    expected = len(content.scaffold(""))   # число страниц/сайт — фиксировано scaffold(), не зависит от бренда
     done, errs = 0, []
     with SessionLocal() as db:
+        page_counts = (
+            select(Page.site_id, func.count(Page.id).label("n"))
+            .group_by(Page.site_id).subquery())
         ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.status == "content",
-                                  ~Site.id.in_(select(Page.site_id)))
+            select(Site.id)
+            .outerjoin(page_counts, page_counts.c.site_id == Site.id)
+            .where(Site.status == "content",
+                   func.coalesce(page_counts.c.n, 0) < expected)
             .order_by(Site.id).limit(cap)).all()]
     for sid in ids:
         try:
@@ -255,9 +301,10 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
 # стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной,
 # `ssl_failed` — у скольких сайтов vhost поднят, а SSL-режим Cloudflare не переключился,
-# `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат).
+# `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат),
+# `provision_awaiting` — сколько сайтов ждут смены NS у регистратора (не успех, не отказ — F19).
 COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
-            "index_unknown": "индекс не выяснен"}
+            "index_unknown": "индекс не выяснен", "provision_awaiting": "провижн: ждёт NS"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
@@ -321,6 +368,13 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
                         errors.append(f"{key}: {type(e).__name__}: {e}")
                         status = "failed"
+                if status == "done" and errors:
+                    # НИ ОДНА стадия не упала целиком (иначе status уже "failed"), но внутри
+                    # стадий упали отдельные СУЩНОСТИ (errors непустой) — «всё прошло идеально»
+                    # и «часть сущностей упала» раньше были неразличимы в итоговом статусе
+                    # свипа (аудит F19, пункт В). Честный статус: не done, но и не failed —
+                    # свип не оборвался, он завершился С ЗАМЕЧАНИЯМИ.
+                    status = "completed_with_errors"
                 jobs.report(run, done=total, total=total, current="",
                             message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
             except jobs.Cancelled:
