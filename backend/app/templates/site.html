@@ -52,7 +52,13 @@
       <div class="body"><div class="t">3 · Provision — инфраструктура <small>M3 · Cloudflare + aaPanel</small></div>
         <div class="h">Одна кнопка делает всё по порядку: зона Cloudflare → проверка NS у регистратора →
           proxied A-запись на VPS → vhost + SSL в aaPanel. Идемпотентно: если зона ждёт NS —
-          баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div></div>
+          баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div>
+        {% if site.ssl_error %}
+        <div class="blind" title="{{ site.ssl_error }}">⚠ SSL-режим Cloudflare не переключился —
+          HTTPS может не работать. Vhost при этом поднят. Причина: {{ site.ssl_error|truncate(120) }}.
+          Почини и прогони provision заново.</div>
+        {% endif %}
+      </div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/provision">
           <button class="btn-sm {{ '' if prov_done else 'btn-acc' }}"

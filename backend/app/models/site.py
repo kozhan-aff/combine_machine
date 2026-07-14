@@ -18,6 +18,12 @@ class Site(Base):
     aapanel_site_name: Mapped[str | None] = mapped_column(String(255))
     doc_root: Mapped[str | None] = mapped_column(String(512))
 
+    # Последний отказ на шаге SSL провижна (смена режима на Cloudflare). Не блокирует сайт —
+    # vhost работает и на 80 — но при origin-only-80 именно этот шаг решает, поедет ли HTTPS,
+    # и раньше он молча глотался (`except Exception: pass`). NULL = SSL встал (или ещё не
+    # пробовали); текст = провижн доехал, но HTTPS под вопросом. Показывается на /sites/{id}.
+    ssl_error: Mapped[str | None] = mapped_column(Text)
+
     niche: Mapped[str | None] = mapped_column(String(255))
     template: Mapped[str | None] = mapped_column(String(255))
 

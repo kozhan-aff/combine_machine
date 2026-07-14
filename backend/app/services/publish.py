@@ -57,6 +57,16 @@ def publish_site(site_id: int) -> dict:
         now = datetime.now(timezone.utc)
         published = []
         for p in pages:
+            # `published` СТАВИТСЯ ТОЛЬКО ПОСЛЕ ТОГО, КАК ПАНЕЛЬ ПОДТВЕРДИЛА ЗАПИСЬ. Раньше отказ
+            # aaPanel (HTTP 200 + {"status": false}) не смотрел никто: страница помечалась
+            # опубликованной, сайт — `published`, а в docroot не было ничего. Дальше M5 честно
+            # спрашивал у поисковика про несуществующий URL и писал `not_indexed` — машина
+            # расследовала последствия собственного вранья (F14/F16).
+            # Теперь write_file поднимает RuntimeError, и он летит наверх НЕ ПОЙМАННЫМ: db.commit()
+            # ниже не выполняется -> страницы остаются `edited`, сайт — в прежнем статусе.
+            # Файлы страниц, успевших записаться до отказа, лежат на диске — и это не рассинхрон:
+            # write_file идемпотентен (CreateFile+SaveFileBody перезаписывают тело), повторная
+            # публикация просто положит их снова. Лучше записать дважды, чем соврать один раз.
             ap.write_file(_target_path(site.doc_root, p.url_path), render_html(p, offer, lang=lang))
             p.status = "published"
             p.published_at = now

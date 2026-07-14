@@ -778,6 +778,14 @@ def provision_action(site_id: int):
                          msg=f"Зона создана, ждёт NS. Пропиши у регистратора: {ns} — потом повтори Provision.")
         if r.get("status") == "error":
             return _back(f"/sites/{site_id}", err=r.get("error", "provision error"))
+        if r.get("ssl_error"):
+            # Зелёный баннер «готов: DNS + vhost + SSL» поверх упавшего SSL — это ровно то
+            # враньё, от которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под
+            # вопросом: говорим об этом красным и оставляем след на карточке (site.ssl_error).
+            return _back(f"/sites/{site_id}", err=(
+                "Provision прошёл (зона + A-запись + vhost), но SSL-режим Cloudflare НЕ "
+                f"переключился: {r['ssl_error']}. HTTPS может не работать — почини причину "
+                "и нажми Provision ещё раз (идемпотентно)."))
         return _back(f"/sites/{site_id}", msg="Provision готов: DNS proxied + vhost + SSL. Дальше — генерация.")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
