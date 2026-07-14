@@ -71,7 +71,36 @@ def test_empty_list_is_not_error():
     assert c.list_zones_paginated("acctHEX") == []
 
 
-def test_token_never_in_repr_or_headers_leak():
+def test_token_never_leaks_via_paginate_error():
+    """_paginate path: success=false должен поднять ошибку БЕЗ токена внутри (аудит §4).
+
+    Токен реально уходит в заголовок запроса (проверяем это тем же fake) — иначе
+    "токена нет в ошибке" было бы тривиально верно просто потому, что его нигде и не было.
+    """
+    seen = {}
     c = CloudflareClient.with_token("SECRET-TOKEN")
-    assert "SECRET-TOKEN" not in repr(c.__dict__.get("account_id", ""))
-    assert c._headers()["Authorization"] == "Bearer SECRET-TOKEN"  # только в заголовке, нигде ещё
+
+    def fake(method, url, **kw):
+        seen["headers"] = kw.get("headers")
+        return _resp({"success": False, "errors": [{"code": 9109, "message": "Invalid access token"}]})
+    c.request = fake
+    with pytest.raises(Exception) as excinfo:
+        c.list_accounts_paginated()
+    assert seen["headers"]["Authorization"] == "Bearer SECRET-TOKEN"
+    assert "SECRET-TOKEN" not in str(excinfo.value)
+
+
+def test_token_never_leaks_via_result_error():
+    """_result path (verify_token/get_dnssec): та же гарантия для другого кодового пути,
+    не завязанного на _paginate/_safe_errors."""
+    c = CloudflareClient.with_token("SECRET-TOKEN")
+    c.request = lambda *a, **k: _resp({"success": False, "errors": [{"code": 1000, "message": "bad"}]})
+    with pytest.raises(Exception) as excinfo:
+        c.verify_token("user")
+    assert "SECRET-TOKEN" not in str(excinfo.value)
+
+    c2 = CloudflareClient.with_token("SECRET-TOKEN")
+    c2.request = lambda *a, **k: _resp({"success": False, "errors": [{"code": 1000, "message": "bad"}]})
+    with pytest.raises(Exception) as excinfo2:
+        c2.get_dnssec("zoneidHEX")
+    assert "SECRET-TOKEN" not in str(excinfo2.value)
