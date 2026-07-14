@@ -40,21 +40,35 @@ branch_labels = None
 depends_on = None
 
 
+# Проигравшие дубли (rn>1) — те же строки и для index_history, и для pages. Считаем набор
+# ОДИНАКОВО в обоих DELETE: оконная функция партиционирует по (site_id, url_path) и упорядочивает
+# по статусу/id САМИХ страниц, поэтому удаление детей из index_history этот набор не сдвигает.
+_LOSERS = """
+    SELECT id
+      FROM (
+        SELECT id,
+               row_number() OVER (
+                   PARTITION BY site_id, url_path
+                   ORDER BY CASE status WHEN 'published' THEN 0
+                                        WHEN 'edited' THEN 1
+                                        ELSE 2 END, id) AS rn
+          FROM pages
+      ) r
+     WHERE r.rn > 1
+"""
+
+
 def upgrade() -> None:
-    # 1. Схлопнуть уже существующие дубли, иначе индекс не создастся на живой базе.
-    op.execute(sa.text("""
-        DELETE FROM pages p
-         USING (
-            SELECT id,
-                   row_number() OVER (
-                       PARTITION BY site_id, url_path
-                       ORDER BY CASE status WHEN 'published' THEN 0
-                                            WHEN 'edited' THEN 1
-                                            ELSE 2 END, id) AS rn
-              FROM pages
-         ) r
-         WHERE p.id = r.id AND r.rn > 1
-    """))
+    # 1a. Сперва — строки index_history проигравших страниц. FK index_history.page_id -> pages.id
+    #     объявлен БЕЗ ondelete (= NO ACTION), и PostgreSQL энфорсит его: DELETE родителя, у
+    #     которого есть дети, поднимает ForeignKeyViolation и откатывает ВСЮ транзакцию миграции,
+    #     обрывая git-pull-деплой. А дети у проигравшей published-страницы есть штатно:
+    #     publish.check_index пишет IndexHistory для КАЖДОЙ published-страницы, а сам тай-брейк
+    #     ниже рассчитан на несколько published-дублей. Дети — раньше родителей.
+    op.execute(sa.text(f"DELETE FROM index_history WHERE page_id IN ({_LOSERS})"))
+
+    # 1b. Теперь схлопнуть сами дубли, иначе индекс не создастся на живой базе.
+    op.execute(sa.text(f"DELETE FROM pages WHERE id IN ({_LOSERS})"))
 
     # 2. Сам инвариант: одна страница на путь сайта.
     op.create_index("uq_page_per_path", "pages", ["site_id", "url_path"], unique=True)

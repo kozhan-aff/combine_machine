@@ -303,6 +303,11 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
     панель показывала чужие домены и чужой счётчик как свои. Промах по id безвреден и молчалив,
     попадание в чужой прогон — нет.
     """
+    if run_id is None:                       # вне track (одиночный score_domain, юнит-тест) — no-op
+        return                               # раньше это глушил только _own в конце, но стадийная
+        #                                      ветка ниже успевала открыть сессию и сделать
+        #                                      SELECT ... WHERE id IS NULL — 6 холостых раундтрипов
+        #                                      под _DB_LOCK на КАЖДЫЙ ручной score одного домена.
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.job import JobRun
