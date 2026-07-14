@@ -56,16 +56,26 @@ FUNNEL_STAGES = [
 # Wayback, не нашедший ни одного снимка, ошибки не бросает (`wayback_checked=False`, errors
 # пуст). Домен, чью историю никто не смотрел, приезжал в инбокс с подписью «история чистая».
 _BLIND_RU = {
-    # whois — источник ВОЗРАСТА, а возраст это гейт (`too_young`). Молчащий A-Parser не
-    # ослаблял этот гейт, он снимал его целиком: без даты сравнивать не с чем, отказа нет,
-    # и домен ехал дальше «как проверенный» (аудит F6). Балл гейт не дублирует — юный домен
-    # с большой ссылочной массой набирает ~0.71 и порог берёт.
-    "whois": "возраст НЕ проверен: whois не ответил — гейт «слишком молодой» не применялся",
+    # whois кормит ДВА гейта воронки: возраст (`too_young`) и занятость (`available` -> лейн,
+    # `not_acquirable`). Молчащий A-Parser не ослаблял их, он снимал их целиком: без даты
+    # сравнивать не с чем, отказа нет, и домен ехал дальше «как проверенный» (аудит F6).
+    # Балл гейт возраста не дублирует — юный домен с большой ссылочной массой набирает ~0.71
+    # и порог берёт. Эта формулировка — для случая, когда возраста НЕ дал никто.
+    "whois": "возраст НЕ проверен: whois не ответил — гейт «слишком молодой» не применялся, "
+             "занятость домена тоже не сверена",
     "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
     "searxng": "эхо в индексе НЕ проверено",
 }
+
+# whois упал, но возраст всё-таки известен — из Wayback (`age_source='wayback'`, фолбэк в
+# _funnel). Прежний текст здесь ЛГАЛ ровно в том состоянии, где показывался: он утверждал, что
+# гейт «слишком молодой» не применялся, — а он применялся (_funnel сравнивает Wayback-возраст с
+# min_age_years). Правда в другом: возраст по архиву — это НИЖНЯЯ оценка (первый снимок не
+# раньше регистрации), а вот ЗАНЯТОСТЬ домена не сверял никто.
+_BLIND_WHOIS_ARCHIVE_AGE = ("возраст по архиву (whois не ответил): гейт «слишком молодой» "
+                            "применён по первому снимку, но занятость домена НЕ сверена")
 
 # Категории прошлого домена — по-русски (панель русская; улики показываются куратору).
 _CATS_RU = {"adult": "взрослое", "pharma": "фарма", "casino": "казино",
@@ -145,6 +155,8 @@ def blind_reason(d) -> str | None:
         return "история НЕ проверена: улик нет в базе — перепроверь"
     for e in errors:
         head = e.split(":", 1)[0]
+        if head == "whois" and (d.score_breakdown or {}).get("age_source") == "wayback":
+            return _BLIND_WHOIS_ARCHIVE_AGE
         if head in _BLIND_RU:
             return _BLIND_RU[head]
     return None
@@ -179,13 +191,26 @@ def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float)
     if status == "approved" and any(
             e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
         status = "scored"
-    # age-guard (аудит F6): возраст НЕИЗВЕСТЕН — значит гейт «слишком молодой» не применялся
-    # НИ РАЗУ (T1 сравнивает с датой из whois; при её отсутствии сравнивать не с чем и отказа
-    # не будет). Балл этот гейт не подстраховывает: `age` весит 0.18, и домен без возраста, но
-    # с проверенной историей + RD за потолком + эхом набирает ровно 0.70 == approve_at — то
-    # есть молчащий whois не понижал домен, а ПРОПУСКАЛ его. Незнание возраста — это НЕ
-    # «возраст в порядке»: отдаём человеку (`scored`), а не отбраковываем — цена ошибки в
-    # другую сторону (выброшенный 16-летний дроп, пока A-Parser лежал) выше.
+    # whois-guard (аудит F6, доведён ревью Задачи 4): whois УПАЛ — гардим по САМОМУ ОТКАЗУ,
+    # тем же механизмом, что кормит бейдж «оценён вслепую», а не по `age_years is None`.
+    #
+    # Почему не по возрасту. Возраст, не добытый whois'ом, ДОБИРАЕТСЯ из Wayback (_funnel:
+    # first_seen -> age_years), и это законно: первый снимок не раньше регистрации, значит для
+    # гейта «слишком молодой» архивный возраст — консервативная НИЖНЯЯ оценка, она годится.
+    # Но упавший whois означает ещё и «мы не знаем, СВОБОДЕН ли домен вообще» (`available`) —
+    # а это ВТОРОЙ, независимый гейт воронки (лейн/`not_acquirable`). Его подменить нечем.
+    # Поэтому отказ whois снимает право на авто-approve ДАЖЕ когда возраст известен иначе —
+    # ровно тот случай, что утекал живьём: clara-c.ru (RD 2219, возраст из архива 16 лет,
+    # score 0.87) авто-одобрялся с бейджем «оценён вслепую» на лбу.
+    if status == "approved" and any(
+            e.startswith("whois:") for e in (sig.get("errors") or [])):
+        status = "scored"
+    # Страховка на будущее переутяжеление весов: возраст НЕИЗВЕСТЕН вообще (whois молчит И
+    # архив пуст) — значит гейт `too_young` не применялся ни разу, сравнивать было не с чем.
+    # Балл его не подстраховывает: `age` весит 0.18, и домен без возраста, но с проверенной
+    # историей + RD за потолком + эхом набирает ровно 0.70 == approve_at. Сегодня эта ветка
+    # недостижима (пустой архив -> wayback_checked=False -> уже сработал гард выше), и это
+    # правильно: инвариант должен пережить перенастройку весов, а не зависеть от неё.
     if status == "approved" and sig.get("age_years") is None:
         status = "scored"
     return status
@@ -372,6 +397,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         age_known = True
         age = (now - wc).days / 365.25
         sig["age_years"] = round(age, 2)
+        sig["age_source"] = "whois"      # ОТКУДА возраст — это не деталь: бейдж пишет по нему
         if age < st["min_age_years"]:
             return "too_young"
 
@@ -450,6 +476,10 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
+            # ...и бейдж обязан сказать об этом ПРАВДУ: гейт молодости ПРИМЕНЁН (ниже, по этому
+            # самому числу), а вот занятость домена не сверял никто. Прежний текст «гейт не
+            # применялся» был ложью ровно в том состоянии, где показывался (ревью Задачи 4).
+            sig["age_source"] = "wayback"
         if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
             return "history_dirty"
     except Exception as e:  # noqa: BLE001
@@ -554,7 +584,10 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
                              "ahrefs_backlinks": sig.get("ahrefs_backlinks"),
                              "history_evidence": sig.get("history_evidence", []),
-                             "sampled": sig.get("sampled")}
+                             "sampled": sig.get("sampled"),
+                             # 'whois' | 'wayback' | None — по нему blind_reason выбирает,
+                             # ЧТО именно осталось непроверенным (возраст или только занятость)
+                             "age_source": sig.get("age_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()
