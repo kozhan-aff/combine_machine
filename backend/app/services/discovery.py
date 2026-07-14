@@ -10,7 +10,16 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")   # проверяем punycode-форму (ASCII)
+# Проверяем punycode-форму (ASCII), метка-за-меткой (аудит 2026-07-14, F30): старый
+# `[a-z0-9-]+` пропускал мусор, который потом платно бьётся о whois/Ahrefs —
+# ведущий/хвостовой дефис в метке ("-foo.ru"/"foo-.ru"), голый IP ("1.2.3.4" — цифровая
+# последняя метка ловится тем же правилом, что и числовой TLD) и однобуквенный TLD
+# ("foo.a"). Метка — не более 63 симв., не начинается/не кончается дефисом (RFC 1035);
+# TLD — та же форма МЕТКИ, но с минимум двумя символами и без права быть числом целиком
+# (punycode "xn--..." проходит: начинается/кончается буквой/цифрой, дефисы только внутри).
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_TLD = r"(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])"     # >=2 симв. и не чисто цифровой
+_DOMAIN_RE = re.compile(rf"^(?:{_LABEL}\.)+{_TLD}$")
 
 
 def _parse_deadline(val) -> datetime | None:
@@ -211,4 +220,7 @@ if __name__ == "__main__":  # pure normalize self-check (no network)
     sentinel = normalize_row({"domainname": "x.ru", "links": 5, "visitors": -1, "yandex_tic": -1, "price": 190})
     assert sentinel["visitors"] is None and sentinel["tic"] is None and sentinel["price"] == 190.0
     assert canonical_domain("www.a.ru") == "a.ru" and canonical_domain("x@y.ru") is None
+    assert canonical_domain("-foo.ru") is None and canonical_domain("foo-.ru") is None
+    assert canonical_domain("foo.123") is None and canonical_domain("foo.a") is None
+    assert canonical_domain("1.2.3.4") is None
     print("discovery normalize_row ok")
