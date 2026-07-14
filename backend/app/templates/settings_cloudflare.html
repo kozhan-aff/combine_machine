@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Настройки — Cloudflare{% endblock %}
+{% block content %}
+<h2><span class="idx">⚙</span> Настройки
+  <span class="hint">Cloudflare — только наблюдение: ни одна кнопка здесь не меняет ничего в CF</span></h2>
+
+<div class="chips">
+  <a class="chip" href="/settings" title="пороги скоринга воронки M1 и включённые источники Discovery">Воронка</a>
+  <a class="chip on" href="/settings/cloudflare"
+     title="read-only правда Cloudflare: подключения, аккаунты, зоны, DNS, сертификаты">Cloudflare</a>
+</div>
+
+<h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">Подключения</h2>
+<div class="wrap" style="margin-bottom:8px">
+<table>
+  <thead><tr><th>Метка</th><th>secret_ref</th><th>Тип</th><th>Статус</th><th>Возможности</th></tr></thead>
+  <tbody>
+  {% for cr in conn_rows %}{% set c = cr.c %}
+    <tr>
+      <td class="dom">{{ c.label }}</td>
+      <td><code>{{ c.secret_ref }}</code></td>
+      <td>{{ c.token_kind }}</td>
+      <td>
+        {% if c.status == 'ok' %}<span class="led led-ok"></span>ok
+        {% elif c.status == 'error' %}<span class="led led-bad"
+              title="{{ c.last_error_safe or '' }}"></span>error
+        {% else %}<span class="led led-warn"></span>не проверен{% endif %}
+      </td>
+      <td>
+        {# capabilities_json живёт на connection-account (не на connection) — роут агрегирует
+           их сюда: allowed побеждает denied/unknown для одной и той же способности #}
+        {% for cap, outcome in cr.caps.items() %}<span class="chip {{ 'on' if outcome == 'allowed' }}"
+            title="{{ cap }}: {{ outcome }}">{{ cap }}</span>{% endfor %}
+        {% if not cr.caps %}<span class="hint">—</span>{% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="empty">подключений нет — импортируется из .env при первом sync</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="station" style="max-width:640px; margin-bottom:20px">
+  <div class="plate">Синхронизация <span class="mod">read-only</span></div>
+  <div class="go">
+    {% if not auth_configured %}
+      <span class="hint" style="color:var(--bad)">Cloudflare-операции недоступны: задайте
+        <b>PANEL_USER</b>/<b>PANEL_PASS</b> в .env — плоская LAN-панель иначе пустит к ним кого угодно.</span>
+    {% endif %}
+    <form method="post" action="/settings/cloudflare/sync" class="inline">
+      <button class="btn-acc" {{ 'disabled' if not auth_configured }}
+              title="прогнать read-only sync: обновить строки подключений/аккаунтов/зон ниже наблюдённой правдой Cloudflare">
+        ⟳ Синхронизировать</button>
+    </form>
+  </div>
+  <details class="what"><summary>зачем это</summary>
+    <div class="what-body">Токен не хранится в БД — только ссылка <b>secret_ref</b>
+      (<code>env:CLOUDFLARE_API_TOKEN</code> либо <code>file:&lt;имя&gt;</code> в read-only
+      каталоге). Полный токен не идёт через веб-форму и никогда не появляется на этом экране —
+      только метка, куда он ведёт, и хвост-подсказка (<code>token_hint</code>) для сверки.</div>
+  </details>
+</div>
+
+<h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">Аккаунты и зоны</h2>
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>Зона</th><th>Аккаунт</th><th>Site</th><th>CF-статус</th><th>NS</th><th>DNS</th>
+    <th>SSL</th><th>origin TLS</th><th>DNSSEC</th><th>cert</th><th>drift</th><th class="num">наблюдалось</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}{% set z = r.z %}
+    <tr>
+      <td class="dom">{{ z.name }}</td>
+      <td>{{ acct_names.get(z.cloudflare_account_id, z.cloudflare_account_id) }}</td>
+      <td>{% if r.site %}<a href="/sites/{{ r.site.id }}" title="открыть карточку сайта">#{{ r.site.id }}</a>
+          {% else %}<span class="hint">—</span>{% endif %}</td>
+      <td>{{ z.status }}{% if z.missing_since %} <span class="led led-warn"
+              title="в последнем sync эта зона не пришла в списке — ЛИБО удалена, ЛИБО транспорт
+              споткнулся: пусто ≠ удалено, missing_since не значит «зоны больше нет»"></span>пропала{% endif %}</td>
+      <td class="num">{{ (z.name_servers_json or [])|join(', ') or '—' }}</td>
+      <td class="num">{{ r.dns }}</td>
+      <td>{% if z.universal_ssl_status %}{{ z.universal_ssl_status }}
+          {% else %}<span class="led led-warn"></span>не проверено{% endif %}</td>
+      <td>{% if z.origin_tls_status == 'ready' %}<span class="led led-ok"></span>ready
+          {% elif z.origin_tls_status == 'failed' %}<span class="led led-bad"></span>failed
+          {% else %}<span class="led led-warn"></span>не проверено{% endif %}</td>
+      <td>{{ z.dnssec_status or '—' }}</td>
+      <td class="num">{{ r.certs or '—' }}</td>
+      <td><span class="hint" title="общий drift по настройкам зоны — заполнит P2, в P0 не считается">—</span></td>
+      <td class="num">{{ z.zones_seen_at.strftime('%m-%d %H:%M') if z.zones_seen_at else '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="12" class="empty">зон нет — запусти ⟳ Синхронизировать выше</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_session, SessionLocal
+from app.models.cloudflare import (
+    CloudflareAccount, CloudflareCertificatePackMirror, CloudflareConnection,
+    CloudflareConnectionAccount, CloudflareDnsRecordMirror, CloudflareZoneMirror,
+)
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
@@ -429,6 +433,52 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
     s = st.get_settings()
     return templates.TemplateResponse(request, "settings.html", {
         "active": "settings", "s": s, "counts": _pool_counts(db, s)})
+
+
+@router.get("/settings/cloudflare", response_class=HTMLResponse)
+def settings_cloudflare_view(request: Request):
+    """Read-only экран правды Cloudflare (задача 7, P0). Ни одной формы, мутирующей CF —
+    единственное действие на странице — уже существующий запуск sync (задача 5/6)."""
+    with SessionLocal() as db:
+        conns = db.query(CloudflareConnection).order_by(CloudflareConnection.id).all()
+        accounts = db.query(CloudflareAccount).order_by(CloudflareAccount.name).all()
+        zones = (db.query(CloudflareZoneMirror)
+                   .order_by(CloudflareZoneMirror.name).all())
+        # capability-чипы: capabilities_json живёт на CloudflareConnectionAccount (НЕ на
+        # CloudflareConnection) — агрегируем по connection (allowed побеждает denied/unknown).
+        caps_by_conn: dict[int, dict] = {}
+        for ca in db.query(CloudflareConnectionAccount).all():
+            d = caps_by_conn.setdefault(ca.connection_id, {})
+            for k, v in (ca.capabilities_json or {}).items():
+                if d.get(k) != "allowed":
+                    d[k] = v
+        conn_rows = [{"c": c, "caps": caps_by_conn.get(c.id, {})} for c in conns]
+        # привязка зоны к Site — по внешнему hex зоны (backfill P0): Site.cf_zone_id (legacy) —
+        # _backfill_site_links (cf_sync.py) ставит cf_zone_mirror_id ТОЛЬКО рядом с cf_zone_id,
+        # так что для колонки «Site» достаточно единственного ключа
+        by_zone = {}
+        for s in db.query(Site).all():
+            if s.cf_zone_id:
+                by_zone.setdefault(s.cf_zone_id, s)
+        # DNS/cert-паки для колонок «DNS»/«cert» (аудит §11) — счётчики non-missing по зоне
+        dns_counts = dict(db.query(CloudflareDnsRecordMirror.cloudflare_zone_id,
+                                   func.count(CloudflareDnsRecordMirror.id))
+                            .filter(CloudflareDnsRecordMirror.missing_since.is_(None))
+                            .group_by(CloudflareDnsRecordMirror.cloudflare_zone_id).all())
+        cert_counts = dict(db.query(CloudflareCertificatePackMirror.cloudflare_zone_id,
+                                    func.count(CloudflareCertificatePackMirror.id))
+                             .filter(CloudflareCertificatePackMirror.missing_since.is_(None))
+                             .group_by(CloudflareCertificatePackMirror.cloudflare_zone_id).all())
+        rows = [{"z": z, "site": by_zone.get(z.cf_zone_id),
+                 "dns": dns_counts.get(z.cf_zone_id, 0),
+                 "certs": cert_counts.get(z.cf_zone_id, 0)} for z in zones]
+        # «Аккаунт» в таблице зон — читаемое имя, если аккаунт уже наблюдён; иначе сырой hex
+        acct_names = {a.cf_account_id: a.name for a in accounts if a.name}
+    return templates.TemplateResponse(request, "settings_cloudflare.html", {
+        "active": "settings",
+        "conn_rows": conn_rows, "accounts": accounts, "acct_names": acct_names, "rows": rows,
+        "auth_configured": bool(settings.PANEL_USER and settings.PANEL_PASS),
+    })
 
 
 @router.get("/autopilot", response_class=HTMLResponse)
