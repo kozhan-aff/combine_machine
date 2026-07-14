@@ -32,7 +32,13 @@
 - Контент = AI-черновик + реальные данные вертикали (замеры/сравнения) + ручная редактура + disclosure.
 
 ## Архитектура (6 модулей, services/)
-- **M1 Domain Intelligence** — discovery из 4 бесплатных источников (backorder-фид с RD/флагами + cctld.ru сырой реестр + reg.ru/sweb витрины через A-Parser fetch_html; дедуп по домену, больший RD выигрывает) + **ступенчатая воронка скоринга дёшево→дорого с ранним выходом**: T0 RD/флаги фида → T1 whois-возраст (A-Parser Net::Whois) → T2 РКН/Spamhaus/indexed_echo → T3 Wayback-история ТОЛЬКО для выживших → скор. Причина отказа — `Domain.reject_reason` (low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|not_acquirable|low_score). Пороги (min RD, min возраст, approve/manual) — рантайм, single-row `scoring_settings`, экран `/settings` с превью-счётчиками. DR-прокси OpenPageRank отпал, см. ниже; платный ссылочный профиль — опц. стадия.
+- **M1 Domain Intelligence** — discovery из 4 бесплатных источников (backorder-фид с RD/флагами + cctld.ru сырой реестр + reg.ru/sweb витрины через A-Parser fetch_html; дедуп по домену, больший RD выигрывает) + **ступенчатая воронка скоринга дёшево→дорого с ранним выходом**: T0 RD/флаги фида → T1 whois-возраст (A-Parser Net::Whois) → T2 РКН/Spamhaus/indexed_echo → T3 Wayback-история ТОЛЬКО для выживших → скор. Причина отказа — `Domain.reject_reason` (low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|not_acquirable|low_score).
+  **История судится по ВИДИМОМУ ТЕКСТУ снимка + `<title>`** (`wayback._visible_text`, nh3), а не по
+  сырому HTML: два «casino» в `<script>` рекламной сети или в `alt=` картинки — не история домена
+  (аудит 2026-07-14, F3). Два «критерия» оттуда УДАЛЕНЫ как призраки: `topic_switch` (был строгим
+  подмножеством категорийного hard-reject — не мог добавить ни одного отказа) и `trademark_risk`
+  (hard-reject БЕЗ единого производителя, всегда NULL — гейт притворялся проверкой юр-риска).
+  Колонка `Domain.trademark_risk` оставлена пустой; оживлять — только с реальным источником знаков. Пороги (min RD, min возраст, approve/manual) — рантайм, single-row `scoring_settings`, экран `/settings` с превью-счётчиками. DR-прокси OpenPageRank отпал, см. ниже; платный ссылочный профиль — опц. стадия.
 - **M2 Acquisition** — очередь выкупа + ручной гейт. Ценные дропы → backorder (ставка); свободные чистые → optimizator (гарантия).
 - **M3 Provisioning** — Cloudflare (зона → **смена NS у регистратора** → DNS proxied) + aaPanel (vhost + origin-SSL). Идемпотентно.
 - **M4 Content** — генерация под гео/язык через LLM (LiteLLM `192.168.1.77:4000`: mistral-large/ollama) + обогащение + опц. структура от конкурента из SERP (SearXNG) + гейт редактуры + вставка офферов.

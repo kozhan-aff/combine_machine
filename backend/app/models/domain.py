@@ -32,12 +32,15 @@ class Domain(Base):
     age_years: Mapped[float | None] = mapped_column(Numeric)
     first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     wayback_checked: Mapped[bool] = mapped_column(Boolean, default=False)
-    prior_flags: Mapped[dict | None] = mapped_column(JSONB)          # {adult, pharma, casino, spam, gambling, topic_switch}
+    prior_flags: Mapped[dict | None] = mapped_column(JSONB)          # {adult, pharma, casino, spam, gambling}
     indexed_echo: Mapped[bool | None] = mapped_column(Boolean)       # old content still indexed
 
     # risk (Stage E)
     rkn_listed: Mapped[bool | None] = mapped_column(Boolean)
     blacklisted: Mapped[bool | None] = mapped_column(Boolean)        # Spamhaus DBL / SURBL
+    # ЛЕГАСИ-КОЛОНКА, всегда NULL: производителя у неё не было НИКОГДА, а hard-reject по ней в
+    # compute_score был (аудит 2026-07-14, F5) — гейт притворялся проверкой юр-риска, которой нет.
+    # Ветку отказа сняли, колонку оставили: она ничего не ломает и ждёт настоящей реализации.
     trademark_risk: Mapped[bool | None] = mapped_column(Boolean)
 
     # decision (Stage F)

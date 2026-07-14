@@ -63,7 +63,7 @@ _BLIND_RU = {
 
 # Категории прошлого домена — по-русски (панель русская; улики показываются куратору).
 _CATS_RU = {"adult": "взрослое", "pharma": "фарма", "casino": "казино",
-            "gambling": "ставки", "spam": "спам", "topic_switch": "смена темы"}
+            "gambling": "ставки", "spam": "спам"}
 
 
 def history_verdict(d) -> str:
@@ -78,7 +78,7 @@ def history_verdict(d) -> str:
     'dirty' проверяется ПЕРВЫМ: известная грязь главнее незнания.
     """
     pf = d.prior_flags or {}
-    if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+    if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
         return "dirty"
     if not d.wayback_checked:
         return "unknown"
@@ -175,16 +175,21 @@ def compute_score(sig: dict, weights: dict | None = None) -> dict:
     pf = sig.get("prior_flags") or {}
 
     # --- hard rejects (Stage E) ---
+    #
+    # Здесь БЫЛИ ещё две ветки отказа, и обе удалены как призраки (аудит 2026-07-14):
+    #   · `trademark_risk` (F5) — читался из БД, но НИ ОДИН код его не вычислял: ни расчёта, ни
+    #     формы, ни импорта. Значение всегда NULL, ветка мертва. Гейт, который выглядит рабочим
+    #     и не работает, опаснее отсутствующего: он врёт куратору, что юр-риск проверен. Считать
+    #     его вслепую по докстрингу — ровно та ошибка, что похоронила cctld-источник, поэтому
+    #     ветка снята, а колонка `Domain.trademark_risk` оставлена (данные не рушим).
+    #   · `topic_switch` (F4) — строгое подмножество категорийного отказа ниже: см. wayback.py,
+    #     флаг больше не производится.
     reasons = []
     if sig.get("rkn_listed"):
         reasons.append("rkn_listed")
     if sig.get("blacklisted") is True:
         reasons.append("blacklisted")
-    if sig.get("trademark_risk"):
-        reasons.append("trademark_risk")
     reasons += [f"prior_{c}" for c in cfg.HARD_REJECT_FLAGS if pf.get(c)]
-    if pf.get("topic_switch"):
-        reasons.append("topic_switch")
     if reasons:
         return {"score": 0.0, "status": "rejected", "breakdown": {"hard_reject": reasons}}
 
@@ -419,7 +424,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
-        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
             return "history_dirty"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
@@ -464,7 +469,6 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             return {"domain": d.domain, "status": d.status, "skipped": "status"}
         c = clients or _make_clients()
         sig: dict = {"errors": []}
-        sig["trademark_risk"] = d.trademark_risk
         reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, job=job)
 
         if sig.get("acquirability_unresolved"):

@@ -1,10 +1,17 @@
 """Wayback Machine history check. Transport + light classification. See docs/api/wayback.md.
 
-Reconstruct what a domain hosted over time -> prior_flags (adult/pharma/casino/gambling/spam),
-topic_switch, real age (first snapshot). Heavy — run only on pre-filtered candidates; cache.
+Reconstruct what a domain hosted over time -> prior_flags (adult/pharma/casino/gambling/spam)
++ real age (first snapshot). Heavy — run only on pre-filtered candidates; cache.
+
+Судим по ВИДИМОМУ ТЕКСТУ снимка, а не по его разметке (см. _visible_text).
 """
+import html as html_lib
+import re
 import time
 from datetime import datetime, timedelta, timezone
+
+import nh3
+
 from app.integrations.base import BaseClient
 
 # «Опасное окно» — последние N дней ЖИЗНИ домена (не от «сегодня»: дроп мог перестать
@@ -54,6 +61,37 @@ STOPWORDS = {
 }
 _MIN_HITS = 2  # stop-word hits in a snapshot to flag its category
 
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _visible_text(raw_html: str) -> str:
+    """Сырой HTML снимка -> ВИДИМЫЙ ТЕКСТ страницы (+ `<title>`). Вход классификатора.
+
+    Раньше стоп-слова считались прямо в разметке — и это был баг, а не мелочь: порог
+    `_MIN_HITS=2` набирается двумя «casino» в `<script>` рекламной сети, в `alt`/`title`
+    картинки, в CSS-пути `/img/casino.png` или в `<meta name="keywords">`. Мебельный магазин
+    получал `prior_flags['casino']` и уезжал в `history_dirty` — а история домена и есть ЕДИНСТВЕННОЕ,
+    за что проект эти домены берёт (CLAUDE.md). Ошибка стоит дорого в обе стороны: ложный отказ
+    выбрасывает чистый дроп, ложное «чисто» тащит в портфель казино.
+
+    Разбираем настоящим HTML5-парсером (nh3/ammonia — он уже в зависимостях, санитайзит
+    публикуемые страницы в services/content.py), а не регулярками: содержимое `<script>`/`<style>`
+    он удаляет ЦЕЛИКОМ (по спеке, вместе с незакрытыми), комментарии режет, атрибуты снимает.
+
+    `<title>` остаётся: его читатель видит во вкладке и в поисковой выдаче — это содержание
+    страницы, а не разметка.
+
+    Пробел перед каждым `<`: nh3 выбрасывает запрещённый тег БЕЗ разделителя, и
+    `игровые</td><td>автоматы` склеилось бы в `игровыеавтоматы` — фразовые стоп-слова
+    («игровые автоматы», «ставки на спорт») перестали бы находиться, то есть настоящее казино
+    прошло бы как чистый домен. Внутрь тегов и скриптов лишний пробел не проникает: и то и
+    другое парсер снимает целиком.
+    """
+    text = nh3.clean(raw_html.replace("<", " <"), tags=set(), attributes={})
+    # nh3 отдаёт HTML-безопасный текст (& < > экранированы) — возвращаем ему человеческий вид;
+    # заодно схлопываем переносы, иначе фраза, разорванная переводом строки, не найдётся.
+    return " ".join(html_lib.unescape(_TAG.sub(" ", text)).split())
+
 
 def _classify_text(text: str) -> set[str]:
     """Categories whose stop-words appear >= _MIN_HITS times in the text."""
@@ -63,6 +101,11 @@ def _classify_text(text: str) -> set[str]:
         if sum(low.count(w) for w in words) >= _MIN_HITS:
             found.add(cat)
     return found
+
+
+def _classify_html(raw_html: str) -> set[str]:
+    """Снимок из архива -> категории его ВИДИМОГО текста. Единственный вход для classify_history."""
+    return _classify_text(_visible_text(raw_html))
 
 
 def _ts(timestamp: str) -> datetime:
@@ -219,7 +262,7 @@ class WaybackClient(BaseClient):
         ok = 0  # реально скачанные и классифицированные снапшоты (не попытки)
         for s in _pick(snaps, sample):
             try:
-                cats = _classify_text(self._fetch_raw(s["timestamp"], s["original"]))
+                cats = _classify_html(self._fetch_raw(s["timestamp"], s["original"]))
                 cats_by_time.append(cats)
                 evidence.append({"url": s["original"], "timestamp": s["timestamp"],
                                  "cats": sorted(cats)})
@@ -235,12 +278,15 @@ class WaybackClient(BaseClient):
             return {"prior_flags": {}, "first_seen": first_seen, "age_years": age_years,
                     "wayback_checked": False, "sampled": ok, "evidence": evidence}
 
+        # `topic_switch` здесь БЫЛ и удалён (аудит 2026-07-14, F4). Он считал
+        # `(later − early) ∩ {adult,pharma,casino,gambling}` — но `later ⊆ all_cats`, а любая из
+        # этих четырёх категорий в all_cats уже поднимает СВОЙ флаг, и все четыре входят в
+        # HARD_REJECT_FLAGS. Строгое подмножество уже сработавшего отказа: ни одного нового
+        # отказа флаг добавить не мог. Смену темы «мебель → казино» ловит `casino`, а не он.
+        # Тематическая ПРЕЕМСТВЕННОСТЬ донора инвариантом проекта не является (CLAUDE.md требует
+        # чистой истории), поэтому чинить его как настоящую проверку было нечего — только удалить.
         all_cats = set().union(*cats_by_time) if cats_by_time else set()
         flags = {c: (c in all_cats) for c in STOPWORDS}
-        # topic_switch: a bad category present in the later half but not in the earliest snapshot
-        early = cats_by_time[0] if cats_by_time else set()
-        later = set().union(*cats_by_time[len(cats_by_time) // 2:]) if cats_by_time else set()
-        flags["topic_switch"] = bool((later - early) & {"adult", "pharma", "casino", "gambling"})
         return {"prior_flags": flags, "first_seen": first_seen, "age_years": age_years,
                 "wayback_checked": True, "sampled": ok, "evidence": evidence}
 
@@ -262,4 +308,12 @@ if __name__ == "__main__":  # pure classifier self-check (no network)
     assert "adult" in _classify_text("Интим услуги, проститутки, вебкам")
     assert _classify_text("Обзор лучших vpn для стриминга, быстрые серверы") == set()
     assert "casino" in _classify_text("Вулкан казино, азино777 бонусы")
-    print("wayback _classify_text ok")
+
+    # судим по видимому тексту, а не по разметке (аудит 2026-07-14, F3)
+    furniture = "<h1>Мебель на заказ</h1><p>Диваны и кресла</p>"
+    assert _classify_html(furniture + '<script>var a="casino roulette casino";</script>') == set()
+    assert _classify_html(furniture + '<a title="casino"><img alt="casino"></a>') == set()
+    assert _classify_html(furniture + "<!-- casino casino -->") == set()
+    assert "casino" in _classify_html("<title>Казино онлайн</title><p>игровые автоматы</p>")
+    assert "casino" in _classify_html("<td>игровые</td><td>автоматы</td><p>игровые\nавтоматы</p>")
+    print("wayback _classify_html ok")

@@ -94,7 +94,7 @@
       <td>{% if d.indexed_echo %}<span style="color:var(--ok)" title="домен встречается в поисковом индексе">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
         {% set pf = d.prior_flags or {} %}
-        {% for k in ['adult','pharma','casino','gambling','spam','topic_switch'] %}
+        {% for k in ['adult','pharma','casino','gambling','spam'] %}
           {% if pf.get(k) %}<span class="flag">{{ k }}</span>{% endif %}
         {% endfor %}
         {% if d.rkn_listed %}<span class="flag">РКН</span>{% endif %}

@@ -22,7 +22,10 @@ PREFILTER = {
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
 # spam included: project invariant — ANY dirty-history flag rejects (see CLAUDE.md).
 HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling", "spam")  # prior_flags categories
-# also hard-reject on: rkn_listed, blacklisted is True, prior_flags.topic_switch
+# also hard-reject on: rkn_listed, blacklisted is True.
+# Здесь БЫЛИ ещё `prior_flags.topic_switch` и `trademark_risk` — оба удалены (аудит 2026-07-14):
+# первый не мог добавить ни одного отказа (подмножество категорий выше), у второго не было ни
+# одного производителя. Проверка, которой нет, не должна выглядеть работающей — см. compute_score.
 
 # Stage F — composite weights (positives; sum = 1.0). Free-stack + Ahrefs (live-verified
 # 2026-07-08, see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).

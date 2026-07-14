@@ -61,8 +61,12 @@ def test_verdict_dirty_when_prior_flags_set():
 
 
 def test_verdict_dirty_beats_missing_check():
-    """Грязь известна — она главнее незнания: домен с флагом не «unknown», а «dirty»."""
-    d = Domain(domain="bad2.ru", wayback_checked=False, prior_flags={"topic_switch": True},
+    """Грязь известна — она главнее незнания: домен с флагом не «unknown», а «dirty».
+
+    Флаг тут `gambling`, а не снятый `topic_switch` (аудит 2026-07-14, F4): вердикт истории
+    держится на категориях HARD_REJECT_FLAGS, и проверять его надо тем, что реально живёт.
+    """
+    d = Domain(domain="bad2.ru", wayback_checked=False, prior_flags={"gambling": True},
                score_breakdown={"errors": []})
     assert scoring.history_verdict(d) == "dirty"
 
