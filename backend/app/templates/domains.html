@@ -110,7 +110,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 <div class="wrap">
 <table>
   <tbody>
-  {% for d, blind, urgent, hist, evidence, ok in inbox %}
+  {% for d, blind, urgent, hist, evidence, ok, note in inbox %}
     {# полоса срочности — только у БЛИЗКОГО дедлайна: у backorder-домена дедлайн есть всегда,
        и полоса «у всех» перестала бы что-либо выделять. Признак посчитан в panel.py (там же
        нормализация tz — SQLite отдаёт дату naive). #}
@@ -159,6 +159,10 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           <div class="hint" style="color:var(--bad)">история грязная — смотри снимки</div>
         {% elif ok %}<div class="hint" style="color:var(--ok)">история чистая</div>
         {% else %}<div class="hint" style="color:var(--acc2)">история не подтверждена</div>{% endif %}
+        {# Пометка о СВЕЖЕСТИ вердикта — информационная, пакет она не блокирует (scoring.history_note):
+           вердикт держится на реальных прошлых уликах, но сегодняшний отказ архива куратор обязан
+           видеть, а не вычитывать из score_breakdown.errors. #}
+        {% if note %}<div class="hint" style="color:var(--acc2)">↺ {{ note }}</div>{% endif %}
         {# УЛИКИ — снимки, которые машина скачала и по которым вынесла вердикт. Вердикт
            ошибается; куратор перепроверяет его глазами, а не верит подписи над ним. #}
         {% if evidence %}

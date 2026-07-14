@@ -179,3 +179,19 @@ def test_json_api_reports_history_not_fake_clean(client):
          wayback_checked=False, prior_flags={}, score_breakdown={"errors": []})
     row = client.get("/api/domains/").json()[0]
     assert row["history"] == "unknown" and "clean" not in row
+
+
+def test_stale_verdict_is_named_but_not_locked(client):
+    """Правило «не затирать проверенное» (аудит F9/C2) оставило домен, чью историю проверили
+    РАНЬШЕ, а сегодня Wayback не ответил, с вердиктом `clean` — и про сегодняшний отказ архива
+    не говорил НИКТО (ошибка живёт в score_breakdown.errors, куда куратор не смотрит).
+
+    Пакет его берёт — и это осознанно: вердикт держится на реальных прошлых уликах, авто-approve
+    гардится по sig ТЕКУЩЕГО прогона, а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
+    завести ту самую тихую ловушку, от которой ветка избавлялась. Но сказать правду в строке —
+    обязан."""
+    _add(domain="stale.ru", status="scored", score=0.825, wayback_checked=True,
+         prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": ["wayback:RuntimeError"]})
+    assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 0}
+    html = client.get("/domains").text
+    assert "сегодня Wayback не ответил" in html, "строка молчит о том, что архив сегодня лежал"

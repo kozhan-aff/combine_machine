@@ -206,8 +206,8 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_verdict,
-                                      stale_donors, DROP_GRACE)
+    from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_note,
+                                      history_verdict, stale_donors, DROP_GRACE)
     from app.services.transitions import dirty_reason
 
     now = datetime.now(timezone.utc)
@@ -250,7 +250,7 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # а не реконструировать условие из blind/hist на месте — иначе два места молча
         # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
-                   history_evidence(d), bulk_ok(d)) for d in inbox],
+                   history_evidence(d), bulk_ok(d), history_note(d)) for d in inbox],
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
