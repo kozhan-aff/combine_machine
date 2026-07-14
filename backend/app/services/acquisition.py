@@ -28,6 +28,7 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
+    from app.services import transitions
 
     if provider not in _PROVIDERS:
         raise ValueError(f"unknown provider {provider!r} (ожидается {_PROVIDERS})")
@@ -42,13 +43,15 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         ).scalar_one_or_none()
         if existing:
             return existing.id                      # уже в очереди — не дублируем
-        if d.status != "approved":                  # только одобренный скорингом домен
-            raise ValueError(
-                f"домен в статусе {d.status!r} — в очередь выкупа берём только approved")
+        # approved -> purchasing через политику (services/transitions): она проверяет и ИСХОДНЫЙ
+        # статус (как раньше — только approved), и ГРЯЗЬ. Второе новое: отклонённый за РКН домен
+        # доезжал сюда отмытым кнопкой «↩ вернуть в approved», которая reject_reason не стирала
+        # (аудит F9). Такие домены на живой базе уже есть — вход в очередь для них закрыт.
+        # ДО db.add: отказ политики не должен оставлять за собой заявку-призрак в сессии.
+        transitions.set_status(d, "purchasing")      # видно в воронке: домен в очереди выкупа
         order = AcquisitionOrder(domain_id=domain_id, provider=provider,
                                  status="pending_confirm", confirmed_by_human=False)
         db.add(order)
-        d.status = "purchasing"                      # видно в воронке: домен в очереди выкупа
         db.commit()
         db.refresh(order)
         return order.id
@@ -66,6 +69,7 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
 
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
+    from app.services import transitions
 
     # Читаем состояние и валидируем, НЕ держа транзакцию открытой на время сетевого вызова.
     with SessionLocal() as db:
@@ -77,6 +81,12 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         provider = o.provider
         d = db.get(Domain, o.domain_id)
         domain = d.domain if d else None
+        # ГРЯЗЬ НЕ ПОКУПАЕМ — и на самом гейте тоже, не только на входе в очередь (create_order).
+        # Заявка на грязный домен могла быть заведена ДО этого фикса: тогда она уже лежит в
+        # /queue, и именно ЗДЕСЬ, на кнопке «✓ подтвердить выкуп», человек тратит деньги.
+        # Проверка идёт до pick_tariff: за грязный домен мы даже сетку тарифов не спрашиваем.
+        if d is not None:
+            transitions.refuse_dirty(d)
     if provider == "backorder" and not bid_rub:
         raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
     # `not math.isfinite` ловит nan/inf/-inf: `not bid_rub` их не видит (nan truthy, `nan<=0`
@@ -341,10 +351,16 @@ def cancel_order(order_id: int) -> dict:
 
 
 def list_orders() -> list[dict]:
-    """Очередь для панели: заказы + домен, свежие сверху."""
+    """Очередь для панели: заказы + домен, свежие сверху.
+
+    `dirty` — причина, по которой домен НЕЛЬЗЯ покупать (или None). Очередь — последний экран
+    перед деньгами, и до этого фикса грязный домен выглядел здесь обычной строкой со ставкой:
+    reject_reason в базе был, но в UI денежного пути его не показывал никто (аудит F13).
+    """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
+    from app.services.transitions import dirty_reason
 
     out = []
     with SessionLocal() as db:
@@ -355,7 +371,8 @@ def list_orders() -> list[dict]:
                         "provider": o.provider, "status": o.status,
                         "confirmed": o.confirmed_by_human,
                         "bid": float(o.cost) if o.cost is not None else None,
-                        "result": o.result, "domain_id": o.domain_id})
+                        "result": o.result, "domain_id": o.domain_id,
+                        "dirty": dirty_reason(d) if d is not None else None})
     return out
 
 

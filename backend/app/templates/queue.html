@@ -48,7 +48,11 @@
   {% for o in orders %}
     <tr>
       <td class="num hint">{{ o.id }}</td>
-      <td class="dom">{{ o.domain }}</td>
+      {# грязный домен обязан ВЫГЛЯДЕТЬ грязным на последнем экране перед деньгами. Заявка на
+         него могла быть заведена до фикса — сегодня create_order/confirm_order её отвергнут,
+         но строка без метки читалась бы как обычный кандидат со ставкой (аудит F13). #}
+      <td class="dom">{{ o.domain }}
+        {% if o.dirty %}<div><span class="flag">{{ o.dirty|reject_ru }}</span></div>{% endif %}</td>
       <td class="hint">{{ o.provider }}</td>
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
             title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}">{{ o.status|status_ru }}</span></td>
@@ -56,7 +60,15 @@
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
       <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} ₽{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
-        {% if o.status == 'pending_confirm' and not o.confirmed %}
+        {% if o.dirty and o.status in ['pending_confirm', 'failed'] %}
+          {# ни ставки, ни отправки: денежный гейт для грязи закрыт в сервисе (transitions.
+             refuse_dirty), и селектор тарифа здесь был бы приглашением к отказу. Снять заявку
+             можно — это делает общий блок «✗ отменить» ниже (он один знает про maybe_sent:
+             при неизвестном исходе отмена заперта, деньги могли уйти). #}
+          <div class="hint" style="color:var(--bad); max-width:220px; margin-bottom:6px"
+               title="домен отклонён воронкой по объективному признаку (РКН, блэклист, грязная история, флаг источника). Портфель держится на чистой истории — этот домен не покупаем ни по какой ставке.">
+            ⛔ выкуп запрещён — грязь ({{ o.dirty|reject_ru }})</div>
+        {% elif o.status == 'pending_confirm' and not o.confirmed %}
           {% set grid = grids.get(o.zone) %}
           {% if grid %}
           {# последний чекпойнт перед деньгами — подписываем его ФАКТИЧЕСКОЙ суммой из селекта,

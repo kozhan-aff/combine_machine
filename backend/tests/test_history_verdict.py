@@ -86,7 +86,7 @@ def test_unchecked_history_stays_out_of_bulk(client):
          prior_flags={}, score_breakdown={"errors": []})
     _add(domain="ok.ru", status="scored", score=0.825, wayback_checked=True,
          prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": []})
-    assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "blind": 1}
+    assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 1}
     r = client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
     assert r.status_code == 303
     with db.SessionLocal() as s:
@@ -121,7 +121,7 @@ def test_row_and_bulk_share_one_predicate(client, monkeypatch):
     monkeypatch.setattr(scoring, "blind_reason", lambda d: None)
     # решающая проверка: строка инбокса и пакет обязаны совпасть — ни то ни другое не
     # признаёт этот домен «чистым», хотя blind_reason (искусственно) молчит.
-    assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 0, "blind": 1}
+    assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 0, "skipped": 1}
     html = client.get("/domains").text
     assert "история чистая" not in html
     # и предикат в изоляции — тот же вывод, без похода через HTTP/шаблон

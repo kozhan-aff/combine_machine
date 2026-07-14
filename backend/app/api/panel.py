@@ -208,6 +208,7 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from app.services import jobs
     from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_verdict,
                                       stale_donors, DROP_GRACE)
+    from app.services.transitions import dirty_reason
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
@@ -255,6 +256,13 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
         "expired_ids": {d.id for d in inbox + ready if _expired(d, now)},
         "ready": ready,
+        # ГРЯЗЬ НА ВИТРИНЕ ВЫКУПА. «Готовы к выкупу» — экран, с которого ИДУТ ТРАТИТЬ ДЕНЬГИ, и
+        # до этого фикса отмытый РКН-домен (approved + reject_reason='rkn') стоял здесь без
+        # единой метки (аудит F13). Сервисы его теперь не пустят ни в очередь, ни в «купил
+        # руками» — но оператор обязан УВИДЕТЬ причину, а не упереться в отказ на клике.
+        # Причина — по-русски, из того же словаря, что и везде (labels.reject_ru).
+        "dirty_by_id": {d.id: _reject_ru(r) for d in ready
+                        if (r := dirty_reason(d)) is not None},
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),
         "offers_active": db.scalar(select(func.count()).select_from(Offer)
@@ -282,6 +290,7 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
                               Domain.reject_reason != "not_acquirable"))
     if min_score is not None:
         stmt = stmt.where(Domain.score >= min_score)
+    from app.services.transitions import dirty_reason
     rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
                                     Domain.referring_domains.desc().nulls_last())
                       .limit(limit)).scalars().all()
@@ -289,46 +298,70 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
     return templates.TemplateResponse(request, "pool.html", {
         "active": "domains", "rows": rows, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
+        # какие строки грязные — решает ПОЛИТИКА, а не шаблон по списку кодов: реестр рисует
+        # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.
+        # Jinja не имеет права переизобретать этот предикат — разъедется молча.
+        "dirty_by_id": {d.id: _reject_ru(r) for d in rows if (r := dirty_reason(d)) is not None},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
 
 
 def _bulk_candidates(db: Session, min_score: float):
-    """(чистые к одобрению, сколько отсеяно как «вслепую»).
+    """(годные к одобрению, сколько ПРОПУЩЕНО пакетом).
 
     Гейт истории — через `scoring.bulk_ok`, ОДИН предикат для пакета и для подписи «история
     чистая» в строке инбокса (см. domains_view). Раньше это условие было реконструировано
     здесь И в Jinja независимо — ровно та связка, на которой аудит поймал F2 (пустой Wayback
     ошибки не даёт → «вслепую» не определялось → штамповали как чистое); любое новое значение
     вердикта/причины отсева развело бы их снова, молча.
+
+    Второе число раньше звалось `blind` — и это имя ВРАЛО: `bulk_ok` отсеивает не только
+    «проверить не удалось», но и «проверили, и там грязь» (с F9 — ещё и РКН/блэклист). Домен,
+    отсеянный за казино в истории, объявлялся оператору «оценённым вслепую». Считаем то, что
+    считаем: сколько строк пакет НЕ ТРОНУЛ.
     """
     from app.services.scoring import bulk_ok
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
-    clean = [d for d in rows if bulk_ok(d)]
-    return clean, len(rows) - len(clean)
+    ok = [d for d in rows if bulk_ok(d)]
+    return ok, len(rows) - len(ok)
 
 
 @router.get("/domains/bulk-preview")
 def bulk_preview(min_score: float = 0.8, db: Session = Depends(get_session)):
     from fastapi.responses import JSONResponse
-    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
-    return JSONResponse({"n": len(clean), "blind": blind})
+    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    return JSONResponse({"n": len(ok), "skipped": skipped})
 
 
 @router.post("/domains/bulk-approve")
 def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_session)):
     """Пакетное одобрение — это КЛИК ЧЕЛОВЕКА, гейт курации на месте (деньги не тратятся:
-    approved != куплен). Домены, оценённые вслепую (Wayback лежал), в пакет НЕ попадают —
-    иначе пакет стал бы обходом того самого гейта, ради которого он существует."""
-    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
-    for d in clean:
-        d.status = "approved"
+    approved != куплен). Домены, чью историю не подтвердили (Wayback лежал) или подтвердили как
+    грязную, в пакет НЕ попадают — иначе пакет стал бы обходом того самого гейта, ради которого
+    он существует.
+
+    Перевод — через политику (services/transitions), хотя `bulk_ok` грязь уже отсеял: пакет
+    двигает статус ПАЧКОЙ, и это последнее место, где стоит перепроверить себя перед записью.
+    Отказ политики здесь — это баг рассинхрона предикатов, а не рабочая ветка: он обязан быть
+    ВИДЕН оператору, а не проглочен молча.
+    """
+    from app.services import transitions
+    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    approved, denied = 0, []
+    for d in ok:
+        try:
+            transitions.set_status(d, "approved")
+            approved += 1
+        except transitions.TransitionDenied as e:
+            denied.append(str(e))
     db.commit()
-    msg = f"Одобрено пакетом: {len(clean)}"
-    if blind:
-        msg += f" · пропущено «вслепую»: {blind} — их реши руками"
+    msg = f"Одобрено пакетом: {approved}"
+    if skipped:
+        msg += f" · пропущено (историю не подтвердить или она грязная): {skipped} — их реши руками"
+    if denied:
+        return _back("/domains", err=f"{msg} · политика отвергла {len(denied)}: {denied[0]}")
     return _back("/domains", msg=msg)
 
 
@@ -544,13 +577,26 @@ def score_one_action(domain_id: int):
 
 @router.post("/domains/{domain_id}/set-status")
 def set_status_action(domain_id: int, status: str = Form(...), db: Session = Depends(get_session)):
-    # ручной override: 'purchased' здесь — money-gate человека мимо очереди; оркестратор
-    # (services/orchestrator) этот роут НЕ зовёт (двигает только до pending_confirm).
-    if status in _MANUAL_STATUSES:      # guard: только ручные переходы курации
-        d = db.get(Domain, domain_id)
-        if d:
-            d.status = status
-            db.commit()
+    """Ручная курация. 'purchased' здесь — money-gate человека мимо очереди; оркестратор
+    (services/orchestrator) этот роут НЕ зовёт.
+
+    `_MANUAL_STATUSES` — это whitelist КНОПОК (какие цели вообще есть у панели). Сам переход
+    судит политика (services/transitions): она смотрит ИСХОДНЫЙ статус и грязь. Раньше здесь
+    не было ничего, кроме whitelist'а целей, — и «↩ вернуть в approved» отмывала РКН-домен
+    одним кликом (аудит F9).
+    """
+    from app.services import transitions
+    if status not in _MANUAL_STATUSES:
+        return _back("/domains", err=f"недопустимая цель перехода: {status!r}")
+    d = db.get(Domain, domain_id)
+    if d is None:
+        return _back("/domains", err=f"домен #{domain_id} не найден")
+    try:
+        transitions.set_status(d, status)
+    except transitions.TransitionDenied as e:
+        db.rollback()
+        return _back("/domains", err=str(e))
+    db.commit()
     return _back("/domains")
 
 

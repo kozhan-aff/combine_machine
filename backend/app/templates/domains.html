@@ -207,18 +207,36 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
   <tbody>
   {% for d in ready %}
     <tr>
-      <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span></td>
+      <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span>
+        {# ГРЯЗЬ — прямо в строке, с которой идут покупать. Отмытый домен (approved с живым
+           reject_reason) выглядел здесь обычным кандидатом: причина отказа лежала в базе, но
+           её не показывал НИКТО из тех экранов, где решают о деньгах. #}
+        {% if d.id in dirty_by_id %}
+          <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
+            <span class="hint" style="color:var(--bad)"
+                  title="домен был отклонён воронкой по объективному признаку (реестр РКН, блэклист, грязная история или флаг источника). Портфель держится на чистой истории — такой домен не покупаем. Вернуть его в оборот может только перепроверка, если проверки скажут, что он чист.">выкуп запрещён — грязь</span></div>
+        {% endif %}</td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}
         {# отсюда ИДУТ ПОКУПАТЬ — метка «окно закрыто» тут дороже всего #}
         {% if d.id in expired_ids %}<br><span class="hint" style="color:var(--bad)"
           title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</span>{% endif %}</td>
       <td>
-        <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
-          <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
-        <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-          <input type="hidden" name="status" value="purchased">
-          <button class="btn-sm btn-buy" title="я уже купил домен руками — система деньги не тратит">🛒 купил руками</button></form>
+        {% if d.id in dirty_by_id %}
+          {# денежных кнопок у грязи нет вовсе: сервисы её и так отвергнут (services/transitions),
+             но кнопка, ведущая в гарантированный отказ, — это ложное предложение купить. #}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="убрать из витрины выкупа">✗ отклонить</button></form>
+        {% else %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+            <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="purchased">
+            <button class="btn-sm btn-buy" title="я уже купил домен руками — система деньги не тратит">🛒 купил руками</button></form>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

@@ -13,7 +13,11 @@
     <span class="badge b-scored">{{ 'scored'|status_ru }}</span><span class="who">машина</span>
       <span class="desc">оценён, но не дотянул до авто-одобрения — реши сам: ✓ или ✗</span>
     <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">машина / ты</span>
-      <span class="desc">чистый и годный к выкупу — купи руками у провайдера, потом отметь 🛒</span>
+      {# «чистый» здесь было ЛОЖЬЮ (аудит F13): approve ставит и человек — в т.ч. домену, чью
+         историю подтвердить не удалось. Статус говорит «решение принято», а не «проверено». #}
+      <span class="desc">одобрен к выкупу — купи руками у провайдера, потом отметь 🛒.
+        <b>«Одобрен» ≠ «история чистая»</b>: одобрить может и человек, в том числе домен, чью
+        историю машина не подтвердила. Вердикт истории и снимки — в <a href="/domains">инбоксе M1</a></span>
     <span class="badge b-rejected">{{ 'rejected'|status_ru }}</span><span class="who">машина / ты</span>
       <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>):
       <code>low_rd</code> мало доноров, <code>feed_flag</code> флаг источника, <code>too_young</code>
@@ -114,11 +118,21 @@
             <input type="hidden" name="status" value="rejected">
             <button class="btn-sm btn-bad" title="отклонить: домен не годится, убрать из воронки">✗ отклонить</button></form>
         {% elif d.status == 'approved' %}
-          <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
-            <button class="btn-sm btn-acc" title="поставить в очередь выкупа (M2): заявка → подтверждение → отправка провайдеру">＋ в очередь выкупа</button></form>
-          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-            <input type="hidden" name="status" value="purchased">
-            <button class="btn-sm btn-buy" title="быстрый путь: я уже купил домен руками у провайдера (система деньги не тратит)">🛒 отметить купленным</button></form>
+          {# отмытый домен (approved с живым reject_reason: РКН/блэклист/история) — денежных
+             кнопок ему не показываем: сервисы его всё равно отвергнут (services/transitions),
+             а кнопка, ведущая в гарантированный отказ, — это ложное предложение купить. #}
+          {% if d.id in dirty_by_id %}
+            <span class="hint" style="color:var(--bad)"
+                  title="домен отклонён воронкой по объективному признаку — в выкуп он не идёт">⛔ грязь — выкуп запрещён</span>
+            <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+              <button class="btn-sm" title="прогнать по воронке заново: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+          {% else %}
+            <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+              <button class="btn-sm btn-acc" title="поставить в очередь выкупа (M2): заявка → подтверждение → отправка провайдеру">＋ в очередь выкупа</button></form>
+            <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+              <input type="hidden" name="status" value="purchased">
+              <button class="btn-sm btn-buy" title="быстрый путь: я уже купил домен руками у провайдера (система деньги не тратит)">🛒 отметить купленным</button></form>
+          {% endif %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
             <button class="btn-sm btn-bad" title="передумал: убрать из очереди на покупку">✗ отклонить</button></form>
@@ -134,9 +148,22 @@
               <button class="btn-sm btn-acc" title="завести карточку сайта: дальше провижн, контент, публикация">＋ создать сайт</button></form>
           {% endif %}
         {% elif d.status == 'rejected' %}
-          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-            <input type="hidden" name="status" value="approved">
-            <button class="btn-sm" title="вернуть домен в статус approved (годен к покупке)">↩ вернуть в approved</button></form>
+          {# ЗДЕСЬ И БЫЛ ВХОД В КОРИДОР (аудит F9). Кнопка «↩ вернуть в approved» предлагалась и
+             РКН-домену, а set_status_action смотрел только ЦЕЛЕВОЙ статус — один клик, и грязь
+             ехала в «Готовы к выкупу», в очередь, на ставку, ни разу не показав, что она грязь.
+             Порог («мало доноров», «молодой», «низкий скор») — другое дело: он крутится на
+             /settings, и вернуть такой домен руками оператор вправе. Кто грязь — решает ПОЛИТИКА
+             (services/transitions), а не список кодов в шаблоне: два места разъехались бы молча. #}
+          {% if d.id in dirty_by_id %}
+            <span class="hint" style="color:var(--bad)"
+                  title="РКН, блэклист, грязная история или флаг источника — это факт о домене, а не наш порог. Ослабить его нечем: портфель держится на чистой истории. Единственный путь назад — перепроверка: если проверки сегодня скажут «чист», воронка сама снимет отметку.">⛔ грязь — не возвращается</span>
+          {% else %}
+            <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+              <input type="hidden" name="status" value="approved">
+              <button class="btn-sm" title="отсеян порогом, а не грязью — вернуть в approved (годен к покупке)">↩ вернуть в approved</button></form>
+          {% endif %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад для грязи: реабилитацию даёт машина по новым уликам, а не кнопка">▶ перепроверить</button></form>
         {% endif %}
       </td>
     </tr>

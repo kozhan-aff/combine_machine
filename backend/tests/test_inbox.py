@@ -70,7 +70,7 @@ def test_bulk_preview_counts(client):
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     body = client.get("/domains/bulk-preview?min_score=0.8").json()
-    assert body == {"n": 1, "blind": 1}
+    assert body == {"n": 1, "skipped": 1}
 
 
 def test_empty_inbox_explains_next_step(client):

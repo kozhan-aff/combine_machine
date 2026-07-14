@@ -56,12 +56,22 @@ def list_offers(db: Session = Depends(get_session)):
 # --- M2 (manual buy) --------------------------------------------------------
 @router.post("/domains/{domain_id}/purchase")
 def mark_purchased(domain_id: int, db: Session = Depends(get_session)):
+    """Человек пометил домен купленным мимо очереди — MVP покупает руками, и этот клик И ЕСТЬ
+    денежный гейт. Оркестратор (services/orchestrator) этот роут НЕ зовёт.
+
+    «Мимо очереди» — не значит «мимо воронки»: роут ставил 'purchased' из ЛЮБОГО статуса, не
+    спросив ни исходного, ни reject_reason (аудит F13). Так покупался и РКН-домен, и вовсе не
+    оценённое сырьё. Теперь переход судит политика (services/transitions).
+    """
+    from app.services import transitions
     d = db.get(Domain, domain_id)
     if not d:
         raise HTTPException(404, "domain not found")
-    # ручной override money-gate: человек пометил домен купленным мимо очереди. Осознанный
-    # обход (человек = денежный гейт). Оркестратор (services/orchestrator) этот роут НЕ зовёт.
-    d.status = "purchased"   # ponytail: MVP buys by hand — the human action IS the money gate
+    try:
+        transitions.set_status(d, "purchased")
+    except transitions.TransitionDenied as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
     db.commit()
     return {"id": d.id, "domain": d.domain, "status": d.status}
 

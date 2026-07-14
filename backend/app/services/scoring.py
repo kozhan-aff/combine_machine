@@ -169,8 +169,14 @@ def bulk_ok(d) -> bool:
     строки инбокса (что рисуется как «чистая»): если эти два места переизобретают условие
     порознь, они разъедутся ровно в режиме бага, который это и чинит (аудит F2) — расхождение
     всплывёт молча, когда `history_verdict`/`blind_reason` обрастут новым значением/веткой.
+
+    `dirty_reason` (аудит F9) добавлен СЮДА, а не рядом с пакетом, по тому же правилу: новое
+    основание «нельзя» обязано пройти через единый предикат, иначе строка инбокса подписала бы
+    «история чистая» домен, который пакет молча пропускает. `history_verdict` ловит грязь ТОЛЬКО
+    по `prior_flags`; РКН и блэклист — это отдельные колонки, и до сих пор их здесь не видел никто.
     """
-    return history_verdict(d) == "clean" and not blind_reason(d)
+    from app.services.transitions import dirty_reason   # ленивый: transitions зовёт нас в ответ
+    return history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
 
 
 def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
