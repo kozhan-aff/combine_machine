@@ -24,14 +24,22 @@ def test_zone_mirror_cf_zone_id_is_unique():
 
 
 def test_only_one_primary_for_read_per_account():
+    """Один cloudflare_account_id может быть привязан к ДВУМ разным connection (несколько
+    токенов на аккаунт), но is_primary_for_read=True — не более чем у одного из них. Тест
+    обязан использовать два РАЗНЫХ connection: с одним и тем же connection обе строки делили бы
+    (connection_id, cloudflare_account_id), и IntegrityError поднял бы композитный uq_conn_account
+    ещё до того, как партиал uq_primary_read_per_account вообще был бы проверен — тест прошёл бы,
+    даже не будь партиал-индекса (аудит ревью Задачи 1)."""
     with SessionLocal() as db:
-        c = CloudflareConnection(label="c", secret_ref="env:CLOUDFLARE_API_TOKEN",
-                                 token_kind="user", status="unverified")
-        db.add(c); db.commit()
-        db.add(CloudflareConnectionAccount(connection_id=c.id, cloudflare_account_id="acc",
+        c1 = CloudflareConnection(label="c1", secret_ref="env:CLOUDFLARE_API_TOKEN",
+                                  token_kind="user", status="unverified")
+        c2 = CloudflareConnection(label="c2", secret_ref="file:second-token",
+                                  token_kind="user", status="unverified")
+        db.add_all([c1, c2]); db.commit()
+        db.add(CloudflareConnectionAccount(connection_id=c1.id, cloudflare_account_id="acc",
                                            status="ok", is_primary_for_read=True))
         db.commit()
-        db.add(CloudflareConnectionAccount(connection_id=c.id, cloudflare_account_id="acc",
+        db.add(CloudflareConnectionAccount(connection_id=c2.id, cloudflare_account_id="acc",
                                            status="ok", is_primary_for_read=True))
         with pytest.raises(IntegrityError):
             db.commit()
