@@ -261,7 +261,12 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # единой метки (аудит F13). Сервисы его теперь не пустят ни в очередь, ни в «купил
         # руками» — но оператор обязан УВИДЕТЬ причину, а не упереться в отказ на клике.
         # Причина — по-русски, из того же словаря, что и везде (labels.reject_ru).
-        "dirty_by_id": {d.id: _reject_ru(r) for d in ready
+        #
+        # ИНБОКС (`scored`) — тоже: `bulk_ok` грязь из пакета исключает, но кнопка «✓ одобрить»
+        # у такой строки оставалась и вела в ГАРАНТИРОВАННЫЙ отказ политики (ревью Задачи 6,
+        # Minor 6). Кнопка, которая не может сработать, — то же ложное предложение, что и
+        # «↩ вернуть в approved» для РКН-домена в реестре.
+        "dirty_by_id": {d.id: _reject_ru(r) for d in inbox + ready
                         if (r := dirty_reason(d)) is not None},
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),
@@ -404,10 +409,14 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
 @router.get("/autopilot", response_class=HTMLResponse)
 def autopilot_view(request: Request, db: Session = Depends(get_session)):
     from app.services.autonomy import get_autonomy
+    from app.services.orchestrator import COUNT_RU
     from app.models.autonomy import AutonomyRun
     runs = db.execute(select(AutonomyRun).order_by(AutonomyRun.id.desc()).limit(10)).scalars().all()
     return templates.TemplateResponse(request, "autopilot.html", {
-        "active": "autopilot", "a": get_autonomy(), "gates": _gates(db), "runs": runs})
+        "active": "autopilot", "a": get_autonomy(), "gates": _gates(db), "runs": runs,
+        # ключи counts — не только стадии (queue_dirty: сколько грязных обошла стадия очереди),
+        # и оператор читает журнал по-русски, а не по именам функций
+        "count_ru": COUNT_RU})
 
 
 @router.get("/settings/preview")

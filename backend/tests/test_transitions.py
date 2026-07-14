@@ -168,6 +168,26 @@ def test_create_order_refuses_dirty_domain():
         assert s.execute(select(AcquisitionOrder)).first() is None
 
 
+def test_create_order_refuses_dirty_even_with_open_order():
+    """ПРОХОДИЛО на ce3bc36: у грязного домена с уже открытой заявкой create_order возвращал её
+    id как УСПЕХ — гард стоял ПОСЛЕ раннего возврата по `existing`.
+
+    Денег это не тратило, но стадия `queue` автопилота засчитывала такой домен заявленным
+    (done += 1), а оператор не слышал ни слова о том, что в очереди выкупа лежит РКН-домен.
+    «Грязь в очереди» не имеет права быть тихим успехом.
+    """
+    from app.services import acquisition
+    from app.services.transitions import TransitionDenied
+
+    did = _add(domain="legacy-open.ru", status="approved", reject_reason="rkn", rkn_listed=True)
+    with db.SessionLocal() as s:
+        s.add(AcquisitionOrder(domain_id=did, provider="backorder", status="pending_confirm",
+                               confirmed_by_human=False))
+        s.commit()
+    with pytest.raises(TransitionDenied):
+        acquisition.create_order(did, "backorder")
+
+
 def test_confirm_order_refuses_dirty_domain(client):
     """Заявка на грязный домен могла быть заведена ДО фикса — тогда её ждала кнопка
     «✓ подтвердить выкуп», а это и есть касса. Гард стоит и на самом денежном гейте."""
@@ -254,28 +274,58 @@ def test_pool_offers_rescore_instead_of_return_for_dirt(client):
     assert "↩ вернуть в approved" in both_html           # порог — возвращается
 
 
-def test_autopilot_sweep_survives_denied_domain():
-    """ЧТО ЛОМАЕТСЯ, когда запрет срабатывает В АВТОПИЛОТЕ: ничего — но это надо доказать.
+def test_stage_queue_dirt_does_not_starve_the_cap():
+    """ПРОХОДИЛО на ce3bc36: стадия `queue` автопилота вставала НАМЕРТВО.
 
-    Стадия `queue` свипа гоняет create_order по ВСЕМ approved-доменам. Отмытый домен теперь
-    отвергается — и если бы отказ ронял стадию, один грязный легаси-домен останавливал бы выкуп
-    всего портфеля. Он его не роняет: чистые домены заявляются, грязный отказ уходит в ошибки
-    свипа под своим именем (оператор видит причину, а не молчание).
+    Отмытые легаси-домены из `approved` больше не уходят (политика их отвергает, статус им никто
+    не двигает) — и `ORDER BY id LIMIT cap` по сырому `approved` отдавал стадии РОВНО ИХ: они
+    сидят в голове id-порядка и выедали весь кап каждый свип. Чистый домен не попадал в очередь
+    НИКОГДА (прогон ревьюера: три свипа подряд, done=0 errs=10, clean.ru всё ещё approved).
+
+    Фикстура ПЛОТНАЯ намеренно: грязных ≥ cap (10 = дефолт cap_queue). Прежний тест брал одного
+    грязного при капе 10 — форма фикстуры прятала поведение, ровно тот же урок ветки.
     """
     from app.services import orchestrator
 
-    dirty = _add(domain="laundered.ru", status="approved", reject_reason="rkn", rkn_listed=True,
-                 score=0.9)
+    cap = 10
+    dirty = [_add(domain=f"laundered{i}.ru", status="approved", reject_reason="rkn",
+                  rkn_listed=True, score=0.9) for i in range(cap + 2)]   # ПЛОТНО: 12 > cap
     clean = _add(domain="clean.ru", status="approved", score=0.9, wayback_checked=True)
-    done, errs = orchestrator._stage_queue(10)
-    assert done == 1 and _status(clean) == "purchasing"     # чистый домен свип НЕ потерял
-    assert _status(dirty) == "approved"                     # грязный не тронут и не куплен
-    assert len(errs) == 1 and "rkn" in errs[0]              # отказ назван, а не проглочен
+
+    done, errs, extra = orchestrator._stage_queue(cap)
+
+    assert done == 1 and _status(clean) == "purchasing"  # чистый домен в очередь ПОПАЛ
+    assert all(_status(x) == "approved" for x in dirty)  # грязные не тронуты и не куплены
+    assert errs == []                                    # это не ошибка стадии, а её защита
+    assert extra == {"queue_dirty": len(dirty)}          # ...но оператор об этом СЛЫШИТ
+
+
+def test_sweep_counts_report_skipped_dirt(client):
+    """Счётчик грязи доезжает до журнала свипов, а не теряется в тупле стадии."""
+    from app.services import orchestrator
+
+    from app.services import autonomy
+
+    _add(domain="laundered.ru", status="approved", reject_reason="rkn", rkn_listed=True, score=0.9)
+    _add(domain="clean.ru", status="approved", score=0.9, wayback_checked=True)
+    autonomy.update_autonomy(autopilot_on=True, auto_discovery=False, auto_score=False,
+                             auto_queue=True, auto_provision=False, auto_generate=False,
+                             auto_publish=False, auto_check_index=False, cap_queue=10)
+
+    out = orchestrator.run_sweep(trigger="manual")
+    assert out["counts"]["queue"] == 1 and out["counts"]["queue_dirty"] == 1
+    assert client.get("/autopilot").text.count("грязь пропущена") >= 1   # по-русски, не queue_dirty
 
 
 def test_bulk_approve_never_stamps_dirt(client):
-    """Единый предикат: новое основание «нельзя» прошло ЧЕРЕЗ bulk_ok, а не мимо него —
-    иначе пакет и строка инбокса разъехались бы молча (эта ветка ловила такое трижды)."""
+    """СТРАХОВКА (не репро): единый предикат `bulk_ok` спрашивает и про грязь.
+
+    Честно о происхождении: состояние «scored + rkn_listed=True» машина породить НЕ МОЖЕТ —
+    воронка при РКН выходит на T2 сразу в `rejected`, а пакет берёт только `scored`. Фикстура
+    ниже сконструирована, живого коридора здесь не было. Гард всё равно нужен — defense in
+    depth: после Critical-2 сигнальные колонки ПЕРЕЖИВАЮТ перескор, и домен со старым
+    `rkn_listed=True`, заново вышедший в `scored` по свежему score, — состояние достижимое.
+    """
     from app.services import scoring
 
     _add(domain="scored-rkn.ru", status="scored", score=0.95, rkn_listed=True,
@@ -287,3 +337,187 @@ def test_bulk_approve_never_stamps_dirt(client):
     client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
     with db.SessionLocal() as s:
         assert s.execute(select(Domain)).scalar_one().status == "scored"
+
+
+def test_inbox_hides_approve_for_dirty_row(client):
+    """ПРОХОДИЛО на ce3bc36: у грязной `scored`-строки инбокса оставалась «✓ одобрить».
+
+    Пакет её уже не трогал (`bulk_ok`), политика бы отказала — то есть кнопка вела в
+    ГАРАНТИРОВАННЫЙ отказ. Ложное предложение одобрить, ровно как «↩ вернуть» в реестре.
+    """
+    _add(domain="scored-rkn.ru", status="scored", score=0.95, rkn_listed=True, wayback_checked=True)
+    html = client.get("/domains").text
+    assert "✓ одобрить" not in html
+    assert "выкуп запрещён — грязь" in html and "реестр РКН" in html
+    assert "▶ перепроверить" in html                      # честный путь назад на месте
+
+
+def test_inbox_keeps_approve_for_clean_row(client):
+    """ЧТО ЛОМАЕТСЯ у чистого домена: ничего — гейт курации остаётся кнопкой человека."""
+    _add(domain="clean.ru", status="scored", score=0.75, wayback_checked=True)
+    assert "✓ одобрить" in client.get("/domains").text
+
+
+# --- РЕГРЕССИЯ 5: КАССА (execute) не спрашивала про грязь -----------------------
+
+def test_execute_refuses_dirty_before_sending_money(monkeypatch):
+    """ПРОХОДИЛО на ce3bc36: ЖИВОЙ ПЛАТНЫЙ ЗАКАЗ на грязный домен уходил провайдеру.
+
+    Заказ, подтверждённый ДО фикса, приходит на отправку с `confirmed_by_human=True` и уже
+    замороженным тарифом — ни create_order, ни confirm_order его больше не увидят, а
+    `execute_confirmed_order` про `dirty_reason` не спрашивал ВООБЩЕ. Единственной защитой было
+    условие в шаблоне queue.html; прямой POST /queue/{id}/execute (старая вкладка, «↻ повторить»
+    после failed) шёл мимо него.
+
+    Гард стоит ДО атомарного claim'а: иначе заказ уезжал бы в транзиентный 'ordering', из
+    которого его не снять (cancel_order берёт только pending_confirm/failed).
+    """
+    import app.integrations.backorder as bo
+    from app.services import acquisition
+    from app.services.transitions import TransitionDenied
+
+    sent = []
+
+    class _Spy:                                  # если провайдера позвали — деньги ушли
+        def find_order(self, dom):
+            sent.append(("find", dom))
+            return None
+        def order(self, dom, price_id=None, period_id=None):
+            sent.append(("ORDER", dom))          # <-- живой платный заказ
+            return {"order_id": "666"}
+    monkeypatch.setattr(bo, "BackorderClient", _Spy)
+
+    did = _add(domain="legacy-rkn.ru", status="purchasing", reject_reason="rkn", rkn_listed=True)
+    with db.SessionLocal() as s:
+        o = AcquisitionOrder(domain_id=did, provider="backorder", status="pending_confirm",
+                             confirmed_by_human=True, cost=190,      # гейт поднят ДО фикса
+                             result={"price_id": 1, "period_id": 2})  # тариф заморожен
+        s.add(o)
+        s.commit()
+        oid = o.id
+
+    with pytest.raises(TransitionDenied):
+        acquisition.execute_confirmed_order(oid)
+
+    assert sent == []                            # провайдера НЕ звали — деньги не потрачены
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, oid)
+        assert o.status == "pending_confirm"     # НЕ 'ordering': отказ раньше claim'а
+        assert o.provider_order_id in (None, "")
+
+
+def test_execute_still_sends_clean_confirmed_order(monkeypatch):
+    """ЧТО ЛОМАЕТСЯ у чистого заказа: ничего — денежный путь обязан ехать."""
+    import app.integrations.backorder as bo
+    from app.services import acquisition
+
+    sent = []
+
+    class _Spy:
+        def find_order(self, dom):
+            return None
+        def order(self, dom, price_id=None, period_id=None):
+            sent.append(dom)
+            return {"order_id": "777"}
+    monkeypatch.setattr(bo, "BackorderClient", _Spy)
+
+    did = _add(domain="clean.ru", status="purchasing", score=0.9, wayback_checked=True)
+    with db.SessionLocal() as s:
+        o = AcquisitionOrder(domain_id=did, provider="backorder", status="pending_confirm",
+                             confirmed_by_human=True, cost=190,
+                             result={"price_id": 1, "period_id": 2})
+        s.add(o)
+        s.commit()
+        oid = o.id
+
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "ordered" and sent == ["clean.ru"]
+
+
+# --- РЕГРЕССИЯ 6: перескор ОТМЫВАЛ грязь (ранний выход воронки стирал улики) ----
+
+def _clients(**over):
+    """Клиенты воронки. По умолчанию всё чисто — тест портит ровно ту проверку, что изучает."""
+    c = {
+        "wayback": type("W", (), {"classify_history": lambda self, d: {
+            "prior_flags": {}, "wayback_checked": True, "sampled": 3, "evidence": [],
+            "first_seen": None, "age_years": None}})(),
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "aparser": type("A", (), {"whois_probe": lambda self, d: {
+            "available": True, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
+    }
+    return {**c, **over}
+
+
+def test_rescore_early_exit_does_not_erase_rkn_evidence():
+    """ПРОХОДИЛО на ce3bc36: «▶ перепроверить» ОТМЫВАЛА РКН-домен — и это была кнопка, которую
+    мы сами поставили как «честный путь назад».
+
+    Воронка выходит на T1 (whois: домен занят -> not_acquirable). РКН/блэклист/Wayback при таком
+    выходе НЕ ВЫПОЛНЯЮТСЯ — а score_domain писал их колонки безусловно, то есть клал туда None.
+    Улики исчезали, `dirty_reason` возвращал None, политика РАЗРЕШАЛА «↩ вернуть в approved» —
+    и дальше домен ехал в очередь и на ставку, ни разу не показав, что он в реестре РКН.
+    """
+    from app.services import scoring, transitions
+
+    did = _add(domain="rkn-taken.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+               lane="free", referring_domains=300, wayback_checked=True,
+               prior_flags={}, score=0.0)
+    taken = type("A", (), {"whois_probe": lambda self, d: {   # занят -> ранний выход на T1
+        "available": False, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})()
+    out = scoring.score_domain(did, clients=_clients(aparser=taken))
+
+    assert out["reject_reason"] == "not_acquirable"       # вердикт этого прогона — про занятость
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.rkn_listed is True                       # улику НЕ СТЁРЛИ: РКН никто не спрашивал
+        assert transitions.dirty_reason(d) == "rkn"       # домен по-прежнему грязный
+        with pytest.raises(transitions.TransitionDenied):
+            transitions.check(d, "approved")              # ...и в оборот не возвращается
+
+
+def test_rescore_t0_exit_does_not_erase_history_evidence():
+    """Тот же корень с другого входа: поднял min_rd в /settings -> перескор -> low_rd на T0.
+
+    T0 не зовёт вообще ничего. Грязная ИСТОРИЯ (prior_flags) и блэклист обязаны пережить это —
+    иначе «ослабь порог обратно» возвращало бы домен уже отмытым.
+    """
+    from app.services import scoring, transitions
+    from app.services.settings import update_settings
+
+    did = _add(domain="casino-lowrd.ru", status="rejected", reject_reason="history_dirty",
+               prior_flags={"casino": True}, wayback_checked=True, blacklisted=True,
+               lane="bid", referring_domains=5, score=0.0,
+               # снимки, по которым вынесен вердикт: они тоже не должны исчезнуть — иначе
+               # инбокс пишет «история грязная — смотри снимки», а смотреть нечего
+               score_breakdown={"history_evidence": [{"url": "casino-lowrd.ru", "when": "2015"}],
+                                "errors": []})
+    update_settings(min_referring_domains=100)            # порог подняли — домен не проходит T0
+
+    out = scoring.score_domain(did, clients=_clients())
+    assert out["reject_reason"] == "low_rd"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.prior_flags == {"casino": True} and d.blacklisted is True   # обе улики целы
+        assert scoring.history_verdict(d) == "dirty"      # история — по-прежнему подтверждённая грязь
+        assert transitions.dirty_reason(d) is not None    # (называет 'blacklist' — он проверяется раньше)
+        assert d.score_breakdown["history_evidence"] == [{"url": "casino-lowrd.ru", "when": "2015"}]
+
+
+def test_rescore_that_actually_ran_the_checks_still_rehabilitates():
+    """ЧТО ЛОМАЕТСЯ от запрета стирать улики: НИЧЕГО у настоящей реабилитации.
+
+    Проверка, которая ОТРАБОТАЛА и сказала «чист», кладёт False — и домен выходит из грязи.
+    Правило звучит «не стирай непроверенное», а не «не верь проверкам».
+    """
+    from app.services import scoring, transitions
+
+    did = _add(domain="unblocked2.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+               lane="bid", referring_domains=300)
+    out = scoring.score_domain(did, clients=_clients())
+    assert out["reject_reason"] is None
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.rkn_listed is False and transitions.dirty_reason(d) is None

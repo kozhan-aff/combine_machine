@@ -36,6 +36,13 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         d = db.get(Domain, domain_id)
         if d is None:
             raise ValueError(f"domain {domain_id} not found")
+        # ГРЯЗЬ — ПЕРВЫМ ДЕЛОМ, до поиска существующей заявки. Легаси-домен (грязный, попавший
+        # в очередь ДО фикса) уже держит открытый заказ — и ранний возврат `existing.id` отдавал
+        # бы его вызывающему как УСПЕХ: стадия `queue` автопилота честно считала такой домен
+        # заявленным (done += 1), а оператор не слышал ни слова о том, что в очереди выкупа
+        # лежит РКН-домен (ревью Задачи 6, Important 4). Денег это не тратит — но тихим успехом
+        # быть не должно.
+        transitions.refuse_dirty(d)
         existing = db.execute(
             select(AcquisitionOrder).where(
                 AcquisitionOrder.domain_id == domain_id,
@@ -44,9 +51,10 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         if existing:
             return existing.id                      # уже в очереди — не дублируем
         # approved -> purchasing через политику (services/transitions): она проверяет и ИСХОДНЫЙ
-        # статус (как раньше — только approved), и ГРЯЗЬ. Второе новое: отклонённый за РКН домен
-        # доезжал сюда отмытым кнопкой «↩ вернуть в approved», которая reject_reason не стирала
-        # (аудит F9). Такие домены на живой базе уже есть — вход в очередь для них закрыт.
+        # статус (как раньше — только approved), и ГРЯЗЬ (ещё раз — set_status зовёт тот же
+        # refuse_dirty). Отклонённый за РКН домен доезжал сюда отмытым кнопкой «↩ вернуть в
+        # approved», которая reject_reason не стирала (аудит F9). Такие домены на живой базе
+        # уже есть — вход в очередь для них закрыт.
         # ДО db.add: отказ политики не должен оставлять за собой заявку-призрак в сессии.
         transitions.set_status(d, "purchasing")      # видно в воронке: домен в очереди выкупа
         order = AcquisitionOrder(domain_id=domain_id, provider=provider,
@@ -134,6 +142,7 @@ def execute_confirmed_order(order_id: int) -> dict:
     from sqlalchemy import update
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
+    from app.services import transitions
 
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
@@ -142,6 +151,20 @@ def execute_confirmed_order(order_id: int) -> dict:
         if not o.confirmed_by_human:                 # ЖЁСТКИЙ ГЕЙТ — деньги не на автопилоте
             return {"order_id": order_id, "status": o.status,
                     "error": "gate: заказ не подтверждён человеком (confirmed_by_human=False)"}
+
+        # ЗДЕСЬ И ЕСТЬ КАССА — и грязь про неё не спрашивали вовсе (ревью Задачи 6, Critical 1).
+        # Заказ на грязный домен, подтверждённый ДО фикса (confirmed_by_human уже True), уходил
+        # провайдеру и списывал деньги: гарды стояли на create_order/confirm_order, то есть на
+        # входе и на гейте, а на САМОЙ ОТПРАВКЕ — ни одного. Единственной защитой было условие
+        # в шаблоне queue.html, а прямой POST /queue/{id}/execute (старая вкладка, повтор после
+        # failed) шёл мимо него.
+        #
+        # ДО атомарного claim'а: иначе заказ уже переведён в 'ordering', а отправка отменена —
+        # заявка залипает в транзиентном статусе, из которого её не снять (cancel_order берёт
+        # только pending_confirm/failed).
+        d = db.get(Domain, o.domain_id)
+        if d is not None:
+            transitions.refuse_dirty(d)              # TransitionDenied -> роут покажет причину
 
         # Атомарный claim: из двух параллельных кликов (sync-роуты в threadpool) в 'ordering'
         # переведёт РОВНО один — второй увидит rowcount 0 и не пошлёт второй живой заказ.
@@ -161,7 +184,6 @@ def execute_confirmed_order(order_id: int) -> dict:
                     "note": "заказ уже обрабатывается или обработан"}
         db.refresh(o)
 
-        d = db.get(Domain, o.domain_id)
         # Несём через ВСЕ ветки исхода:
         #  price_id/period_id — тариф, замороженный человеком на confirm (иначе «↻ повторить»
         #    после отказа теряет ставку и требует переподтверждения на ровном месте);

@@ -142,7 +142,14 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
            СЧИТАННЫЙ в Python (panel.py) тем же кодом, что решает _bulk_candidates — строка НЕ
            реконструирует условие из blind/hist сама, иначе два места могут разъехаться молча
            (аудит F2 поймал именно такое расхождение). #}
-        {% if blind %}
+        {% if d.id in dirty_by_id %}
+          {# ГРЯЗЬ ГЛАВНЕЕ ВСЕГО ОСТАЛЬНОГО в этой строке: РКН-домен с чистым Wayback иначе нёс бы
+             подпись «история не подтверждена» — правдивую и совершенно не о том. Причина названа
+             (реестр РКН / блэклист / история / флаг фида), а «✓ одобрить» ниже снята. #}
+          <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
+            <span class="hint" style="color:var(--bad)"
+                  title="объективный признак (реестр РКН, блэклист, грязная история или флаг источника) — не наш порог, ослабить его на /settings нечем. Портфель держится на чистой истории: такой домен не одобряем и не покупаем.">выкуп запрещён — грязь</span></div>
+        {% elif blind %}
           <div class="blind" title="машина не смогла проверить этот сигнал — одобрять вслепую нельзя">
             ⚠ {{ blind }}
             <form class="inline" method="post" action="/domains/{{ d.id }}/score">
@@ -173,9 +180,18 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% endif %}
       </td>
       <td style="width:220px; text-align:right">
-        <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-          <input type="hidden" name="status" value="approved">
-          <button class="btn-sm btn-ok" title="домен годен — пойдёт в очередь выкупа">✓ одобрить</button></form>
+        {% if d.id in dirty_by_id %}
+          {# «✓ одобрить» здесь вела бы в гарантированный отказ политики (services/transitions):
+             approved — это статус НА ПУТИ К ДЕНЬГАМ, и грязь туда не пускают. Тот же запрет, что
+             у витрины выкупа и реестра, — правило одно, экраны разные. Честный путь назад —
+             перепроверка: реабилитацию даёт машина по новым уликам, а не кнопка. #}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+        {% else %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm btn-ok" title="домен годен — пойдёт в очередь выкупа">✓ одобрить</button></form>
+        {% endif %}
         <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
           <input type="hidden" name="status" value="rejected">
           <button class="btn-sm btn-bad" title="домен не годится — убрать из воронки">✗ отклонить</button></form>

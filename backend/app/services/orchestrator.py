@@ -73,7 +73,9 @@ def last_finished_sweep_at() -> datetime | None:
 
 
 # --- стадии: каждая = запрос кандидатов + вызов существующего сервиса + учёт ---------
-# handler(cap) -> (сделано:int, ошибки:list[str]). cap=None только у discovery.
+# handler(cap) -> (сделано:int, ошибки:list[str][, доп.счётчики:dict]). cap=None только у
+# discovery. Третий элемент опционален: стадия вправе рассказать оператору не только «сделано
+# N», но и «пропущено M и вот почему» — это не ошибка и не должно ею притворяться.
 
 def _stage_discovery(cap):
     from app.services import discovery
@@ -86,23 +88,46 @@ def _stage_score(cap):
 
 
 def _stage_queue(cap):
-    """approved-домены (у них по определению нет открытого заказа) -> create_order, до капа."""
+    """approved-домены (у них по определению нет открытого заказа) -> create_order, до капа.
+
+    ГРЯЗЬ ОТСЕИВАЕТСЯ В ВЫБОРКЕ, ДО КАПА, — и это не косметика (ревью Задачи 6, Critical 3).
+    Легаси-домены (отмытые кнопкой «↩ вернуть в approved» до фикса F9) из `approved` больше НЕ
+    УХОДЯТ: политика их отвергает, статус им никто не двигает. Они сидят в голове id-порядка
+    вечно — и `LIMIT cap` по сырому `approved` выедали ВЕСЬ кап каждый свип: 10 грязных при
+    cap_queue=10, и чистый домен не попадал в очередь НИКОГДА. Автопилотный выкуп вставал
+    намертво, а не «шумел».
+
+    Число отсеянных возвращаем ОТДЕЛЬНЫМ счётчиком: «пропустили N грязных» — это факт о
+    состоянии базы, который оператор обязан видеть, а не тишина и не строка в ошибках (ошибка
+    у стадии значит «сломалось», а здесь сработала защита).
+    """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services import acquisition
+    from app.services.transitions import dirty_reason
 
-    done, errs = 0, []
+    done, errs, dirty = 0, [], 0
     with SessionLocal() as db:
-        ids = [r[0] for r in db.execute(
-            select(Domain.id).where(Domain.status == "approved").order_by(Domain.id).limit(cap)).all()]
+        # без limit(cap) в SQL: кап применяется к ЧИСТЫМ кандидатам, иначе грязь его и съест.
+        # `approved` — курируемый набор (десятки строк), полная выборка здесь дешёвая.
+        rows = db.execute(
+            select(Domain).where(Domain.status == "approved").order_by(Domain.id)).scalars().all()
+        ids = []
+        for d in rows:
+            if dirty_reason(d) is not None:
+                dirty += 1
+            elif len(ids) < cap:
+                ids.append(d.id)
     for did in ids:
         try:
             acquisition.create_order(did)      # деньги НЕ тратит — только заявка pending_confirm
             done += 1
         except Exception as e:  # noqa: BLE001
+            # сюда попадает и отказ политики (домен стал грязным между выборкой и заявкой) —
+            # стадию это не роняет: остальные домены свип обработает.
             errs.append(f"domain#{did}: {type(e).__name__}: {e}")
-    return done, errs
+    return done, errs, {"queue_dirty": dirty} if dirty else {}
 
 
 def _stage_provision(cap):
@@ -222,6 +247,10 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
             "provision": "провижн", "generate": "контент", "publish": "публикация",
             "check_index": "индексация"}
 
+# подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
+# стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной.
+COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена"}
+
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     """Прогнать включённые авто-стадии до гейтов. respect_master=False у ручного запуска.
@@ -257,8 +286,12 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                             current=STAGE_RU[key])
                 cap = cfg[cap_attr] if cap_attr else None
                 try:
-                    n, errs = handler(cap)
+                    # третий элемент — доп.счётчики стадии (см. контракт handler выше);
+                    # у стадий без него распаковка даёт пустой хвост.
+                    n, errs, *extra = handler(cap)
                     counts[key] = n
+                    if extra:
+                        counts.update(extra[0])
                     errors += [f"{key}: {e}" for e in errs]
                 except jobs.AlreadyRunning:
                     # ЗАМОК СРАБОТАЛ ШТАТНО, а не сломался: оператор прямо сейчас гоняет свой

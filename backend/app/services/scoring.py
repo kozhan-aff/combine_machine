@@ -566,34 +566,51 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                 result = {**result, "status": _decide(result["score"], sig,
                                                       st["approve_at"], st["manual_review_at"])}
 
-        d.lane = sig.get("lane") or d.lane
-        d.whois_created = sig.get("whois_created")
-        # факт сверки приобретаемости: скоринг уже сходил в whois — перепроверке незачем
-        # повторять это следующим же кликом
-        d.acquirability_checked_at = sig.get("acquirability_checked_at") or d.acquirability_checked_at
-        d.prior_flags = sig.get("prior_flags")
-        d.wayback_checked = bool(sig.get("wayback_checked"))
-        d.first_seen = sig.get("first_seen")
-        d.age_years = sig.get("age_years")
-        d.rkn_listed = sig.get("rkn_listed")
-        d.blacklisted = sig.get("blacklisted")
-        d.indexed_echo = sig.get("indexed_echo")
-        if sig.get("dr") is not None:
-            d.dr = sig["dr"]
-        if sig.get("referring_domains") is not None:
-            d.referring_domains = sig["referring_domains"]
+        # СИГНАЛЫ ПИШЕМ ТОЛЬКО ИЗ ПРОВЕРОК, КОТОРЫЕ В ЭТОМ ПРОГОНЕ РЕАЛЬНО ОТРАБОТАЛИ.
+        #
+        # Раньше здесь стоял безусловный `d.X = sig.get("X")` — и он ОТМЫВАЛ ГРЯЗЬ (ревью
+        # Задачи 6, Critical 2). Воронка выходит рано: T0 (low_rd/feed_flag) не зовёт вообще
+        # ничего, T1 (too_young/not_acquirable) — только whois. РКН, блэклист и Wayback при
+        # таком выходе НЕ ВЫПОЛНЯЛИСЬ, sig о них молчит — и в колонки ложился None. Домен,
+        # отклонённый за РКН, после «▶ перепроверить» терял ВСЕ улики (rkn_listed=None,
+        # prior_flags=None) и снова становился чистым для политики (services/transitions).
+        # То есть кнопка реабилитации работала не «по новым уликам», а ПО ИХ ОТСУТСТВИЮ:
+        # достаточно было поднять min_rd на /settings, чтобы перескор стёр память о РКН.
+        #
+        # Правило ОБЩЕЕ, а не три частных случая (dr/age_years из F25 — тот же корень):
+        # ОТСУТСТВИЕ значения — это «не проверяли», и оно не имеет права затирать то, что
+        # кто-то проверил. None трактуем так же: «blacklist ответил "недоступен"» не снимает
+        # вчерашнее «в блэклисте». Проверка, которая ОТРАБОТАЛА и сказала «чист», кладёт False —
+        # и реабилитирует домен, как и задумано (см. test_rescoring_is_the_honest_way_back).
+        for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
+                    "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
+                    "indexed_echo", "dr", "referring_domains"):
+            v = sig.get(col)
+            if v is not None:
+                setattr(d, col, v)
         # ЛЕГАСИ-КОЛОНКА. Имя врёт: это «не отклонён», а не «чистая история» — по нему нельзя
         # судить о прошлом домена (JSON-двойник так и делал, аудит F2). Чистоту истории
         # спрашивать ТОЛЬКО у history_verdict(). Колонка доживает до ближайшей миграции.
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
+        prev = d.score_breakdown or {}
+
+        def _kept(key):
+            """То же правило для УЛИК: снимок, который этот прогон не смотрел, не исчезает.
+
+            Иначе `prior_flags` (мы его только что сохранили) остался бы вердиктом без единого
+            подтверждения: инбокс пишет «история грязная — смотри снимки», а смотреть нечего.
+            """
+            v = sig.get(key)
+            return v if v is not None else prev.get(key)
+
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
-                             "ahrefs_backlinks": sig.get("ahrefs_backlinks"),
-                             "history_evidence": sig.get("history_evidence", []),
-                             "sampled": sig.get("sampled"),
+                             "ahrefs_backlinks": _kept("ahrefs_backlinks"),
+                             "history_evidence": _kept("history_evidence") or [],
+                             "sampled": _kept("sampled"),
                              # 'whois' | 'wayback' | None — по нему blind_reason выбирает,
                              # ЧТО именно осталось непроверенным (возраст или только занятость)
-                             "age_source": sig.get("age_source")}
+                             "age_source": _kept("age_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         db.commit()
