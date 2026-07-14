@@ -209,3 +209,70 @@ def test_site_card_shows_unknown_as_its_own_state(monkeypatch, client):
     # ни «в индексе», ни «не в индексе» — оба вердикта в таблице печатаются сразу после </span>
     assert "</span>в индексе" not in html and "</span>не в индексе" not in html
     assert "не проверялось" not in html      # проверка БЫЛА, просто ничего не выяснила
+
+
+# ── (6) .рф: хосты сравниваются в ОДНОЙ форме, иначе вечное `not_indexed` ──────
+def test_idn_site_is_seen_as_indexed_across_punycode_and_cyrillic(monkeypatch):
+    """В БД домен лежит punycode (`discovery.canonical_domain`), а .рф-сайт выдача показывает
+    кириллицей. Сырое сравнение хостов-строк дало бы такому сайту ВЕЧНОЕ `not_indexed` — ту же
+    ложь «не нашли = нет в индексе», ради которой писалась вся задача, только с другой стороны
+    (M2 по этой же причине сверяет заказы через norm_domain)."""
+    from app.services.publish import check_index
+
+    sid, pid = _site_with_page(domain="xn--80aswg.xn--p1ai", url_path="/setup")   # сайт.рф
+    _serp(monkeypatch, [{"url": "https://сайт.рф/setup", "title": "Настройка"}])
+
+    assert check_index(sid)["pages"]["/setup"] == "indexed"
+    assert _status(pid) == "indexed"
+
+
+def test_idn_site_not_indexed_stays_not_indexed(monkeypatch):
+    """Нормализация не превращается в «всё подходит»: чужая кириллическая выдача и чужой путь
+    на .рф-сайте — по-прежнему `not_indexed`."""
+    from app.services.publish import check_index
+
+    sid, _ = _site_with_page(domain="xn--80aswg.xn--p1ai", url_path="/setup")     # сайт.рф
+    _serp(monkeypatch, [{"url": "https://другой.рф/setup"},          # чужой сайт
+                        {"url": "https://сайт.рф/reviews"}])         # наш сайт, чужая страница
+    assert check_index(sid)["pages"]["/setup"] == "not_indexed"
+
+
+def test_garbage_host_in_serp_does_not_sink_the_check(monkeypatch):
+    """IDNA падает на кривом хосте (пустая метка, метка >63 символов). URL в выдаче — ЧУЖОЙ
+    текст: одна мусорная строка не имеет права уронить проверку и оставить сайт без вердикта."""
+    from app.services.publish import check_index
+
+    sid, _ = _site_with_page(domain="mydomain.ru", url_path="/setup")
+    _serp(monkeypatch, [{"url": "https://ex..ru/setup"},             # пустая метка
+                        {"url": "https://" + "a" * 70 + ".ru/setup"},  # метка длиннее 63
+                        {"url": "не url вовсе"},
+                        {"url": None},
+                        {"url": "https://mydomain.ru/setup"}])       # а вот и наша страница
+    assert check_index(sid)["pages"]["/setup"] == "indexed"
+
+
+# ── (7) сырой `unknown` не доходит до оператора ────────────────────────────────
+def test_check_index_flash_says_unknown_out_loud(monkeypatch, client):
+    """Флеш ручной кнопки — по-русски и со смыслом: «unknown» оператор прочтёт как «нет»,
+    а это ровно то состояние, чей смысл обязан быть произнесён вслух."""
+    from urllib.parse import unquote
+
+    sid, _ = _site_with_page(domain="flash.ru", url_path="/setup")
+    _serp(monkeypatch, [], dead=[["yandex", "CAPTCHA"]])
+
+    r = client.post(f"/sites/{sid}/check-index", follow_redirects=False)
+    assert r.status_code == 303
+    flash = unquote(r.headers["location"])
+    assert "не знаю (движки молчат)" in flash
+    assert "unknown" not in flash
+
+
+# ── (8) percent-encoding: %3F/%23 — буква сегмента, а не хвост URL ─────────────
+def test_encoded_question_mark_is_not_treated_as_a_query():
+    """Порядок операций в _norm_path: `?`/`#` режутся ДО unquote. Наоборот — `%3F` в имени
+    сегмента становился разделителем и путь обрубался по букве, хвостом не бывшей."""
+    from app.services.publish import _norm_path
+
+    assert _norm_path("/what%3Fnow") == "/what?now"      # раньше -> "/what"
+    assert _norm_path("/a%23b") == "/a#b"                # раньше -> "/a"
+    assert _norm_path("/setup?utm=1#top") == "/setup"    # настоящий хвост режется как и раньше

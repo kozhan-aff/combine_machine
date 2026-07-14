@@ -149,11 +149,12 @@
       <td>{{ p.title or '—' }}</td>
       <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}"
             title="{{ {'draft':'AI-черновик — публикация его не возьмёт','edited':'вычитано человеком — готово к публикации','published':'опубликовано на сайте'}.get(p.status, p.status) }}">{{ p.status|status_ru }}</span></td>
-      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>в индексе
-          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>не в индексе
+      {# подписи вердиктов — из labels.INDEX_RU (тот же словарь, что во флеше кнопки проверки) #}
+      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>{{ p.index_status|index_ru }}
+          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>{{ p.index_status|index_ru }}
           {% elif p.index_checked_at %}<span class="led led-warn"
                title="выдача пуста, но движки SearXNG не ответили (CAPTCHA/лимит) — спросить не удалось. Это не «нет в индексе»"
-               ></span>не знаю <span class="hint">движки молчат</span>
+               ></span>{{ p.index_status|index_ru }}
           {% else %}<span class="led led-off"></span><span class="hint">не проверялось</span>{% endif %}</td>
       <td><a class="btn btn-sm {{ 'btn-acc' if p.status == 'draft' }}" href="/pages/{{ p.id }}"
              title="{{ 'открыть редактор: вычитать черновик и сохранить как edited' if p.status == 'draft' else 'открыть страницу в редакторе' }}">

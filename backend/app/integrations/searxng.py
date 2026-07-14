@@ -5,15 +5,26 @@ See docs/api/searxng.md. Used for M1 indexed_echo (site:) and M4 competitor SERP
 from urllib.parse import urlparse
 
 from app.config import settings
+from app.integrations.backorder import norm_domain
 from app.integrations.base import BaseClient
 
 
 def host_matches(url: str | None, domain: str) -> bool:
     """True iff url's host IS domain or a subdomain of it. Substring match ('domain in url')
-    false-positives on hostile URLs like https://mydomain.ru.evil.com/, so compare hostnames."""
-    host = (urlparse(url or "").hostname or "").lower()
-    domain = domain.lower()
-    return host == domain or host.endswith("." + domain)
+    false-positives on hostile URLs like https://mydomain.ru.evil.com/, so compare hostnames.
+
+    Хосты сравниваются в ОДНОЙ форме, а не как сырые строки. В БД домен лежит punycode
+    (`discovery.canonical_domain`), а .рф-сайт выдача показывает кириллицей: сырое сравнение
+    дало бы такому сайту ВЕЧНОЕ `not_indexed` — ту самую ложь «не нашли = нет в индексе», от
+    которой лечится M5 (F15), только зайдя с другой стороны. Нормализатор — тот же, каким M2
+    сверяет заказы (`backorder.norm_domain`: фид отдаёт .РФ кириллицей, billmgr — punycode);
+    одна точка правды на punycode, а не третья копия идиомы. На мусорном хосте из ЧУЖОЙ выдачи
+    (`ex..ru`, метка >63 симв.) IDNA падает — norm_domain это ловит и возвращает строку как
+    есть: кривая строка в выдаче не имеет права ронять проверку индексации всего сайта.
+    """
+    host = norm_domain(urlparse(url or "").hostname or "")
+    domain = norm_domain(domain)
+    return bool(domain) and (host == domain or host.endswith("." + domain))
 
 
 class SearxngClient(BaseClient):

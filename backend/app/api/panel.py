@@ -27,10 +27,12 @@ from app.models.site import Site, Page
 from app.services import diag_cache
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
-from app.services.labels import status_ru as _status_ru, reject_ru as _reject_ru, lane_ru as _lane_ru
+from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
+                                 lane_ru as _lane_ru, index_ru as _index_ru)
 templates.env.filters["status_ru"] = _status_ru
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
+templates.env.filters["index_ru"] = _index_ru
 templates.env.globals["diag_alert"] = diag_cache.alert   # баннер в base.html читает кэш
 router = APIRouter()
 
@@ -846,7 +848,8 @@ def check_index_action(site_id: int):
         pages = r.get("pages", {})
         if not pages:
             return _back(f"/sites/{site_id}", msg="Нет опубликованных страниц для проверки.")
-        s = ", ".join(f"{k}: {v}" for k, v in pages.items())
+        # Вердикт — через labels.index_ru: сырое `unknown` во флеше оператор прочтёт как «нет».
+        s = ", ".join(f"{k}: {_index_ru(v)}" for k, v in pages.items())
         return _back(f"/sites/{site_id}", msg=f"Индексация — {s}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"индексация: {e}")
