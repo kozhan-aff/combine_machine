@@ -20,11 +20,11 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_session
+from app.db import get_session, SessionLocal
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
-from app.services import diag_cache
+from app.services import cf_sync, diag_cache
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
@@ -40,7 +40,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -561,6 +561,25 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     from app.services import jobs, scoring
     ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
     return _back_here(request, err=None if ok else "Перепроверка уже идёт")
+
+
+@router.post("/settings/cloudflare/sync")
+def cloudflare_sync(request: Request):
+    """Ручной запуск read-only Cloudflare sync (P0 — НИ ОДНОЙ CF-мутации, только наблюдение
+    внешней правды в mirror-таблицы). CF-write-гейт первой строкой (задача 6): без настроенных
+    PANEL_USER/PANEL_PASS плоская LAN-панель пускала бы к Cloudflare-операциям кого угодно, кто
+    знает IP — до чтения формы, до spawn."""
+    _require_cf_write(request)
+    from app.services import jobs
+
+    def _job():
+        with jobs.track("cf_sync", trigger="manual",
+                        stages=[{"key": "verify", "label": "Проверка токенов", "state": "pending"},
+                                {"key": "zones", "label": "Зоны и записи", "state": "pending"}]) as rid:
+            with SessionLocal() as db:
+                cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw))
+    ok = jobs.spawn("cf_sync", _job)
+    return _back_here(request, err=None if ok else "Синхронизация уже идёт")
 
 
 @router.post("/run/{job}/cancel")

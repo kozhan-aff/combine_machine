@@ -435,7 +435,8 @@
 // умер (контейнер убили) — показываем «оборвалась», НЕ рисуем живой бар.
 // Данные приходят из фида (имена доменов) — только textContent, никогда innerHTML.
 const JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки',
-                recheck:'Перепроверка занятости', sweep:'Свип автопилота'};
+                recheck:'Перепроверка занятости', sweep:'Свип автопилота',
+                cf_sync:'Синхронизация Cloudflare'};
 function jobCard(j){
   const dead = j.status==='failed' || j.stale;       // stale = процесс убит, бар врал бы «идёт»
   const el = document.createElement('div');
