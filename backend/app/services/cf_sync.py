@@ -122,7 +122,7 @@ def sync_connection(db, conn: CloudflareConnection, *, run=None) -> None:
         if acc_row is None:
             acc_row = CloudflareAccount(cf_account_id=acc_hex)
             db.add(acc_row)
-        acc_row.name = a.get("name", acc_row.name)
+        acc_row.name = a.get("name") or acc_row.name
         acc_row.last_synced_at = _now()
         ca = (db.query(CloudflareConnectionAccount)
                 .filter_by(connection_id=conn.id, cloudflare_account_id=acc_hex).one_or_none())

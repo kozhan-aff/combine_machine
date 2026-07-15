@@ -218,6 +218,10 @@ def upgrade() -> None:
                     "cloudflare_certificate_pack_mirrors", ["cf_pack_id"], unique=True)
     op.add_column("sites", sa.Column("cf_zone_mirror_id", sa.Integer(), nullable=True))
     op.add_column("sites", sa.Column("cloudflare_account_id", sa.String(length=64), nullable=True))
+    # FK ставим тем же именем, что даёт SQLAlchemy модели (site.py: ForeignKey), иначе прод-схема
+    # молча расходится с ORM и следующий autogenerate предложит его добавить (ревью ветки, minor).
+    op.create_foreign_key("fk_sites_cf_zone_mirror_id", "sites",
+                          "cloudflare_zone_mirrors", ["cf_zone_mirror_id"], ["id"])
     # Дедуп перед UNIQUE(domain_id): гонка panel/worker могла создать два Site на один Domain.
     # Keeper = сайт с наибольшим числом страниц (тай-брейк — меньший id). Страницы проигравших
     # переносим на keeper, при коллизии url_path (uq_page_per_path из 0014) — коллизии удаляем.
@@ -323,6 +327,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("uq_site_per_domain", table_name="sites")
     op.drop_column("sites", "cloudflare_account_id")
+    op.drop_constraint("fk_sites_cf_zone_mirror_id", "sites", type_="foreignkey")
     op.drop_column("sites", "cf_zone_mirror_id")
     # drop в обратном порядке; drop_table снимает и свои индексы (кроме уже снятого sites-индекса выше)
     op.drop_table("cloudflare_certificate_pack_mirrors")
