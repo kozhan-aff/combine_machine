@@ -539,6 +539,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                  ahrefs_budget=None, run: int | None = None) -> dict:
     """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита).
     job — имя прогона в реестре (jobs.py): если задан, _funnel репортит текущую стадию."""
+    from datetime import datetime, timezone
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
@@ -578,6 +579,16 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
         else:
             sig.setdefault("referring_domains", d.referring_domains)
+            # F25: тот же приём для DR. Ahrefs зовётся ТОЛЬКО когда фид не дал RD (см. _funnel,
+            # T3b) — при рескоре уже приобретённого RD-домена sig["dr"] никогда не наполняется,
+            # хотя d.dr в БД уже хранит проверенное значение с прошлого прогона. Без setdefault
+            # compute_score считал authority от 0.0, будто Ahrefs вообще не спрашивали — домен с
+            # authority=1.0 на первом скоринге терял вес 0.12 на каждом следующем рескоре.
+            # float(): `dr` — Numeric, ORM отдаёт его как Decimal при чтении СВЕЖЕЙ строки из БД
+            # (`d = db.get(...)` в начале score_domain — новая сессия, не то же значение, что
+            # только что вернул Ahrefs) — Decimal/float в compute_score роняет TypeError (тот же
+            # приём, что уже применяет api/domains.py при отдаче `dr` наружу).
+            sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
             result = compute_score(sig, st.get("weights"))     # веса — рантайм, с /settings
             if "hard_reject" not in result["breakdown"]:
                 # Finding 1 (2026-07 review): re-decide with the RUNTIME /settings thresholds
@@ -634,6 +645,11 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                              "age_source": _kept("age_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
+        # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку до решения — до этой колонки узнать было
+        # неоткуда (discovered_at — это discovery, не скоринг; score_breakdown молчит про время).
+        # Ставим только здесь: unresolved-возврат выше (whois не разобрал/бюджет исчерпан)
+        # оставляет домен discovered — воронка НЕ дошла до решения, значит и не "оценила" его.
+        d.scored_at = datetime.now(timezone.utc)
         db.commit()
         return {"domain": d.domain, **result, "reject_reason": d.reject_reason,
                 "errors": sig.get("errors", [])}

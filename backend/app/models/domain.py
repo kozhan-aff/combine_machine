@@ -75,6 +75,11 @@ class Domain(Base):
     score: Mapped[float | None] = mapped_column(Numeric)
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
     notes: Mapped[str | None] = mapped_column(Text)
+    # когда воронка ПОСЛЕДНИЙ РАЗ довела домен до решения (approved/scored/rejected) — F24.
+    # NULL = ни разу не скорился (или скоринг всегда выходил unresolved: whois не отвечал / бюджет
+    # исчерпан — тогда домен остаётся discovered, и это НЕ решение). Пишет только score_domain,
+    # в самом конце, рядом с db.commit() — см. acquirability_checked_at выше за тот же приём.
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # funnel bookkeeping
     reject_reason: Mapped[str | None] = mapped_column(String(32))    # low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|low_score|not_acquirable
