@@ -940,16 +940,27 @@ def check_index_action(site_id: int):
 # ponytail: тянем по HTTPS с fine-grained PAT — не монтируем SSH-ключ в контейнер.
 # Требует volume `.:/repo` + git в образе (см. docker-compose/Dockerfile).
 def _pull_banner(r: dict):
-    """Единый баннер из dict deploy.git_pull()/git_force_pull()."""
-    if not r.get("ok"):
-        return _back("/diag", err=r.get("error", "обновление не удалось"))
-    warn = f" ⚠ миграции: {r['alembic_warn']}" if r.get("alembic_warn") else ""
+    """Единый баннер из dict deploy.git_pull()/git_force_pull().
+
+    r["ok"] честно отражает и git, и алембик (F22/F23/F29): упавшая миграция — красный
+    err=, НЕ зелёный msg=, даже если код при этом обновился (git pull сам прошёл)."""
     rebuild = " · нужна пересборка образа: docker compose up -d --build" if r.get("needs_rebuild") else ""
+    if not r.get("ok"):
+        if "old" not in r:
+            # git pull/fetch/checkout не прошёл сам по себе — до алембика не дошли
+            return _back("/diag", err=r.get("error", "обновление не удалось"))
+        # git отработал (код обновлён или уже был свежим), но МИГРАЦИЯ ПРОВАЛИЛАСЬ —
+        # код и схема БД разъехались, это не успешный деплой.
+        subj = r.get("subject", "")
+        transition = f"{r['old']}→{r['new']}" if r["old"] != r["new"] else r["new"]
+        warn = r.get("alembic_warn") or "код обновлён, миграция не выполнена"
+        return _back("/diag", err=f"Код обновлён ({transition} «{subj}»), но МИГРАЦИЯ "
+                                   f"ПРОВАЛИЛАСЬ: {warn}{rebuild}")
     verb = "Принудительно обновлено" if r.get("forced") else "Обновлено"
     subj = r.get("subject", "")
     if r["old"] == r["new"]:
-        return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{warn}{rebuild}")
-    return _back("/diag", msg=f"{verb}: {r['old']}→{r['new']} «{subj}»{warn}{rebuild}")
+        return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{rebuild}")
+    return _back("/diag", msg=f"{verb}: {r['old']}→{r['new']} «{subj}»{rebuild}")
 
 
 @router.post("/admin/pull")

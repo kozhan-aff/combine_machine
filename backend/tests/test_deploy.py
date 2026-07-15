@@ -94,10 +94,12 @@ def test_pull_detects_rebuild(creds, monkeypatch):
     assert deploy.git_pull()["needs_rebuild"] is True
 
 
-def test_pull_alembic_warn_nonfatal(creds, monkeypatch):
+def test_pull_alembic_failure_is_not_ok(creds, monkeypatch):
+    """F22/F23: упавшая миграция -> ok=False (раньше пряталась в alembic_warn, а ok молча
+    оставался True — деплой с провалившейся миграцией красился зелёным, см. audit 2026-07-14)."""
     _patch(monkeypatch, Router(pull_rc=0, alembic_rc=1, alembic_err="migration boom"))
     out = deploy.git_pull()
-    assert out["ok"] is True and "migration boom" in out["alembic_warn"]
+    assert out["ok"] is False and "migration boom" in out["alembic_warn"]
 
 
 def test_force_pull_no_git_clean(creds, monkeypatch):

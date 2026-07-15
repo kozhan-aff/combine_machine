@@ -67,8 +67,11 @@ docker compose run --rm backend pytest backend/tests/test_name.py::test_case -v
 # Lint (pyflakes on app & tests)
 .venv/bin/python -m pyflakes backend/app backend/tests
 
-# Smoke test (check all integrations)
-docker compose run --rm backend python backend/scripts/smoke.py
+# Smoke test (check all integrations) — открой /diag на запущенной панели (Basic-auth из
+# .env), пингует cloudflare/aapanel/searxng/llm/wayback/rkn/backorder/aparser/blacklist/db
+# по-настоящему (не skip). Отдельного CLI-скрипта нет — scripts/smoke.py удалён
+# (аудит 2026-07-14, F29): всегда возвращал exit-код 0 и врал "не реализовано" про
+# cloudflare/aapanel, которые /diag уже реально пингует.
 ```
 
 **Note:** Tests are hermetic (autouse-fixture blocks network). Live box testing on `192.168.1.77`.
