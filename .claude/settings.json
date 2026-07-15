@@ -7,7 +7,6 @@
       "Bash(alembic:*)",
       "Bash(pytest:*)",
       "Bash(ruff:*)",
-      "Bash(python scripts/smoke.py:*)",
       "Bash(python -m app:*)",
       "Bash(uvicorn:*)",
       "WebFetch",
