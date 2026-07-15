@@ -4,14 +4,14 @@
 поэтому панель его не видела вовсе — «машина работает» было непроверяемо на глаз. Теперь
 и панель, и воркер пишут в одну таблицу job_run.
 
-КОНТРАКТ:
-  track(name, trigger=, stages=)  контекст-менеджер вокруг работы; сам закрывает строку
-                                  (done / failed / cancelled). Занято -> AlreadyRunning.
+КОНТРАКТ (задача адресуется ПО ИМЕНИ снаружи и ПО run_id изнутри — см. «Лизинг» ниже):
+  track(name, trigger=, stages=)  контекст-менеджер вокруг работы; отдаёт run_id; сам закрывает
+                                  строку (done / failed / cancelled). Занято -> AlreadyRunning.
   spawn(name, target) -> bool     запустить target() в фоне (панель); False если уже идёт.
-  report(name, ...)               обновить прогресс/стадию текущего прогона; вне track — no-op.
-  cancelled(name) -> bool         сервис спрашивает между элементами; True -> поднять Cancelled.
-  request_cancel(name)            кнопка «стоп».
-  live() / last(name)             что идёт сейчас / итог последнего прогона.
+  report(run_id, ...)             обновить прогресс/стадию СВОЕГО прогона; run_id=None — no-op.
+  cancelled(run_id) -> bool       сервис спрашивает между элементами; True -> поднять Cancelled.
+  request_cancel(name)            кнопка «стоп» (оператор знает имя, не id).
+  is_running(name) / live() / last(name)   замок занят? / что идёт / итог последнего прогона.
 
 ТЕРМИНАЛЬНЫЙ КОНТРАКТ (JS-компонент держится его же):
   status == "running"    -> идёт; done/total/current/stages — прогресс;
@@ -20,14 +20,41 @@
   status == "done"       -> успех, ДАЖЕ если done == total == 0 (discovery без кандидатов).
   done/total — только отображение, не признак терминала.
 
-Замок — частичный уникальный индекс (name) WHERE status='running'. Строку, чей updated_at
-старше STALE_MIN, считаем оборванной (контейнер перезапустили).
+ЛИЗИНГ ЗАМКА (аудит F17). Замок — частичный уникальный индекс (name) WHERE status='running'.
+Держится он не фактом строки, а СЕРДЦЕБИЕНИЕМ: `track` поднимает демон-тред, который раз в
+HEARTBEAT_SEC трогает `updated_at` СВОЕЙ строки — независимо от того, репортит ли сервис прогресс.
+Строку, молчащую дольше STALE_MIN, считаем трупом (контейнер убили) и гасим.
+
+  ПОЧЕМУ ТРЕД, А НЕ «пусть сервис сам тикает». Приложение синхронное, а молчание стадий — это
+  ОДИН блокирующий вызов: `generate` сидит внутри llm.complete() минутами, `score` — внутри
+  whois-запроса A-Parser. Между вызовами тикать негде: тикать надо ВО ВРЕМЯ вызова. Блокирующий
+  сокет отпускает GIL, поэтому тред тикает и сквозь LLM. Цена — по демон-треду на идущий джоб
+  (их максимум 4) и один UPDATE в минуту.
+
+  ПОЧЕМУ updated_at, А НЕ НОВАЯ КОЛОНКА lease_until. Колонка уже значит ровно это — «когда о
+  задаче в последний раз было слышно». У неё просто не было говорящего: `onupdate` нет, а
+  report() зовётся только на границах стадий. Отдельный lease_until был бы вторым именем той же
+  величины (и второй миграцией).
+
+  ЧИСЛА. HEARTBEAT_SEC=60, STALE_MIN=5 — то есть труп объявляется после ПЯТИ пропущенных ударов.
+  Раньше стояло 15 минут БЕЗ сердцебиения, и это был баг в обе стороны: порог короче живой
+  стадии (score с капом 200 доменов × ~60 с/домен ≈ 200 минут молчания — CLAUDE.md) убивал
+  ЖИВОГО, а честный «безсердцебиенный» порог пришлось бы задрать за 3.5 часа — и тогда упавший
+  контейнер запирал бы воронку на полсмены. С сердцебиением молчание перестало быть уликой
+  работы: живой тикает всегда, поэтому порог можно держать коротким.
 
 ГДЕ ГАСИМ ПРОТУХШЕЕ (_reap): ТОЛЬКО на пути захвата замка — _open() и is_running(). НИКОГДА
-на пути чтения (live/progress/last): панель поллит live() раз в 1.5с, а стадия свипа `generate`
-(LLM по 5 сайтам) законно молчит дольше STALE_MIN — реап в live() пометил бы ЖИВУЮ задачу
-упавшей и отпустил бы замок под вторую. Чтение только считает флаг stale: «оборвалась» — это
-показ, а не мутация. Гасим ровно тогда, когда замок кому-то реально понадобился.
+на пути чтения (live/progress/last): панель поллит live() раз в 1.5с, и реап на чтении сам бы
+гасил задачу, которая законно молчит. Чтение только считает флаг stale: «оборвалась» — это
+показ, а не мутация. Гасим ровно тогда, когда замок кому-то реально понадобился, — и теперь это
+безопасно: живая задача к тому моменту уже подала признак жизни.
+
+ФЕНСИНГ ЗОМБИ. Если замок у нас всё-таки отобрали (сердцебиение не дошло — БД лежала), процесс
+не имеет права ни писать в чужой прогон, ни продолжать работу:
+  · report/_close адресуются run_id и обновляют строку УСЛОВНО (WHERE id AND status='running') —
+    раньше report искал строку ПО ИМЕНИ и зомби дописывал прогресс в живой прогон ПРЕЕМНИКА;
+  · cancelled(run_id) отвечает True, если строка больше не наша, — сервис между элементами
+    поднимает Cancelled и уходит. Замок потерян -> работу прекрати.
 """
 import logging
 import threading
@@ -35,11 +62,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-STALE_MIN = 15                       # как STALE_MIN оркестратора: running без обновлений = труп
-# по потоку на КАЖДОЕ имя джоба (discovery|score|recheck|sweep). Меньше — и третий одновременный
-# запуск молча ляжет в очередь пула: строки в реестре ещё нет, панель ничего не рисует, кнопка
-# выглядит сломанной. Один оператор, четыре кнопки — четыре потока.
-_EXEC = ThreadPoolExecutor(max_workers=4)
+HEARTBEAT_SEC = 60                   # как часто живой прогон трогает свой updated_at
+STALE_MIN = 5                        # молчит дольше -> труп. 5 пропущенных ударов (см. шапку)
+# по потоку на КАЖДОЕ имя джоба (discovery|score|recheck|sweep|cf_sync). Меньше — и третий
+# одновременный запуск молча ляжет в очередь пула: строки в реестре ещё нет, панель ничего не
+# рисует, кнопка выглядит сломанной. Один оператор, пять кнопок — пять потоков.
+_EXEC = ThreadPoolExecutor(max_workers=5)
 # уже отданные в пул, но ещё не открывшие свою строку в БД (см. spawn) — гонка своего процесса
 _INFLIGHT: set[str] = set()
 # RLock (не Lock): is_running() теперь тоже смотрит в _INFLIGHT (см. её докстринг и правку ниже),
@@ -158,30 +186,76 @@ def _open(name: str, trigger: str, stages: list | None) -> int | None:
         return row.id
 
 
-def _close(run_id: int, status: str, error: str | None = None) -> None:
+def _own(run_id: int | None, **values) -> bool:
+    """Условно обновить СВОЮ строку: WHERE id=run_id AND status='running'.
+
+    Условие — не украшение. Если замок у нас отобрали (реап решил, что мы труп), строка уже
+    не 'running', и мы обязаны промахнуться, а не переписать чужую работу. Слепая ORM-запись
+    по PK («прочитал -> решил -> записал») ровно этим и опасна — см. `_settle` в
+    services/acquisition.py, там тот же приём и та же причина. Возвращает True, если строка
+    ещё наша (rowcount).
+    """
+    from sqlalchemy import update
     from app.db import SessionLocal
     from app.models.job import JobRun
+    if run_id is None:                      # вне track (одиночный score_domain, юнит-тест)
+        return False
     with _DB_LOCK, SessionLocal() as db:
-        r = db.get(JobRun, run_id)
-        if r is None:
-            return
-        r.status = status
-        r.error = error
-        r.finished_at = _utcnow()
-        r.updated_at = _utcnow()
-        if status == "done":                # успех — все чипы гасим в «пройдено»
-            r.stages = [s if s.get("state") == "skip" else {**s, "state": "done"}
-                        for s in (r.stages or [])]
+        res = db.execute(update(JobRun)
+                         .where(JobRun.id == run_id, JobRun.status == "running")
+                         .values(updated_at=_utcnow(), **values))
         db.commit()
+        return res.rowcount > 0
+
+
+def _heartbeat(run_id: int) -> tuple[threading.Thread, threading.Event]:
+    """Демон-тред: пока идёт работа — раз в HEARTBEAT_SEC трогать updated_at (см. шапку).
+
+    Ошибки БД глотаем и продолжаем: сердцебиение — страховка замка, а не работа. Если БД
+    лежит дольше STALE_MIN, замок у нас честно отберут, и об этом узнает cancelled() (фенсинг).
+    """
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(HEARTBEAT_SEC):
+            try:
+                if not _own(run_id):        # строка больше не наша — стучать некуда
+                    return
+            except Exception:               # noqa: BLE001
+                _log.exception("сердцебиение прогона #%s не дошло", run_id)
+
+    t = threading.Thread(target=_beat, name=f"jobs-heartbeat-{run_id}", daemon=True)
+    t.start()
+    return t, stop
+
+
+def _close(run_id: int, status: str, error: str | None = None) -> None:
+    """Закрыть СВОЙ прогон — условно (см. _own): строку, которую у нас уже отобрал реап,
+    зомби не воскрешает и не перекрашивает в 'done'. Оператор видит «оборвалась» — так и было."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.job import JobRun
+    values: dict = {"status": status, "error": error, "finished_at": _utcnow()}
+    if status == "done":                    # успех — все чипы гасим в «пройдено»
+        with _DB_LOCK, SessionLocal() as db:
+            stages = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
+        values["stages"] = [s if s.get("state") == "skip" else {**s, "state": "done"}
+                            for s in (stages or [])]
+    _own(run_id, **values)
 
 
 @contextmanager
 def track(name: str, *, trigger: str = "manual", stages: list | None = None):
     """Обернуть работу записью реестра. Кто бы ни позвал сервис — панель, оркестратор,
-    cron воркера — прогресс появляется бесплатно."""
+    cron воркера — прогресс появляется бесплатно. Отдаёт run_id: им сервис адресует свои
+    report()/cancelled() (по ИМЕНИ адресоваться нельзя — попадёшь в чужой прогон, см. шапку).
+
+    На время работы держит сердцебиение — иначе молчащая стадия выглядит трупом, и первый же
+    желающий занять замок её убьёт."""
     run_id = _open(name, trigger, stages)
     if run_id is None:
         raise AlreadyRunning(name)
+    beat, stop = _heartbeat(run_id)
     try:
         yield run_id
     except Cancelled:
@@ -191,6 +265,11 @@ def track(name: str, *, trigger: str = "manual", stages: list | None = None):
         raise
     else:
         _close(run_id, "done")
+    finally:
+        # ГАСИМ ТРЕД ДО ВЫХОДА, а не бросаем демоном: иначе тестовый харнесс снесёт SQLite-движок
+        # из-под живого писателя (тот же класс аварии, что лечит _drain, см. его докстринг).
+        stop.set()
+        beat.join(timeout=5)
 
 
 def _advance(stages: list, active: str) -> list:
@@ -212,35 +291,62 @@ def _advance(stages: list, active: str) -> list:
     return out
 
 
-def report(name: str, done: int | None = None, total: int | None = None,
+def report(run_id: int | None, done: int | None = None, total: int | None = None,
            current: str | None = None, stage: str | None = None,
            message: str | None = None) -> None:
-    """Обновить текущий прогон. Вне track (одиночный score_domain, юнит-тест) — no-op."""
+    """Обновить СВОЙ прогон (run_id из track). Вне track (одиночный score_domain, юнит-тест)
+    run_id=None — no-op.
+
+    АДРЕСАЦИЯ ПО id, А НЕ ПО ИМЕНИ (аудит F17). Раньше сюда шло имя джоба, и строка искалась
+    как «running с таким именем» — то есть зомби (процесс, у которого замок уже отобрали)
+    находил не свою мёртвую строку, а ЖИВОЙ прогон преемника и дописывал прогресс в него:
+    панель показывала чужие домены и чужой счётчик как свои. Промах по id безвреден и молчалив,
+    попадание в чужой прогон — нет.
+    """
+    if run_id is None:                       # вне track (одиночный score_domain, юнит-тест) — no-op
+        return                               # раньше это глушил только _own в конце, но стадийная
+        #                                      ветка ниже успевала открыть сессию и сделать
+        #                                      SELECT ... WHERE id IS NULL — 6 холостых раундтрипов
+        #                                      под _DB_LOCK на КАЖДЫЙ ручной score одного домена.
+    from sqlalchemy import select
     from app.db import SessionLocal
-    with _DB_LOCK, SessionLocal() as db:
-        r = _running(db, name)
-        if r is None:
-            return
-        if done is not None:
-            r.done = done
-        if total is not None:
-            r.total = total
-        if current is not None:
-            r.current = current[:255]
-        if message is not None:
-            r.message = message[:400]
-        if stage is not None:
-            r.stage = stage
-            r.stages = _advance(r.stages, stage)
-        r.updated_at = _utcnow()
-        db.commit()
+    from app.models.job import JobRun
+    values: dict = {}
+    if done is not None:
+        values["done"] = done
+    if total is not None:
+        values["total"] = total
+    if current is not None:
+        values["current"] = current[:255]
+    if message is not None:
+        values["message"] = message[:400]
+    if stage is not None:
+        values["stage"] = stage
+        with _DB_LOCK, SessionLocal() as db:
+            known = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
+        values["stages"] = _advance(known, stage)
+    _own(run_id, **values)
 
 
-def cancelled(name: str) -> bool:
+def cancelled(run_id: int | None) -> bool:
+    """«Мне пора остановиться?» — сервис спрашивает между элементами.
+
+    True в ДВУХ случаях, и второй — не про кнопку:
+      · человек нажал «стоп» (cancel_requested);
+      · строка больше не наша (реап решил, что мы труп, и отдал замок другому). Продолжать
+        работу без замка — значит делать её ВТОРЫМ: два свипа в двух процессах = дубли страниц
+        и двойной счёт LLM. Замок потерян -> уходим, а прогресс уже пишет преемник.
+    Вне track (run_id=None) отменять нечего.
+    """
+    from sqlalchemy import select
     from app.db import SessionLocal
+    from app.models.job import JobRun
+    if run_id is None:
+        return False
     with _DB_LOCK, SessionLocal() as db:
-        r = _running(db, name)
-        return bool(r and r.cancel_requested)
+        r = db.execute(select(JobRun).where(JobRun.id == run_id,
+                                            JobRun.status == "running")).scalars().first()
+        return r is None or bool(r.cancel_requested)
 
 
 def request_cancel(name: str) -> bool:

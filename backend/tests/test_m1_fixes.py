@@ -54,7 +54,10 @@ def test_wayback_checked_when_a_fetch_succeeds(monkeypatch):
     snaps = [{"timestamp": "20180101000000", "original": "http://x.com/"},
              {"timestamp": "20200101000000", "original": "http://x.com/"}]
     monkeypatch.setattr(w, "get_snapshots", lambda domain, **k: snaps)
-    monkeypatch.setattr(w, "_fetch_raw", lambda ts, orig: "clean vpn review, fast servers")
+    # текст страницы, а не обрывок: снимок без видимого текста ПРОЧИТАННЫМ не считается
+    # (wayback.MIN_TEXT_CHARS — ревью Задачи 3), и обрывок в 29 знаков проверял бы не то.
+    monkeypatch.setattr(w, "_fetch_raw",
+                        lambda ts, orig: "clean vpn review: fast servers, no logs, honest pricing")
     # sample=2: покрытие считается от запрошенного sample (Task 5, I4) — с дефолтным
     # sample=5 при 2 реальных снапшотах порог покрытия недостижим даже при 100% успехе.
     out = w.classify_history("ok.com", sample=2, polite=0.0)
@@ -72,7 +75,7 @@ def test_wayback_partial_coverage_not_checked(monkeypatch):
     def _fetch(ts, orig):
         calls["n"] += 1
         if calls["n"] == 1:
-            return "clean vpn review"
+            return "clean vpn review: fast servers, no logs, honest pricing"
         raise RuntimeError("429")
     monkeypatch.setattr(c, "_fetch_raw", _fetch)
     h = c.classify_history("x.ru", sample=5, polite=0)
@@ -457,11 +460,11 @@ def test_score_pending_isolates_failure(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
     real = scoring.score_domain
-    def _boom(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
+    def _boom(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
-        return real(did, clients, whois_budget, ahrefs_budget, job=job)
+        return real(did, clients, whois_budget, ahrefs_budget, run=run)
     monkeypatch.setattr(scoring, "score_domain", _boom)
     # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)

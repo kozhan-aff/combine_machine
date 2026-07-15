@@ -110,7 +110,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 <div class="wrap">
 <table>
   <tbody>
-  {% for d, blind, urgent in inbox %}
+  {% for d, blind, urgent, hist, evidence, ok, note in inbox %}
     {# полоса срочности — только у БЛИЗКОГО дедлайна: у backorder-домена дедлайн есть всегда,
        и полоса «у всех» перестала бы что-либо выделять. Признак посчитан в panel.py (там же
        нормализация tz — SQLite отдаёт дату naive). #}
@@ -137,18 +137,65 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           RD <b>{{ d.referring_domains if d.referring_domains is not none else '—' }}</b> ·
           {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }} лет
         </div>
-        {% if blind %}
+        {# «история чистая» — заявление о ФАКТЕ, а не отсутствие ошибок: его вправе нести только
+           домен, для которого пакетное одобрение реально сработает. `ok` — это bulk_ok(d),
+           СЧИТАННЫЙ в Python (panel.py) тем же кодом, что решает _bulk_candidates — строка НЕ
+           реконструирует условие из blind/hist сама, иначе два места могут разъехаться молча
+           (аудит F2 поймал именно такое расхождение). #}
+        {% if d.id in dirty_by_id %}
+          {# ГРЯЗЬ ГЛАВНЕЕ ВСЕГО ОСТАЛЬНОГО в этой строке: РКН-домен с чистым Wayback иначе нёс бы
+             подпись «история не подтверждена» — правдивую и совершенно не о том. Причина названа
+             (реестр РКН / блэклист / история / флаг фида), а «✓ одобрить» ниже снята. #}
+          <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
+            <span class="hint" style="color:var(--bad)"
+                  title="объективный признак (реестр РКН, блэклист, грязная история или флаг источника) — не наш порог, ослабить его на /settings нечем. Портфель держится на чистой истории: такой домен не одобряем и не покупаем.">выкуп запрещён — грязь</span></div>
+        {% elif blind %}
           <div class="blind" title="машина не смогла проверить этот сигнал — одобрять вслепую нельзя">
             ⚠ {{ blind }}
             <form class="inline" method="post" action="/domains/{{ d.id }}/score">
               <button class="btn-sm" title="прогнать проверки для этого домена заново">▶ перепроверить</button></form>
           </div>
-        {% else %}<div class="hint" style="color:var(--ok)">история чистая</div>{% endif %}
+        {% elif hist == 'dirty' %}
+          <div class="hint" style="color:var(--bad)">история грязная — смотри снимки</div>
+        {% elif ok %}<div class="hint" style="color:var(--ok)">история чистая</div>
+        {% else %}<div class="hint" style="color:var(--acc2)">история не подтверждена</div>{% endif %}
+        {# Пометка о СВЕЖЕСТИ вердикта — информационная, пакет она не блокирует (scoring.history_note):
+           вердикт держится на реальных прошлых уликах, но сегодняшний отказ архива куратор обязан
+           видеть, а не вычитывать из score_breakdown.errors. #}
+        {% if note %}<div class="hint" style="color:var(--acc2)">↺ {{ note }}</div>{% endif %}
+        {# УЛИКИ — снимки, которые машина скачала и по которым вынесла вердикт. Вердикт
+           ошибается; куратор перепроверяет его глазами, а не верит подписи над ним. #}
+        {% if evidence %}
+          <details class="evi">
+            <summary title="эти снимки Wayback машина прочитала и классифицировала">снимки, по которым судили — {{ evidence|length }}</summary>
+            <ul class="evi-list">
+              {% for e in evidence %}
+                <li><span class="when">{{ e.when }}</span>
+                  <a href="{{ e.link }}" target="_blank" rel="noopener" title="открыть снимок в Wayback">{{ e.url }}</a>
+                  {# «чисто» вправе носить только снимок, который БЫЛО ЧЕМ прочитать: у
+                     редирект-заглушки/frameset/SPA видимого текста нет вовсе, и подпись «чисто»
+                     под ней — то самое ложное «проверено» (ревью Задачи 3). #}
+                  {% if e.cats %}<span class="cat">{{ e.cats }}</span>
+                  {% elif e.unread %}<span class="hint" title="на снимке нет видимого текста (редирект-заглушка, frameset или SPA) — классифицировать было нечего">без текста — не читан</span>
+                  {% else %}<span class="hint">чисто</span>{% endif %}</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
       </td>
       <td style="width:220px; text-align:right">
-        <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-          <input type="hidden" name="status" value="approved">
-          <button class="btn-sm btn-ok" title="домен годен — пойдёт в очередь выкупа">✓ одобрить</button></form>
+        {% if d.id in dirty_by_id %}
+          {# «✓ одобрить» здесь вела бы в гарантированный отказ политики (services/transitions):
+             approved — это статус НА ПУТИ К ДЕНЬГАМ, и грязь туда не пускают. Тот же запрет, что
+             у витрины выкупа и реестра, — правило одно, экраны разные. Честный путь назад —
+             перепроверка: реабилитацию даёт машина по новым уликам, а не кнопка. #}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+        {% else %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="approved">
+            <button class="btn-sm btn-ok" title="домен годен — пойдёт в очередь выкупа">✓ одобрить</button></form>
+        {% endif %}
         <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
           <input type="hidden" name="status" value="rejected">
           <button class="btn-sm btn-bad" title="домен не годится — убрать из воронки">✗ отклонить</button></form>
@@ -180,18 +227,36 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
   <tbody>
   {% for d in ready %}
     <tr>
-      <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span></td>
+      <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span>
+        {# ГРЯЗЬ — прямо в строке, с которой идут покупать. Отмытый домен (approved с живым
+           reject_reason) выглядел здесь обычным кандидатом: причина отказа лежала в базе, но
+           её не показывал НИКТО из тех экранов, где решают о деньгах. #}
+        {% if d.id in dirty_by_id %}
+          <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
+            <span class="hint" style="color:var(--bad)"
+                  title="домен был отклонён воронкой по объективному признаку (реестр РКН, блэклист, грязная история или флаг источника). Портфель держится на чистой истории — такой домен не покупаем. Вернуть его в оборот может только перепроверка, если проверки скажут, что он чист.">выкуп запрещён — грязь</span></div>
+        {% endif %}</td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}
         {# отсюда ИДУТ ПОКУПАТЬ — метка «окно закрыто» тут дороже всего #}
         {% if d.id in expired_ids %}<br><span class="hint" style="color:var(--bad)"
           title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</span>{% endif %}</td>
       <td>
-        <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
-          <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
-        <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
-          <input type="hidden" name="status" value="purchased">
-          <button class="btn-sm btn-buy" title="я уже купил домен руками — система деньги не тратит">🛒 купил руками</button></form>
+        {% if d.id in dirty_by_id %}
+          {# денежных кнопок у грязи нет вовсе: сервисы её и так отвергнут (services/transitions),
+             но кнопка, ведущая в гарантированный отказ, — это ложное предложение купить. #}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/score">
+            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="rejected">
+            <button class="btn-sm btn-bad" title="убрать из витрины выкупа">✗ отклонить</button></form>
+        {% else %}
+          <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+            <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
+          <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
+            <input type="hidden" name="status" value="purchased">
+            <button class="btn-sm btn-buy" title="я уже купил домен руками — система деньги не тратит">🛒 купил руками</button></form>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

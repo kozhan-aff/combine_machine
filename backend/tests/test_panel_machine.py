@@ -28,8 +28,8 @@ def test_autopilot_uses_the_same_component(client):
 
 def test_dashboard_shows_machine_block_and_last_runs(client):
     from app.services import jobs
-    with jobs.track("recheck"):
-        jobs.report("recheck", done=200, total=200,
+    with jobs.track("recheck") as run:
+        jobs.report(run, done=200, total=200,
                     message="занято уже 3 из отобранных — ушли в rejected")
     html = client.get("/").text
     assert 'id="machine"' in html and 'id="machine-idle"' in html

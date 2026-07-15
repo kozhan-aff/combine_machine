@@ -12,7 +12,7 @@ Recheck/Sweep) уходят в фон через services.jobs — роут от
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
-from fastapi import APIRouter, Request, Depends, Form
+from fastapi import APIRouter, Request, Depends, Form, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -20,17 +20,23 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_session
+from app.db import get_session, SessionLocal
+from app.models.cloudflare import (
+    CloudflareAccount, CloudflareCertificatePackMirror, CloudflareConnection,
+    CloudflareConnectionAccount, CloudflareDnsRecordMirror, CloudflareZoneMirror,
+)
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
-from app.services import diag_cache
+from app.services import cf_sync, diag_cache
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
-from app.services.labels import status_ru as _status_ru, reject_ru as _reject_ru, lane_ru as _lane_ru
+from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
+                                 lane_ru as _lane_ru, index_ru as _index_ru)
 templates.env.filters["status_ru"] = _status_ru
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
+templates.env.filters["index_ru"] = _index_ru
 templates.env.globals["diag_alert"] = diag_cache.alert   # баннер в base.html читает кэш
 router = APIRouter()
 
@@ -38,7 +44,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -104,10 +110,20 @@ def _next_steps(db: Session) -> list[dict]:
     if pc.get("edited"):
         steps.append({"href": "/", "text": f"{pc['edited']} отредактировано — публикуй сайт (M5)."})
     if pc.get("published"):
-        unknown = db.scalar(select(func.count()).select_from(Page).where(
-            Page.status == "published", Page.index_status != "indexed")) or 0
-        if unknown:
-            steps.append({"href": "/", "text": f"{unknown} опубликованных ещё не в индексе — проверяй «индексация» (site:)."})
+        # Три РАЗНЫХ состояния, и валить их в одно «ещё не в индексе» — врать: «не спросили»,
+        # «спросили и не выяснили» и «спросили, в индексе нет» требуют разных действий оператора.
+        def _idx(*cond):
+            return db.scalar(select(func.count()).select_from(Page).where(
+                Page.status == "published", *cond)) or 0
+        never = _idx(Page.index_status == "unknown", Page.index_checked_at.is_(None))
+        blind = _idx(Page.index_status == "unknown", Page.index_checked_at.isnot(None))
+        missing = _idx(Page.index_status == "not_indexed")
+        if never:
+            steps.append({"href": "/", "text": f"{never} опубликованных страниц ещё не проверялись на индексацию — запусти «индексация» (site:)."})
+        if blind:
+            steps.append({"href": "/diag", "text": f"{blind} страниц проверить не удалось: движки SearXNG не ответили (CAPTCHA/лимит). Это про поисковик, а не про сайт — почини SearXNG и повтори проверку."})
+        if missing:
+            steps.append({"href": "/", "text": f"{missing} опубликованных страниц нет в индексе — попадание занимает дни, проверяй периодически."})
     if not steps:
         steps.append({"href": "/domains", "text": "Очередь пуста: запусти ↻ Discovery за свежими дропами."})
     return steps
@@ -206,7 +222,9 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import blind_reason, stale_donors, DROP_GRACE
+    from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_note,
+                                      history_verdict, stale_donors, DROP_GRACE)
+    from app.services.transitions import dirty_reason
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
@@ -237,14 +255,35 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     thr = sum(n for code, n in reasons.items() if code in ("low_rd", "too_young", "low_score"))
     return templates.TemplateResponse(request, "domains.html", {
         "active": "domains",
-        # тройка: домен + причина «вслепую» + признак срочности. Все три решения приняты в
-        # Python — в Jinja нет ни tz-нормализации, ни доступа к blind_reason.
-        "inbox": [(d, blind_reason(d), _urgent(d, soon, now)) for d in inbox],
+        # строка инбокса: домен + причина «вслепую» + срочность + вердикт истории + улики.
+        # Все решения приняты в Python — в Jinja нет ни tz-нормализации, ни доступа к скорингу.
+        # Вердикт едет ОТДЕЛЬНО от blind: «не проверяли» и «проверили, и там грязь» — разные
+        # вещи, а подпись «история чистая» не имеет права стоять ни под тем, ни под другим.
+        # Улики (снимки Wayback, по которым машина судила) едут всегда, когда они есть: вердикт
+        # ошибается — куратор должен мочь перепроверить и «грязно», и «чисто».
+        # `ok` — РЕЗУЛЬТАТ bulk_ok(d), ТОТ ЖЕ предикат, что решает пакетное одобрение
+        # (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
+        # а не реконструировать условие из blind/hist на месте — иначе два места молча
+        # разъедутся (см. bulk_ok).
+        "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
+                   history_evidence(d), bulk_ok(d), history_note(d)) for d in inbox],
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
         "expired_ids": {d.id for d in inbox + ready if _expired(d, now)},
         "ready": ready,
+        # ГРЯЗЬ НА ВИТРИНЕ ВЫКУПА. «Готовы к выкупу» — экран, с которого ИДУТ ТРАТИТЬ ДЕНЬГИ, и
+        # до этого фикса отмытый РКН-домен (approved + reject_reason='rkn') стоял здесь без
+        # единой метки (аудит F13). Сервисы его теперь не пустят ни в очередь, ни в «купил
+        # руками» — но оператор обязан УВИДЕТЬ причину, а не упереться в отказ на клике.
+        # Причина — по-русски, из того же словаря, что и везде (labels.reject_ru).
+        #
+        # ИНБОКС (`scored`) — тоже: `bulk_ok` грязь из пакета исключает, но кнопка «✓ одобрить»
+        # у такой строки оставалась и вела в ГАРАНТИРОВАННЫЙ отказ политики (ревью Задачи 6,
+        # Minor 6). Кнопка, которая не может сработать, — то же ложное предложение, что и
+        # «↩ вернуть в approved» для РКН-домена в реестре.
+        "dirty_by_id": {d.id: _reject_ru(r) for d in inbox + ready
+                        if (r := dirty_reason(d)) is not None},
         "counts": counts, "total": sum(counts.values()),
         "gates": _gates(db),
         "offers_active": db.scalar(select(func.count()).select_from(Offer)
@@ -272,6 +311,7 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
                               Domain.reject_reason != "not_acquirable"))
     if min_score is not None:
         stmt = stmt.where(Domain.score >= min_score)
+    from app.services.transitions import dirty_reason
     rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
                                     Domain.referring_domains.desc().nulls_last())
                       .limit(limit)).scalars().all()
@@ -279,39 +319,70 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
     return templates.TemplateResponse(request, "pool.html", {
         "active": "domains", "rows": rows, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
+        # какие строки грязные — решает ПОЛИТИКА, а не шаблон по списку кодов: реестр рисует
+        # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.
+        # Jinja не имеет права переизобретать этот предикат — разъедется молча.
+        "dirty_by_id": {d.id: _reject_ru(r) for d in rows if (r := dirty_reason(d)) is not None},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
 
 
 def _bulk_candidates(db: Session, min_score: float):
-    """(чистые к одобрению, сколько отсеяно как «вслепую»)."""
-    from app.services.scoring import blind_reason
+    """(годные к одобрению, сколько ПРОПУЩЕНО пакетом).
+
+    Гейт истории — через `scoring.bulk_ok`, ОДИН предикат для пакета и для подписи «история
+    чистая» в строке инбокса (см. domains_view). Раньше это условие было реконструировано
+    здесь И в Jinja независимо — ровно та связка, на которой аудит поймал F2 (пустой Wayback
+    ошибки не даёт → «вслепую» не определялось → штамповали как чистое); любое новое значение
+    вердикта/причины отсева развело бы их снова, молча.
+
+    Второе число раньше звалось `blind` — и это имя ВРАЛО: `bulk_ok` отсеивает не только
+    «проверить не удалось», но и «проверили, и там грязь» (с F9 — ещё и РКН/блэклист). Домен,
+    отсеянный за казино в истории, объявлялся оператору «оценённым вслепую». Считаем то, что
+    считаем: сколько строк пакет НЕ ТРОНУЛ.
+    """
+    from app.services.scoring import bulk_ok
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
-    clean = [d for d in rows if not blind_reason(d)]
-    return clean, len(rows) - len(clean)
+    ok = [d for d in rows if bulk_ok(d)]
+    return ok, len(rows) - len(ok)
 
 
 @router.get("/domains/bulk-preview")
 def bulk_preview(min_score: float = 0.8, db: Session = Depends(get_session)):
     from fastapi.responses import JSONResponse
-    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
-    return JSONResponse({"n": len(clean), "blind": blind})
+    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    return JSONResponse({"n": len(ok), "skipped": skipped})
 
 
 @router.post("/domains/bulk-approve")
 def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_session)):
     """Пакетное одобрение — это КЛИК ЧЕЛОВЕКА, гейт курации на месте (деньги не тратятся:
-    approved != куплен). Домены, оценённые вслепую (Wayback лежал), в пакет НЕ попадают —
-    иначе пакет стал бы обходом того самого гейта, ради которого он существует."""
-    clean, blind = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
-    for d in clean:
-        d.status = "approved"
+    approved != куплен). Домены, чью историю не подтвердили (Wayback лежал) или подтвердили как
+    грязную, в пакет НЕ попадают — иначе пакет стал бы обходом того самого гейта, ради которого
+    он существует.
+
+    Перевод — через политику (services/transitions), хотя `bulk_ok` грязь уже отсеял: пакет
+    двигает статус ПАЧКОЙ, и это последнее место, где стоит перепроверить себя перед записью.
+    Отказ политики здесь — это баг рассинхрона предикатов, а не рабочая ветка: он обязан быть
+    ВИДЕН оператору, а не проглочен молча.
+    """
+    from app.services import transitions
+    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    approved, denied = 0, []
+    for d in ok:
+        try:
+            transitions.set_status(d, "approved")
+            approved += 1
+        except transitions.TransitionDenied as e:
+            denied.append(str(e))
     db.commit()
-    msg = f"Одобрено пакетом: {len(clean)}"
-    if blind:
-        msg += f" · пропущено «вслепую»: {blind} — их реши руками"
+    msg = f"Одобрено пакетом: {approved}"
+    if skipped:
+        msg += f" · пропущено (историю не подтвердить или она грязная): {skipped} — их реши руками"
+    if denied:
+        return _back("/domains", err=f"{msg} · политика отвергла {len(denied)}: {denied[0]}")
     return _back("/domains", msg=msg)
 
 
@@ -343,6 +414,19 @@ def diag_refresh(request: Request):
     return _back(back, msg="Статусы внешних инструментов перепроверены")
 
 
+def _require_cf_write(request: Request) -> None:
+    """Hard gate: любой CF-write требует НАСТРОЕННЫЙ panel auth. Same-origin недостаточен
+    (аудит §11/§15) — панель живёт на LAN, а same-origin ничего не доказывает про то, кто
+    физически может достучаться до порта. Транспортная Basic-проверка (если включена) стоит
+    отдельно; здесь проверяется, что auth ВООБЩЕ сконфигурирован — иначе плоская LAN-экспозиция
+    открывает Cloudflare-мутации кому угодно, кто знает IP. `request` не используется сейчас —
+    параметр под будущие роуты-потребители (P1+ мутации), которые зовут этот гейт первой строкой,
+    как и запуск sync (задача 5)."""
+    if not (settings.PANEL_USER and settings.PANEL_PASS):
+        raise HTTPException(status_code=403,
+                            detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_view(request: Request, db: Session = Depends(get_session)):
     from app.services import settings as st
@@ -351,13 +435,63 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
         "active": "settings", "s": s, "counts": _pool_counts(db, s)})
 
 
+@router.get("/settings/cloudflare", response_class=HTMLResponse)
+def settings_cloudflare_view(request: Request):
+    """Read-only экран правды Cloudflare (задача 7, P0). Ни одной формы, мутирующей CF —
+    единственное действие на странице — уже существующий запуск sync (задача 5/6)."""
+    with SessionLocal() as db:
+        conns = db.query(CloudflareConnection).order_by(CloudflareConnection.id).all()
+        accounts = db.query(CloudflareAccount).order_by(CloudflareAccount.name).all()
+        zones = (db.query(CloudflareZoneMirror)
+                   .order_by(CloudflareZoneMirror.name).all())
+        # capability-чипы: capabilities_json живёт на CloudflareConnectionAccount (НЕ на
+        # CloudflareConnection) — агрегируем по connection (allowed побеждает denied/unknown).
+        caps_by_conn: dict[int, dict] = {}
+        for ca in db.query(CloudflareConnectionAccount).all():
+            d = caps_by_conn.setdefault(ca.connection_id, {})
+            for k, v in (ca.capabilities_json or {}).items():
+                if d.get(k) != "allowed":
+                    d[k] = v
+        conn_rows = [{"c": c, "caps": caps_by_conn.get(c.id, {})} for c in conns]
+        # привязка зоны к Site — по внешнему hex зоны (backfill P0): Site.cf_zone_id (legacy) —
+        # _backfill_site_links (cf_sync.py) ставит cf_zone_mirror_id ТОЛЬКО рядом с cf_zone_id,
+        # так что для колонки «Site» достаточно единственного ключа
+        by_zone = {}
+        for s in db.query(Site).all():
+            if s.cf_zone_id:
+                by_zone.setdefault(s.cf_zone_id, s)
+        # DNS/cert-паки для колонок «DNS»/«cert» (аудит §11) — счётчики non-missing по зоне
+        dns_counts = dict(db.query(CloudflareDnsRecordMirror.cloudflare_zone_id,
+                                   func.count(CloudflareDnsRecordMirror.id))
+                            .filter(CloudflareDnsRecordMirror.missing_since.is_(None))
+                            .group_by(CloudflareDnsRecordMirror.cloudflare_zone_id).all())
+        cert_counts = dict(db.query(CloudflareCertificatePackMirror.cloudflare_zone_id,
+                                    func.count(CloudflareCertificatePackMirror.id))
+                             .filter(CloudflareCertificatePackMirror.missing_since.is_(None))
+                             .group_by(CloudflareCertificatePackMirror.cloudflare_zone_id).all())
+        rows = [{"z": z, "site": by_zone.get(z.cf_zone_id),
+                 "dns": dns_counts.get(z.cf_zone_id, 0),
+                 "certs": cert_counts.get(z.cf_zone_id, 0)} for z in zones]
+        # «Аккаунт» в таблице зон — читаемое имя, если аккаунт уже наблюдён; иначе сырой hex
+        acct_names = {a.cf_account_id: a.name for a in accounts if a.name}
+    return templates.TemplateResponse(request, "settings_cloudflare.html", {
+        "active": "settings",
+        "conn_rows": conn_rows, "accounts": accounts, "acct_names": acct_names, "rows": rows,
+        "auth_configured": bool(settings.PANEL_USER and settings.PANEL_PASS),
+    })
+
+
 @router.get("/autopilot", response_class=HTMLResponse)
 def autopilot_view(request: Request, db: Session = Depends(get_session)):
     from app.services.autonomy import get_autonomy
+    from app.services.orchestrator import COUNT_RU
     from app.models.autonomy import AutonomyRun
     runs = db.execute(select(AutonomyRun).order_by(AutonomyRun.id.desc()).limit(10)).scalars().all()
     return templates.TemplateResponse(request, "autopilot.html", {
-        "active": "autopilot", "a": get_autonomy(), "gates": _gates(db), "runs": runs})
+        "active": "autopilot", "a": get_autonomy(), "gates": _gates(db), "runs": runs,
+        # ключи counts — не только стадии (queue_dirty: сколько грязных обошла стадия очереди),
+        # и оператор читает журнал по-русски, а не по именам функций
+        "count_ru": COUNT_RU})
 
 
 @router.get("/settings/preview")
@@ -403,6 +537,11 @@ def queue_view(request: Request):
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
         "balance": balance, "bo_err": bo_err,
+        # Сколько машина ЖДЁТ, прежде чем счесть отправку оборвавшейся. Из константы, а не числом
+        # в шаблоне: очередь обязана называть оператору тот же срок, по которому судит сверка
+        # (ревью Задачи 8, минор 3) — разъедься они, и человек в промежутке решит, что кнопка
+        # сломана: бейдж пишет «заказ уходит провайдеру…», а сверка отвечает «не трогали».
+        "stuck_after_min": acquisition.STUCK_CLAIM_MIN,
         "n_pending": sum(1 for o in orders if o["status"] == "pending_confirm"),
     })
 
@@ -474,9 +613,27 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     return _back_here(request, err=None if ok else "Перепроверка уже идёт")
 
 
+@router.post("/settings/cloudflare/sync")
+def cloudflare_sync(request: Request):
+    """Ручной запуск read-only Cloudflare sync (P0 — НИ ОДНОЙ CF-мутации, только наблюдение
+    внешней правды в mirror-таблицы). CF-write-гейт первой строкой (задача 6): без настроенных
+    PANEL_USER/PANEL_PASS плоская LAN-панель пускала бы к Cloudflare-операциям кого угодно, кто
+    знает IP — до чтения формы, до spawn."""
+    _require_cf_write(request)
+    from app.services import jobs
+
+    def _job():
+        with jobs.track("cf_sync", trigger="manual",
+                        stages=[{"key": "verify", "label": "Проверка токенов", "state": "pending"},
+                                {"key": "zones", "label": "Зоны и записи", "state": "pending"}]) as rid:
+            with SessionLocal() as db:
+                cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw), run=rid)
+    ok = jobs.spawn("cf_sync", _job)
+    return _back_here(request, err=None if ok else "Синхронизация уже идёт")
+
+
 @router.post("/run/{job}/cancel")
 def run_cancel_action(request: Request, job: str):
-    from fastapi import HTTPException
     from app.services import jobs
     if job not in _JOBS:
         raise HTTPException(status_code=404, detail=f"неизвестный джоб: {job}")
@@ -527,13 +684,26 @@ def score_one_action(domain_id: int):
 
 @router.post("/domains/{domain_id}/set-status")
 def set_status_action(domain_id: int, status: str = Form(...), db: Session = Depends(get_session)):
-    # ручной override: 'purchased' здесь — money-gate человека мимо очереди; оркестратор
-    # (services/orchestrator) этот роут НЕ зовёт (двигает только до pending_confirm).
-    if status in _MANUAL_STATUSES:      # guard: только ручные переходы курации
-        d = db.get(Domain, domain_id)
-        if d:
-            d.status = status
-            db.commit()
+    """Ручная курация. 'purchased' здесь — money-gate человека мимо очереди; оркестратор
+    (services/orchestrator) этот роут НЕ зовёт.
+
+    `_MANUAL_STATUSES` — это whitelist КНОПОК (какие цели вообще есть у панели). Сам переход
+    судит политика (services/transitions): она смотрит ИСХОДНЫЙ статус и грязь. Раньше здесь
+    не было ничего, кроме whitelist'а целей, — и «↩ вернуть в approved» отмывала РКН-домен
+    одним кликом (аудит F9).
+    """
+    from app.services import transitions
+    if status not in _MANUAL_STATUSES:
+        return _back("/domains", err=f"недопустимая цель перехода: {status!r}")
+    d = db.get(Domain, domain_id)
+    if d is None:
+        return _back("/domains", err=f"домен #{domain_id} не найден")
+    try:
+        transitions.set_status(d, status)
+    except transitions.TransitionDenied as e:
+        db.rollback()
+        return _back("/domains", err=str(e))
+    db.commit()
     return _back("/domains")
 
 
@@ -603,9 +773,29 @@ def queue_poll_action():
     from app.services import acquisition
     try:
         r = acquisition.poll_orders()
-        return _back("/queue", msg=f"Сверено с провайдером: наших заказов {r['checked']} · "
+        # Конфликт — не «ошибка сверки», а найденный дубль: провайдер держит заказ в полёте, а
+        # домен уже занят другим открытым заказом (одна открытая заявка на домен). Молчать о нём
+        # нельзя: за такой строкой стоят деньги, которые могли уйти.
+        #
+        # `checked` — сколько НАШИХ строк провайдер вообще знает, и конфликтные среди них: они
+        # тоже нашлись, просто не поехали. Поэтому «из них», а не отдельным слагаемым — иначе
+        # дубль считался бы дважды и разбивка не сходилась с итогом (ревью Задачи 7, минор 4).
+        dup = (f" · дублей не поднято {r['conflicts']} (у домена уже есть открытый заказ — "
+               f"смотри пометку в очереди)") if r.get("conflicts") else ""
+        # «из них» цеплялось к «в полёте», а дубль как раз НЕ в полёте — он в `checked` (ревью
+        # Задачи 7, раунд 3). Оговорку двигаем к тому числу, в которое дубль реально входит.
+        checked = (f"наших заказов {r['checked']}"
+                   + (" (дубли входят сюда же)" if r.get("conflicts") else ""))
+        # Застрявшие отправки (F11) — ради них сверку и жмут, когда строка висит в «отправляется».
+        # `lost` в `checked` не входит (провайдер про такой заказ НЕ знает — сверять было не с чем),
+        # `sending` тоже (её не трогали) — потому оба отдельными слагаемыми, а не «из них».
+        stuck = (f" · застрявших отправок разобрано {r['lost']} (провайдер про них не знает — "
+                 f"заказа нет, деньги не ушли; можно повторить или снять)") if r.get("lost") else ""
+        live = (f" · отправок в полёте {r['sending']} — не трогали: их прямо сейчас шлёт провайдеру "
+                f"живая отправка, вердикт за неё выносить нельзя") if r.get("sending") else ""
+        return _back("/queue", msg=f"Сверено с провайдером: {checked} · "
                                    f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                                   f"в полёте {r.get('pending', 0)}.")
+                                   f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"опрос статусов: {e}")
 
@@ -624,8 +814,15 @@ def queue_caught_action(order_id: int):
 def queue_cancel_action(order_id: int):
     from app.services import acquisition
     try:
-        acquisition.cancel_order(order_id)
-        return _back("/queue", msg=f"Заказ #{order_id} снят — домен возвращён в approved.")
+        r = acquisition.cancel_order(order_id)
+        # Отмена НЕ всегда возвращает домен в approved (его может держать открытый заказ или
+        # заказ с неизвестным исходом — деньги могли уйти), и отменить она может не всё
+        # (maybe_sent заперт). Сказать это словами, а не рапортовать успех вслепую.
+        if r.get("error"):
+            return _back("/queue", err=f"отмена заказа #{order_id}: {r['error']}")
+        if r.get("status") != "cancelled":
+            return _back("/queue", err=f"заказ #{order_id}: {r.get('note') or 'снять нельзя'}")
+        return _back("/queue", msg=f"Заказ #{order_id} снят — {r.get('note') or 'домен не тронут'}.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отмена: {e}")
 
@@ -636,6 +833,14 @@ def offer_create_action(brand: str = Form(...), affiliate_link: str = Form(...),
                         language: str = Form(""), db: Session = Depends(get_session)):
     if not brand.strip() or not affiliate_link.strip():
         return _back("/offers", err="бренд и партнёрская ссылка обязательны")
+    # F28 (аудит 2026-07-14): affiliate_link уходит в href опубликованной страницы почти как есть
+    # (content.render_html только html.escape() — экранирует спецсимволы, НЕ схему). Без этой
+    # проверки "javascript:alert(1)" сохранялся бы как валидный оффер и исполнялся по клику на
+    # живом сайте. allowlist http/https — тут (создание) И в render_html (defense in depth: этот
+    # роут можно обойти прямым API-вызовом, см. pipeline.py::create_offer).
+    from app.services.content import is_safe_url
+    if not is_safe_url(affiliate_link.strip()):
+        return _back("/offers", err="партнёрская ссылка: разрешены только http/https")
     o = Offer(brand=brand.strip(), affiliate_link=affiliate_link.strip(),
               promo_code=promo_code.strip() or None, country=country.strip() or None,
               language=language.strip() or None)
@@ -674,6 +879,14 @@ def provision_action(site_id: int):
                          msg=f"Зона создана, ждёт NS. Пропиши у регистратора: {ns} — потом повтори Provision.")
         if r.get("status") == "error":
             return _back(f"/sites/{site_id}", err=r.get("error", "provision error"))
+        if r.get("ssl_error"):
+            # Зелёный баннер «готов: DNS + vhost + SSL» поверх упавшего SSL — это ровно то
+            # враньё, от которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под
+            # вопросом: говорим об этом красным и оставляем след на карточке (site.ssl_error).
+            return _back(f"/sites/{site_id}", err=(
+                "Provision прошёл (зона + A-запись + vhost), но SSL-режим Cloudflare НЕ "
+                f"переключился: {r['ssl_error']}. HTTPS может не работать — почини причину "
+                "и нажми Provision ещё раз (идемпотентно)."))
         return _back(f"/sites/{site_id}", msg="Provision готов: DNS proxied + vhost + SSL. Дальше — генерация.")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
@@ -724,7 +937,8 @@ def check_index_action(site_id: int):
         pages = r.get("pages", {})
         if not pages:
             return _back(f"/sites/{site_id}", msg="Нет опубликованных страниц для проверки.")
-        s = ", ".join(f"{k}: {v}" for k, v in pages.items())
+        # Вердикт — через labels.index_ru: сырое `unknown` во флеше оператор прочтёт как «нет».
+        s = ", ".join(f"{k}: {_index_ru(v)}" for k, v in pages.items())
         return _back(f"/sites/{site_id}", msg=f"Индексация — {s}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"индексация: {e}")
@@ -734,16 +948,27 @@ def check_index_action(site_id: int):
 # ponytail: тянем по HTTPS с fine-grained PAT — не монтируем SSH-ключ в контейнер.
 # Требует volume `.:/repo` + git в образе (см. docker-compose/Dockerfile).
 def _pull_banner(r: dict):
-    """Единый баннер из dict deploy.git_pull()/git_force_pull()."""
-    if not r.get("ok"):
-        return _back("/diag", err=r.get("error", "обновление не удалось"))
-    warn = f" ⚠ миграции: {r['alembic_warn']}" if r.get("alembic_warn") else ""
+    """Единый баннер из dict deploy.git_pull()/git_force_pull().
+
+    r["ok"] честно отражает и git, и алембик (F22/F23/F29): упавшая миграция — красный
+    err=, НЕ зелёный msg=, даже если код при этом обновился (git pull сам прошёл)."""
     rebuild = " · нужна пересборка образа: docker compose up -d --build" if r.get("needs_rebuild") else ""
+    if not r.get("ok"):
+        if "old" not in r:
+            # git pull/fetch/checkout не прошёл сам по себе — до алембика не дошли
+            return _back("/diag", err=r.get("error", "обновление не удалось"))
+        # git отработал (код обновлён или уже был свежим), но МИГРАЦИЯ ПРОВАЛИЛАСЬ —
+        # код и схема БД разъехались, это не успешный деплой.
+        subj = r.get("subject", "")
+        transition = f"{r['old']}→{r['new']}" if r["old"] != r["new"] else r["new"]
+        warn = r.get("alembic_warn") or "код обновлён, миграция не выполнена"
+        return _back("/diag", err=f"Код обновлён ({transition} «{subj}»), но МИГРАЦИЯ "
+                                   f"ПРОВАЛИЛАСЬ: {warn}{rebuild}")
     verb = "Принудительно обновлено" if r.get("forced") else "Обновлено"
     subj = r.get("subject", "")
     if r["old"] == r["new"]:
-        return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{warn}{rebuild}")
-    return _back("/diag", msg=f"{verb}: {r['old']}→{r['new']} «{subj}»{warn}{rebuild}")
+        return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{rebuild}")
+    return _back("/diag", msg=f"{verb}: {r['old']}→{r['new']} «{subj}»{rebuild}")
 
 
 @router.post("/admin/pull")

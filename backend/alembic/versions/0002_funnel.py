@@ -28,9 +28,14 @@ def upgrade() -> None:
         sa.Column("sources_enabled", postgresql.JSONB()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
+    # Витрины (cctld/reg_ru/sweb) — сырьё без RD/лейна/дедлайна; платный Ahrefs зовётся ровно
+    # для доменов БЕЗ RD (только эти источники его не дают) -> включать их с нуля значит молча
+    # жечь деньги на капчу с самой первой установки. Рантайм-дефолт SOURCES_ENABLED в
+    # scoring_config.py уже держит их выключенными — INSERT обязан ему соответствовать, а не
+    # расходиться (аудит 2026-07-14, F21). Уже накатанные базы правит корректирующая 0015.
     op.execute(
         "INSERT INTO scoring_settings (id, sources_enabled) VALUES "
-        "(1, '{\"backorder\": true, \"cctld\": true, \"reg_ru\": true, \"sweb\": true}')"
+        "(1, '{\"backorder\": true, \"cctld\": false, \"reg_ru\": false, \"sweb\": false}')"
     )
 
 

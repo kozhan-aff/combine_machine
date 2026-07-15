@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db import get_session
 from app.models.domain import Domain
+from app.services.scoring import history_verdict
 
 router = APIRouter(prefix="/domains", tags=["domains"])
 
@@ -28,7 +29,9 @@ def list_domains(status: str | None = None, min_score: float | None = None,
             "score": float(d.score) if d.score is not None else None,
             "dr": float(d.dr) if d.dr is not None else None,
             "referring_domains": d.referring_domains,
-            "clean": d.clean,
+            # НЕ d.clean: та колонка значит «не отклонён», а наружу читалась как «чистая
+            # история» (аудит F2). Отдаём честный вердикт: clean | dirty | unknown.
+            "history": history_verdict(d),
             "reject_reason": d.reject_reason,
         }
         for d in rows

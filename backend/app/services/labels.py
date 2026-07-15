@@ -12,8 +12,10 @@ STATUS_RU = {
     "discovered": "найден", "scored": "оценён", "approved": "одобрен",
     "rejected": "отклонён", "purchasing": "в очереди", "purchased": "куплен",
     "live": "живой",
-    # заказ выкупа (M2)
-    "pending_confirm": "ждёт подтверждения", "ordered": "отправлен",
+    # заказ выкупа (M2). `ordering` — транзиентный claim отправки: живёт секунды, но если процесс
+    # убили в этот момент, строка висит в нём, пока её не разберёт поллинг (F11). В очереди она
+    # видна — значит и подпись у неё обязана быть человеческая, а не сырой `ordering`.
+    "pending_confirm": "ждёт подтверждения", "ordering": "отправляется", "ordered": "отправлен",
     "caught": "пойман", "failed": "ошибка", "cancelled": "отменён",
     # сайт (M3–M5)
     "provisioning": "поднимается", "content": "контент", "published": "опубликован",
@@ -29,6 +31,15 @@ REJECT_RU = {
 
 LANE_RU = {"bid": "ставка", "free": "свободный"}
 
+# Индексация страницы (M5). `unknown` — не «нет»: это состояние, чей смысл ОБЯЗАН быть
+# произнесён вслух, иначе оператор прочтёт его как «страницы нет в индексе» и пойдёт чинить
+# работающее (ровно та ложь, от которой лечился check_index, F15). Поэтому подпись несёт и
+# причину («движки молчат»), а не одно слово.
+INDEX_RU = {
+    "indexed": "в индексе", "not_indexed": "не в индексе",
+    "unknown": "не знаю (движки молчат)",
+}
+
 
 def status_ru(v):
     return STATUS_RU.get(v, v) if v else ""
@@ -42,8 +53,13 @@ def lane_ru(v):
     return LANE_RU.get(v, v) if v else ""
 
 
+def index_ru(v):
+    return INDEX_RU.get(v, v) if v else ""
+
+
 if __name__ == "__main__":  # self-check без БД
     assert status_ru("approved") == "одобрен" and status_ru("zzz") == "zzz"
     assert status_ru(None) == "" and lane_ru("bid") == "ставка"
     assert reject_ru("not_acquirable") == "нельзя купить"
+    assert index_ru("unknown") == "не знаю (движки молчат)" and index_ru(None) == ""
     print("labels ok")

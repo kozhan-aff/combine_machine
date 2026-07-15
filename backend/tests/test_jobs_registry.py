@@ -9,8 +9,8 @@ STAGES = [{"key": "rd", "label": "RD из фида"},
 
 
 def test_track_writes_row_and_closes_done():
-    with jobs.track("score", stages=STAGES):
-        jobs.report("score", done=1, total=3, current="a.ru", stage="whois")
+    with jobs.track("score", stages=STAGES) as run:
+        jobs.report(run, done=1, total=3, current="a.ru", stage="whois")
         p = jobs.progress("score")
         assert p["running"] is True and p["done"] == 1 and p["current"] == "a.ru"
         st = {s["key"]: s["state"] for s in p["stages"]}
@@ -40,12 +40,12 @@ def test_double_spawn_rejected_before_row_exists():
 
 
 def test_cancel_marks_cancelled_and_keeps_progress():
-    with jobs.track("recheck"):
-        jobs.report("recheck", done=34, total=100)
-        assert jobs.cancelled("recheck") is False
-        jobs.request_cancel("recheck")
-        assert jobs.cancelled("recheck") is True
-        if jobs.cancelled("recheck"):
+    with jobs.track("recheck") as run:
+        jobs.report(run, done=34, total=100)
+        assert jobs.cancelled(run) is False
+        jobs.request_cancel("recheck")     # кнопка знает ИМЯ джоба, а не id прогона
+        assert jobs.cancelled(run) is True
+        if jobs.cancelled(run):
             raise jobs.Cancelled()          # так делает сервис между доменами
     p = jobs.progress("recheck")
     assert p["status"] == "cancelled" and p["done"] == 34 and p["total"] == 100
@@ -54,8 +54,8 @@ def test_cancel_marks_cancelled_and_keeps_progress():
 def test_failure_records_stage_where_it_broke():
     """Упавшая задача обязана показать, НА КАКОЙ стадии встала (макет new-03)."""
     with pytest.raises(RuntimeError):
-        with jobs.track("score", stages=STAGES):
-            jobs.report("score", done=18, total=100, stage="whois")
+        with jobs.track("score", stages=STAGES) as run:
+            jobs.report(run, done=18, total=100, stage="whois")
             raise RuntimeError("A-Parser timeout")
     p = jobs.progress("score")
     assert p["status"] == "failed" and "timeout" in p["error"] and p["done"] == 18
@@ -71,15 +71,15 @@ def test_live_shows_running_jobs_only():
 
 
 def test_last_returns_finished_run_with_message():
-    with jobs.track("recheck"):
-        jobs.report("recheck", done=200, total=200, message="занято 3 из отобранных")
+    with jobs.track("recheck") as run:
+        jobs.report(run, done=200, total=200, message="занято 3 из отобранных")
     assert jobs.last("recheck")["message"] == "занято 3 из отобранных"
     assert jobs.last("discovery") is None
 
 
 def test_report_outside_track_is_noop():
     """score_domain по одной кнопке и юнит-тесты зовут report без открытого прогона."""
-    jobs.report("score", done=1, total=1)     # не должно падать
+    jobs.report(None, done=1, total=1)        # нет прогона — нечего адресовать, не падаем
     assert jobs.progress("score")["running"] is False
 
 

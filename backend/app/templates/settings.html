@@ -4,6 +4,12 @@
 <h2><span class="idx">⚙</span> Настройки воронки
   <span class="hint">пороги скоринга · пул: {{ counts.total }} доменов · счётчики обновляются при сдвиге</span></h2>
 
+<div class="chips">
+  <a class="chip on" href="/settings" title="пороги скоринга воронки M1 и включённые источники Discovery">Воронка</a>
+  <a class="chip" href="/settings/cloudflare"
+     title="read-only правда Cloudflare: подключения, аккаунты, зоны, DNS, сертификаты">Cloudflare</a>
+</div>
+
 <form method="post" action="/settings/save" style="max-width:760px; display:grid; gap:14px">
   <div class="station">
     <div class="plate">T0 · min доноров (RD) — <b>отсекает пустышки</b></div>

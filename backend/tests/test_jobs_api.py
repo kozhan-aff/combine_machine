@@ -3,8 +3,8 @@ from app.services import jobs
 
 
 def test_live_lists_running_job(client):
-    with jobs.track("score", stages=[{"key": "rd", "label": "RD из фида"}]):
-        jobs.report("score", done=3, total=10, current="a.ru", stage="rd")
+    with jobs.track("score", stages=[{"key": "rd", "label": "RD из фида"}]) as run:
+        jobs.report(run, done=3, total=10, current="a.ru", stage="rd")
         r = client.get("/api/jobs/live")
         assert r.status_code == 200
         body = r.json()
@@ -14,8 +14,8 @@ def test_live_lists_running_job(client):
 
 
 def test_live_reports_last_run_when_idle(client):
-    with jobs.track("recheck"):
-        jobs.report("recheck", done=200, total=200, message="занято 3")
+    with jobs.track("recheck") as run:
+        jobs.report(run, done=200, total=200, message="занято 3")
     body = client.get("/api/jobs/live").json()
     assert body["jobs"] == []
     assert body["last"]["recheck"]["message"] == "занято 3"
@@ -23,10 +23,10 @@ def test_live_reports_last_run_when_idle(client):
 
 
 def test_cancel_sets_flag(client):
-    with jobs.track("score"):
+    with jobs.track("score") as run:
         r = client.post("/run/score/cancel", follow_redirects=False)
         assert r.status_code == 303
-        assert jobs.cancelled("score") is True
+        assert jobs.cancelled(run) is True
 
 
 def test_run_returns_to_page_it_was_pressed_on(client, monkeypatch):

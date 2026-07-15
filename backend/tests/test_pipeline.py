@@ -203,9 +203,10 @@ def test_edit_gate_and_publish(client, monkeypatch):
     states = sorted(p["status"] for p in client.get(f"/api/sites/{site_id}/pages").json())
     assert states == ["draft", "draft", "published"]
 
-    # M5 index check (mock SearXNG -> no hits)
-    monkeypatch.setattr("app.integrations.searxng.SearxngClient.search",
-                        lambda self, q, **kw: [])
+    # M5 index check (mock SearXNG -> движки ответили, выдача пуста => законное «нет в индексе»;
+    # мёртвые движки дали бы `unknown` — см. test_index_truth.py)
+    monkeypatch.setattr("app.integrations.searxng.SearxngClient.search_full",
+                        lambda self, q, **kw: {"results": [], "unresponsive_engines": []})
     assert client.post(f"/api/sites/{site_id}/check-index").json()["pages"]["/"] == "not_indexed"
 
 

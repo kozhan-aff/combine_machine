@@ -7,6 +7,11 @@
 {% set n_draft = pc.get('draft', 0) %}
 {% set n_edited = pc.get('edited', 0) %}
 {% set n_published = pc.get('published', 0) %}
+{% set idx_ok = pages | selectattr('index_status', 'equalto', 'indexed') | list %}
+{# «спросили, но не выяснили»: unknown + отметка времени проверки. unknown БЕЗ отметки — это
+   «не проверялось ни разу» (дефолт колонки), и путать их нельзя. #}
+{% set idx_blind = pages | selectattr('index_status', 'equalto', 'unknown')
+                         | selectattr('index_checked_at') | list %}
 
 <h2><span class="idx">◈</span> {{ domain }}
   <span class="badge b-{{ site.status if site.status in ['provisioning','content','published'] else 'default' }}"
@@ -52,7 +57,13 @@
       <div class="body"><div class="t">3 · Provision — инфраструктура <small>M3 · Cloudflare + aaPanel</small></div>
         <div class="h">Одна кнопка делает всё по порядку: зона Cloudflare → проверка NS у регистратора →
           proxied A-запись на VPS → vhost + SSL в aaPanel. Идемпотентно: если зона ждёт NS —
-          баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div></div>
+          баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div>
+        {% if site.ssl_error %}
+        <div class="blind" title="{{ site.ssl_error }}">⚠ SSL-режим Cloudflare не переключился —
+          HTTPS может не работать. Vhost при этом поднят. Причина: {{ site.ssl_error|truncate(120) }}.
+          Почини и прогони provision заново.</div>
+        {% endif %}
+      </div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/provision">
           <button class="btn-sm {{ '' if prov_done else 'btn-acc' }}"
@@ -103,11 +114,16 @@
     </li>
 
     <li>
-      <span class="st"><span class="led {{ 'led-ok' if (pages | selectattr('index_status','equalto','indexed') | list) else ('led-todo' if n_published else 'led-off') }}"></span></span>
+      <span class="st"><span class="led {{ 'led-ok' if idx_ok else ('led-warn' if idx_blind else ('led-todo' if n_published else 'led-off')) }}"></span></span>
       <div class="body"><div class="t">7 · Индексация <small>M5 · site: через SearXNG</small></div>
         <div class="h">Спрашивает у поисковиков «site:{{ domain }}…» по каждой опубликованной странице
-          и записывает результат в колонку «индекс». Не мгновенно: попадание в индекс занимает дни —
-          проверяй периодически.</div></div>
+          и сверяет с выдачей ПУТЬ, а не только домен (главная в выдаче ничего не говорит про /setup).
+          Не мгновенно: попадание в индекс занимает дни — проверяй периодически.</div>
+        {% if idx_blind %}
+        <div class="blind">Последняя проверка ничего не выяснила у {{ idx_blind|length }} стр.: движки
+          SearXNG не ответили (CAPTCHA/лимит). Это про поисковик, а не про сайт — повтори проверку
+          позже или разберись с SearXNG в <a href="/diag">диагностике</a>.</div>
+        {% endif %}</div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/check-index">
           <button class="btn-sm" {{ 'disabled' if not n_published }}
@@ -133,8 +149,12 @@
       <td>{{ p.title or '—' }}</td>
       <td><span class="badge b-{{ p.status if p.status in ['draft','edited','published'] else 'default' }}"
             title="{{ {'draft':'AI-черновик — публикация его не возьмёт','edited':'вычитано человеком — готово к публикации','published':'опубликовано на сайте'}.get(p.status, p.status) }}">{{ p.status|status_ru }}</span></td>
-      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>в индексе
-          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>не в индексе
+      {# подписи вердиктов — из labels.INDEX_RU (тот же словарь, что во флеше кнопки проверки) #}
+      <td>{% if p.index_status == 'indexed' %}<span class="led led-ok"></span>{{ p.index_status|index_ru }}
+          {% elif p.index_status == 'not_indexed' %}<span class="led led-bad"></span>{{ p.index_status|index_ru }}
+          {% elif p.index_checked_at %}<span class="led led-warn"
+               title="выдача пуста, но движки SearXNG не ответили (CAPTCHA/лимит) — спросить не удалось. Это не «нет в индексе»"
+               ></span>{{ p.index_status|index_ru }}
           {% else %}<span class="led led-off"></span><span class="hint">не проверялось</span>{% endif %}</td>
       <td><a class="btn btn-sm {{ 'btn-acc' if p.status == 'draft' }}" href="/pages/{{ p.id }}"
              title="{{ 'открыть редактор: вычитать черновик и сохранить как edited' if p.status == 'draft' else 'открыть страницу в редакторе' }}">

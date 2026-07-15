@@ -10,7 +10,16 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")   # проверяем punycode-форму (ASCII)
+# Проверяем punycode-форму (ASCII), метка-за-меткой (аудит 2026-07-14, F30): старый
+# `[a-z0-9-]+` пропускал мусор, который потом платно бьётся о whois/Ahrefs —
+# ведущий/хвостовой дефис в метке ("-foo.ru"/"foo-.ru"), голый IP ("1.2.3.4" — цифровая
+# последняя метка ловится тем же правилом, что и числовой TLD) и однобуквенный TLD
+# ("foo.a"). Метка — не более 63 симв., не начинается/не кончается дефисом (RFC 1035);
+# TLD — та же форма МЕТКИ, но с минимум двумя символами и без права быть числом целиком
+# (punycode "xn--..." проходит: начинается/кончается буквой/цифрой, дефисы только внутри).
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_TLD = r"(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])"     # >=2 симв. и не чисто цифровой
+_DOMAIN_RE = re.compile(rf"^(?:{_LABEL}\.)+{_TLD}$")
 
 
 def _parse_deadline(val) -> datetime | None:
@@ -82,18 +91,24 @@ def _sources():
 _SOURCE_RU = {"backorder": "backorder", "cctld": "cctld", "reg_ru": "reg.ru", "sweb": "sweb"}
 
 
-def _collect(enabled: dict) -> list[dict]:
+def _collect(enabled: dict, run=None) -> list[dict]:
     """Собрать строки со всех включённых источников. Сбой одного источника не топит остальные.
 
     Стадию репортим ПЕРЕД походом в источник: сбор идёт секунды, и оператор должен видеть,
-    кого именно сейчас опрашиваем (jobs.report вне track — no-op, юнит-тесты не ломаются).
+    кого именно сейчас опрашиваем (run=None — вне track, no-op: юнит-тесты не ломаются).
     """
     from app.services import jobs
     rows: list[dict] = []
     for name, Client in _sources().items():
         if not enabled.get(name):
             continue
-        jobs.report("discovery", stage=name, current=f"собираю: {_SOURCE_RU.get(name, name)}")
+        # Между источниками (не внутри — один источник это один сетевой поход) спрашиваем
+        # реестр: нажали ли «стоп». Тот же контракт, что уже держат score_pending/recheck_
+        # acquirability/run_sweep — кнопка рисуется ЛЮБОЙ живой задаче, а до сих пор её слушал
+        # только score/recheck (F18): discovery доезжал до конца независимо от кнопки.
+        if jobs.cancelled(run):
+            raise jobs.Cancelled()
+        jobs.report(run, stage=name, current=f"собираю: {_SOURCE_RU.get(name, name)}")
         before = len(rows)
         try:
             if name == "backorder":                         # даёт RD + фид-флаги
@@ -129,9 +144,9 @@ def run_discovery() -> int:
     enabled = get_settings()["sources_enabled"]
     stages = ([{"key": k, "label": _SOURCE_RU[k]} for k in _SOURCE_RU if enabled.get(k)]
               + [{"key": "dedup", "label": "дедуп"}, {"key": "save", "label": "запись"}])
-    with jobs.track("discovery", stages=stages):
-        rows = _collect(enabled)
-        jobs.report("discovery", stage="dedup")
+    with jobs.track("discovery", stages=stages) as run:
+        rows = _collect(enabled, run)
+        jobs.report(run, stage="dedup")
         best: dict[str, dict] = {}
         for r in rows:
             d = canonical_domain(r.get("domain"))      # единый ключ: сырые источники тоже канонятся
@@ -146,9 +161,9 @@ def run_discovery() -> int:
             # ноль кандидатов (фид пуст / источники выключены) — тоже честный терминал:
             # репортим 0/0 «нет кандидатов»; JS считает джоб завершённым по running=False
             # (терминальный контракт в services/jobs.py), done/total — только отображение.
-            jobs.report("discovery", done=0, total=0, current="", message="нет кандидатов")
+            jobs.report(run, done=0, total=0, current="", message="нет кандидатов")
             return 0
-        jobs.report("discovery", stage="save")
+        jobs.report(run, stage="save")
 
         def _insert(db) -> int:
             existing = {d.domain: d for d in db.execute(
@@ -192,7 +207,7 @@ def run_discovery() -> int:
                 # одной повторной попытки достаточно (перечитанный existing уже включает их вставки).
                 db.rollback()
                 n = _insert(db)
-        jobs.report("discovery", done=1, total=1, current="", message=f"собрано {n} доменов")
+        jobs.report(run, done=1, total=1, current="", message=f"собрано {n} доменов")
         return n
 
 
@@ -205,4 +220,7 @@ if __name__ == "__main__":  # pure normalize self-check (no network)
     sentinel = normalize_row({"domainname": "x.ru", "links": 5, "visitors": -1, "yandex_tic": -1, "price": 190})
     assert sentinel["visitors"] is None and sentinel["tic"] is None and sentinel["price"] == 190.0
     assert canonical_domain("www.a.ru") == "a.ru" and canonical_domain("x@y.ru") is None
+    assert canonical_domain("-foo.ru") is None and canonical_domain("foo-.ru") is None
+    assert canonical_domain("foo.123") is None and canonical_domain("foo.a") is None
+    assert canonical_domain("1.2.3.4") is None
     print("discovery normalize_row ok")

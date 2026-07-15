@@ -68,16 +68,23 @@ def _detect_rebuild(old: str, new: str) -> bool:
 
 
 def _post_update(old: str) -> dict:
-    """Общий хвост pull/force: alembic (мягко) + новый hash/subject + детект пересборки."""
+    """Общий хвост pull/force: alembic + новый hash/subject + детект пересборки.
+
+    ok=False, если миграция упала или alembic не найден — код репозитория мог обновиться,
+    а схема БД нет, и это НЕ успешный деплой (F22/F23/F29, аудит 2026-07-14): раньше
+    ok всегда был True, а провал алембика молча прятался маленьким суффиксом в
+    alembic_warn — git-pull с упавшей миграцией на боксе красился зелёным «Обновлено»."""
     try:
         mig = subprocess.run(["alembic", "upgrade", "head"], cwd=_APP,
                              capture_output=True, text=True, timeout=120)
-        alembic_warn = "" if mig.returncode == 0 else _scrub(mig.stderr.strip())[:150]
+        ok = mig.returncode == 0
+        alembic_warn = "" if ok else _scrub(mig.stderr.strip())[:150]
     except FileNotFoundError:
+        ok = False
         alembic_warn = "alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
     cur = deploy_status()
     new = cur.get("hash", "")
-    return {"ok": True, "old": old, "new": new, "subject": cur.get("subject", ""),
+    return {"ok": ok, "old": old, "new": new, "subject": cur.get("subject", ""),
             "needs_rebuild": _detect_rebuild(old, new), "alembic_warn": alembic_warn}
 
 

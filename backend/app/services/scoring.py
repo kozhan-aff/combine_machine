@@ -50,21 +50,158 @@ FUNNEL_STAGES = [
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Гарды в _decide не дают авто-approve
 # без Wayback — домен уходит в scored, то есть В ИНБОКС К ЧЕЛОВЕКУ, и там неотличим от честно
 # проверенного. Человек штампует непроверенное, думая, что машина посмотрела историю.
+#
+# ИСТОРИИ ЗДЕСЬ НЕТ НАМЕРЕННО: её вердикт считает history_verdict (см. ниже). Раньше она жила
+# тут ключом "wayback" — и это был баг (аудит, F2): «вслепую» выводилось из ФАКТА ОШИБКИ, а
+# Wayback, не нашедший ни одного снимка, ошибки не бросает (`wayback_checked=False`, errors
+# пуст). Домен, чью историю никто не смотрел, приезжал в инбокс с подписью «история чистая».
 _BLIND_RU = {
-    "wayback": "история НЕ проверена: Wayback был недоступен",
+    # whois кормит ДВА гейта воронки: возраст (`too_young`) и занятость (`available` -> лейн,
+    # `not_acquirable`). Молчащий A-Parser не ослаблял их, он снимал их целиком: без даты
+    # сравнивать не с чем, отказа нет, и домен ехал дальше «как проверенный» (аудит F6).
+    # Балл гейт возраста не дублирует — юный домен с большой ссылочной массой набирает ~0.71
+    # и порог берёт. Эта формулировка — для случая, когда возраста НЕ дал никто.
+    "whois": "возраст НЕ проверен: whois не ответил — гейт «слишком молодой» не применялся, "
+             "занятость домена тоже не сверена",
+    "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
     "searxng": "эхо в индексе НЕ проверено",
 }
 
+# whois упал, но возраст всё-таки известен — из Wayback (`age_source='wayback'`, фолбэк в
+# _funnel). Прежний текст здесь ЛГАЛ ровно в том состоянии, где показывался: он утверждал, что
+# гейт «слишком молодой» не применялся, — а он применялся (_funnel сравнивает Wayback-возраст с
+# min_age_years). Правда в другом: возраст по архиву — это НИЖНЯЯ оценка (первый снимок не
+# раньше регистрации), а вот ЗАНЯТОСТЬ домена не сверял никто.
+_BLIND_WHOIS_ARCHIVE_AGE = ("возраст по архиву (whois не ответил): гейт «слишком молодой» "
+                            "применён по первому снимку, но занятость домена НЕ сверена")
+
+# Категории прошлого домена — по-русски (панель русская; улики показываются куратору).
+_CATS_RU = {"adult": "взрослое", "pharma": "фарма", "casino": "казино",
+            "gambling": "ставки", "spam": "спам"}
+
+
+def history_verdict(d) -> str:
+    """Что машина РЕАЛЬНО знает об истории домена: 'clean' | 'dirty' | 'unknown'.
+
+    ЕДИНСТВЕННЫЙ источник правды о чистоте истории — и для инбокса, и для пакетного одобрения,
+    и для JSON. Три состояния, а не два: «не проверяли» — это НЕ «чисто». Домен становится
+    'clean' только там, где Wayback реально прочитал большинство выборки (`wayback_checked`);
+    пустой архив, троттлинг archive.org и упавший запрос дают 'unknown' — и такой домен
+    исключён из пакета (см. panel._bulk_candidates).
+
+    'dirty' проверяется ПЕРВЫМ: известная грязь главнее незнания.
+    """
+    pf = d.prior_flags or {}
+    if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
+        return "dirty"
+    if not d.wayback_checked:
+        return "unknown"
+    return "clean"
+
+
+def history_evidence(d) -> list[dict]:
+    """Снимки, по которым машина судила историю, — готовые к показу (ссылка, дата, категории).
+
+    Вердикт ошибается (это и доказал аудит), поэтому куратор обязан мочь ПЕРЕПРОВЕРИТЬ его
+    глазами: улики пишутся в score_breakdown.history_evidence (Задача 1) — здесь они
+    превращаются в ссылки на web.archive.org.
+
+    `unread` — снимок скачался, но видимого текста на нём НЕТ (редирект-заглушка, frameset,
+    SPA-оболочка; см. wayback.MIN_TEXT_CHARS). Без этой пометки строка улики выглядела бы в
+    инбоксе ровно как честно прочитанная и чистая («категорий не найдено»), хотя не прочитано
+    вообще ничего. Улики без `chars` — из прогонов ДО этой пометки: догадываться о них нельзя,
+    считаем прочитанными (как их и трактовал тогдашний вердикт).
+    """
+    from app.integrations.wayback import MIN_TEXT_CHARS
+
+    out = []
+    for e in (d.score_breakdown or {}).get("history_evidence") or []:
+        url, ts = e.get("url") or "", str(e.get("timestamp") or "")
+        if not url or len(ts) < 8:   # пустые url/timestamp -> битая ссылка web.archive.org/web//
+            continue
+        chars = e.get("chars")
+        out.append({
+            "link": f"https://web.archive.org/web/{ts}/{url}",
+            "url": url,
+            "when": f"{ts[6:8]}.{ts[4:6]}.{ts[:4]}" if len(ts) >= 8 else ts,
+            "cats": ", ".join(_CATS_RU.get(c, c) for c in e.get("cats") or []),
+            "chars": chars,
+            "unread": isinstance(chars, int) and chars < MIN_TEXT_CHARS,
+        })
+    return out
+
 
 def blind_reason(d) -> str | None:
-    """Домен оценён при недоступной проверке — в пакет одобрения он не идёт (спека §1.5)."""
-    for e in (d.score_breakdown or {}).get("errors") or []:
-        head = str(e).split(":", 1)[0]
+    """Домен оценён при недоступной/несостоявшейся проверке — в пакет одобрения он не идёт.
+
+    История идёт первой строкой: она — главный инвариант проекта («домены берём за чистую
+    историю»), и именно она молча выдавала непроверенное за чистое.
+    """
+    errors = [str(e) for e in ((d.score_breakdown or {}).get("errors") or [])]
+    if history_verdict(d) == "unknown":
+        if any(e.startswith("wayback:") for e in errors):
+            return "история НЕ проверена: Wayback был недоступен"
+        if (d.score_breakdown or {}).get("history_evidence"):
+            # снимки есть, но прочитать удалось меньшинство (троттлинг archive.org) —
+            # вердикт по паре страниц был бы гаданием
+            return "история НЕ проверена: прочитано слишком мало снимков"
+        # sampled==0 — либо CDX вернул пустой список (архив реально пуст), либо снимки были,
+        # но ни одно тело не открылось (троттлинг/5xx archive.org глушатся внутри classify_history,
+        # evidence остаётся пустым). Различить эти два случая из score_breakdown нельзя, поэтому
+        # формулировка НЕ утверждает «снимков нет» как факт. sampled отсутствует (None) — домен
+        # отскорен ДО того, как поле стали писать (иначе не заполнено): и это тоже не «архива нет».
+        if (d.score_breakdown or {}).get("sampled") == 0:
+            return "история НЕ проверена: снимков нет или ни один не открылся — судить не по чему"
+        return "история НЕ проверена: улик нет в базе — перепроверь"
+    for e in errors:
+        head = e.split(":", 1)[0]
+        if head == "whois" and (d.score_breakdown or {}).get("age_source") == "wayback":
+            return _BLIND_WHOIS_ARCHIVE_AGE
         if head in _BLIND_RU:
             return _BLIND_RU[head]
     return None
+
+
+def history_note(d) -> str | None:
+    """Информационная пометка о СВЕЖЕСТИ вердикта истории. НЕ блокирует — и это осознанно.
+
+    Побочный эффект правила «не затирать проверенное» (аудит F9/C2): домен, чью историю
+    проверили РАНЬШЕ, а сегодня Wayback не ответил, сохраняет `wayback_checked=True` и
+    вердикт `clean` — про сегодняшний отказ архива не говорил НИКТО (ошибка живёт в
+    `score_breakdown.errors`, куда куратор не смотрит).
+
+    Почему НЕ блокирует (и почему эта пометка живёт рядом с `blind_reason`, а не внутри него):
+    вердикт опирается на РЕАЛЬНЫЕ прошлые улики, они сохранены и показываются строкой ниже, а
+    авто-approve по-прежнему гардится по `sig` ТЕКУЩЕГО прогона (`_decide`) — машина такой домен
+    сама не одобрит. Запирать его от пакетного одобрения из-за ТРАНЗИЕНТНОГО сбоя архива значило
+    бы завести ровно ту тихую ловушку, от которой ветка избавлялась: домены, помеченные сетевым
+    чихом, копятся навсегда и никем не разбираются.
+    """
+    if history_verdict(d) == "unknown":
+        return None                    # там своё слово скажет blind_reason — не дублируем
+    errors = [str(e) for e in ((d.score_breakdown or {}).get("errors") or [])]
+    if any(e.startswith("wayback:") for e in errors):
+        return "вердикт — из прошлой проверки: сегодня Wayback не ответил"
+    return None
+
+
+def bulk_ok(d) -> bool:
+    """Домен годится для ПАКЕТНОГО одобрения и вправе носить подпись «история чистая».
+
+    ОДИН предикат для panel._bulk_candidates (что реально становится `approved`) и для
+    строки инбокса (что рисуется как «чистая»): если эти два места переизобретают условие
+    порознь, они разъедутся ровно в режиме бага, который это и чинит (аудит F2) — расхождение
+    всплывёт молча, когда `history_verdict`/`blind_reason` обрастут новым значением/веткой.
+
+    `dirty_reason` (аудит F9) добавлен СЮДА, а не рядом с пакетом, по тому же правилу: новое
+    основание «нельзя» обязано пройти через единый предикат, иначе строка инбокса подписала бы
+    «история чистая» домен, который пакет молча пропускает. `history_verdict` ловит грязь ТОЛЬКО
+    по `prior_flags`; РКН и блэклист — это отдельные колонки, и до сих пор их здесь не видел никто.
+    """
+    from app.services.transitions import dirty_reason   # ленивый: transitions зовёт нас в ответ
+    return history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
 
 
 def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
@@ -85,6 +222,28 @@ def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float)
     if status == "approved" and any(
             e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
         status = "scored"
+    # whois-guard (аудит F6, доведён ревью Задачи 4): whois УПАЛ — гардим по САМОМУ ОТКАЗУ,
+    # тем же механизмом, что кормит бейдж «оценён вслепую», а не по `age_years is None`.
+    #
+    # Почему не по возрасту. Возраст, не добытый whois'ом, ДОБИРАЕТСЯ из Wayback (_funnel:
+    # first_seen -> age_years), и это законно: первый снимок не раньше регистрации, значит для
+    # гейта «слишком молодой» архивный возраст — консервативная НИЖНЯЯ оценка, она годится.
+    # Но упавший whois означает ещё и «мы не знаем, СВОБОДЕН ли домен вообще» (`available`) —
+    # а это ВТОРОЙ, независимый гейт воронки (лейн/`not_acquirable`). Его подменить нечем.
+    # Поэтому отказ whois снимает право на авто-approve ДАЖЕ когда возраст известен иначе —
+    # ровно тот случай, что утекал живьём: clara-c.ru (RD 2219, возраст из архива 16 лет,
+    # score 0.87) авто-одобрялся с бейджем «оценён вслепую» на лбу.
+    if status == "approved" and any(
+            e.startswith("whois:") for e in (sig.get("errors") or [])):
+        status = "scored"
+    # Страховка на будущее переутяжеление весов: возраст НЕИЗВЕСТЕН вообще (whois молчит И
+    # архив пуст) — значит гейт `too_young` не применялся ни разу, сравнивать было не с чем.
+    # Балл его не подстраховывает: `age` весит 0.18, и домен без возраста, но с проверенной
+    # историей + RD за потолком + эхом набирает ровно 0.70 == approve_at. Сегодня эта ветка
+    # недостижима (пустой архив -> wayback_checked=False -> уже сработал гард выше), и это
+    # правильно: инвариант должен пережить перенастройку весов, а не зависеть от неё.
+    if status == "approved" and sig.get("age_years") is None:
+        status = "scored"
     return status
 
 
@@ -98,16 +257,21 @@ def compute_score(sig: dict, weights: dict | None = None) -> dict:
     pf = sig.get("prior_flags") or {}
 
     # --- hard rejects (Stage E) ---
+    #
+    # Здесь БЫЛИ ещё две ветки отказа, и обе удалены как призраки (аудит 2026-07-14):
+    #   · `trademark_risk` (F5) — читался из БД, но НИ ОДИН код его не вычислял: ни расчёта, ни
+    #     формы, ни импорта. Значение всегда NULL, ветка мертва. Гейт, который выглядит рабочим
+    #     и не работает, опаснее отсутствующего: он врёт куратору, что юр-риск проверен. Считать
+    #     его вслепую по докстрингу — ровно та ошибка, что похоронила cctld-источник, поэтому
+    #     ветка снята, а колонка `Domain.trademark_risk` оставлена (данные не рушим).
+    #   · `topic_switch` (F4) — строгое подмножество категорийного отказа ниже: см. wayback.py,
+    #     флаг больше не производится.
     reasons = []
     if sig.get("rkn_listed"):
         reasons.append("rkn_listed")
     if sig.get("blacklisted") is True:
         reasons.append("blacklisted")
-    if sig.get("trademark_risk"):
-        reasons.append("trademark_risk")
     reasons += [f"prior_{c}" for c in cfg.HARD_REJECT_FLAGS if pf.get(c)]
-    if pf.get("topic_switch"):
-        reasons.append("topic_switch")
     if reasons:
         return {"score": 0.0, "status": "rejected", "breakdown": {"hard_reject": reasons}}
 
@@ -197,8 +361,12 @@ def scorable(now):
 
     Берём, значит, только тех, у кого есть шанс:
       · lane='bid' — backorder: T1 короткозамкнут лейном, whois нужен ради возраста;
-      · дроп НАСТУПИЛ (с запасом DROP_GRACE) — сегодня whois впервые может сказать «свободен».
-        До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке;
+      · дроп НАСТУПИЛ (`deadline <= now`) — сегодня whois впервые может сказать «свободен».
+        До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке. F20 (аудит
+        2026-07-14): здесь стоял `<= now + DROP_GRACE` — не «наступил с запасом», а «наступит
+        В ПРЕДЕЛАХ DROP_GRACE ВПЕРЕДИ», то есть дроп ЗАВТРА/послезавтра уже проходил сюда, хотя
+        такой домен гарантированно ещё занят. DROP_GRACE здесь не нужен вообще — это ДРУГАЯ
+        граница, чем верхний запас ПОСЛЕ дропа в acquirability_verdict, путать нельзя;
       · дедлайна НЕТ — раз в RECHECK_EVERY. Здесь одним шансом обойтись нельзя: «занят сегодня»
         без даты дропа не говорит ничего про день освобождения, и домен (вся популяция
         reg.ru/sweb) никогда не увидел бы собственного дропа.
@@ -207,14 +375,14 @@ def scorable(now):
     from sqlalchemy import or_, and_
     return or_(
         Domain.lane == "bid",
-        and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now + DROP_GRACE),
+        and_(Domain.acquire_deadline.is_not(None), Domain.acquire_deadline <= now),
         and_(Domain.acquire_deadline.is_(None),
              or_(Domain.acquirability_checked_at.is_(None),
                  Domain.acquirability_checked_at < now - RECHECK_EVERY)),
     )
 
 
-def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> str | None:
+def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
     источников (backorder объявляет lane=bid сам). Дорогой Wayback (T3) — только для
@@ -223,16 +391,14 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     from app.services import jobs
     now = datetime.now(timezone.utc)
 
-    if job:
-        jobs.report(job, stage="rd")
+    jobs.report(run, stage="rd")
     # T0 — фид (0 стоимости)
     if d.feed_flags and any(d.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
         return "feed_flag"
     if d.referring_domains is not None and d.referring_domains < st["min_referring_domains"]:
         return "low_rd"
 
-    if job:
-        jobs.report(job, stage="whois")
+    jobs.report(run, stage="whois")
     # T1 — приобретаемость + возраст (ОДИН whois-вызов, под бюджетом)
     if whois_budget is not None and whois_budget[0] <= 0:
         sig["acquirability_unresolved"] = True     # бюджет whois на прогон исчерпан — оставить discovered
@@ -264,6 +430,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
         age_known = True
         age = (now - wc).days / 365.25
         sig["age_years"] = round(age, 2)
+        sig["age_source"] = "whois"      # ОТКУДА возраст — это не деталь: бейдж пишет по нему
         if age < st["min_age_years"]:
             return "too_young"
 
@@ -298,8 +465,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
                 sig["unresolved_why"] = "taken_undated"
             return None
 
-    if job:
-        jobs.report(job, stage="risk")
+    jobs.report(run, stage="risk")
     # T2 — риск (средне): РКН + Spamhaus
     try:
         sig["rkn_listed"] = c["rkn"].is_listed(d.domain)
@@ -316,26 +482,35 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
 
-    if job:
-        jobs.report(job, stage="echo")
+    jobs.report(run, stage="echo")
     # indexed_echo
     try:
         sig["indexed_echo"] = c["searxng"].indexed_echo(d.domain)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
-    if job:
-        jobs.report(job, stage="history")
+    jobs.report(run, stage="history")
     # T3 — история (дорого): только для приобретаемых выживших
     try:
         hist = c["wayback"].classify_history(d.domain)
         pf = hist.get("prior_flags") or {}
         sig["prior_flags"] = pf
         sig["wayback_checked"] = hist.get("wayback_checked")     # сохраняем ДО возможного выхода
+        # чем именно подтверждён вердикт истории — снимки, которые реально смотрели. Кладём
+        # ДО возможного выхода в history_dirty: отказ — тоже вердикт, и он тоже ошибается.
+        sig["history_evidence"] = hist.get("evidence") or []
+        # сколько снимков РЕАЛЬНО скачали в ЭТОМ прогоне — 0 отличает «архив честно пуст» от
+        # «этот прогон вообще не оставил числа» (см. blind_reason: домены, отскоренные до
+        # появления этого поля, не имеют права носить утверждение о пустом архиве).
+        sig["sampled"] = hist.get("sampled")
         sig["first_seen"] = hist.get("first_seen")
         if sig.get("whois_created") is None and hist.get("age_years") is not None:
             sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
-        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS) or pf.get("topic_switch"):
+            # ...и бейдж обязан сказать об этом ПРАВДУ: гейт молодости ПРИМЕНЁН (ниже, по этому
+            # самому числу), а вот занятость домена не сверял никто. Прежний текст «гейт не
+            # применялся» был ложью ровно в том состоянии, где показывался (ревью Задачи 4).
+            sig["age_source"] = "wayback"
+        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
             return "history_dirty"
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"wayback:{type(e).__name__}")
@@ -344,8 +519,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:
         return "too_young"
 
-    if job:
-        jobs.report(job, stage="ahrefs")
+    jobs.report(run, stage="ahrefs")
     # T3b — Ahrefs (дорого, капча за деньги): ТОЛЬКО если фид не дал RD (cctld/reg_ru/
     # sweb — у backorder RD уже есть, повторно не проверяем) и бюджет жив.
     # ahrefs_budget=None -> НЕ вызываем (в отличие от whois_budget=None=безлимит — Ahrefs
@@ -364,9 +538,10 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, job=None) -> s
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
-                 ahrefs_budget=None, job: str | None = None) -> dict:
+                 ahrefs_budget=None, run: int | None = None) -> dict:
     """Полная воронка для одного домена. whois_budget — мутабельный [int] или None (без лимита).
     job — имя прогона в реестре (jobs.py): если задан, _funnel репортит текущую стадию."""
+    from datetime import datetime, timezone
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings
@@ -380,8 +555,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             return {"domain": d.domain, "status": d.status, "skipped": "status"}
         c = clients or _make_clients()
         sig: dict = {"errors": []}
-        sig["trademark_risk"] = d.trademark_risk
-        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, job=job)
+        reject = _funnel(d, c, st, sig, whois_budget, ahrefs_budget, run=run)
 
         if sig.get("acquirability_unresolved"):
             # приобретаемость не определена (whois сбой/непонятно/бюджет) — статус НЕ трогаем,
@@ -407,6 +581,16 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
         else:
             sig.setdefault("referring_domains", d.referring_domains)
+            # F25: тот же приём для DR. Ahrefs зовётся ТОЛЬКО когда фид не дал RD (см. _funnel,
+            # T3b) — при рескоре уже приобретённого RD-домена sig["dr"] никогда не наполняется,
+            # хотя d.dr в БД уже хранит проверенное значение с прошлого прогона. Без setdefault
+            # compute_score считал authority от 0.0, будто Ahrefs вообще не спрашивали — домен с
+            # authority=1.0 на первом скоринге терял вес 0.12 на каждом следующем рескоре.
+            # float(): `dr` — Numeric, ORM отдаёт его как Decimal при чтении СВЕЖЕЙ строки из БД
+            # (`d = db.get(...)` в начале score_domain — новая сессия, не то же значение, что
+            # только что вернул Ahrefs) — Decimal/float в compute_score роняет TypeError (тот же
+            # приём, что уже применяет api/domains.py при отдаче `dr` наружу).
+            sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
             result = compute_score(sig, st.get("weights"))     # веса — рантайм, с /settings
             if "hard_reject" not in result["breakdown"]:
                 # Finding 1 (2026-07 review): re-decide with the RUNTIME /settings thresholds
@@ -416,28 +600,58 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                 result = {**result, "status": _decide(result["score"], sig,
                                                       st["approve_at"], st["manual_review_at"])}
 
-        d.lane = sig.get("lane") or d.lane
-        d.whois_created = sig.get("whois_created")
-        # факт сверки приобретаемости: скоринг уже сходил в whois — перепроверке незачем
-        # повторять это следующим же кликом
-        d.acquirability_checked_at = sig.get("acquirability_checked_at") or d.acquirability_checked_at
-        d.prior_flags = sig.get("prior_flags")
-        d.wayback_checked = bool(sig.get("wayback_checked"))
-        d.first_seen = sig.get("first_seen")
-        d.age_years = sig.get("age_years")
-        d.rkn_listed = sig.get("rkn_listed")
-        d.blacklisted = sig.get("blacklisted")
-        d.indexed_echo = sig.get("indexed_echo")
-        if sig.get("dr") is not None:
-            d.dr = sig["dr"]
-        if sig.get("referring_domains") is not None:
-            d.referring_domains = sig["referring_domains"]
+        # СИГНАЛЫ ПИШЕМ ТОЛЬКО ИЗ ПРОВЕРОК, КОТОРЫЕ В ЭТОМ ПРОГОНЕ РЕАЛЬНО ОТРАБОТАЛИ.
+        #
+        # Раньше здесь стоял безусловный `d.X = sig.get("X")` — и он ОТМЫВАЛ ГРЯЗЬ (ревью
+        # Задачи 6, Critical 2). Воронка выходит рано: T0 (low_rd/feed_flag) не зовёт вообще
+        # ничего, T1 (too_young/not_acquirable) — только whois. РКН, блэклист и Wayback при
+        # таком выходе НЕ ВЫПОЛНЯЛИСЬ, sig о них молчит — и в колонки ложился None. Домен,
+        # отклонённый за РКН, после «▶ перепроверить» терял ВСЕ улики (rkn_listed=None,
+        # prior_flags=None) и снова становился чистым для политики (services/transitions).
+        # То есть кнопка реабилитации работала не «по новым уликам», а ПО ИХ ОТСУТСТВИЮ:
+        # достаточно было поднять min_rd на /settings, чтобы перескор стёр память о РКН.
+        #
+        # Правило ОБЩЕЕ, а не три частных случая (dr/age_years из F25 — тот же корень):
+        # ОТСУТСТВИЕ значения — это «не проверяли», и оно не имеет права затирать то, что
+        # кто-то проверил. None трактуем так же: «blacklist ответил "недоступен"» не снимает
+        # вчерашнее «в блэклисте». Проверка, которая ОТРАБОТАЛА и сказала «чист», кладёт False —
+        # и реабилитирует домен, как и задумано (см. test_rescoring_is_the_honest_way_back).
+        for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
+                    "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
+                    "indexed_echo", "dr", "referring_domains"):
+            v = sig.get(col)
+            if v is not None:
+                setattr(d, col, v)
+        # ЛЕГАСИ-КОЛОНКА. Имя врёт: это «не отклонён», а не «чистая история» — по нему нельзя
+        # судить о прошлом домена (JSON-двойник так и делал, аудит F2). Чистоту истории
+        # спрашивать ТОЛЬКО у history_verdict(). Колонка доживает до ближайшей миграции.
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
+        prev = d.score_breakdown or {}
+
+        def _kept(key):
+            """То же правило для УЛИК: снимок, который этот прогон не смотрел, не исчезает.
+
+            Иначе `prior_flags` (мы его только что сохранили) остался бы вердиктом без единого
+            подтверждения: инбокс пишет «история грязная — смотри снимки», а смотреть нечего.
+            """
+            v = sig.get(key)
+            return v if v is not None else prev.get(key)
+
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
-                             "ahrefs_backlinks": sig.get("ahrefs_backlinks")}
+                             "ahrefs_backlinks": _kept("ahrefs_backlinks"),
+                             "history_evidence": _kept("history_evidence") or [],
+                             "sampled": _kept("sampled"),
+                             # 'whois' | 'wayback' | None — по нему blind_reason выбирает,
+                             # ЧТО именно осталось непроверенным (возраст или только занятость)
+                             "age_source": _kept("age_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
+        # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку до решения — до этой колонки узнать было
+        # неоткуда (discovered_at — это discovery, не скоринг; score_breakdown молчит про время).
+        # Ставим только здесь: unresolved-возврат выше (whois не разобрал/бюджет исчерпан)
+        # оставляет домен discovered — воронка НЕ дошла до решения, значит и не "оценила" его.
+        d.scored_at = datetime.now(timezone.utc)
         db.commit()
         return {"domain": d.domain, **result, "reject_reason": d.reject_reason,
                 "errors": sig.get("errors", [])}
@@ -515,20 +729,20 @@ def score_pending(limit: int = 100) -> int:
     whois_budget = [int(st["max_whois_per_run"])]
     ahrefs_budget = [int(st["max_ahrefs_per_run"])]
     total, done = len(rows), 0
-    with jobs.track("score", stages=stages):
+    with jobs.track("score", stages=stages) as run:
         for i, (did, name) in enumerate(rows, 1):
             # ПОРЯДОК ВАЖЕН: репорт ДО проверки стопа. done = i-1 — это ровно столько доменов,
             # сколько уже дошли до конца. Проверь стоп раньше репорта — и в реестре останется
             # done от прошлой итерации, то есть «остановлена на 0 / 5» после одного домена.
-            jobs.report("score", done=i - 1, total=total, current=name)
-            if jobs.cancelled("score"):
+            jobs.report(run, done=i - 1, total=total, current=name)
+            if jobs.cancelled(run):
                 raise jobs.Cancelled()
             try:
-                score_domain(did, clients, whois_budget, ahrefs_budget, job="score")
+                score_domain(did, clients, whois_budget, ahrefs_budget, run=run)
             except Exception:  # noqa: BLE001 — падение одного домена не топит батч
                 logging.getLogger(__name__).exception("score_domain %s упал", name)
             done = i
-        jobs.report("score", done=total, total=total, current="",
+        jobs.report(run, done=total, total=total, current="",
                     message=idle_msg or f"прогнано {total} доменов через воронку")
     return done
 
@@ -591,13 +805,13 @@ def recheck_acquirability(limit: int = 200) -> dict:
     # free+waiting+taken+unknown; расходится ровно на домены, которые между whois и записью
     # успели уйти в выкуп (см. декремент taken по rowcount ниже) — их отбраковки не было.
     out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
-    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]):
-        jobs.report("recheck", stage="whois")
+    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]) as run:
+        jobs.report(run, stage="whois")
         budget = int(get_settings()["max_whois_per_run"])
         if budget <= 0:
             # ВНУТРИ track, а не до него: иначе прогон завершался бы, не создав строки реестра,
             # и кнопка «Перепроверить» выглядела бы сломанной — ровно та болезнь, которую лечим.
-            jobs.report("recheck", message="whois-бюджет = 0, проверять нечем (см. /settings)")
+            jobs.report(run, message="whois-бюджет = 0, проверять нечем (см. /settings)")
             return out
         with SessionLocal() as db:
             ids = db.execute(
@@ -611,15 +825,15 @@ def recheck_acquirability(limit: int = 200) -> dict:
         c = _make_clients()
         total = len(ids)
         for i, did in enumerate(ids, 1):
-            jobs.report("recheck", done=i - 1, total=total)   # ДО стопа — см. score_pending
-            if jobs.cancelled("recheck"):
+            jobs.report(run, done=i - 1, total=total)         # ДО стопа — см. score_pending
+            if jobs.cancelled(run):
                 raise jobs.Cancelled()
             with SessionLocal() as db:
                 d = db.get(Domain, did)
                 if d is None or d.status not in _RECHECK_STATUSES:
                     continue                      # статус увели, пока шли (напр. в выкуп)
                 name, deadline, lane = d.domain, d.acquire_deadline, d.lane
-            jobs.report("recheck", current=name)  # репорт ДО вызова: whois идёт секунды
+            jobs.report(run, current=name)        # репорт ДО вызова: whois идёт секунды
 
             now = datetime.now(timezone.utc)
             out["checked"] += 1                           # вызов состоялся — бюджет потрачен
@@ -667,7 +881,7 @@ def recheck_acquirability(limit: int = 200) -> dict:
                f"не определилось {out['unknown']}") if total else (
             "проверять нечего: нет доменов «на решении» или «одобрен». "
             "Сначала оцени найденные — кнопка «Оценить домены»")
-        jobs.report("recheck", done=total, total=total, current="", message=msg)
+        jobs.report(run, done=total, total=total, current="", message=msg)
     return out
 
 

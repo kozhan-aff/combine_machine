@@ -25,6 +25,25 @@ def _sanitize(body: str | None) -> str:
     return nh3.clean(body or "", tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS)
 
 
+# F28 (аудит 2026-07-14): affiliate_link идёт прямо в href через html.escape(), а html.escape
+# экранирует ТОЛЬКО HTML-спецсимволы (< > & " ') — схему НЕ проверяет. "javascript:alert(1)"
+# проходит насквозь и выполняется по клику на опубликованной странице (реальный XSS, не
+# гипотетический: rel="sponsored nofollow" от исполнения ссылки не защищает). allowlist схем
+# проверяется В ДВУХ МЕСТАХ (defense in depth) — на создании оффера (panel.py/pipeline.py: форма
+# может быть обойдена прямым API-вызовом) И здесь, в render_html (egress — офферы, заведённые до
+# этой проверки, тоже не должны попасть в HTML с опасной схемой).
+_ALLOWED_URL_SCHEMES = {"http", "https"}
+
+
+def is_safe_url(url: str | None) -> bool:
+    """True только для http(s)-ссылок. javascript:/data:/vbscript:/file:/пустая схема -> False."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse((url or "").strip()).scheme.lower() in _ALLOWED_URL_SCHEMES
+    except ValueError:
+        return False
+
+
 def scaffold(brand: str, niche: str | None = None) -> list[dict]:
     """Minimal site structure (page specs). Tune per niche/SERP later."""
     return [
@@ -35,9 +54,17 @@ def scaffold(brand: str, niche: str | None = None) -> list[dict]:
 
 
 def _system_prompt(lang: str) -> str:
+    # F27 (аудит 2026-07-14): раньше здесь стояло "замеры скорости" — а vertical_data.py не
+    # содержит ни одного реального измерения скорости ни по одному бренду. Промпт прямо
+    # ПРОВОЦИРОВАЛ модель выдумывать конкретные цифры (Mbps/пинги), а гейт редактуры вместо
+    # проверки реальных данных превращался в "поймай галлюцинацию". Формулировка ниже просит
+    # то, что реально ЕСТЬ в vertical_data (обход гео-блоков, юзкейсы, устройства/протоколы),
+    # и явно требует не придумывать числа, которых не давали.
     return (f"Ты опытный редактор VPN-обзоров. Пиши на языке '{lang}', по делу, с реальной "
-            "пользой (замеры скорости, обход гео-блоков, юзкейсы), без воды и маркетингового "
-            "мусора. Верни HTML-ФРАГМЕНT (только <h2>/<h3>/<p>/<ul>, без <html>/<body>). "
+            "пользой (обход гео-блоков, юзкейсы, поддерживаемые устройства и протоколы), без "
+            "воды и маркетингового мусора. Не выдумывай конкретные цифры (скорость, пинг, "
+            "проценты), которых нет в переданных данных — если измерений не дали, пиши без них. "
+            "Верни HTML-ФРАГМЕНT (только <h2>/<h3>/<p>/<ul>, без <html>/<body>). "
             "Это ЧЕРНОВИК для последующей человеческой редактуры.")
 
 
@@ -69,6 +96,7 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
     По умолчанию off — сеть не дёргается в тестах/скриптах; панель включает явно.
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.offer import Offer, SiteOffer
@@ -117,11 +145,31 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
                                                  _page_prompt(spec, brand, vertical_data, competitor))))
             if not body.strip():
                 continue  # empty LLM output (null/blocked): skip page, don't crash the batch
+            # F26: фиксируем на КАЖДОЙ странице, под какой оффер и язык она реально написана —
+            # publish.py читает это отсюда, а не пересчитывает "текущий активный оффер сайта"
+            # заново (см. миграцию 0018).
             db.add(Page(site_id=site_id, url_path=spec["url_path"], title=spec["title"],
-                        status="draft", body=body))
+                        status="draft", body=body, lang=lang,
+                        offer_id=(offer.id if offer else None)))
             created += 1
         site.status = "content"
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # uq_page_per_path (site_id, url_path) — миграция 0014. Сюда попадаем НЕ от кривых
+            # данных, а от гонки двух ПРОЦЕССОВ: кнопка «сгенерировать» в панели и стадия
+            # generate автопилотного свипа в воркере вошли одновременно, SELECT «страница уже
+            # есть» выше у обоих честно ответил «нет» (чужая незакоммиченная строка под READ
+            # COMMITTED невидима), и оба вставили один и тот же путь. Инвариант отбил вторую
+            # вставку — и оператор обязан прочитать это словами, а не SQL-трейсом в сводке свипа.
+            #
+            # Откатываем ВЕСЬ батч, а не досыпаем остаток: страницы этого сайта прямо сейчас
+            # пишет другой прогон, и он допишет их целиком. Потерянные токены LLM — цена
+            # честная: альтернатива (вторая копия страницы) стоит дороже, см. модель Page.
+            db.rollback()
+            raise ValueError(
+                f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
+                f"генерация пропущена, дубли не заводим") from None
         return created
 
 
@@ -148,7 +196,11 @@ def render_html(page, offer=None, lang: str = "ru") -> str:
     re-sanitized here (egress) so any writer that skipped _sanitize can't leak hostile HTML.
     """
     offer_block = ""
-    if offer is not None:
+    # F28: не рендерим ссылку с опасной схемой (javascript:/data:/...), даже если она как-то
+    # обошла проверку на создании оффера — это последний рубеж перед публикацией. Оффер без
+    # безопасной ссылки лучше показать без ссылки (только бренд/промокод потеряны — не XSS),
+    # чем опубликовать страницу с исполняемым href.
+    if offer is not None and is_safe_url(offer.affiliate_link):
         promo = f" Промокод: <b>{html.escape(offer.promo_code)}</b>." if offer.promo_code else ""
         offer_block = (f'<p class="offer"><a href="{html.escape(offer.affiliate_link)}" '
                        f'rel="sponsored nofollow">Перейти к {html.escape(offer.brand)}</a>.{promo}</p>')
@@ -174,4 +226,8 @@ if __name__ == "__main__":  # pure checks (no network/DB): disclosure + sponsore
     dirty = _sanitize('<h2>ok</h2><script>alert(1)</script><a href="x" onclick="bad()">l</a>')
     assert "script" not in dirty.lower() and "onclick" not in dirty.lower(), dirty
     assert "<h2>ok</h2>" in dirty and "alert" not in dirty, dirty   # tag+content of <script> gone
+    assert is_safe_url("https://ex.com/x") and is_safe_url("http://ex.com")
+    assert not is_safe_url("javascript:alert(1)") and not is_safe_url("data:text/html,x")
+    evil = N(brand="Evil", affiliate_link="javascript:alert(1)", promo_code=None)
+    assert "javascript:" not in render_html(pg, evil)  # F28: dangerous scheme never rendered
     print("content render_html + _clean + _sanitize ok")

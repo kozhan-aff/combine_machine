@@ -46,11 +46,17 @@ def test_blind_domain_is_flagged_in_inbox(client):
 
 
 def test_bulk_approve_skips_blind_domains(client):
-    """Пакет — решение человека, но НЕ обход гейта: непроверенное в него не попадает."""
-    _add(domain="clean.ru", status="scored", score=0.9, score_breakdown={"errors": []})
+    """Пакет — решение человека, но НЕ обход гейта: непроверенное в него не попадает.
+
+    `clean.ru` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
+    прочитанной истории — это и был баг F2 (пустой Wayback ошибки не бросает), и фикстура,
+    молчавшая об этом поле, ровно его и покрывала собой."""
+    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
+         prior_flags={}, score_breakdown={"errors": []})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
-    _add(domain="weak.ru", status="scored", score=0.5, score_breakdown={"errors": []})
+    _add(domain="weak.ru", status="scored", score=0.5, wayback_checked=True,
+         prior_flags={}, score_breakdown={"errors": []})
     r = client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
     assert r.status_code == 303
     with SessionLocal() as db:
@@ -59,11 +65,12 @@ def test_bulk_approve_skips_blind_domains(client):
 
 
 def test_bulk_preview_counts(client):
-    _add(domain="clean.ru", status="scored", score=0.9, score_breakdown={"errors": []})
+    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
+         prior_flags={}, score_breakdown={"errors": []})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     body = client.get("/domains/bulk-preview?min_score=0.8").json()
-    assert body == {"n": 1, "blind": 1}
+    assert body == {"n": 1, "skipped": 1}
 
 
 def test_empty_inbox_explains_next_step(client):
@@ -112,8 +119,8 @@ def test_domains_shows_last_run_summary(client):
     """Не только падения: успешный прогон тоже обязан оставить след — иначе «ничего не
     произошло» и «всё сломалось» выглядят одинаково."""
     from app.services import jobs
-    with jobs.track("score"):
-        jobs.report("score", done=3, total=3, message="прогнано 3 доменов через воронку")
+    with jobs.track("score") as run:
+        jobs.report(run, done=3, total=3, message="прогнано 3 доменов через воронку")
     assert "прогнано 3 доменов" in client.get("/domains").text
 
 

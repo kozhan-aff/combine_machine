@@ -20,11 +20,30 @@ from app.integrations.base import BaseClient
 _ZONE_FIELDS = ("id", "status", "name_servers")
 
 
+def _safe_errors(body: dict) -> str:
+    """Форматировать ошибки CF-envelope без утечки Authorization/raw-response (аудит §4)."""
+    errs = body.get("errors") or []
+    parts = [f"{e.get('code', '')}:{e.get('message', '')}" for e in errs if isinstance(e, dict)]
+    return "; ".join(p for p in parts if p.strip(":")) or "unknown error"
+
+
 class CloudflareClient(BaseClient):
     def __init__(self):
         super().__init__("https://api.cloudflare.com/client/v4")
         self.token = settings.CLOUDFLARE_API_TOKEN
         self.account_id = settings.CLOUDFLARE_ACCOUNT_ID
+
+    @classmethod
+    def with_token(cls, token: str, account_id: str = "") -> "CloudflareClient":
+        """Клиент с ЯВНЫМ токеном/аккаунтом — не из глобального settings singleton (аудит §4.1).
+
+        Нужен account-aware P0: разные CloudflareConnection в БД несут разные secret_ref,
+        а singleton на settings знает только про один .env-токен.
+        """
+        c = cls()
+        c.token = token
+        c.account_id = account_id
+        return c
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
@@ -36,6 +55,28 @@ class CloudflareClient(BaseClient):
         if not data.get("success"):
             raise RuntimeError(data.get("errors"))
         return data.get("result")
+
+    def _paginate(self, path: str, params: dict | None = None) -> list:
+        """Собрать все страницы по `result_info`. HTTP 2xx недостаточно — envelope
+        `success` проверяется на КАЖДОЙ странице (пусто ≠ ошибка ≠ not-found, аудит §2)."""
+        out: list = []
+        page = 1
+        params = dict(params or {})
+        while True:
+            params["page"] = page
+            params.setdefault("per_page", 50)
+            resp = self.request("GET", f"{self.base_url}{path}",
+                                headers=self._headers(), params=params)
+            body = resp.json()
+            if not body.get("success"):
+                raise RuntimeError(f"cloudflare {path}: " + _safe_errors(body))
+            out.extend(body.get("result") or [])
+            info = body.get("result_info") or {}
+            total = info.get("total_pages")
+            if not total or page >= total:
+                break
+            page += 1
+        return out
 
     @staticmethod
     def _zone(result: dict) -> dict:
@@ -161,3 +202,64 @@ class CloudflareClient(BaseClient):
         )
         self._result(resp)
         return True
+
+    # --- P0 read-only: account-aware verify/discovery (services/cf_sync.py, задача 4) ---
+    #
+    # Ничего ниже не мутирует Cloudflare. `find_zone(domain)` выше НЕ трогается —
+    # им пользуется provisioning.py. `find_zone_in_account` — отдельный account-scoped
+    # метод для sync-сервиса (несколько CloudflareConnection/аккаунтов одновременно).
+
+    def verify_token(self, token_kind: str, account_id: str = "") -> dict:
+        """GET /user/tokens/verify (user-owned) либо /accounts/{id}/tokens/verify
+        (account-owned) — разные токены проверяются РАЗНЫМИ эндпоинтами."""
+        if token_kind == "account":
+            if not account_id:
+                raise ValueError("account-owned токен требует account_id для verify")
+            path = f"/accounts/{account_id}/tokens/verify"
+        else:
+            path = "/user/tokens/verify"
+        resp = self.request("GET", f"{self.base_url}{path}", headers=self._headers())
+        return self._result(resp)
+
+    def list_accounts_paginated(self) -> list:
+        """GET /accounts — все аккаунты, видимые этому токену, все страницы."""
+        return self._paginate("/accounts")
+
+    def list_zones_paginated(self, account_id: str) -> list:
+        """GET /zones?account.id=... — все зоны аккаунта, все страницы (счёт бывает > 50)."""
+        return self._paginate("/zones", {"account.id": account_id})
+
+    def find_zone_in_account(self, name: str, account_id: str) -> dict | None:
+        """Account-scoped поиск зоны по имени. НЕ путать с legacy `find_zone(domain)`
+        выше (без account.id, используется provisioning.py) — этот всегда фильтрует
+        по конкретному аккаунту, т.к. sync видит несколько CloudflareConnection сразу."""
+        zones = self._paginate("/zones", {"name": name, "account.id": account_id})
+        return zones[0] if zones else None
+
+    def list_dns_paginated(self, zone_id: str, type: str | None = None,
+                           name: str | None = None) -> list:
+        """GET /zones/{zone_id}/dns_records, все страницы (в отличие от `list_dns` выше,
+        который берёт только первую)."""
+        params: dict = {}
+        if type:
+            params["type"] = type
+        if name:
+            params["name"] = name
+        return self._paginate(f"/zones/{zone_id}/dns_records", params)
+
+    def get_zone_setting(self, zone_id: str, setting_id: str) -> dict:
+        """GET /zones/{zone_id}/settings/{setting_id} — ТОЛЬКО per-setting.
+        Batch `/zones/{id}/settings` deprecated, EOL 2026-09-15 — не добавлять."""
+        resp = self.request("GET", f"{self.base_url}/zones/{zone_id}/settings/{setting_id}",
+                            headers=self._headers())
+        return self._result(resp)
+
+    def list_universal_certificate_packs(self, zone_id: str) -> list:
+        """GET /zones/{zone_id}/ssl/certificate_packs — read-only статус Universal SSL."""
+        return self._paginate(f"/zones/{zone_id}/ssl/certificate_packs")
+
+    def get_dnssec(self, zone_id: str) -> dict:
+        """GET /zones/{zone_id}/dnssec — read-only статус DNSSEC."""
+        resp = self.request("GET", f"{self.base_url}/zones/{zone_id}/dnssec",
+                            headers=self._headers())
+        return self._result(resp)

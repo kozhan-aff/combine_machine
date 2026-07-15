@@ -60,11 +60,19 @@ def test_get_tariffs_parses_price_from_period(monkeypatch):
 
 
 def test_pick_tariff_rounds_bid_up_to_tier(monkeypatch):
-    """Ставка округляется ВВЕРХ до ближайшего тира: платить между тирами нельзя."""
+    """Ставка округляется ВВЕРХ до ближайшего тира: платить между тирами нельзя.
+
+    Кейс «ставка выше сетки» переассертирован (Задача 5, F8): раньше он утверждал молчаливый
+    верхний тир (`return grid[-1]`) — то есть КОДИРОВАЛ баг, из-за которого мусорная ставка
+    (nan/inf/опечатка с лишним нулём) списывала счёт по максимальному тарифу зоны, ничего не
+    сказав человеку. Теперь это ValueError: платить сверх верхнего тира всё равно нечем.
+    """
     c = _client(monkeypatch)
     assert c.pick_tariff("x.ru", 190)["price"] == 190.0           # точное попадание
     assert c.pick_tariff("x.ru", 300)["price"] == 400.0           # между тирами -> вверх
-    assert c.pick_tariff("x.ru", 999999)["price"] == 550.0        # выше сетки -> верхний тир
+    assert c.pick_tariff("x.ru", 550)["price"] == 550.0           # ровно верхний тир — легитимно
+    with pytest.raises(ValueError, match="выше максимума"):        # выше сетки -> отказ, не клэмп
+        c.pick_tariff("x.ru", 999999)
 
 
 def test_pick_tariff_uses_domain_zone(monkeypatch):

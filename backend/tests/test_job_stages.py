@@ -16,8 +16,8 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
     _seed(1)
     seen = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
-        jobs.report(job, stage="whois")                  # так репортит _funnel
+    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
+        jobs.report(run, stage="whois")                  # так репортит _funnel
         seen.append(jobs.progress("score")["stage"])
         return {"domain": "d0.ru"}
 
@@ -35,7 +35,7 @@ def test_score_pending_stops_on_cancel(monkeypatch):
     _seed(5)
     scored = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, job=None):
+    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
         scored.append(did)
         jobs.request_cancel("score")                      # человек нажал «стоп» на первом домене
         return {}
@@ -63,8 +63,12 @@ def test_discovery_stages_are_sources(monkeypatch):
 
 
 def test_blind_reason_flags_unverified_history():
-    """Wayback лежал -> домен оценён вслепую; штамповать его нельзя (спека §1.5)."""
+    """Wayback лежал -> домен оценён вслепую; штамповать его нельзя (спека §1.5).
+
+    «Чистый» домен обязан нести wayback_checked=True: отсутствие ошибок чистотой НЕ является
+    (аудит F2 — пустой архив ошибки не даёт). Три состояния истории — в test_history_verdict."""
     d = Domain(domain="x.ru", score_breakdown={"errors": ["wayback:ConnectError"]})
     assert "Wayback" in scoring.blind_reason(d)
-    clean = Domain(domain="y.ru", score_breakdown={"errors": []})
+    clean = Domain(domain="y.ru", wayback_checked=True, prior_flags={},
+                   score_breakdown={"errors": []})
     assert scoring.blind_reason(clean) is None

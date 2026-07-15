@@ -12,6 +12,7 @@ from app.models.domain import Domain
 from app.models.site import Site, Page
 from app.models.offer import Offer, SiteOffer
 from app.services import provisioning, content, publish
+from app.services.content import is_safe_url
 
 router = APIRouter(tags=["pipeline"])
 
@@ -40,6 +41,11 @@ class SiteOfferIn(BaseModel):
 # --- offers -----------------------------------------------------------------
 @router.post("/offers")
 def create_offer(o: OfferIn, db: Session = Depends(get_session)):
+    # F28: тот же allowlist http/https, что и в panel.py::offer_create_action — этот JSON-роут
+    # ровно та "форма обойдена прямым API-вызовом", от которой defense-in-depth в render_html
+    # предостерегает; закрываем и вход, а не только выход.
+    if not is_safe_url(o.affiliate_link):
+        raise HTTPException(400, "affiliate_link: разрешены только http/https")
     offer = Offer(**o.model_dump())
     db.add(offer)
     db.commit()
@@ -56,12 +62,22 @@ def list_offers(db: Session = Depends(get_session)):
 # --- M2 (manual buy) --------------------------------------------------------
 @router.post("/domains/{domain_id}/purchase")
 def mark_purchased(domain_id: int, db: Session = Depends(get_session)):
+    """Человек пометил домен купленным мимо очереди — MVP покупает руками, и этот клик И ЕСТЬ
+    денежный гейт. Оркестратор (services/orchestrator) этот роут НЕ зовёт.
+
+    «Мимо очереди» — не значит «мимо воронки»: роут ставил 'purchased' из ЛЮБОГО статуса, не
+    спросив ни исходного, ни reject_reason (аудит F13). Так покупался и РКН-домен, и вовсе не
+    оценённое сырьё. Теперь переход судит политика (services/transitions).
+    """
+    from app.services import transitions
     d = db.get(Domain, domain_id)
     if not d:
         raise HTTPException(404, "domain not found")
-    # ручной override money-gate: человек пометил домен купленным мимо очереди. Осознанный
-    # обход (человек = денежный гейт). Оркестратор (services/orchestrator) этот роут НЕ зовёт.
-    d.status = "purchased"   # ponytail: MVP buys by hand — the human action IS the money gate
+    try:
+        transitions.set_status(d, "purchased")
+    except transitions.TransitionDenied as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
     db.commit()
     return {"id": d.id, "domain": d.domain, "status": d.status}
 

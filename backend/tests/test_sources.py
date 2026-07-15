@@ -92,7 +92,7 @@ def test_run_discovery_dedups_across_sources(monkeypatch):
     import app.db as db
     from sqlalchemy import select
     from app.models.domain import Domain
-    monkeypatch.setattr("app.services.discovery._collect", lambda enabled: [
+    monkeypatch.setattr("app.services.discovery._collect", lambda enabled, run=None: [
         {"domain": "dup.ru", "source": "cctld", "referring_domains": None},
         {"domain": "dup.ru", "source": "backorder", "referring_domains": 42, "feed_flags": {"rkn": False}},
         {"domain": "solo.ru", "source": "cctld", "referring_domains": None},
@@ -119,7 +119,7 @@ def test_run_discovery_persists_acquirability(monkeypatch):
     import app.db as db
     from app.models.domain import Domain
     from sqlalchemy import select
-    monkeypatch.setattr("app.services.discovery._collect", lambda enabled: [
+    monkeypatch.setattr("app.services.discovery._collect", lambda enabled, run=None: [
         {"domain": "bo.ru", "source": "backorder", "referring_domains": 5, "lane": "bid",
          "acquire_deadline": None, "visitors": 10, "tic": 20, "feed_flags": {"rkn": False}}])
     assert discovery.run_discovery() == 1
@@ -153,7 +153,7 @@ def test_existing_discovered_row_enriched_on_rediscovery(monkeypatch):
         s.add(Domain(domain="drop.ru", source="cctld", status="discovered",
                      referring_domains=None, lane=None)); s.commit()
     # день 2: тот же домен пришёл из backorder с RD и lane
-    monkeypatch.setattr(discovery, "_collect", lambda enabled: [
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
         {"domain": "drop.ru", "source": "backorder", "referring_domains": 42, "lane": "bid",
          "acquire_deadline": None, "visitors": None, "tic": None, "feed_flags": {}}])
     discovery.run_discovery()

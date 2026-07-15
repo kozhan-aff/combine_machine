@@ -39,6 +39,41 @@ def _make_token(api_sk: str, request_time: str) -> str:
     return _md5(request_time + _md5(api_sk))
 
 
+def _fail_msg(res) -> str | None:
+    """Текст отказа из конверта aaPanel — или None, если отказа нет.
+
+    aaPanel, как и A-Parser, отвечает **HTTP 200 даже на отказ**: сбой живёт в ТЕЛЕ
+    ({"status": false, "msg": "permission denied"}), `raise_for_status` его не видит.
+    Судим ТОЛЬКО по булеву `status` — ровно как велит docs/api/aapanel.md («Branch on the
+    boolean status fields, not on message strings»: msg локализован, на CN-сборках он
+    по-китайски).
+
+    Что НЕ отказ (иначе валидатор сломал бы рабочий провижн):
+      · не-dict — законный ответ: /ajax?action=GetTaskCount отдаёт голый int, getData на
+        части сборок — список;
+      · dict БЕЗ ключа `status` — успех большинства ручек: AddSite отвечает
+        {"siteStatus": true, ...}, getData — {"data": [...], "where": ..., "page": ...};
+      · `data: []` — «сайтов нет», а не «спросить не смог».
+    """
+    if isinstance(res, dict) and res.get("status") is False:
+        return str(res.get("msg") or res)[:200]
+    return None
+
+
+def _ok(res, what: str, also: str | None = None):
+    """Пропустить успешный ответ, отказ — поднять RuntimeError (глотать его нельзя).
+
+    Поднимается ВНЕ `@retry` (`BaseClient.request` уже вернул ответ): иначе один отказ
+    «permission denied» превратился бы в ТРИ попытки создать сайт — шум и риск полусоздания.
+    `also` — сопутствующая причина (см. write_file), чтобы оператор увидел первопричину,
+    а не только последнее звено.
+    """
+    msg = _fail_msg(res)
+    if msg is None:
+        return res
+    raise RuntimeError(f"aaPanel {what}: {msg}" + (f" [{also}]" if also else ""))
+
+
 class AaPanelClient(BaseClient):
     def __init__(self):
         super().__init__(settings.AAPANEL_URL)
@@ -123,11 +158,15 @@ class AaPanelClient(BaseClient):
         Legacy path `/data?action=getData&table=sites`; current panels (7.x+) also
         expose `/v2/data?action=getData&table=sites` with identical params/response —
         if the legacy path ever 404s, switch to the /v2/data form.
+
+        Читающая ручка, но конверт проверяем и здесь: на ней стоит ИДЕМПОТЕНТНОСТЬ. Отказ,
+        принятый за «сайтов нет» (`res["data"]` отсутствует -> `[]`), заставил бы ensure_site
+        создавать уже существующий сайт. Пустой `data: []` — законный ответ, он проходит.
         """
-        res = self._post(
+        res = _ok(self._post(
             "/data?action=getData&table=sites",
             {"table": "sites", "p": 1, "limit": 1000, "type": -1, "search": ""},
-        )
+        ), "getData table=sites")
         if isinstance(res, dict):
             return res.get("data") or []
         return res if isinstance(res, list) else []
@@ -139,8 +178,11 @@ class AaPanelClient(BaseClient):
         """Create an nginx vhost. version="00" = pure static (no PHP) — our default.
 
         Not idempotent by itself (duplicate => status/msg error); use ensure_site().
+        Отказ (нет прав, «сайт уже есть», кончилось место) -> RuntimeError: раньше он
+        возвращался обычным словарём, provision его не смотрел и объявлял сайт готовым.
+        Успех приходит БЕЗ ключа `status` ({"siteStatus": true, ...}) — _ok его пропускает.
         """
-        return self._post(
+        return _ok(self._post(
             "/site?action=AddSite",
             {
                 "webname": json.dumps({"domain": domain, "domainlist": [], "count": 0}),
@@ -153,15 +195,44 @@ class AaPanelClient(BaseClient):
                 "ftp": "false",
                 "sql": "false",
             },
-        )
+        ), "AddSite")
 
     def ensure_site(self, domain: str, path: str, **kw) -> dict:
-        """Idempotent create: skip if a site named `domain` already exists."""
+        """Idempotent create: skip if a site named `domain` already exists.
+
+        Отказ AddSite ещё не значит «провижн сорван». Самый частый его повод — «сайт уже есть»
+        (docs/api/aapanel.md: AddSite на существующем домене отвечает status/msg-ошибкой, текст
+        китайский — «网站已存在»), то есть ЖЕЛАЕМОЕ СОСТОЯНИЕ УЖЕ ДОСТИГНУТО. Так бывает, когда
+        сайт появился МЕЖДУ нашим списком и AddSite (параллельный свип, оператор руками) или
+        когда getData его не показал (там же, каверат: на части сборок список видит не все типы
+        проектов). Уронить тут RuntimeError — значит запереть сайт в вечном `provisioning`:
+        каждый прогон свипа будет заново звать AddSite и заново получать тот же отказ.
+
+        Судить об этом по ТЕКСТУ msg нельзя — он локализован, и это ровно тот урок, ради
+        которого валидатор смотрит на булев `status` (см. _fail_msg). Поэтому спрашиваем
+        панель ещё раз: сайт есть — значит есть, кто бы что ни ответил. Панель остаётся
+        источником правды, локаль ни при чём. Настоящий отказ (нет прав, протух api_sk, кончилось
+        место) сайта не породит — второй `site_exists` вернёт False, и RuntimeError полетит
+        наверх, как и должен.
+        """
         if self.site_exists(domain):
             return {"exists": True, "name": domain}
-        return self.add_site(domain, path, **kw)
+        try:
+            return self.add_site(domain, path, **kw)
+        except RuntimeError:
+            if not self.site_exists(domain):
+                raise
+            return {"exists": True, "name": domain}
 
     def apply_ssl(self, domain: str, site_name: str) -> dict:
+        """Issue + deploy an origin cert. Успех -> dict, ЛЮБОЙ отказ -> RuntimeError.
+
+        Контракт единый и звучит вслух: раньше половина отказов возвращалась словарём
+        {"status": False, ...} — вызывающему коду пришлось бы его разбирать, и он бы этого
+        не делал (ровно так и молчал провижн). Метод пока не вызывается из services/ (M3
+        держит SSL на стороне Cloudflare), но его первый же потребитель должен получить
+        отказ отказом, а не «пустым сертификатом».
+        """
         # UNVERIFIED (see docs/api/aapanel.md) — the /acme flow is not in the official
         # PDF; field semantics sourced from the PHP reference lib + aaPanel source.
         # In particular `auth_to` may need the site NAME instead of the id on some
@@ -170,10 +241,12 @@ class AaPanelClient(BaseClient):
             (s.get("id") for s in self.list_sites() if s.get("name") == site_name), None
         )
         if site_id is None:
-            return {"status": False, "msg": f"site not found: {site_name}"}
+            # шаг называем ТОТ, на котором встали: до SetSSL дело не дошло, упали на поиске id
+            # в списке сайтов — иначе оператор пойдёт чинить не ту ручку.
+            raise RuntimeError(f"aaPanel apply_ssl: site not found: {site_name}")
 
         # Step 1 — issue Let's Encrypt cert (http-01: domain must already resolve here).
-        issued = self._post(
+        issued = _ok(self._post(
             "/acme?action=apply_cert_api",
             {
                 "domains": json.dumps([domain]),
@@ -182,18 +255,20 @@ class AaPanelClient(BaseClient):
                 "auth_type": "http",
                 "auto_wildcard": 0,
             },
-        )
+        ), "apply_cert_api")
         key = issued.get("private_key") if isinstance(issued, dict) else None
         cert = (issued.get("cert") or issued.get("fullchain")) if isinstance(issued, dict) else None
         if not key or not cert:
-            return {"status": False, "msg": "apply_cert_api did not return key/cert", "detail": issued}
+            # Конверт может быть «успешным», а ключа/цепочки в нём нет (имена полей на части
+            # сборок другие — UNVERIFIED выше). Ставить в SetSSL пустой сертификат нельзя.
+            raise RuntimeError(f"aaPanel apply_cert_api: ответ без key/cert: {str(issued)[:160]}")
 
         # Step 2 — deploy to the vhost. NB: the cert PEM goes in the field named `csr`
         # (aaPanel misnomer — it is the full certificate chain, not a signing request).
-        return self._post(
+        return _ok(self._post(
             "/site?action=SetSSL",
             {"type": 1, "siteName": site_name, "key": key, "csr": cert},
-        )
+        ), "SetSSL")
 
     def delete_site(self, site_name: str, site_id: int, remove_dir: bool = True,
                     remove_ftp: bool = True, remove_db: bool = True) -> dict:
@@ -216,10 +291,26 @@ class AaPanelClient(BaseClient):
         dirs (os.makedirs) AND an empty file. So the order is CreateFile → SaveFileBody.
         CreateFile is idempotent-for-our-purposes: on re-publish it returns "Requested file
         exists!", which we ignore, and SaveFileBody then overwrites the body.
+
+        ГРАНИЦА «пусто ≠ сбой» здесь проходит по CreateFile, и она НЕ судится по конверту.
+        «Requested file exists!» приезжает тем же `{"status": false, "msg": ...}`, что и
+        настоящий отказ, — отличить их можно только по ТЕКСТУ msg, а текст локализован
+        (docs/api/aapanel.md: «Chinese response text… Branch on the boolean status, not on
+        message strings»). Валидатор на подстроке сломал бы ПОВТОРНУЮ публикацию на первой
+        же не-английской сборке панели — то есть саму идемпотентность, ради которой этот
+        CreateFile и вызывается.
+
+        Поэтому судим по тому, кто знает правду: **тело файла кладёт SaveFileBody**. Успех
+        SaveFileBody = страница на диске (что бы ни ответил CreateFile). Настоящий отказ
+        CreateFile (нет прав, диск полон) не проскочит: файла не появится, и SaveFileBody
+        честно упадёт — «Configuration file not exist». Причину CreateFile несём в тексте
+        рядом, чтобы оператор увидел ПЕРВОПРИЧИНУ, а не только последнее звено.
         """
-        self._post("/files?action=CreateFile", {"path": path})  # +parent dirs, empty file
-        return self._post("/files?action=SaveFileBody",
-                          {"path": path, "data": content, "encoding": "utf-8"})
+        created = self._post("/files?action=CreateFile", {"path": path})  # +parent dirs, empty file
+        saved = self._post("/files?action=SaveFileBody",
+                           {"path": path, "data": content, "encoding": "utf-8"})
+        why = _fail_msg(created)
+        return _ok(saved, "SaveFileBody", also=f"CreateFile: {why}" if why else None)
 
 
 if __name__ == "__main__":

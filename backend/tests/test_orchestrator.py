@@ -1,35 +1,22 @@
-"""Оркестратор: single-flight-замок (AutonomyRun) + учёт прогонов."""
-from datetime import datetime, timezone, timedelta
-
+"""Оркестратор: журнал свипов + учёт прогонов. ЗАМОК свипа держит реестр задач (jobs), а не
+AutonomyRun — его второй, более слабый single-flight снят в Задаче 11 (F17): он судил по
+`started_at`, то есть любой свип длиннее 15 минут объявлял сам себя протухшим. Тесты на сам
+замок и его лизинг — в test_job_lease.py."""
 import app.db as db
 from app.models.autonomy import AutonomyRun
 from app.services import orchestrator as orch
 
 
-def test_acquire_lock_inserts_running_row():
-    run_id = orch._acquire_lock("cron")
+def test_start_run_opens_journal_row():
+    run_id = orch._start_run("cron")
     assert run_id is not None
     with db.SessionLocal() as s:
         r = s.get(AutonomyRun, run_id)
         assert r.status == "running" and r.trigger == "cron" and r.finished_at is None
 
 
-def test_acquire_lock_blocked_by_fresh_running():
-    first = orch._acquire_lock("cron")
-    second = orch._acquire_lock("manual")           # свежий running держит замок
-    assert first is not None and second is None
-
-
-def test_acquire_lock_overrides_stale_running():
-    with db.SessionLocal() as s:                    # протухший running (старше STALE_MIN)
-        stale = AutonomyRun(status="running", trigger="cron",
-                            started_at=datetime.now(timezone.utc) - timedelta(minutes=orch.STALE_MIN + 1))
-        s.add(stale); s.commit()
-    assert orch._acquire_lock("cron") is not None   # протухший не блокирует
-
-
 def test_finish_run_records_summary():
-    run_id = orch._acquire_lock("manual")
+    run_id = orch._start_run("manual")
     orch._finish_run(run_id, "done", {"score": 3}, ["queue: boom"])
     with db.SessionLocal() as s:
         r = s.get(AutonomyRun, run_id)
@@ -39,7 +26,7 @@ def test_finish_run_records_summary():
 
 def test_last_finished_sweep_at_returns_latest():
     assert orch.last_finished_sweep_at() is None     # пусто -> None
-    rid = orch._acquire_lock("cron")
+    rid = orch._start_run("cron")
     orch._finish_run(rid, "done", {}, [])
     got = orch.last_finished_sweep_at()
     assert got is not None and got.tzinfo is not None
@@ -161,6 +148,26 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
 
 
 def test_single_flight_second_sweep_skipped():
+    """Замок свипа — реестровый (jobs), и держит его ЧУЖОЙ ИДУЩИЙ ПРОГОН, а не строка AutonomyRun."""
+    from app.services import jobs
     _enable()                            # мастер вкл, стадий нет
-    orch._acquire_lock("cron")           # держим замок вручную (свежий running)
-    assert orch.run_sweep(trigger="cron") == {"skipped": "already_running"}
+    with jobs.track("sweep"):            # «свип уже идёт в другом процессе»
+        assert orch.run_sweep(trigger="cron") == {"skipped": "already_running"}
+
+
+def test_skipped_sweep_leaves_no_trace_in_the_journal():
+    """Свипа НЕ БЫЛО — значит и записи о нём быть не должно.
+
+    Раньше отбитый замком свип всё равно писал строку AutonomyRun со статусом `done` и
+    `finished_at`. Она (а) висела в журнале /autopilot как состоявшийся прогон, (б) двигала
+    last_finished_sweep_at — и шедулер откладывал СЛЕДУЮЩИЙ свип, приняв несостоявшийся за
+    только что отработавший. Несделанная работа не имеет права выглядеть сделанной."""
+    from sqlalchemy import func, select
+
+    from app.services import jobs
+    _enable()
+    with jobs.track("sweep"):
+        assert orch.run_sweep(trigger="cron") == {"skipped": "already_running"}
+    with db.SessionLocal() as s:
+        assert s.scalar(select(func.count()).select_from(AutonomyRun)) == 0
+    assert orch.last_finished_sweep_at() is None      # throttle шедулера не сдвинут

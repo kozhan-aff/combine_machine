@@ -83,8 +83,11 @@
       <td class="num hint">{{ r.id }}</td>
       <td class="num">{{ r.started_at.strftime('%d.%m %H:%M') if r.started_at else '' }}</td>
       <td>{{ 'ручной' if r.trigger == 'manual' else 'по расписанию' }}</td>
-      <td><span class="badge b-{{ 'approved' if r.status == 'done' else 'rejected' if r.status == 'failed' else 'discovered' }}">{{ r.status }}</span></td>
-      <td class="hint">{% for k, v in (r.counts or {}).items() %}{{ k }}:{{ v }} {% endfor %}</td>
+      <td><span class="badge b-{{ 'approved' if r.status == 'done' else 'rejected' if r.status == 'failed' else 'warn' if r.status == 'completed_with_errors' else 'discovered' }}"
+            title="{{ 'часть сущностей внутри стадий упала — свип не оборвался, но не идеален' if r.status == 'completed_with_errors' else '' }}">{{ 'с замечаниями' if r.status == 'completed_with_errors' else r.status }}</span></td>
+      {# «грязь пропущена: N» — не ошибка, а факт о базе: столько approved-доменов стадия очереди
+         обошла (политика их к деньгам не пускает). Их место в счётчиках, а не в ошибках. #}
+      <td class="hint">{% for k, v in (r.counts or {}).items() %}{{ count_ru.get(k, k) }}:{{ v }} {% endfor %}</td>
       <td class="hint">{{ (r.errors or [])|length }}{% if r.errors %} · {{ r.errors[0] }}{% endif %}</td>
     </tr>
   {% endfor %}

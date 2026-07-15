@@ -102,6 +102,7 @@
   .b-purchased, .b-purchasing { color:var(--violet); background:var(--violet-soft); }
   .b-live, .b-published { color:#0f6e3a; background:#dcf3e4; }
   .b-provisioning { color:var(--warn); background:var(--warn-soft); }
+  .b-warn       { color:var(--warn); background:var(--warn-soft); }  /* свип: done, но errors непусты (F19) */
   .b-content    { color:var(--info); background:var(--info-soft); }
   .b-draft      { color:var(--mut); background:var(--panel2); border-color:var(--line); }
   .b-edited     { color:var(--acc2); background:var(--acc-soft); }
@@ -116,6 +117,7 @@
   .led-todo { background:var(--acc); }
   .led-off  { background:var(--line2); }
   .led-bad  { background:var(--bad); }
+  .led-warn { background:var(--warn); }   /* «не знаю»: спросить не удалось — не «ок» и не «нет» */
 
   /* ---- кнопки ---- */
   button, .btn { font-family:var(--ui); font-size:13px; font-weight:600; letter-spacing:.01em;
@@ -290,6 +292,27 @@
            border:1px solid var(--warn); border-radius:var(--r-sm); padding:4px 9px;
            display:inline-flex; align-items:center; gap:8px; }
 
+  /* ⛔ денежное действие запрещено политикой (грязь: РКН/блэклист/история/флаг фида). Живёт в
+     узкой колонке действий — геометрия здесь, а не инлайном в queue.html/domains.html, иначе
+     CSS-контракт расползается по контент-шаблонам. */
+  .deny { display:block; max-width:220px; margin-bottom:6px; font-size:12px; color:var(--bad); }
+
+  /* улики истории: снимки Wayback, по которым машина вынесла вердикт. Свёрнуты — строка
+     инбокса остаётся короткой, но вердикт перестаёт быть непроверяемым словом. */
+  details.evi { margin-top:5px; font-size:12px; }
+  details.evi > summary { cursor:pointer; list-style:none; color:var(--mut); width:max-content; }
+  details.evi > summary::-webkit-details-marker { display:none; }
+  details.evi > summary::before { content:"▸ "; color:var(--acc); }
+  details.evi[open] > summary::before { content:"▾ "; }
+  details.evi > summary:hover { color:var(--ink); }
+  .evi-list { list-style:none; margin:5px 0 0; padding:6px 0 0 12px;
+              border-top:1px solid var(--line); display:grid; gap:4px; }
+  .evi-list li { display:flex; align-items:baseline; gap:8px; font-size:11.5px; }
+  .evi-list .when { font-family:var(--mono); color:var(--dim); white-space:nowrap; }
+  .evi-list a { font-family:var(--mono); word-break:break-all; }
+  .evi-list .cat { color:var(--bad); background:var(--bad-soft); border-radius:var(--r-sm);
+                   padding:1px 6px; font-weight:600; white-space:nowrap; }
+
   .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px; align-items:end; }
   .chip { font-size:12px; font-weight:600; padding:4px 12px; border:1px solid var(--line2);
           border-radius:999px; color:var(--mut); background:var(--panel); }
@@ -412,7 +435,8 @@
 // умер (контейнер убили) — показываем «оборвалась», НЕ рисуем живой бар.
 // Данные приходят из фида (имена доменов) — только textContent, никогда innerHTML.
 const JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки',
-                recheck:'Перепроверка занятости', sweep:'Свип автопилота'};
+                recheck:'Перепроверка занятости', sweep:'Свип автопилота',
+                cf_sync:'Синхронизация Cloudflare'};
 function jobCard(j){
   const dead = j.status==='failed' || j.stale;       // stale = процесс убит, бар врал бы «идёт»
   const el = document.createElement('div');

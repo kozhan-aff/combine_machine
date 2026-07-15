@@ -74,7 +74,17 @@ def provision(site_id: int) -> dict:
             return {"status": "error", "domain": domain, "error": "VPS_ORIGIN_IP не задан"}
         cf.ensure_a_record(zone["id"], domain, ip, proxied=True)
 
-        # 4. aaPanel vhost (idempotent)
+        # 4. aaPanel vhost (idempotent).
+        # ensure_site БОЛЬШЕ НЕ МОЛЧИТ: отказ панели (нет прав, кончилось место, протух api_sk)
+        # приходил как HTTP 200 + {"status": false} и раньше проезжал мимо — сайт объявлялся
+        # `content` без vhost'а, и человек шёл писать контент для несуществующего сайта (F14).
+        # Теперь это RuntimeError, и он летит наверх НЕ ПОЙМАННЫМ — намеренно:
+        #   · `site.status` остаётся `provisioning` (commit ниже не выполнится, сессия
+        #     откатится) — карточка не врёт, что инфраструктура готова;
+        #   · провижн ИДЕМПОТЕНТЕН, значит недоделанное доводит повтор: зона CF уже сохранена
+        #     (шаг 1 коммитит cf_zone_id), ensure_zone/ensure_a_record — check-before-create,
+        #     ensure_site пропускает уже созданный сайт. Оператор чинит причину, жмёт
+        #     «Provision» ещё раз — и дело доезжает с того же места, ничего не дублируя.
         ap = AaPanelClient()
         root = site.doc_root or docroot_for(domain)
         ap.ensure_site(domain, root)
@@ -82,15 +92,25 @@ def provision(site_id: int) -> dict:
         site.doc_root = root
 
         # 5. SSL: Cloudflare edge 'full' now; upgrade to 'strict' once origin cert is valid.
+        # Заминка на edge-режиме НЕ роняет рабочий vhost (сайт на :80 уже поднят) — но и молча
+        # исчезать больше не смеет: при origin, слушающем только :80, ровно этот режим решает,
+        # поедет ли HTTPS. Пишем причину в `site.ssl_error` (её видно на карточке сайта) и
+        # отдаём наверх, а не в `pass`. Успех затирает прошлую ошибку в NULL — починенное не
+        # должно висеть обвинением.
+        ssl_error = None
         try:
             cf.set_ssl(zone["id"], "full")
-        except Exception:  # noqa: BLE001  # an SSL hiccup must not block a working vhost
-            pass
+        except Exception as e:  # noqa: BLE001  # an SSL hiccup must not block a working vhost
+            ssl_error = f"{type(e).__name__}: {e}"[:500]
+        site.ssl_error = ssl_error
 
         site.status = "content"   # ready for M4
         db.commit()
-        return {"status": "provisioned", "domain": domain, "site_id": site.id,
-                "cf_zone_id": site.cf_zone_id, "doc_root": root}
+        out = {"status": "provisioned", "domain": domain, "site_id": site.id,
+               "cf_zone_id": site.cf_zone_id, "doc_root": root}
+        if ssl_error:
+            out["ssl_error"] = ssl_error
+        return out
 
 
 if __name__ == "__main__":  # pure helper self-check (no network/DB)

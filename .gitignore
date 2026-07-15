@@ -11,6 +11,10 @@ dist/
 .DS_Store
 .playwright-mcp/
 .omc/
+.codex
+audit_notes
+.agents
+AGENTS.md
 
 # скриншоты панели (Playwright/ручные) — не в репо. Узко: только корень,
 # чтобы правило не съело будущую статику панели (app/static/**.png).

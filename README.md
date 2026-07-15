@@ -24,7 +24,6 @@ docker compose run --rm backend pytest -q   # тесты пайплайна (SQL
 - `backend/app/integrations/` — клиенты внешних API (только транспорт).
 - `backend/app/services/` — бизнес-логика по модулям M1–M6 (+ `diagnostics.py` для /diag).
 - `backend/tests/` — пайплайн-тесты на SQLite (гейты, скоринг, публикация, экраны).
-- `scripts/smoke.py` — smoke-тест доступа к сервисам.
 - `docs/api/` — референсы всех интеграций (endpoints/auth/примеры) + `README.md`-индекс.
 - `docs/DEPLOY.md` — деплой на бокс, обновление через git, каналы доступа.
 
