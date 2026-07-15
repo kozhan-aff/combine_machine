@@ -74,6 +74,7 @@ def publish_site(site_id: int) -> dict:
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.domain import Domain
+    from app.models.offer import Offer
     from app.integrations.aapanel import AaPanelClient
     from app.services.content import render_html
 
@@ -88,14 +89,25 @@ def publish_site(site_id: int) -> dict:
             return {"status": "no_edited_pages",
                     "hint": "гейт: публикуются только страницы в статусе 'edited'"}
 
-        offer = _pick_offer(db, site_id)
-        # <html lang=...>: offer carries the target ISO language (one domain = one geo/lang);
-        # no site.language column, so derive from the offer and default to 'ru'.
-        lang = (offer.language if offer and offer.language else "ru")
+        # F26 (аудит 2026-07-14): «текущий активный оффер сайта» больше НЕ пересчитывается заново
+        # при каждой публикации — он мог смениться (SiteOffer добавлен/убран) с момента генерации,
+        # и тогда страница про бренд A уходила в интернет со ссылкой на бренд B и чужим `lang`.
+        # Считаем его ОДИН РАЗ здесь только как fallback — ИСКЛЮЧИТЕЛЬНО для legacy-страниц
+        # (созданных до миграции 0018), у которых p.offer_id пуст и восстанавливать нечего.
+        fallback_offer = _pick_offer(db, site_id)
         ap = AaPanelClient()
         now = datetime.now(timezone.utc)
         published = []
         for p in pages:
+            # Каждая страница несёт СВОЙ offer_id/lang, зафиксированные в момент генерации
+            # (content.generate_site) — читаем их, а не «текущее» состояние сайта.
+            if p.offer_id is not None:
+                offer = db.get(Offer, p.offer_id)
+            else:
+                offer = fallback_offer
+            # <html lang=...>: приоритет — язык, под который страница реально писалась;
+            # для legacy-страниц без p.lang — язык текущего оффера, дефолт 'ru'.
+            lang = p.lang or (offer.language if offer and offer.language else "ru")
             # `published` СТАВИТСЯ ТОЛЬКО ПОСЛЕ ТОГО, КАК ПАНЕЛЬ ПОДТВЕРДИЛА ЗАПИСЬ. Раньше отказ
             # aaPanel (HTTP 200 + {"status": false}) не смотрел никто: страница помечалась
             # опубликованной, сайт — `published`, а в docroot не было ничего. Дальше M5 честно

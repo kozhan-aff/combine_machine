@@ -60,6 +60,18 @@ class Page(Base):
     # HARD GATE: published only allowed from `edited`
     body: Mapped[str | None] = mapped_column(Text)
 
+    # F26 (аудит 2026-07-14) + миграция 0018: язык и оффер, ПОД КОТОРЫЕ РЕАЛЬНО ПИСАЛАСЬ эта
+    # страница. Раньше publish.py пересчитывал «текущий активный оффер сайта» ЗАНОВО в момент
+    # публикации (`_pick_offer`, та же query, что и content.generate_site) — если набор
+    # SiteOffer сайта поменялся между генерацией и публикацией (оператор добавил/сменил оффер
+    # с меньшим Offer.id), страница, написанная про бренд A на языке en, публиковалась со
+    # ссылкой на бренд B и `<html lang="ru">`. Пишет ТОЛЬКО content.generate_site, в момент
+    # создания Page — это факт истории ("под что писали"), а не текущее состояние сайта.
+    # NULL = legacy-страница старше 0018, для неё publish.py считает текущий активный оффер,
+    # как раньше (нечего восстанавливать задним числом).
+    lang: Mapped[str | None] = mapped_column(String(8))
+    offer_id: Mapped[int | None] = mapped_column(ForeignKey("offers.id"))
+
     index_status: Mapped[str] = mapped_column(String(32), default="unknown")  # unknown | indexed | not_indexed
     index_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

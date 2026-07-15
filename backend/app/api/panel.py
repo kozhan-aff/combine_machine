@@ -833,6 +833,14 @@ def offer_create_action(brand: str = Form(...), affiliate_link: str = Form(...),
                         language: str = Form(""), db: Session = Depends(get_session)):
     if not brand.strip() or not affiliate_link.strip():
         return _back("/offers", err="бренд и партнёрская ссылка обязательны")
+    # F28 (аудит 2026-07-14): affiliate_link уходит в href опубликованной страницы почти как есть
+    # (content.render_html только html.escape() — экранирует спецсимволы, НЕ схему). Без этой
+    # проверки "javascript:alert(1)" сохранялся бы как валидный оффер и исполнялся по клику на
+    # живом сайте. allowlist http/https — тут (создание) И в render_html (defense in depth: этот
+    # роут можно обойти прямым API-вызовом, см. pipeline.py::create_offer).
+    from app.services.content import is_safe_url
+    if not is_safe_url(affiliate_link.strip()):
+        return _back("/offers", err="партнёрская ссылка: разрешены только http/https")
     o = Offer(brand=brand.strip(), affiliate_link=affiliate_link.strip(),
               promo_code=promo_code.strip() or None, country=country.strip() or None,
               language=language.strip() or None)

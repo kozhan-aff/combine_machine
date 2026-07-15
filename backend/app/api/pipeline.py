@@ -12,6 +12,7 @@ from app.models.domain import Domain
 from app.models.site import Site, Page
 from app.models.offer import Offer, SiteOffer
 from app.services import provisioning, content, publish
+from app.services.content import is_safe_url
 
 router = APIRouter(tags=["pipeline"])
 
@@ -40,6 +41,11 @@ class SiteOfferIn(BaseModel):
 # --- offers -----------------------------------------------------------------
 @router.post("/offers")
 def create_offer(o: OfferIn, db: Session = Depends(get_session)):
+    # F28: тот же allowlist http/https, что и в panel.py::offer_create_action — этот JSON-роут
+    # ровно та "форма обойдена прямым API-вызовом", от которой defense-in-depth в render_html
+    # предостерегает; закрываем и вход, а не только выход.
+    if not is_safe_url(o.affiliate_link):
+        raise HTTPException(400, "affiliate_link: разрешены только http/https")
     offer = Offer(**o.model_dump())
     db.add(offer)
     db.commit()
