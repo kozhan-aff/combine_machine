@@ -52,7 +52,8 @@ def test_cf_sync_route_spawns_job_when_auth_configured(client, monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "PANEL_USER", "u")
     monkeypatch.setattr(settings, "PANEL_PASS", "p")
-    monkeypatch.setattr(panel.cf_sync, "sync_all", lambda db, report=None: {"connections": 0})
+    monkeypatch.setattr(panel.cf_sync, "sync_all",
+                        lambda db, report=None, run=None: {"connections": 0})
     r = client.post("/settings/cloudflare/sync", auth=("u", "p"), follow_redirects=False)
     assert r.status_code == 303
     jobs._drain()

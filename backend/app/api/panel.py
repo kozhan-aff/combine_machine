@@ -627,7 +627,7 @@ def cloudflare_sync(request: Request):
                         stages=[{"key": "verify", "label": "Проверка токенов", "state": "pending"},
                                 {"key": "zones", "label": "Зоны и записи", "state": "pending"}]) as rid:
             with SessionLocal() as db:
-                cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw))
+                cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw), run=rid)
     ok = jobs.spawn("cf_sync", _job)
     return _back_here(request, err=None if ok else "Синхронизация уже идёт")
 

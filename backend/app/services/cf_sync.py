@@ -73,7 +73,12 @@ def _reconcile_missing(db, account_hex: str, seen_zone_ids: set) -> None:
             m.missing_since = _now()
 
 
-def sync_connection(db, conn: CloudflareConnection) -> None:
+def sync_connection(db, conn: CloudflareConnection, *, run=None) -> None:
+    """run — id прогона job-реестра (jobs.track), НЕ обязателен: без него (юнит-тесты,
+    прямой вызов) отмена просто не проверяется. С ним — между зонами внутри аккаунта, где и
+    копится основное время (F18-паттерн: без этой проверки кнопка «✕ Отменить» была тихим
+    no-op — sync доезжал до конца независимо от неё, см. audit-fixes Задача 12)."""
+    from app.services import jobs
     # 1. secret_ref → токен (значение секрета никогда не в last_error_safe)
     try:
         token = resolve_secret_ref(conn.secret_ref)
@@ -136,6 +141,12 @@ def sync_connection(db, conn: CloudflareConnection) -> None:
             _observe(db, conn.id, acc_hex, "account", acc_hex, "zones_read", "allowed")
             seen = set()
             for z in zones:
+                # между зонами (не внутри — одна зона это один связный поход к деталям),
+                # тот же контракт, что discovery._collect/orchestrator.run_sweep между
+                # своими элементами. Одна connection может нести 51+ зону — без этой
+                # проверки кнопка молчала бы, пока не переберёт их ВСЕ.
+                if run is not None and jobs.cancelled(run):
+                    raise jobs.Cancelled()
                 m = _upsert_zone(db, acc_hex, z)
                 seen.add(z["id"])
                 _sync_zone_details(db, cf, m)     # 6. детали зоны
@@ -144,6 +155,11 @@ def sync_connection(db, conn: CloudflareConnection) -> None:
             acc_row.last_error_safe = None
             ca.status = "ok"
             ca.last_error_safe = None
+        except jobs.Cancelled:
+            # сохранить то, что успели отнаблюдать до отмены — не откатывать честную работу
+            ca.capabilities_json = caps
+            db.commit()
+            raise
         except Exception as exc:
             caps["zones_read"] = "denied"
             acc_row.status = "error"
@@ -252,14 +268,23 @@ def _backfill_site_links(db) -> None:
             s.cloudflare_account_id = settings.CLOUDFLARE_ACCOUNT_ID
 
 
-def sync_all(db, *, report=None) -> dict:
+def sync_all(db, *, report=None, run=None) -> dict:
+    """run — id прогона job-реестра (см. panel.py::cloudflare_sync); пробрасываем в
+    sync_connection, чтобы кнопка «✕ Отменить» слушалась И между connections, И между зонами
+    внутри одной (обычно connections 1-2, зон внутри — 51+, без внутреннего чека кнопка была
+    тихим no-op при типичной топологии)."""
+    from app.services import jobs
     cf_legacy.import_legacy_connection(db)
     conns = db.query(CloudflareConnection).all()
     done = 0
     for conn in conns:
+        # ПЕРЕД тяжёлой работой (sync_connection) для КАЖДОЙ connection, не после — иначе
+        # последняя connection всё равно отработает вхолостую (тот же баг, что F18).
+        if run is not None and jobs.cancelled(run):
+            raise jobs.Cancelled()
         if report:
             report(done=done, total=len(conns), current=conn.label, stage="verify")
-        sync_connection(db, conn)
+        sync_connection(db, conn, run=run)
         done += 1
     _backfill_site_links(db)  # §2.6: зоны уже наблюдены — можно связать legacy-Site
     db.commit()
