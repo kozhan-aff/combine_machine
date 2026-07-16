@@ -145,3 +145,18 @@ def test_backfill_ignores_site_without_cf_zone_id(monkeypatch):
         cf_sync.sync_all(db)
         s = db.query(Site).filter_by(domain_id=d.id).one()
         assert s.cf_zone_mirror_id is None and s.cloudflare_account_id is None
+
+
+def test_legacy_import_token_kind_is_user_even_with_account_id(sqlite_db, monkeypatch):
+    # Наличие CLOUDFLARE_ACCOUNT_ID НЕ делает токен account-owned (аудит F1.1).
+    from app.config import settings
+    from app.services import cf_legacy
+    from app.models.cloudflare import CloudflareConnection
+    from app.db import SessionLocal
+    monkeypatch.setattr(settings, "CLOUDFLARE_API_TOKEN", "tok_live_1234", raising=False)
+    monkeypatch.setattr(settings, "CLOUDFLARE_ACCOUNT_ID", "acc_hex_dead", raising=False)
+    with SessionLocal() as db:
+        cid = cf_legacy.import_legacy_connection(db)
+        conn = db.get(CloudflareConnection, cid)
+        assert conn.token_kind == "user"              # НЕ "account"
+        assert conn.owner_cf_account_id == "acc_hex_dead"   # но account_id сохранён для листинга зон
