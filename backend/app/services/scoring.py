@@ -66,6 +66,7 @@ _BLIND_RU = {
     "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
+    "safebrowsing": "Google Safe Browsing НЕ проверен: сервис не ответил",
     "searxng": "эхо в индексе НЕ проверено",
 }
 
@@ -217,10 +218,12 @@ def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float)
     # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
     if status == "approved" and not sig.get("wayback_checked"):
         status = "scored"
-    # risk-guard: если проверка RKN или blacklist упала (ключ сигнала отсутствует, ошибка
-    # осела в errors), нельзя подтверждать чистоту автоматом — уводим в ручной `scored`.
+    # risk-guard: если проверка RKN, blacklist или SafeBrowsing упала (ключ сигнала
+    # отсутствует, ошибка осела в errors), нельзя подтверждать чистоту автоматом —
+    # уводим в ручной `scored`.
     if status == "approved" and any(
-            e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
+            e.startswith(("rkn:", "blacklist:", "safebrowsing:"))
+            for e in (sig.get("errors") or [])):
         status = "scored"
     # whois-guard (аудит F6, доведён ревью Задачи 4): whois УПАЛ — гардим по САМОМУ ОТКАЗУ,
     # тем же механизмом, что кормит бейдж «оценён вслепую», а не по `age_years is None`.
@@ -482,6 +485,15 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
 
+    try:
+        sig["safebrowsing_flagged"] = c["aparser"].safebrowsing_check(d.domain)
+        if sig["safebrowsing_flagged"] is True:
+            return "safebrowsing"
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"safebrowsing:{type(e).__name__}")
+    if sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in sig:
+        sig["errors"].append("safebrowsing:unavailable")  # формат не распознан -> risk-guard
+
     jobs.report(run, stage="echo")
     # indexed_echo
     try:
@@ -490,30 +502,46 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
         sig["errors"].append(f"searxng:{type(e).__name__}")
 
     jobs.report(run, stage="history")
-    # T3 — история (дорого): только для приобретаемых выживших
+    # Archive — не сигнал чистоты, только решение «стоит ли звать дорогой Wayback-фетч».
+    # times=0 подтверждено -> Wayback пропускается, но wayback_checked всё равно False
+    # (см. дизайн-документ: это ДОЛЖНО вести себя ИДЕНТИЧНО честно-пустому Wayback).
+    skip_wayback = False
     try:
-        hist = c["wayback"].classify_history(d.domain)
-        pf = hist.get("prior_flags") or {}
-        sig["prior_flags"] = pf
-        sig["wayback_checked"] = hist.get("wayback_checked")     # сохраняем ДО возможного выхода
-        # чем именно подтверждён вердикт истории — снимки, которые реально смотрели. Кладём
-        # ДО возможного выхода в history_dirty: отказ — тоже вердикт, и он тоже ошибается.
-        sig["history_evidence"] = hist.get("evidence") or []
-        # сколько снимков РЕАЛЬНО скачали в ЭТОМ прогоне — 0 отличает «архив честно пуст» от
-        # «этот прогон вообще не оставил числа» (см. blind_reason: домены, отскоренные до
-        # появления этого поля, не имеют права носить утверждение о пустом архиве).
-        sig["sampled"] = hist.get("sampled")
-        sig["first_seen"] = hist.get("first_seen")
-        if sig.get("whois_created") is None and hist.get("age_years") is not None:
-            sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
-            # ...и бейдж обязан сказать об этом ПРАВДУ: гейт молодости ПРИМЕНЁН (ниже, по этому
-            # самому числу), а вот занятость домена не сверял никто. Прежний текст «гейт не
-            # применялся» был ложью ровно в том состоянии, где показывался (ревью Задачи 4).
-            sig["age_source"] = "wayback"
-        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
-            return "history_dirty"
+        arch = c["aparser"].archive_probe(d.domain)
+        sig["archive_times"] = arch.get("times")
+        skip_wayback = arch.get("times") == 0
     except Exception as e:  # noqa: BLE001
-        sig["errors"].append(f"wayback:{type(e).__name__}")
+        sig["errors"].append(f"archive:{type(e).__name__}")
+
+    if skip_wayback:
+        sig["wayback_checked"] = False
+        sig["sampled"] = 0
+        sig["history_evidence"] = []
+    else:
+        # T3 — история (дорого): только для приобретаемых выживших
+        try:
+            hist = c["wayback"].classify_history(d.domain)
+            pf = hist.get("prior_flags") or {}
+            sig["prior_flags"] = pf
+            sig["wayback_checked"] = hist.get("wayback_checked")     # сохраняем ДО возможного выхода
+            # чем именно подтверждён вердикт истории — снимки, которые реально смотрели. Кладём
+            # ДО возможного выхода в history_dirty: отказ — тоже вердикт, и он тоже ошибается.
+            sig["history_evidence"] = hist.get("evidence") or []
+            # сколько снимков РЕАЛЬНО скачали в ЭТОМ прогоне — 0 отличает «архив честно пуст» от
+            # «этот прогон вообще не оставил числа» (см. blind_reason: домены, отскоренные до
+            # появления этого поля, не имеют права носить утверждение о пустом архиве).
+            sig["sampled"] = hist.get("sampled")
+            sig["first_seen"] = hist.get("first_seen")
+            if sig.get("whois_created") is None and hist.get("age_years") is not None:
+                sig["age_years"] = hist["age_years"]           # whois приоритетнее; Wayback — фолбэк
+                # ...и бейдж обязан сказать об этом ПРАВДУ: гейт молодости ПРИМЕНЁН (ниже, по этому
+                # самому числу), а вот занятость домена не сверял никто. Прежний текст «гейт не
+                # применялся» был ложью ровно в том состоянии, где показывался (ревью Задачи 4).
+                sig["age_source"] = "wayback"
+            if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
+                return "history_dirty"
+        except Exception as e:  # noqa: BLE001
+            sig["errors"].append(f"wayback:{type(e).__name__}")
 
     # непроверяемый по whois возраст всё равно проходит гейт молодости (ПОСЛЕ history_dirty)
     if not age_known and sig.get("age_years") is not None and sig["age_years"] < st["min_age_years"]:

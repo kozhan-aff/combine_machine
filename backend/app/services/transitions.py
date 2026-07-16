@@ -50,7 +50,7 @@
 #
 # `not_acquirable` здесь НЕТ намеренно: «домен занят» — это не грязь, а чужая покупка. Оператор,
 # знающий, что домен всё-таки дропнулся, вправе вернуть его руками.
-DIRTY_REASONS = frozenset({"rkn", "blacklist", "history_dirty", "feed_flag"})
+DIRTY_REASONS = frozenset({"rkn", "blacklist", "history_dirty", "feed_flag", "safebrowsing"})
 
 # Куда домен вправе двинуть ЧЕЛОВЕК. Ключ — ИСХОДНЫЙ статус (именно его и не смотрели).
 # Пустое множество = «отсюда руками не двигают»:

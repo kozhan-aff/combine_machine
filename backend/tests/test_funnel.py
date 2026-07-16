@@ -24,18 +24,27 @@ class _Wayback:
 
 
 def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True,
-             whois=None, whois_raises=False):
+             whois=None, whois_raises=False, safebrowsing=False, archive_times=None):
     """whois: dict {"available":..., "created":...} (новый формат, приобретаемость известна
     явно). whois_dt: старый позиционный аргумент (только дата) — оборачивается в
     {"available": False, "created": whois_dt} (занят, но с датой регистрации — для тестов,
     доходящих до T2/T3 через lane="bid" на тестовом Domain). whois_raises=True — whois_probe
-    бросает (недоступен)."""
+    бросает (недоступен). safebrowsing: True = зафлагован, False = чист, None = падает
+    (исключение). archive_times: None = Archive не смог определить (совпадает с сегодняшним
+    поведением — Wayback всё равно запускается), 0 = архив честно пуст (Wayback пропускается),
+    >0 = есть снимки (Wayback запускается)."""
     pr = whois if whois is not None else {"available": False, "created": whois_dt}
     class _W:  # aparser
         def whois_probe(self, dom):
             if whois_raises:
                 raise RuntimeError("whois timeout")
             return pr
+        def safebrowsing_check(self, dom):
+            if safebrowsing is None:
+                raise RuntimeError("safebrowsing timeout")
+            return safebrowsing
+        def archive_probe(self, dom):
+            return {"times": archive_times, "first": None, "last": None}
     class _R:
         def is_listed(self, dom): return rkn
     class _B:
@@ -46,10 +55,17 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
             "wayback": wayback}
 
 
-def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True):
+def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
+                          safebrowsing=False, archive_times=None):
     """Как _clients, но whois_probe падает (недоступен) — для Finding-1 фолбэка."""
     class _W:  # aparser
         def whois_probe(self, dom): raise RuntimeError("whois timeout")
+        def safebrowsing_check(self, dom):
+            if safebrowsing is None:
+                raise RuntimeError("safebrowsing timeout")
+            return safebrowsing
+        def archive_probe(self, dom):
+            return {"times": archive_times, "first": None, "last": None}
     class _R:
         def is_listed(self, dom): return rkn
     class _B:
@@ -448,6 +464,76 @@ def test_ahrefs_failure_does_not_crash_funnel():
     assert ah.calls == 1
     assert any(e.startswith("ahrefs:") for e in out["errors"])
     assert out["breakdown"]["components"]["authority"] == 0.0   # сбой -> dr=None -> 0, не крэш
+
+
+# --- SafeBrowsing hard-reject + Archive pre-gate (Тред D, Задача 2) ---------------
+#
+# Примечание: иллюстративные тесты в брифе вызывали `scoring._funnel(...)` напрямую с
+# сигнатурой `(d, clients, db, settings_dict, sig)`. В ЭТОМ файле НЕТ ни одного прямого
+# вызова `_funnel` — все ~31 существующих теста гоняют воронку через публичный
+# `scoring.score_domain(did, clients=...)` (см. test_rkn_rejects_before_wayback,
+# test_blacklist_rejects_before_wayback и т.д. выше). Тесты ниже следуют РЕАЛЬНОМУ
+# паттерну этого файла, а не иллюстративному из брифа.
+
+def test_safebrowsing_flagged_hard_rejects():
+    did = _mk(domain="badsb.ru", referring_domains=50, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T0-T1 пройдены
+    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=True))
+    assert out["status"] == "rejected" and out["reject_reason"] == "safebrowsing"
+    assert wb.calls == 0            # отсеян ДО Wayback — как rkn/blacklist
+
+
+def test_safebrowsing_clean_proceeds_to_wayback():
+    did = _mk(domain="cleansb.ru", referring_domains=3000, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=False))
+    assert out["reject_reason"] is None
+    assert wb.calls == 1
+
+
+def test_safebrowsing_error_does_not_reject_and_is_logged():
+    did = _mk(domain="unknownsb.ru", referring_domains=50, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
+    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=None))
+    assert out["reject_reason"] is None
+    assert any(e.startswith("safebrowsing:") for e in out["errors"])
+
+
+def test_archive_confirms_empty_skips_wayback():
+    did = _mk(domain="neverarchived.ru", referring_domains=3000, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    out = scoring.score_domain(did, clients=_clients(old, wb, archive_times=0))
+    assert out["reject_reason"] is None
+    assert wb.calls == 0                    # дорогой фетч не звался
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.wayback_checked is False       # ИДЕНТИЧНО честно-пустому Wayback сегодня
+    assert d.score_breakdown["sampled"] == 0
+    assert d.score_breakdown["history_evidence"] == []
+
+
+def test_archive_has_snapshots_still_runs_wayback():
+    did = _mk(domain="hashistory.ru", referring_domains=3000, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    out = scoring.score_domain(did, clients=_clients(old, wb, archive_times=19))
+    assert out["reject_reason"] is None
+    assert wb.calls == 1                   # архив не заменяет Wayback, только решает, звать ли его
+
+
+def test_archive_error_falls_through_to_wayback():
+    """archive_times=None имитирует и «формат не распознан», и реальную ошибку —
+    в обоих случаях _funnel не имеет права угадывать, фолбэк на настоящий Wayback."""
+    did = _mk(domain="archiveunclear.ru", referring_domains=3000, lane="bid")
+    wb = _Wayback()
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    out = scoring.score_domain(did, clients=_clients(old, wb, archive_times=None))
+    assert out["reject_reason"] is None
+    assert wb.calls == 1
 
 
 # --- квота: воронка не платит whois'ом дважды за детерминированный ответ ---------
