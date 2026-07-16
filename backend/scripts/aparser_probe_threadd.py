@@ -29,6 +29,10 @@ CANDIDATES = [
     ("Rank::Archive", "{domain}"),
     ("SecurityTrails::Domain", "{domain}"),
     ("SE::Yandex", "site:{domain}"),
+    ("SE::Google::TrustCheck", "{domain}"),
+    ("SE::Google::Compromised", "{domain}"),
+    ("Check::BackLink", "{domain}"),
+    ("Cloudflare::Radar", "{domain}"),
 ]
 
 
