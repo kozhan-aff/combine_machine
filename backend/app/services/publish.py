@@ -95,6 +95,13 @@ def publish_site(site_id: int) -> dict:
         # Считаем его ОДИН РАЗ здесь только как fallback — ИСКЛЮЧИТЕЛЬНО для legacy-страниц
         # (созданных до миграции 0018), у которых p.offer_id пуст и восстанавливать нечего.
         fallback_offer = _pick_offer(db, site_id)
+        # F3 (аудит 2026-07-15): выключенный оффер публикуется как есть (offer_id — зафиксированное
+        # решение о бренде, F26), но подставляем общий резервный URL вместо мёртвой ссылки, если
+        # оператор его настроил. Читаем ОДИН РАЗ на весь publish_site() — резерв общий для всего
+        # портфеля, не per-странице.
+        from app.models.offer import OfferSettings
+        _offer_settings = db.get(OfferSettings, 1)
+        reserve_url = _offer_settings.reserve_offer_url if _offer_settings else None
         ap = AaPanelClient()
         now = datetime.now(timezone.utc)
         published = []
@@ -118,7 +125,8 @@ def publish_site(site_id: int) -> dict:
             # Файлы страниц, успевших записаться до отказа, лежат на диске — и это не рассинхрон:
             # write_file идемпотентен (CreateFile+SaveFileBody перезаписывают тело), повторная
             # публикация просто положит их снова. Лучше записать дважды, чем соврать один раз.
-            ap.write_file(_target_path(site.doc_root, p.url_path), render_html(p, offer, lang=lang))
+            ap.write_file(_target_path(site.doc_root, p.url_path),
+                          render_html(p, offer, lang=lang, reserve_url=reserve_url))
             p.status = "published"
             p.published_at = now
             published.append(p.url_path)

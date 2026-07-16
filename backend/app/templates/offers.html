@@ -66,4 +66,21 @@
   </div>
 </div>
 
+<div class="station" style="max-width:920px">
+  <div class="plate">⛑ Резервный URL — страховка на случай выключенного оффера <span class="mod">публикация</span></div>
+  <div class="what">Если оффер, под который писалась страница, потом выключили — публикация НЕ
+    блокируется (offer_id зафиксирован как факт истории, не переоценивается), но ссылка на кнопке
+    будет мёртвой. Задай сюда общий URL (напр. сводное сравнение VPN) — при СЛЕДУЮЩЕЙ публикации
+    такой страницы кнопка поведёт туда вместо мёртвой ссылки. Бренд/промокод в тексте не меняются.
+    Пусто = сегодняшнее поведение (мёртвая ссылка остаётся как есть). Уже опубликованные страницы
+    эта настройка не чинит — republish делает оператор вручную.</div>
+  <div class="go">
+    <form method="post" action="/offers/reserve-url" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
+      <label class="f">резервный URL <span class="note">http/https, пусто — очистить</span>
+        <input name="reserve_offer_url" placeholder="https://…" value="{{ reserve_offer_url or '' }}" style="width:340px"></label>
+      <button class="btn-sm" title="сохранить (пусто — очистить, вернуться к сегодняшнему поведению)">сохранить</button>
+    </form>
+  </div>
+</div>
+
 {% endblock %}
