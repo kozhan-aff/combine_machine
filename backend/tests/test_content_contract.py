@@ -342,3 +342,88 @@ def test_offer_settings_defaults_to_no_row():
     from app.models.offer import OfferSettings
     with db.SessionLocal() as s:
         assert s.get(OfferSettings, 1) is None
+
+
+def test_offers_view_shows_current_reserve_url(client):
+    """GET /offers отражает уже сохранённый reserve_offer_url в значении поля формы."""
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/current"))
+        s.commit()
+    r = client.get("/offers")
+    assert r.status_code == 200
+    assert "https://reserve.example/current" in r.text
+
+
+def test_offers_view_renders_when_no_settings_row(client):
+    """Строки OfferSettings ещё нет вовсе (обычное состояние до первой настройки) -> страница
+    не падает, поле формы просто пустое."""
+    r = client.get("/offers")
+    assert r.status_code == 200
+
+
+def test_reserve_url_save_persists_and_reflects_on_reload(client):
+    r = client.post("/offers/reserve-url",
+                     data={"reserve_offer_url": "https://reserve.example/new"},
+                     follow_redirects=False)
+    assert r.status_code in (302, 303)
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        row = s.get(OfferSettings, 1)
+        assert row is not None and row.reserve_offer_url == "https://reserve.example/new"
+    r2 = client.get("/offers")
+    assert "https://reserve.example/new" in r2.text
+
+
+def test_reserve_url_save_rejects_javascript_scheme(client):
+    """Defense in depth, третья точка (после affiliate_link на создании оффера и render_html):
+    резервный URL проверяется тем же is_safe_url на входе."""
+    r = client.post("/offers/reserve-url",
+                     data={"reserve_offer_url": "javascript:alert(1)"},
+                     follow_redirects=False)
+    assert r.status_code in (302, 303)
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        row = s.get(OfferSettings, 1)
+        assert row is None or row.reserve_offer_url != "javascript:alert(1)"
+
+
+def test_reserve_url_save_empty_clears_existing(client):
+    """Пустое значение формы -> reserve_offer_url снова NULL (возврат к сегодняшнему поведению)."""
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/old"))
+        s.commit()
+    client.post("/offers/reserve-url", data={"reserve_offer_url": ""}, follow_redirects=False)
+    with db.SessionLocal() as s:
+        row = s.get(OfferSettings, 1)
+        assert row.reserve_offer_url is None
+
+
+def test_site_badge_title_mentions_reserve_when_configured(client, monkeypatch):
+    """Бейдж «оффер выключен» на карточке сайта называет судьбу ссылки: резерв настроен -> одна
+    формулировка title, не настроен -> другая."""
+    from app.services import content
+    from app.models.offer import OfferSettings
+
+    site_id = _make_site(domain="badge-reserve.ru")
+    offer_id = _add_offer("DeadVPN3", "ru", link="https://ex.com/dead3")
+    with db.SessionLocal() as s:
+        s.add(SiteOffer(site_id=site_id, offer_id=offer_id))
+        s.commit()
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
+                        lambda self, system, prompt, **kw: "<p>текст</p>")
+    content.generate_site(site_id, lang="ru")
+    with db.SessionLocal() as s:
+        s.query(Offer).filter_by(id=offer_id).first().active = False
+        s.commit()
+
+    r = client.get(f"/sites/{site_id}")
+    assert "резервный URL не настроен" in r.text
+
+    with db.SessionLocal() as s:
+        s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/compare"))
+        s.commit()
+
+    r2 = client.get(f"/sites/{site_id}")
+    assert "поведёт на резервный URL" in r2.text

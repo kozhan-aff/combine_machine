@@ -507,7 +507,12 @@ def settings_preview(min_rd: int = 1, min_age: float = 3.0, approve: float = 0.7
 @router.get("/offers", response_class=HTMLResponse)
 def offers_view(request: Request, db: Session = Depends(get_session)):
     rows = db.execute(select(Offer).order_by(Offer.id)).scalars().all()
-    return templates.TemplateResponse(request, "offers.html", {"active": "offers", "rows": rows})
+    from app.models.offer import OfferSettings
+    os_row = db.get(OfferSettings, 1)
+    return templates.TemplateResponse(request, "offers.html", {
+        "active": "offers", "rows": rows,
+        "reserve_offer_url": os_row.reserve_offer_url if os_row else "",
+    })
 
 
 @router.get("/queue", response_class=HTMLResponse)
@@ -566,11 +571,14 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
     offer_ids = {p.offer_id for p in pages if p.offer_id is not None}
     page_offers = {o.id: o for o in db.execute(
         select(Offer).where(Offer.id.in_(offer_ids))).scalars().all()} if offer_ids else {}
+    from app.models.offer import OfferSettings
+    _os_row = db.get(OfferSettings, 1)
+    reserve_configured = bool(_os_row and _os_row.reserve_offer_url)
     return templates.TemplateResponse(request, "site.html", {
         "active": "dash",
         "site": site, "domain": d.domain if d else f"#{site.domain_id}",
         "pages": pages, "pc": pc, "attached": attached, "all_offers": all_offers,
-        "page_offers": page_offers,
+        "page_offers": page_offers, "reserve_configured": reserve_configured,
     })
 
 
@@ -865,6 +873,24 @@ def offer_toggle_action(offer_id: int, db: Session = Depends(get_session)):
         o.active = not o.active
         db.commit()
     return _back("/offers")
+
+
+@router.post("/offers/reserve-url")
+def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depends(get_session)):
+    """F3 (аудит 2026-07-15): резервный URL для страниц с выключенным офером. Тот же is_safe_url,
+    что и affiliate_link на создании оффера (F28, defense in depth — вторая точка в render_html)."""
+    from app.models.offer import OfferSettings
+    from app.services.content import is_safe_url
+    url = reserve_offer_url.strip()
+    if url and not is_safe_url(url):
+        return _back("/offers", err="резервный URL: разрешены только http/https")
+    row = db.get(OfferSettings, 1)
+    if row is None:
+        row = OfferSettings(id=1)
+        db.add(row)
+    row.reserve_offer_url = url or None
+    db.commit()
+    return _back("/offers", msg="Резервный URL сохранён" if url else "Резервный URL очищен")
 
 
 @router.post("/sites/{site_id}/attach-offer")
