@@ -31,3 +31,11 @@ def test_reset_autonomy_restores_defaults():
     autonomy.update_autonomy(autopilot_on=True, cap_score=1, auto_publish=True)
     a = autonomy.reset_autonomy()
     assert a["autopilot_on"] is False and a["cap_score"] == 20 and a["auto_publish"] is False
+
+
+def test_autonomy_status_column_fits_terminal_statuses():
+    # На SQLite VARCHAR-длина не enforce-ится, поэтому проверяем САМУ схему, а не INSERT:
+    # колонка обязана вмещать самый длинный терминальный статус свипа.
+    from app.models.autonomy import AutonomyRun
+    longest = "completed_with_errors"          # 21 символ, orchestrator.py:377
+    assert AutonomyRun.__table__.c.status.type.length >= len(longest)

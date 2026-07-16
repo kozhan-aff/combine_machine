@@ -48,6 +48,6 @@ class AutonomyRun(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trigger: Mapped[str] = mapped_column(String(16), default="cron")     # cron | manual
-    status: Mapped[str] = mapped_column(String(16), default="running")   # running | done | failed
+    status: Mapped[str] = mapped_column(String(32), default="running")   # running|done|failed|cancelled|completed_with_errors
     counts: Mapped[dict] = mapped_column(JSONB, default=dict)            # {stage: n}
     errors: Mapped[list] = mapped_column(JSONB, default=list)           # ["stage: текст", ...]
