@@ -88,8 +88,8 @@
           {% else %}<span class="led led-warn"></span>не проверено{% endif %}</td>
       <td>{{ z.dnssec_status or '—' }}</td>
       <td class="num">{{ r.certs or '—' }}</td>
-      <td>{% if z.dns_error_safe or z.cert_error_safe %}<span class="led led-warn"
-              title="детали зоны читались с ошибкой (данные могут быть протухшими): {{ z.dns_error_safe or z.cert_error_safe }}"></span>ошибка деталей
+      <td>{% if z.dns_error_safe or z.cert_error_safe or z.last_error_safe %}<span class="led led-warn"
+              title="детали зоны читались с ошибкой (данные могут быть протухшими): {{ z.dns_error_safe or z.cert_error_safe or z.last_error_safe }}"></span>ошибка деталей
           {% else %}<span class="led led-ok"></span>ок{% endif %}</td>
       <td><span class="hint" title="общий drift по настройкам зоны — заполнит P2, в P0 не считается">—</span></td>
       <td class="num">{{ z.zones_seen_at.strftime('%m-%d %H:%M') if z.zones_seen_at else '—' }}</td>
