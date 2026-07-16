@@ -340,3 +340,32 @@ def test_panel_screens_render(client, monkeypatch):
         assert p.status == "edited" and "<script" not in p.body
     assert client.post(f"/sites/{site_id}/attach-offer", data={"offer_id": offer_id},
                        follow_redirects=False).status_code == 303
+
+
+def test_deactivated_offer_shows_badge_on_site_card(client, monkeypatch):
+    """F3 (аудит 2026-07-15): p.offer_id зафиксирован при генерации и публикация его не
+    переоценивает (решение пользователя — publish.py не блокируется), но карточка сайта обязана
+    ПОКАЗАТЬ, что страница держит ссылку на уже выключенный оффер."""
+    _add(Domain(domain="offer-badge.ru", source="backorder", status="purchased",
+                referring_domains=10))
+    offer_id = client.post("/api/offers", json={
+        "brand": "DeadVPN", "affiliate_link": "https://ex.com/dead", "promo_code": "X1"}).json()["id"]
+    with db.SessionLocal() as s:
+        from sqlalchemy import select
+        did = s.execute(select(Domain.id).where(Domain.domain == "offer-badge.ru")).scalar_one()
+    site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    # оффер привязан ДО генерации -> content.generate_site стампует его в p.offer_id
+    client.post(f"/sites/{site_id}/attach-offer", data={"offer_id": offer_id},
+                follow_redirects=False)
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
+                        lambda self, system, prompt, **kw: "<h2>D</h2>")
+    client.post(f"/api/sites/{site_id}/generate")
+
+    r = client.get(f"/sites/{site_id}")
+    assert "оффер выключен" not in r.text          # ещё активен -> бейджа нет
+
+    client.post(f"/offers/{offer_id}/toggle", follow_redirects=False)   # выключаем оффер
+
+    r = client.get(f"/sites/{site_id}")
+    assert r.status_code == 200 and "оффер выключен" in r.text
+    assert "DeadVPN" in r.text                      # title называет конкретный бренд

@@ -558,10 +558,19 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
         .where(SiteOffer.site_id == site_id)).scalars().all()
     all_offers = db.execute(select(Offer).where(Offer.active.is_(True))).scalars().all()
     pc = _page_counts(db, site_id)
+    # F3 (аудит 2026-07-15): p.offer_id зафиксирован при генерации и НЕ переоценивается публикацией
+    # (см. комментарий Page.offer_id) — если оффер выключили ПОСЛЕ генерации, страница молча
+    # опубликует ссылку на выключенный оффер. Публикация намеренно не блокируется (решение
+    # пользователя), но карточка сайта обязана это ПОКАЗАТЬ — иначе оператор узнает только
+    # постфактум с уже опубликованной мёртвой ссылкой.
+    offer_ids = {p.offer_id for p in pages if p.offer_id is not None}
+    page_offers = {o.id: o for o in db.execute(
+        select(Offer).where(Offer.id.in_(offer_ids))).scalars().all()} if offer_ids else {}
     return templates.TemplateResponse(request, "site.html", {
         "active": "dash",
         "site": site, "domain": d.domain if d else f"#{site.domain_id}",
         "pages": pages, "pc": pc, "attached": attached, "all_offers": all_offers,
+        "page_offers": page_offers,
     })
 
 
