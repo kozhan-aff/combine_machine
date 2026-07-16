@@ -38,6 +38,7 @@ class Site(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # ротация провижна (F2.1)
 
     pages: Mapped[list["Page"]] = relationship(back_populates="site")
 

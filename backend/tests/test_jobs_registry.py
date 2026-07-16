@@ -106,6 +106,15 @@ def test_stale_run_is_shown_not_killed():
     assert jobs.live() == []
 
 
+def test_track_closes_done_warn_when_body_signals():
+    """Тело (свип) может заявить свой терминальный исход: «прошёл, но с замечаниями» — не
+    зелёный `done`, но и не `failed` (F2.2). track подхватывает то, что сказало jobs.finish()."""
+    with jobs.track("sweep") as run:
+        jobs.finish(run, "done_warn")         # тело: «прошёл, но с замечаниями»
+    p = jobs.progress("sweep")
+    assert p["status"] == "done_warn"
+
+
 def test_reaped_run_frees_the_lock():
     """Убитый контейнер не должен запирать джоб навсегда."""
     from datetime import timedelta

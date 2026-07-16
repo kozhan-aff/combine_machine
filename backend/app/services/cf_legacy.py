@@ -24,7 +24,10 @@ def import_legacy_connection(db) -> int | None:
     conn = CloudflareConnection(
         label="legacy .env",
         secret_ref=LEGACY_SECRET_REF,
-        token_kind="account" if settings.CLOUDFLARE_ACCOUNT_ID else "user",
+        # account_id НЕ доказывает владельца токена: живой .env-токен проверен user-owned
+        # (2026-07-11, /user/tokens/verify, 20 зон). account-owned токены заводятся отдельным
+        # путём с явным token_kind, не этим legacy-импортом (аудит 2026-07-15, F1.1).
+        token_kind="user",
         owner_cf_account_id=settings.CLOUDFLARE_ACCOUNT_ID or None,
         token_fingerprint=fp,
         token_hint="..." + token[-4:] if len(token) >= 4 else None,

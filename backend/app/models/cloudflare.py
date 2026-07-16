@@ -119,6 +119,8 @@ class CloudflareZoneMirror(Base):
     zones_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error_safe: Mapped[str | None] = mapped_column(Text)
+    dns_error_safe: Mapped[str | None] = mapped_column(Text)     # ошибка чтения DNS-записей зоны
+    cert_error_safe: Mapped[str | None] = mapped_column(Text)    # ошибка чтения cert-паков зоны
 
 
 class CloudflareZoneSettingObservation(Base):

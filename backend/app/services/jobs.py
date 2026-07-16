@@ -18,6 +18,8 @@
   status == "failed"     -> упал; error — текст, done — где встал, stage — на какой стадии;
   status == "cancelled"  -> остановлен человеком на done/total;
   status == "done"       -> успех, ДАЖЕ если done == total == 0 (discovery без кандидатов).
+  status == "done_warn"  -> свип прошёл, но отдельные сущности упали (см. F2.2); чипы
+                            гасятся в «пройдено», как у done — стадии-то отработали.
   done/total — только отображение, не признак терминала.
 
 ЛИЗИНГ ЗАМКА (аудит F17). Замок — частичный уникальный индекс (name) WHERE status='running'.
@@ -93,6 +95,9 @@ _DB_LOCK = threading.RLock()
 # test_autopilot_panel.py::test_autopilot_run_starts_job поллит побочный эффект, а не реестр),
 # доживает до drop_all() СЛЕДУЮЩЕГО теста и рвёт общий коннекшен.
 _FUTURES: list = []
+# Терминальный исход, заявленный ТЕЛОМ track (сегодня — свип: «с замечаниями»). Тело зовёт
+# jobs.finish(run_id, "done_warn") перед нормальным выходом; track подхватывает вместо "done".
+_OUTCOME: dict[int, str] = {}
 _log = logging.getLogger(__name__)
 
 
@@ -236,7 +241,7 @@ def _close(run_id: int, status: str, error: str | None = None) -> None:
     from app.db import SessionLocal
     from app.models.job import JobRun
     values: dict = {"status": status, "error": error, "finished_at": _utcnow()}
-    if status == "done":                    # успех — все чипы гасим в «пройдено»
+    if status in ("done", "done_warn"):     # успех/с замечаниями — стадии отработали, чипы «пройдено»
         with _DB_LOCK, SessionLocal() as db:
             stages = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
         values["stages"] = [s if s.get("state") == "skip" else {**s, "state": "done"}
@@ -259,12 +264,14 @@ def track(name: str, *, trigger: str = "manual", stages: list | None = None):
     try:
         yield run_id
     except Cancelled:
+        _OUTCOME.pop(run_id, None)
         _close(run_id, "cancelled")         # остановлен человеком — это не ошибка
     except BaseException as e:              # BaseException: ловушки сети в тестах — тоже финал
+        _OUTCOME.pop(run_id, None)
         _close(run_id, "failed", f"{type(e).__name__}: {e}"[:200])
         raise
     else:
-        _close(run_id, "done")
+        _close(run_id, _OUTCOME.pop(run_id, "done"))
     finally:
         # ГАСИМ ТРЕД ДО ВЫХОДА, а не бросаем демоном: иначе тестовый харнесс снесёт SQLite-движок
         # из-под живого писателя (тот же класс аварии, что лечит _drain, см. его докстринг).
@@ -326,6 +333,14 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
             known = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
         values["stages"] = _advance(known, stage)
     _own(run_id, **values)
+
+
+def finish(run_id: int | None, status: str) -> None:
+    """Тело track заявляет СВОЙ терминальный статус (напр. свип «с замечаниями» -> done_warn).
+    Иначе track закрывает прогон как "done". run_id=None — no-op (вне track)."""
+    if run_id is None:
+        return
+    _OUTCOME[run_id] = status
 
 
 def cancelled(run_id: int | None) -> bool:
