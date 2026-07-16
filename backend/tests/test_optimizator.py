@@ -108,3 +108,50 @@ def test_register_transport_failure_raises_ambiguous(monkeypatch):
     c = OptimizatorClient()
     with pytest.raises(OptimizatorAmbiguous):
         c.register(["a.ru"])
+
+
+# --- Fix Codex Bug 1/2/3: _get()/_unwrap() must surface uncertainty, not swallow it -----------
+
+
+def test_unwrap_empty_list_raises_ambiguous():
+    """[] — ни ошибки, ни данных. Раньше тихо возвращалось {} (успех с пустым результатом);
+    для check_domain это ложноположительно читалось бы как "домен наш"."""
+    from app.integrations.optimizator import _unwrap
+    with pytest.raises(OptimizatorAmbiguous):
+        _unwrap([])
+
+
+def test_unwrap_empty_dict_row_raises_ambiguous():
+    """[{}] — распарсили массив, а внутри пусто: тоже не форма успеха, тоже неизвестность."""
+    from app.integrations.optimizator import _unwrap
+    with pytest.raises(OptimizatorAmbiguous):
+        _unwrap([{}])
+
+
+def test_unwrap_non_dict_row_raises_ambiguous():
+    from app.integrations.optimizator import _unwrap
+    with pytest.raises(OptimizatorAmbiguous):
+        _unwrap(["unexpected string payload"])
+
+
+def test_get_transport_failure_raises_ambiguous(monkeypatch):
+    """_get() — единственный путь, которым идут check_domain/balance/prices/check_nicd/
+    check_order (всё, кроме register(), которое обходит BaseClient целиком). Раньше
+    httpx.TransportError/HTTPStatusError из self.request() (BaseClient, с ретраями) улетал
+    наружу КАК ЕСТЬ — check_domain() физически не мог сдержать обещание докстринга
+    "бросает OptimizatorAmbiguous на сбой"."""
+    def fake_request(self, method, url, **kw):
+        raise httpx.TimeoutException("timed out")
+    monkeypatch.setattr("app.integrations.base.BaseClient.request", fake_request)
+    c = OptimizatorClient()
+    with pytest.raises(OptimizatorAmbiguous):
+        c.check_domain("a.ru")
+
+
+def test_get_still_raises_optimizator_error_unwrapped(monkeypatch):
+    """Регрессия: обёртка в _get() не должна перехватывать/перепаковывать OptimizatorError —
+    чистый отказ провайдера обязан долетать как есть (не как Ambiguous)."""
+    c = _client(monkeypatch, [{"error": "недостаточно средств", "error_id": 42}])
+    with pytest.raises(OptimizatorError) as exc:
+        c.balance()
+    assert exc.value.error_id == 42

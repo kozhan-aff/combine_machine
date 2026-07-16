@@ -103,6 +103,31 @@ def test_execute_ambiguous_send_sets_maybe_sent(monkeypatch):
     assert result["maybe_sent"] is True
 
 
+def test_execute_ambiguous_check_domain_blocks_register_and_sets_maybe_sent(monkeypatch):
+    """Bug 4a: check_domain НЕ смог ответить (Ambiguous, не чистый OptimizatorError) — это
+    НЕ равно "не наш". Слать register() поверх неизвестности рискованно (а вдруг уже наш и
+    это повторная попытка) — execute обязан остановиться, пометить maybe_sent=True и НЕ
+    звать register() вообще."""
+    monkeypatch.setattr("app.integrations.optimizator.OptimizatorClient.prices",
+                        lambda self, zone="ru": {"price_registration": 179})
+    monkeypatch.setattr(
+        "app.integrations.optimizator.OptimizatorClient.check_domain",
+        lambda self, domain: (_ for _ in ()).throw(OptimizatorAmbiguous("timed out")))
+    called = {"register": 0}
+
+    def _register(self, domains):
+        called["register"] += 1
+        return {"order_id": 1}
+    monkeypatch.setattr("app.integrations.optimizator.OptimizatorClient.register", _register)
+    did = _approved_optimizator()
+    oid = acquisition.create_order(did, provider="optimizator")
+    acquisition.confirm_order(oid)
+    result = acquisition.execute_confirmed_order(oid)
+    assert result["status"] == "failed"
+    assert result["maybe_sent"] is True
+    assert called["register"] == 0                   # неизвестность НЕ повод слать деньги
+
+
 def test_execute_still_gates_on_confirmed_by_human():
     """ГЕЙТ НЕ ТРОНУТ — тот же тест, что уже есть для backorder, повторён для optimizator."""
     did = _approved_optimizator()

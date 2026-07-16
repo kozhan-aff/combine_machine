@@ -37,11 +37,16 @@ class OptimizatorAmbiguous(Exception):
 
 
 def _unwrap(data) -> dict:
-    """[{...}] -> {...}; поднимает OptimizatorError на форму {"error":..., "error_id":...}."""
-    row = data[0] if isinstance(data, list) and data else {}
+    """[{...}] -> {...}; поднимает OptimizatorError на форму {"error":..., "error_id":...},
+    OptimizatorAmbiguous на пустой/нераспознанный ответ (ни ошибки, ни данных — это НЕ
+    успех с пустым результатом, у этого провайдера такого не бывает ни на одном
+    подтверждённом живом вызове; это неизвестность, а не факт)."""
+    row = data[0] if isinstance(data, list) and data else None
     if isinstance(row, dict) and "error" in row:
         raise OptimizatorError(row.get("error", "unknown error"), row.get("error_id"))
-    return row if isinstance(row, dict) else {}
+    if not isinstance(row, dict) or not row:
+        raise OptimizatorAmbiguous(f"пустой/неожиданный ответ: {data!r}"[:200])
+    return row
 
 
 class OptimizatorClient(BaseClient):
@@ -52,8 +57,13 @@ class OptimizatorClient(BaseClient):
 
     def _get(self, action: str, **params) -> dict:
         p = {"a": "api", "sa": action, "api_key": self.api_key, **params}
-        r = self.request("GET", self.base_url + "/", params=p)
-        return _unwrap(r.json())
+        try:
+            r = self.request("GET", self.base_url + "/", params=p)
+            return _unwrap(r.json())
+        except (OptimizatorError, OptimizatorAmbiguous):
+            raise
+        except Exception as e:  # noqa: BLE001 — транспорт/JSON-сбой, тот же принцип, что в register()
+            raise OptimizatorAmbiguous(f"{type(e).__name__}: {e}") from e
 
     def ping(self) -> bool:
         """Живость + auth — balance ничего не стоит (read-only)."""
@@ -98,6 +108,8 @@ class OptimizatorClient(BaseClient):
                 r.raise_for_status()
                 return _unwrap(r.json())
         except OptimizatorError:
+            raise
+        except OptimizatorAmbiguous:
             raise
         except Exception as e:  # noqa: BLE001 — транспорт/JSON-сбой ПОСЛЕ отправки денежного запроса
             raise OptimizatorAmbiguous(f"{type(e).__name__}: {e}") from e

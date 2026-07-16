@@ -457,15 +457,30 @@ def execute_confirmed_order(order_id: int) -> dict:
                 # ИДЕМПОТЕНТНОСТЬ. У API нет «список заказов»/«заказ по домену» (в отличие
                 # от backorder.find_order) — единственная замена: check_domain успешен
                 # ТОЛЬКО для доменов под нашей анкетой. Успех = «уже наш», второй
-                # reg_domains не шлём. check_domain, как и все методы клиента, бросает на
-                # отказ/сбой — нет отдельного None-сентинела (нет живых данных о формате
-                # "домен не наш"). Эта проверка денег не тратит, поэтому безопасно просто
-                # продолжить к register() на любом исключении: если домен и правда уже
-                # наш, ответит reg_domains (его OptimizatorError упадёт в except ниже).
+                # reg_domains не шлём. ЧИСТЫЙ отказ провайдера (OptimizatorError, напр. "домен
+                # не найден под нашей анкетой") безопасно трактуем как "не наш" и продолжаем к
+                # register() — если домен и правда уже наш, ответит сам reg_domains (его
+                # OptimizatorError упадёт в except ниже). НЕОПРЕДЕЛЁННОСТЬ (OptimizatorAmbiguous
+                # — сеть/формат, а не ответ провайдера) — это НЕ "подтверждённо не наш": слать
+                # register() поверх неё рискованно (а вдруг уже наш и это повторная попытка),
+                # поэтому она обрывает ветку СРАЗУ, не доходя до register() (см. except ниже).
                 try:
                     existing = c.check_domain(d.domain)
-                except (OptimizatorError, OptimizatorAmbiguous):
+                except OptimizatorError:
                     existing = None
+                except OptimizatorAmbiguous as e:
+                    # НЕ смогли проверить — human должен решить сам, а не мы вслепую. НЕ шлём
+                    # register(), падаем в failed с заблокированным retry-без-проверки (тот же
+                    # контракт, что у самого register(): неизвестность -> maybe_sent -> нельзя
+                    # тихо отменить). `saved` НЕ трогаем — maybe_sent от прошлой попытки (если
+                    # была) остаётся вытесненным явным True ниже в любом случае.
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"не удалось проверить владение доменом "
+                                                  f"(check_domain): {e}", "maybe_sent": True}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                # Дошли сюда ТОЛЬКО через успех/OptimizatorError выше — что-то реально узнали
+                # (домен наш или домен не наш), неизвестности нет, снимаем флаг прошлой ambiguous.
                 saved.pop("maybe_sent", None)
                 if existing is not None:
                     o.status = "ordered"
@@ -729,15 +744,19 @@ def poll_orders() -> dict:
                 sending += 1                          # живой execute в полёте — не трогаем
                 continue
             d = db.get(Domain, o.domain_id)
-            # check_domain даёт ТОЛЬКО «домен наш» или «нет» (включая транспортные сбои —
-            # неотличимы от «нет данных», нет отдельного None-сентинела). Консервативно: не
-            # смогли подтвердить -> 'failed', а не вечный 'ordering' — человек увидит строку в
-            # /queue и решит сам (в т.ч. вручную сверив на сайте провайдера), а не потеряет её
-            # из виду (design doc §3).
+            # check_domain различает ЧИСТЫЙ отказ провайдера (OptimizatorError — "домен не наш",
+            # можно судить строку прямо сейчас) от НЕОПРЕДЕЛЁННОСТИ (OptimizatorAmbiguous —
+            # сеть/формат, провайдер вообще не ответил). Отказ -> 'failed' ниже, человек увидит
+            # строку в /queue и решит сам (design doc §3). Неизвестность — консервативно НЕ
+            # выносим вердикт вообще: ложный 'failed' здесь опасен ровно как в execute, он
+            # разблокировал бы отмену заказа, чья судьба на самом деле неизвестна. Строку не
+            # трогаем — следующий прогон поллинга попробует снова.
             try:
                 existing = oc.check_domain(d.domain) if d is not None else None
-            except (OptimizatorError, OptimizatorAmbiguous):
+            except OptimizatorError:
                 existing = None
+            except OptimizatorAmbiguous:
+                continue
             if existing is not None:
                 # УСПЕХ: регистрация прошла до обрыва. 'caught'-пути здесь нет (в отличие от
                 # backorder) — у optimizator нет фазы «поймали, но не наши»: домен либо уже под

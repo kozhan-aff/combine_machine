@@ -465,6 +465,28 @@ def test_optimizator_stuck_ordering_recovers_when_not_registered(sqlite_db, monk
     acquisition.create_order(did, "optimizator")      # домен снова покупаем — не узник
 
 
+def test_optimizator_ambiguous_check_domain_leaves_row_untouched(sqlite_db, monkeypatch):
+    """Bug 4b: check_domain НЕ смог ответить (Ambiguous, не чистый отказ) во время recovery —
+    не выносим вердикт о строке вообще. Она остаётся 'ordering', claimed_at не трогаем:
+    ложный 'failed' здесь разблокировал бы отмену заказа, чья судьба на самом деле неизвестна."""
+    did, oid = _send_and_die_optimizator(monkeypatch, "ambiguous-opt.ru")
+    _age_the_claim(oid)
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [])
+    monkeypatch.setattr(
+        optimizator.OptimizatorClient, "check_domain",
+        lambda self, domain: (_ for _ in ()).throw(optimizator.OptimizatorAmbiguous("timed out")))
+    with db.SessionLocal() as s:
+        claimed_before = s.get(AcquisitionOrder, oid).claimed_at
+
+    r = acquisition.poll_orders()
+
+    o = _orders(did)[0]
+    assert o.status == "ordering", "неопределённость не должна выноситься как вердикт о строке"
+    assert o.claimed_at == claimed_before, "claim не трогаем — recovery попробует снова"
+    assert r["checked"] == 0
+    assert r["sending"] == 0
+
+
 def test_optimizator_fresh_ordering_claim_is_not_touched(sqlite_db, monkeypatch):
     """ГАРД ПОРОГА (а не регрессия бага): свежий claim — живой execute в полёте у optimizator.
     Recovery-цикл его не трогает, как и у backorder (тот же STUCK_CLAIM_MIN, тот же смысл)."""
