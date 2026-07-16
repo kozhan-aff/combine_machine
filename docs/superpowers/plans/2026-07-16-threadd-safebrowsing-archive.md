@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Пост-ревью поправка.** Archive-часть этого плана (Task 2, Steps 4/5 — `skip_wayback`
+> и связанные тесты) реализована как написано, но финальное ревью нашло её нерабочей и
+> бесполезной (`times="none"` парсится в `None`, не `0` — условие никогда не срабатывает;
+> и даже сработай оно, `classify_history` и так мгновенно выходит на пустом архиве —
+> нечего было бы экономить). Убрана целиком коммитом `b6d50d0` после этого плана.
+> Source of truth — `docs/superpowers/specs/2026-07-16-threadd-safebrowsing-archive-design.md`
+> (поправка в самом верху файла). SafeBrowsing (Task 2, Steps 3/5/6) — реализован как
+> написано, ревью одобрило полностью, не тронут.
+
 **Goal:** Add two live-verified cheap A-Parser signals to the M1 scoring funnel —
 `SE::Google::SafeBrowsing` as a hard-reject (like RKN/blacklist), and `Rank::Archive`
 (preset `no_proxy`) as a pre-check that skips the expensive real Wayback fetch when it
