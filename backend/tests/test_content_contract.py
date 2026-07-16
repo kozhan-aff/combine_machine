@@ -177,10 +177,151 @@ def test_render_html_never_emits_javascript_href():
     from app.services.content import render_html
 
     page = SimpleNamespace(title="T", body="<p>x</p>")
-    offer = SimpleNamespace(brand="Evil", affiliate_link="javascript:alert(1)", promo_code=None)
+    offer = SimpleNamespace(brand="Evil", affiliate_link="javascript:alert(1)", promo_code=None,
+                            active=True)
     out = render_html(page, offer)
     assert "javascript:" not in out
     assert "<a href=" not in out            # ссылки нет вовсе — не «безопасная замена»
+
+
+def test_render_html_swaps_link_to_reserve_when_offer_inactive():
+    """F3: offer.active=False + reserve_url задан и безопасен -> href подменяется на резерв,
+    бренд/промокод в тексте кнопки НЕ меняются."""
+    from types import SimpleNamespace
+    from app.services.content import render_html
+
+    page = SimpleNamespace(title="T", body="<p>x</p>")
+    offer = SimpleNamespace(brand="DeadVPN", affiliate_link="https://ex.com/dead",
+                            promo_code="X1", active=False)
+    out = render_html(page, offer, reserve_url="https://reserve.example/compare")
+    assert "https://reserve.example/compare" in out
+    assert "ex.com/dead" not in out
+    assert "DeadVPN" in out and "X1" in out
+
+
+def test_render_html_keeps_dead_link_without_reserve_configured():
+    """Без reserve_url (None, дефолт) поведение НЕ меняется — оффер выключен, ссылка остаётся
+    его собственной (уже неактивной). Сегодняшний контракт."""
+    from types import SimpleNamespace
+    from app.services.content import render_html
+
+    page = SimpleNamespace(title="T", body="<p>x</p>")
+    offer = SimpleNamespace(brand="DeadVPN", affiliate_link="https://ex.com/dead",
+                            promo_code="X1", active=False)
+    out = render_html(page, offer)
+    assert "ex.com/dead" in out
+
+
+def test_render_html_active_offer_ignores_reserve_url():
+    """Оффер активен -> reserve_url (даже если задан) не используется вообще."""
+    from types import SimpleNamespace
+    from app.services.content import render_html
+
+    page = SimpleNamespace(title="T", body="<p>x</p>")
+    offer = SimpleNamespace(brand="LiveVPN", affiliate_link="https://ex.com/live",
+                            promo_code=None, active=True)
+    out = render_html(page, offer, reserve_url="https://reserve.example/compare")
+    assert "ex.com/live" in out
+    assert "reserve.example" not in out
+
+
+def test_render_html_never_emits_dangerous_reserve_url():
+    """Defense in depth (F28, тот же принцип, что для affiliate_link): даже если резервный URL
+    каким-то образом оказался в БД с опасной схемой (форма его отвергает — Task 3, но прямая
+    запись в БД её обходит), render_html не должен вставить его в href."""
+    from types import SimpleNamespace
+    from app.services.content import render_html
+
+    page = SimpleNamespace(title="T", body="<p>x</p>")
+    offer = SimpleNamespace(brand="DeadVPN", affiliate_link="https://ex.com/dead",
+                            promo_code=None, active=False)
+    out = render_html(page, offer, reserve_url="javascript:alert(1)")
+    assert "javascript:" not in out
+    assert "<a href=" not in out            # ссылки нет вовсе — не «безопасная замена»
+
+
+def test_publish_uses_reserve_url_for_deactivated_offer(monkeypatch):
+    """Сквозной сценарий через publish_site(): оффер выключен ПОСЛЕ генерации, резерв настроен
+    ДО публикации -> опубликованный файл несёт резервную ссылку, не мёртвую."""
+    from app.services import content, publish
+    from app.integrations.aapanel import AaPanelClient
+    from app.models.offer import OfferSettings
+
+    site_id = _make_site(domain="reserve-on.ru")
+    offer_id = _add_offer("DeadVPN", "ru", link="https://ex.com/dead")
+    with db.SessionLocal() as s:
+        s.add(SiteOffer(site_id=site_id, offer_id=offer_id))
+        s.commit()
+
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
+                        lambda self, system, prompt, **kw: "<p>текст</p>")
+    assert content.generate_site(site_id, lang="ru") == 3
+
+    with db.SessionLocal() as s:
+        for p in s.query(Page).filter_by(site_id=site_id).all():
+            p.status = "edited"
+        s.query(Offer).filter_by(id=offer_id).first().active = False   # выключаем ПОСЛЕ генерации
+        s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/compare"))
+        s.commit()
+
+    written = {}
+
+    def _post(self, path, data=None):
+        if "CreateFile" in path:
+            return {"status": True, "msg": "Created successfully!"}
+        if "SaveFileBody" in path:
+            written[data["path"]] = data["data"]
+            return {"status": True, "msg": "Saved successfully!"}
+        raise AssertionError(path)  # pragma: no cover
+
+    monkeypatch.setattr(AaPanelClient, "_post", _post)
+    out = publish.publish_site(site_id)
+    assert out["status"] == "published"
+
+    home = written["/www/wwwroot/reserve-on.ru/index.html"]
+    assert "https://reserve.example/compare" in home
+    assert "ex.com/dead" not in home
+    assert "DeadVPN" in home                       # бренд в тексте кнопки не поменялся
+
+
+def test_publish_keeps_dead_link_when_no_reserve_row(monkeypatch):
+    """Без строки OfferSettings вовсе (обычное состояние до Task 3/первой настройки) publish_site
+    не падает и не меняет поведение — мёртвая ссылка остаётся как есть."""
+    from app.services import content, publish
+    from app.integrations.aapanel import AaPanelClient
+
+    site_id = _make_site(domain="reserve-off.ru")
+    offer_id = _add_offer("DeadVPN2", "ru", link="https://ex.com/dead2")
+    with db.SessionLocal() as s:
+        s.add(SiteOffer(site_id=site_id, offer_id=offer_id))
+        s.commit()
+
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
+                        lambda self, system, prompt, **kw: "<p>текст</p>")
+    content.generate_site(site_id, lang="ru")
+
+    with db.SessionLocal() as s:
+        for p in s.query(Page).filter_by(site_id=site_id).all():
+            p.status = "edited"
+        s.query(Offer).filter_by(id=offer_id).first().active = False
+        s.commit()
+        # OfferSettings НЕ создаём вовсе — проверяем именно этот случай
+
+    written = {}
+
+    def _post(self, path, data=None):
+        if "CreateFile" in path:
+            return {"status": True, "msg": "Created successfully!"}
+        if "SaveFileBody" in path:
+            written[data["path"]] = data["data"]
+            return {"status": True, "msg": "Saved successfully!"}
+        raise AssertionError(path)  # pragma: no cover
+
+    monkeypatch.setattr(AaPanelClient, "_post", _post)
+    out = publish.publish_site(site_id)
+    assert out["status"] == "published"
+    home = written["/www/wwwroot/reserve-off.ru/index.html"]
+    assert "ex.com/dead2" in home    # сегодняшнее поведение сохранено
 
 
 def test_offer_settings_singleton_roundtrip():

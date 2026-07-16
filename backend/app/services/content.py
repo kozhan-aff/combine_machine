@@ -189,21 +189,29 @@ def mark_edited(page_id: int, body: str | None = None) -> dict:
         return {"page_id": page_id, "status": p.status}
 
 
-def render_html(page, offer=None, lang: str = "ru") -> str:
+def render_html(page, offer=None, lang: str = "ru", reserve_url: str | None = None) -> str:
     """Wrap an edited page into a full HTML doc with offer link (sponsored) + disclosure. For M5.
 
     lang: <html lang=...> for the generation language (publish passes it down). Body is
     re-sanitized here (egress) so any writer that skipped _sanitize can't leak hostile HTML.
+
+    reserve_url: F3 (аудит 2026-07-15) — если offer.active=False, ссылка подменяется на этот
+    общий резервный URL (если задан). offer_id зафиксирован при генерации и остаётся фактом
+    истории (F26) — меняется ТОЛЬКО href, бренд/промокод в тексте не трогаются.
     """
     offer_block = ""
-    # F28: не рендерим ссылку с опасной схемой (javascript:/data:/...), даже если она как-то
-    # обошла проверку на создании оффера — это последний рубеж перед публикацией. Оффер без
-    # безопасной ссылки лучше показать без ссылки (только бренд/промокод потеряны — не XSS),
-    # чем опубликовать страницу с исполняемым href.
-    if offer is not None and is_safe_url(offer.affiliate_link):
-        promo = f" Промокод: <b>{html.escape(offer.promo_code)}</b>." if offer.promo_code else ""
-        offer_block = (f'<p class="offer"><a href="{html.escape(offer.affiliate_link)}" '
-                       f'rel="sponsored nofollow">Перейти к {html.escape(offer.brand)}</a>.{promo}</p>')
+    if offer is not None:
+        link = offer.affiliate_link
+        if not offer.active and reserve_url:
+            link = reserve_url
+        # F28: не рендерим ссылку с опасной схемой (javascript:/data:/...), даже если она как-то
+        # обошла проверку на создании оффера/сохранении резерва — это последний рубеж перед
+        # публикацией. Без безопасной ссылки лучше показать блок без ссылки (только бренд/промокод
+        # потеряны — не XSS), чем опубликовать страницу с исполняемым href.
+        if is_safe_url(link):
+            promo = f" Промокод: <b>{html.escape(offer.promo_code)}</b>." if offer.promo_code else ""
+            offer_block = (f'<p class="offer"><a href="{html.escape(link)}" '
+                           f'rel="sponsored nofollow">Перейти к {html.escape(offer.brand)}</a>.{promo}</p>')
     return (
         f"<!doctype html><html lang='{html.escape(lang or 'ru')}'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -216,7 +224,8 @@ def render_html(page, offer=None, lang: str = "ru") -> str:
 if __name__ == "__main__":  # pure checks (no network/DB): disclosure + sponsored rel always present
     from types import SimpleNamespace as N
     pg = N(title="Обзор", body="<h2>Тест</h2><p>...</p>")
-    off = N(brand="NordVPN", affiliate_link="https://ex.com/aff?x=1", promo_code="SAVE10")
+    off = N(brand="NordVPN", affiliate_link="https://ex.com/aff?x=1", promo_code="SAVE10",
+            active=True)
     out = render_html(pg, off)
     assert DISCLOSURE in out and 'rel="sponsored nofollow"' in out and "SAVE10" in out
     assert "<article><h2>Тест</h2>" in out
@@ -228,6 +237,6 @@ if __name__ == "__main__":  # pure checks (no network/DB): disclosure + sponsore
     assert "<h2>ok</h2>" in dirty and "alert" not in dirty, dirty   # tag+content of <script> gone
     assert is_safe_url("https://ex.com/x") and is_safe_url("http://ex.com")
     assert not is_safe_url("javascript:alert(1)") and not is_safe_url("data:text/html,x")
-    evil = N(brand="Evil", affiliate_link="javascript:alert(1)", promo_code=None)
+    evil = N(brand="Evil", affiliate_link="javascript:alert(1)", promo_code=None, active=True)
     assert "javascript:" not in render_html(pg, evil)  # F28: dangerous scheme never rendered
     print("content render_html + _clean + _sanitize ok")
