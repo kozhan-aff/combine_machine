@@ -35,6 +35,7 @@
         <span class="hint" style="flex:1">
           {% if r.status == 'failed' %}<span style="color:var(--bad)">упала: {{ r.error }}</span>
           {% elif r.status == 'cancelled' %}остановлена на {{ r.done }} / {{ r.total }}
+          {% elif r.status == 'done_warn' %}<span class="badge b-warn" title="{{ r.message }}">с замечаниями</span>
           {% else %}{{ r.message or 'готово' }}{% endif %}
         </span>
         <span class="hint num">{{ (r.finished_at[8:10] + '.' + r.finished_at[5:7] + ' ' + r.finished_at[11:16]) if r.finished_at else '—' }}</span>

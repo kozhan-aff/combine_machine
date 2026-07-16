@@ -380,6 +380,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     # свипа (аудит F19, пункт В). Честный статус: не done, но и не failed —
                     # свип не оборвался, он завершился С ЗАМЕЧАНИЯМИ.
                     status = "completed_with_errors"
+                    jobs.finish(run, "done_warn")   # JobRun-карточка тоже «с замечаниями», не зелёная (F2.2)
                 jobs.report(run, done=total, total=total, current="",
                             message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
             except jobs.Cancelled:
