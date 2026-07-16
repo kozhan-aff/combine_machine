@@ -181,3 +181,23 @@ def test_render_html_never_emits_javascript_href():
     out = render_html(page, offer)
     assert "javascript:" not in out
     assert "<a href=" not in out            # ссылки нет вовсе — не «безопасная замена»
+
+
+def test_offer_settings_singleton_roundtrip():
+    """OfferSettings — single-row (id=1) конфиг, тот же паттерн, что ScoringSettings/
+    AutonomySettings. Пока таблицы/класса нет — падает импортом."""
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/compare"))
+        s.commit()
+    with db.SessionLocal() as s:
+        row = s.get(OfferSettings, 1)
+        assert row.reserve_offer_url == "https://reserve.example/compare"
+
+
+def test_offer_settings_defaults_to_no_row():
+    """Дефолт — строки НЕТ вовсе (не создаётся автоматически при create_all). Публикация и UI
+    обязаны трактовать отсутствие строки как reserve_offer_url=None, не падать."""
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        assert s.get(OfferSettings, 1) is None

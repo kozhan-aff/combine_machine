@@ -40,3 +40,18 @@ class SiteOffer(Base):
     # и оба вставляют. Дубль здесь не безобиден — вставка оффера в контент (M4) прошлась бы по
     # обеим строкам и продублировала бы блок с офером/промокодом на странице.
     __table_args__ = (Index("uq_site_offer", "site_id", "offer_id", unique=True),)
+
+
+class OfferSettings(Base):
+    """Single-row (id=1) рантайм-конфиг публикации офферов — тот же паттерн, что
+    ScoringSettings/AutonomySettings (single-row, редактируется на лету через UI).
+
+    reserve_offer_url: общий URL на весь портфель, на который публикация подставит ссылку
+    ВМЕСТО ссылки уже выключенного оффера (F3, аудит 2026-07-15). NULL = резерв не настроен —
+    сегодняшнее поведение (мёртвая ссылка остаётся как есть). Меняется ТОЛЬКО href — бренд/
+    промокод в тексте страницы не трогаются (offer_id остаётся зафиксированным фактом истории,
+    F26)."""
+    __tablename__ = "offer_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)                  # всегда 1
+    reserve_offer_url: Mapped[str | None] = mapped_column(Text)
