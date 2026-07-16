@@ -128,20 +128,22 @@ def _stage_provision(cap):
     """Две под-операции под общим капом: (а) purchased без сайта -> create_site_for;
     (б) сайт в provisioning -> provision (идемпотентен, awaiting_ns = норм, повторим).
 
-    ФЕЙРНЕСС (аудит F19, пункт А): под-операцию (б) больше НЕ выбираем через SQL
-    `LIMIT(cap)`. `provisioning.provision()` НЕ двигает `site.status`, пока зона Cloudflare
-    не станет `active` (NS у регистратора правит человек — недели, не минуты) — то есть
-    запрос `Site.status=='provisioning' ORDER BY id LIMIT cap` каждый свип возвращал ОДНИ И
-    ТЕ ЖЕ первые по id сайты, и раз `awaiting_ns` считался `done += 1`, они честно съедали
-    весь кап навсегда: сайты с бОльшим id не получали ни одного шанса, пока первые не
-    задеплоятся сами (ждать которых машине нечего — там ждёт человек). Провижн — маленький
-    курируемый набор (как `approved` в `_stage_queue`, не масштаб discovery в тысячи строк),
-    полная выборка тут дешёвая — ровно тот же приём, что уже применён в `_stage_queue`.
-    Кап теперь бьёт не по «попыткам», а по ЗАВЕРШЁННЫМ работам (`succeeded`, цикл ниже):
-    `awaiting_ns` бюджет не тратит и цикл не останавливает, поэтому в ОДНОМ И ТОМ ЖЕ свипе
-    очередь доходит до сайтов дальше по id, которые реально могут задеплоиться.
+    КАП НА ПОПЫТКИ, НЕ НА УСПЕХИ (аудит F2.1, правит регресс из F19). Пункт (б) раньше бил
+    капом по `succeeded`: `awaiting_ns`/`error` бюджет не тратили и цикл не останавливали —
+    при капе 5 и 100 вечно-`awaiting_ns` сайтах свип делал до 100 внешних `provision()` за
+    прогон (предохранитель на квоту/нагрузку по факту снят). Возврат к `LIMIT(cap)` в SQL
+    без ротации воскресил бы старый баг F19 (одни и те же первые по id сайты навсегда едят
+    кап) — поэтому `LIMIT(cap)` теперь идёт ВМЕСТЕ с `ORDER BY last_attempt_at ASC NULLS
+    FIRST, id`: сайт, чью попытку потратили в этом свипе, штампуется и уходит в хвост
+    очереди — следующий свип берёт ДРУГИЕ сайты. Фейрнесс F19 больше не гарантирован ВНУТРИ
+    одного свипа (кап=1 при вечно-`awaiting_ns` первом сайте не дотянется до второго в ТОТ ЖЕ
+    прогон), но вечного голода нет — ротация распределяет попытки МЕЖДУ свипами, и это и есть
+    цена настоящего предохранителя: попытки — конечный, охраняемый ресурс, а не успехи.
+    Штамп `last_attempt_at` пишется сразу после выборки, в ТОЙ ЖЕ сессии — иначе гонка
+    (панель + автопилотный свип, РАЗНЫЕ ПРОЦЕССЫ) могла бы взять один и тот же сайт дважды
+    до того, как первая попытка успеет отметиться.
     """
-    from sqlalchemy import select
+    from sqlalchemy import select, update
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.models.site import Site
@@ -154,7 +156,12 @@ def _stage_provision(cap):
                                     ~Domain.id.in_(select(Site.domain_id)))
             .order_by(Domain.id).limit(cap)).all()]
         prov_ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.status == "provisioning").order_by(Site.id)).all()]
+            select(Site.id).where(Site.status == "provisioning")
+            .order_by(Site.last_attempt_at.asc().nulls_first(), Site.id).limit(cap)).all()]
+        if prov_ids:
+            db.execute(update(Site).where(Site.id.in_(prov_ids))
+                       .values(last_attempt_at=datetime.now(timezone.utc)))
+            db.commit()
     for did in purchased:
         if succeeded >= cap:
             break
@@ -164,8 +171,6 @@ def _stage_provision(cap):
         except Exception as e:  # noqa: BLE001
             errs.append(f"domain#{did}: {type(e).__name__}: {e}")
     for sid in prov_ids:
-        if succeeded >= cap:
-            break
         try:
             out = provisioning.provision(sid)
             st = out.get("status") if isinstance(out, dict) else None

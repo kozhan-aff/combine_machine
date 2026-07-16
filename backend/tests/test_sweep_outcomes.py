@@ -100,11 +100,17 @@ def test_provision_error_status_is_not_counted_as_succeeded(monkeypatch):
 
 
 def test_provision_fairness_awaiting_site_does_not_starve_a_later_site(monkeypatch):
-    """ПАДАЛО до фикса: запрос был `ORDER BY id LIMIT cap`. При cap=1 в выборку попадал
-    ТОЛЬКО первый по id сайт — если он вечно `awaiting_ns`, второй сайт не получал ни единого
-    шанса НИКОГДА, сколько бы свипов ни прогонялось (тот же класс бага, что и
-    `test_stage_queue_dirt_does_not_starve_the_cap` в test_transitions.py, только для провижна).
-    """
+    """ПАДАЛО до фикса F19: запрос был `ORDER BY id LIMIT cap` БЕЗ ротации — при cap=1 в
+    выборку попадал ТОЛЬКО первый по id сайт, и если он вечно `awaiting_ns`, второй сайт не
+    получал ни единого шанса НИКОГДА, сколько бы свипов ни прогонялось (id-порядок не менялся
+    ни от одного прогона к другому).
+
+    F2.1 чинит ту же болезнь ДРУГИМ лекарством: кап честно ограничивает ПОПЫТКИ (не успехи —
+    см. `test_provision_cap_limits_attempts_not_successes`), поэтому fresh больше не гарантирован
+    В ТОМ ЖЕ свипе при cap=1 (единственная попытка уходит на stuck, который идёт первым по
+    `last_attempt_at IS NULL, id ASC`). Голода при этом нет — ротация штампует `last_attempt_at`
+    у stuck сразу после попытки, и СЛЕДУЮЩИЙ свип видит его позже в очереди, чем всё ещё
+    непотроганный fresh: гарантия «не навсегда» переехала с одного свипа на конечное их число."""
     stuck = _site_provisioning("stuck.ru")      # меньший id — вечно awaiting_ns
     _site_provisioning("fresh.ru")              # больший id — реально может задеплоиться
 
@@ -115,11 +121,38 @@ def test_provision_fairness_awaiting_site_does_not_starve_a_later_site(monkeypat
 
     monkeypatch.setattr("app.services.provisioning.provision", fake_provision)
 
-    done, errs, extra = orch._stage_provision(1)   # кап=1 — старый код даже не увидел бы fresh
+    # свип 1: единственная попытка (cap=1) тратится на stuck — предохранитель, не отказ
+    done1, errs1, extra1 = orch._stage_provision(1)
+    assert done1 == 0
+    assert errs1 == []
+    assert extra1 == {"provision_awaiting": 1}
 
-    assert done == 1                                # fresh реально обработан В ЭТОМ ЖЕ свипе
-    assert errs == []
-    assert extra == {"provision_awaiting": 1}       # stuck честно посчитан как «ждёт», не потерян
+    # свип 2: ротация по last_attempt_at отдаёт единственную попытку fresh — starvation нет
+    done2, errs2, extra2 = orch._stage_provision(1)
+    assert done2 == 1
+    assert errs2 == []
+    assert extra2 == {}
+
+
+def test_provision_cap_limits_attempts_not_successes(monkeypatch):
+    """ПАДАЛО до фикса (F2.1): кап считал `succeeded`, а `awaiting_ns`/`error` его не тратили —
+    при 100 вечно-`awaiting_ns` сайтах и cap=2 свип делал бы до 100 внешних `provision()`.
+    Три сайта, ВСЕ вернут `awaiting_ns` (ни успех, ни отказ) — кап=2 обязан ограничить именно
+    ПОПЫТКИ, а не дождаться двух успехов, которых тут никогда не будет."""
+    for i in range(3):
+        _site_provisioning(f"stuck{i}.ru")
+
+    calls = []
+
+    def fake_provision(site_id):
+        calls.append(site_id)
+        return {"status": "awaiting_ns", "domain": f"stuck{site_id}.ru", "name_servers": []}
+
+    monkeypatch.setattr("app.services.provisioning.provision", fake_provision)
+
+    orch._stage_provision(2)
+
+    assert len(calls) == 2, f"кап=2 обязан ограничить попытки; было {len(calls)}"
 
 
 def test_sweep_status_is_completed_with_errors_when_an_entity_fails(monkeypatch):
