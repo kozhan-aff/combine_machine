@@ -67,7 +67,7 @@
 <table>
   <thead><tr>
     <th>Зона</th><th>Аккаунт</th><th>Site</th><th>CF-статус</th><th>NS</th><th>DNS</th>
-    <th>SSL</th><th>origin TLS</th><th>DNSSEC</th><th>cert</th><th>drift</th><th class="num">наблюдалось</th>
+    <th>SSL</th><th>origin TLS</th><th>DNSSEC</th><th>cert</th><th>детали</th><th>drift</th><th class="num">наблюдалось</th>
   </tr></thead>
   <tbody>
   {% for r in rows %}{% set z = r.z %}
@@ -88,11 +88,14 @@
           {% else %}<span class="led led-warn"></span>не проверено{% endif %}</td>
       <td>{{ z.dnssec_status or '—' }}</td>
       <td class="num">{{ r.certs or '—' }}</td>
+      <td>{% if z.dns_error_safe or z.cert_error_safe %}<span class="led led-warn"
+              title="детали зоны читались с ошибкой (данные могут быть протухшими): {{ z.dns_error_safe or z.cert_error_safe }}"></span>ошибка деталей
+          {% else %}<span class="led led-ok"></span>ок{% endif %}</td>
       <td><span class="hint" title="общий drift по настройкам зоны — заполнит P2, в P0 не считается">—</span></td>
       <td class="num">{{ z.zones_seen_at.strftime('%m-%d %H:%M') if z.zones_seen_at else '—' }}</td>
     </tr>
   {% else %}
-    <tr><td colspan="12" class="empty">зон нет — запусти ⟳ Синхронизировать выше</td></tr>
+    <tr><td colspan="13" class="empty">зон нет — запусти ⟳ Синхронизировать выше</td></tr>
   {% endfor %}
   </tbody>
 </table>

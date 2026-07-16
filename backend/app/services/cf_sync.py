@@ -199,8 +199,10 @@ def _sync_zone_details(db, cf, m: CloudflareZoneMirror) -> None:
         for r in db.query(CloudflareDnsRecordMirror).filter_by(cloudflare_zone_id=zid).all():
             if r.cf_record_id not in seen and r.missing_since is None:
                 r.missing_since = _now()
-    except Exception:
-        pass  # ошибка DNS одной зоны — соседние зоны/детали не портим
+    except Exception as exc:
+        m.dns_error_safe = _safe(exc)   # не глотать: соседние GET не портим, но правда видна (F1.3)
+    else:
+        m.dns_error_safe = None
     # per-setting наблюдения (batch endpoint deprecated — только по одному)
     for sid in _OBSERVED_SETTINGS:
         obs = (db.query(CloudflareZoneSettingObservation)
@@ -246,8 +248,10 @@ def _sync_zone_details(db, cf, m: CloudflareZoneMirror) -> None:
         for pm in db.query(CloudflareCertificatePackMirror).filter_by(cloudflare_zone_id=zid).all():
             if pm.cf_pack_id not in seen and pm.missing_since is None:
                 pm.missing_since = _now()
-    except Exception:
-        pass
+    except Exception as exc:
+        m.cert_error_safe = _safe(exc)   # аудит F1.3
+    else:
+        m.cert_error_safe = None
     # dnssec
     try:
         d = cf.get_dnssec(zid)

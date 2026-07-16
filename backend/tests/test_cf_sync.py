@@ -179,3 +179,24 @@ def test_legacy_import_token_kind_is_user_even_with_account_id(sqlite_db, monkey
         conn = db.get(CloudflareConnection, cid)
         assert conn.token_kind == "user"              # НЕ "account"
         assert conn.owner_cf_account_id == "acc_hex_dead"   # но account_id сохранён для листинга зон
+
+
+def test_dns_error_recorded_not_swallowed(sqlite_db):
+    from app.services import cf_sync
+    from app.models.cloudflare import CloudflareZoneMirror
+    from app.db import SessionLocal
+
+    class FakeCF:
+        def list_dns_paginated(self, zid): raise RuntimeError("dns boom")
+        def get_zone_setting(self, zid, sid): return {"value": "on", "editable": True}
+        def get_universal_ssl(self, zid): return {"enabled": True}
+        def list_universal_certificate_packs(self, zid): raise RuntimeError("cert boom")
+        def get_dnssec(self, zid): return {"status": "active"}
+
+    with SessionLocal() as db:
+        m = CloudflareZoneMirror(cf_zone_id="z9", cloudflare_account_id="a1", name="ex.ru")
+        db.add(m); db.commit()
+        cf_sync._sync_zone_details(db, FakeCF(), m)
+        db.commit()
+        assert m.dns_error_safe and "dns boom" in m.dns_error_safe
+        assert m.cert_error_safe and "cert boom" in m.cert_error_safe
