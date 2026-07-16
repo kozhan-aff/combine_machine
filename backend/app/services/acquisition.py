@@ -280,6 +280,19 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         if domain is None:
             raise ValueError(f"order {order_id}: домен не найден")
         tier = BackorderClient().pick_tariff(domain, float(bid_rub))
+    elif provider == "optimizator":
+        # Цена ФИКСИРОВАНА (не выбор человека, в отличие от backorder-тира), но всё
+        # равно показываем и фиксируем ДО отправки — денежный гейт требует видимой
+        # суммы, а не "система решит на исполнении". price_id/period_id: None — это
+        # backorder-специфичные поля (тир сетки тарифов), у optimizator их нет; ниже
+        # существующий код обращается к tier["price_id"]/tier["period_id"]
+        # БЕЗУСЛОВНО, когда tier is not None — без этих двух ключей он упал бы KeyError.
+        from app.integrations.optimizator import OptimizatorClient
+        if domain is None:
+            raise ValueError(f"order {order_id}: домен не найден")
+        zone = domain.rsplit(".", 1)[-1]
+        price = OptimizatorClient().prices(zone)
+        tier = {"price": price["price_registration"], "price_id": None, "period_id": None}
 
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
@@ -439,8 +452,39 @@ def execute_confirmed_order(order_id: int) -> dict:
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
             else:
-                from app.integrations.optimizator import OptimizatorClient
-                res = OptimizatorClient().register([d.domain])   # optimizator берёт список
+                from app.integrations.optimizator import OptimizatorClient, OptimizatorError, OptimizatorAmbiguous
+                c = OptimizatorClient()
+                # ИДЕМПОТЕНТНОСТЬ. У API нет «список заказов»/«заказ по домену» (в отличие
+                # от backorder.find_order) — единственная замена: check_domain успешен
+                # ТОЛЬКО для доменов под нашей анкетой. Успех = «уже наш», второй
+                # reg_domains не шлём. check_domain, как и все методы клиента, бросает на
+                # отказ/сбой — нет отдельного None-сентинела (нет живых данных о формате
+                # "домен не наш"). Эта проверка денег не тратит, поэтому безопасно просто
+                # продолжить к register() на любом исключении: если домен и правда уже
+                # наш, ответит reg_domains (его OptimizatorError упадёт в except ниже).
+                try:
+                    existing = c.check_domain(d.domain)
+                except (OptimizatorError, OptimizatorAmbiguous):
+                    existing = None
+                saved.pop("maybe_sent", None)
+                if existing is not None:
+                    o.status = "ordered"
+                    o.result = {**saved, "note": "домен уже под нашей анкетой (check_domain) — "
+                                                 "второй reg_domains не шлём",
+                                "data_end": existing.get("data_end")}
+                    o.ordered_at = o.ordered_at or datetime.now(timezone.utc)
+                    db.commit()
+                    return {"order_id": order_id, "status": o.status, "result": o.result}
+                try:
+                    res = c.register([d.domain])
+                except OptimizatorAmbiguous as e:
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"исход неизвестен: {e}", "maybe_sent": True}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                # OptimizatorError (чистый отказ) падает в общий except Exception ниже —
+                # деньги не ушли, "↻ повторить" безопасен, сообщение уже читаемое
+                # (OptimizatorError.__str__ несёт error_id).
             o.status = "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
             o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
