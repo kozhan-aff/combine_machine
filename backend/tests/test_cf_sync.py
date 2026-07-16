@@ -108,16 +108,35 @@ def test_connection_account_capabilities_recorded(monkeypatch):
         assert (ca.capabilities_json or {}).get("zones_read") == "allowed"
 
 
-def test_universal_ssl_status_recorded_from_setting(monkeypatch):
-    # SSL-колонка UI читает m.universal_ssl_status — sync обязан его писать из наблюдения setting
-    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "tok")
-    z = {"id": "zid1", "name": "a.ru", "status": "active", "account": {"id": "accHEX"}}
-    _CURRENT[0] = _FakeCF([z]); monkeypatch.setattr(cf_sync, "CloudflareClient", _FakeCF)
+def test_universal_ssl_uses_dedicated_endpoint(sqlite_db):
+    # universal_ssl больше НЕ обычный zone-setting: свой эндпоинт возвращает {enabled: bool}.
+    from app.services import cf_sync
+    from app.models.cloudflare import CloudflareZoneMirror
+    from app.db import SessionLocal
+
+    KNOWN = set(cf_sync._OBSERVED_SETTINGS)   # universal_ssl СЮДА больше не входит
+
+    class FakeCF:
+        def get_zone_setting(self, zid, sid):
+            assert sid in KNOWN, f"universal_ssl не должен идти через settings-эндпоинт: {sid}"
+            return {"value": "on", "editable": True}
+        def get_universal_ssl(self, zid):
+            return {"enabled": True}
+        def list_dns_paginated(self, zid): return []
+        def list_universal_certificate_packs(self, zid): return []
+        def get_dnssec(self, zid): return {"status": "active"}
+
     with SessionLocal() as db:
-        c = _seed_conn(db)
-        cf_sync.sync_connection(db, c)
-        m = db.query(CloudflareZoneMirror).filter_by(cf_zone_id="zid1").one()
+        m = CloudflareZoneMirror(cf_zone_id="z1", cloudflare_account_id="a1", name="ex.ru")
+        db.add(m); db.commit()
+        cf_sync._sync_zone_details(db, FakeCF(), m)
+        db.commit()
         assert m.universal_ssl_status == "on"
+
+
+def test_universal_ssl_not_in_observed_settings():
+    from app.services import cf_sync
+    assert "universal_ssl" not in cf_sync._OBSERVED_SETTINGS
 
 
 def test_backfill_links_legacy_site_to_mirror(monkeypatch):

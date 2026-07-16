@@ -15,7 +15,8 @@ from app.models.cloudflare import (
 )
 
 _OBSERVED_SETTINGS = ("ssl", "always_use_https", "min_tls_version", "tls_1_3", "http3",
-                      "0rtt", "development_mode", "universal_ssl")  # per-setting GET, read-only
+                      "0rtt", "development_mode")  # per-setting GET, read-only
+# universal_ssl НЕ здесь: у него отдельный эндпоинт /ssl/universal/settings (аудит F1.2)
 
 
 def _now() -> datetime:
@@ -214,12 +215,17 @@ def _sync_zone_details(db, cf, m: CloudflareZoneMirror) -> None:
             obs.status = "observed"
             obs.observed_at = _now()
             obs.error_safe = None
-            if sid == "universal_ssl":  # зеркалим в zone mirror для SSL-колонки UI
-                m.universal_ssl_status = _stringify(s.get("value"))
         except Exception as exc:
             obs.status = "error"
             obs.error_safe = _safe(exc)
             obs.observed_at = _now()
+    # Universal SSL — отдельный эндпоинт, не общий settings-цикл (аудит F1.2)
+    try:
+        u = cf.get_universal_ssl(zid)
+        m.universal_ssl_status = "on" if u.get("enabled") else "off"
+    except Exception as exc:
+        # НЕ затираем прежний статус ошибкой — фиксируем на уровне зоны (см. F1.3)
+        m.last_error_safe = _safe(exc)
     # cert-паки
     try:
         packs = cf.list_universal_certificate_packs(zid)

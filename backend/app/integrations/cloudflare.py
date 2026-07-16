@@ -263,3 +263,10 @@ class CloudflareClient(BaseClient):
         resp = self.request("GET", f"{self.base_url}/zones/{zone_id}/dnssec",
                             headers=self._headers())
         return self._result(resp)
+
+    def get_universal_ssl(self, zone_id: str) -> dict:
+        """GET /zones/{zone_id}/ssl/universal/settings — read-only статус Universal SSL.
+        У него ОТДЕЛЬНЫЙ эндпоинт (не /settings/universal_ssl), ответ {enabled: bool}."""
+        resp = self.request("GET", f"{self.base_url}/zones/{zone_id}/ssl/universal/settings",
+                            headers=self._headers())
+        return self._result(resp)
