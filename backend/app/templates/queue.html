@@ -76,6 +76,7 @@
                title="домен отклонён воронкой по объективному признаку (РКН, блэклист, грязная история, флаг источника). Портфель держится на чистой истории — этот домен не покупаем ни по какой ставке.">
             ⛔ выкуп запрещён — грязь ({{ o.dirty|reject_ru }})</div>
         {% elif o.status == 'pending_confirm' and not o.confirmed %}
+          {% if o.provider == 'backorder' %}
           {% set grid = grids.get(o.zone) %}
           {% if grid %}
           {# последний чекпойнт перед деньгами — подписываем его ФАКТИЧЕСКОЙ суммой из селекта,
@@ -90,6 +91,15 @@
             <span class="hint" style="color:var(--bad)">зона домена вне сетки backorder (только .RU/.РФ)</span>
           {% else %}
             <span class="hint">сетка тарифов {{ o.zone }} не загрузилась — подтвердить нельзя</span>
+          {% endif %}
+          {% else %}
+          {# optimizator: цена ФИКСИРОВАНА (не выбор человека, в отличие от ставки backorder) —
+             тарифного селектора для этого канала не существует, показывать backorder-сетку
+             здесь было бы бессмысленным выбором. Точную сумму узнаёт и замораживает confirm_order
+             (у провайдера), панель на этом шаге её ещё не знает. #}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
+                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }} через optimizator? Цена фиксированная — сумму узнаем у провайдера прямо сейчас и спишем с баланса. Это денежный гейт.')">
+            <button class="btn-sm btn-buy" title="optimizator: цена фиксированная — подтверждение поднимает денежный гейт, точную сумму зафиксирует confirm_order">✓ подтвердить (фикс. цена)</button></form>
           {% endif %}
         {% elif o.status == 'pending_confirm' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">

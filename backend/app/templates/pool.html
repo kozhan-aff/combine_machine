@@ -127,7 +127,11 @@
             <form class="inline" method="post" action="/domains/{{ d.id }}/score">
               <button class="btn-sm" title="прогнать по воронке заново: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
           {% else %}
-            <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+            <form class="inline" method="post" action="/domains/{{ d.id }}/queue" style="display:flex; gap:8px; align-items:center">
+              <select name="provider" title="куда отправлять заказ: backorder — ставка на перехват (ценные дропы), optimizator — фиксированная цена (свободные чистые)">
+                <option value="backorder" {{ 'selected' if d.lane != 'free' }}>backorder</option>
+                <option value="optimizator" {{ 'selected' if d.lane == 'free' }}>optimizator</option>
+              </select>
               <button class="btn-sm btn-acc" title="поставить в очередь выкупа (M2): заявка → подтверждение → отправка провайдеру">＋ в очередь выкупа</button></form>
             <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
               <input type="hidden" name="status" value="purchased">

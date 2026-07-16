@@ -355,6 +355,22 @@ def test_queue_badge_carries_the_provider_truth(client):
     assert "у провайдера: Не оплачен" in html, "бейдж «ошибка» молчит о том, что заказ жив"
 
 
+def test_confirm_form_hides_tariff_select_for_optimizator(client):
+    """Заказ provider=optimizator в pending_confirm НЕ должен показывать backorder-
+    тарифную сетку (её не существует для этого канала) — иначе бессмысленный выбор."""
+    did = _approved("free-clean.ru")
+    with db.SessionLocal() as s:
+        s.get(Domain, did).lane = "free"
+        s.commit()
+    oid = acquisition.create_order(did, "optimizator")   # реальный сервис, не ORM-инъекция
+
+    html = client.get("/queue").text
+    assert "free-clean.ru" in html
+    assert f'/queue/{oid}/confirm' in html
+    assert 'name="bid_rub"' not in html                  # backorder-тариф не показан
+    assert "фикс. цена" in html                          # optimizator: подтверждение без ставки
+
+
 def test_index_predicate_matches_the_migration(sqlite_db):
     """Предикат индекса живёт в ДВУХ местах: `_OPEN_ORDER_SQL` (модель — её `create_all` видят
     тесты) и текст миграции 0010 (её исполняет живой PostgreSQL). Разъедутся — тест зелен, прод

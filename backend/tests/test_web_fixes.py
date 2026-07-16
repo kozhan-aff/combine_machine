@@ -244,6 +244,51 @@ def test_domains_localized_labels(client, sqlite_db):
 
 
 # --- Task 5 (спек 2 лицо): unresolved single-score флеш — не "(None)" ------------
+
+# --- Task 4 (optimizator M2): очередь-добавление даёт выбор канала выкупа --------
+def test_queue_add_form_has_provider_select(client):
+    """Кнопка «＋ в очередь выкупа» должна давать выбор канала — раньше форма
+    всегда слала provider=backorder неявно, второй канал был недостижим из панели."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="pick-provider.ru", source="backorder", status="approved"))
+        s.commit()
+    html = client.get("/domains").text
+    assert "pick-provider.ru" in html
+    assert '<select name="provider"' in html
+    assert 'option value="backorder"' in html and 'option value="optimizator"' in html
+
+
+def test_queue_add_preselects_optimizator_for_free_lane(client):
+    """lane='free' -> optimizator предвыбран (CLAUDE.md: «свободные чистые → optimizator»)."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="free-lane.ru", source="cctld", status="approved", lane="free"))
+        s.commit()
+    html = client.get("/domains").text
+    assert "free-lane.ru" in html
+    assert '<option value="optimizator" selected>' in html
+
+
+def test_queue_add_preselects_backorder_for_bid_lane(client):
+    """lane='bid' (или неизвестный) -> backorder остаётся предвыбором по умолчанию."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="bid-lane.ru", source="backorder", status="approved", lane="bid"))
+        s.commit()
+    html = client.get("/domains").text
+    assert '<option value="backorder" selected>' in html
+    assert '<option value="optimizator" selected>' not in html
+
+
+def test_pool_queue_add_form_has_provider_select(client):
+    """Тот же выбор канала — и на /domains/pool (полный реестр), форма там своя копия."""
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="pool-provider.ru", source="cctld", status="approved", lane="free"))
+        s.commit()
+    html = client.get("/domains/pool?status=approved").text
+    assert "pool-provider.ru" in html
+    assert '<select name="provider"' in html
+    assert '<option value="optimizator" selected>' in html
+
+
 def test_single_score_unresolved_flash(client, monkeypatch):
     import app.db as db
     from app.models.domain import Domain
