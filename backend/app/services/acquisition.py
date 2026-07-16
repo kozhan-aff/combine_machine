@@ -542,13 +542,13 @@ def poll_orders() -> dict:
     повторить или снять. Свежий claim НЕ ТРОГАЕМ: за ним стоит живой execute, и отобрать у него
     строку значит открыть ей путь на повторную отправку — второе списание.
 
-    ВЫХОД ИЗ 'ordering' — ТОЛЬКО ДЛЯ backorder (ревью Задачи 8, минор 2). Мы спрашиваем правду у
-    backorder, значит и разбираем только его строки: заказ optimizator'а, застрявший в 'ordering',
-    так и останется могилой — cancel его не берёт, сюда он не попадает по фильтру провайдера.
-    Сегодня окна для этого нет (execute для optimizator падает NotImplementedError ДО сети, то есть
-    до claim'а исход уже известен), но как только у канала появится транспорт — ему понадобится
-    свой разбор застрявшей отправки, иначе инвариант «у 'ordering' ВСЕГДА есть выход» окажется
-    правдой только про один провайдер.
+    ВЫХОД ИЗ 'ordering' ЕСТЬ И У optimizator (Task 3, второй канал — было ревью Задачи 8, минор 2,
+    отложено до появления транспорта). До Task 1/2 execute для optimizator падал NotImplementedError
+    ДО сети — до claim'а исход был уже известен, окна для застревания не было. Реальный транспорт
+    открыл то же окно, что у backorder: процесс могли убить между claim'ом и ответом провайдера.
+    Ниже — свой цикл по `provider == "optimizator"`: источник правды другой (нет client_orders()/
+    find_order — списка заказов у optimizator нет), только check_domain(domain) по одному домену.
+    Структура та же: снимок SELECT'ом, пропуск свежего claim'а, запись ТОЛЬКО через `_settle`.
     """
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
@@ -703,6 +703,71 @@ def poll_orders() -> dict:
             else:
                 matched += 1
                 moved[done] = moved.get(done, 0) + 1
+
+    # --- optimizator: застрявший 'ordering' (тот же F11-класс, второй канал, см. докстринг выше) --
+    # ДО транспорта (Task 1/2) execute для optimizator падал ДО сети (NotImplementedError) — окна
+    # для застревания не было. Теперь оно есть: тот же риск, что у backorder, только источник
+    # правды другой — у optimizator нет client_orders()/find_order (списка заказов), только
+    # check_domain(domain) по одному домену за раз (design doc §3). Цикл СТРУКТУРНО зеркалит
+    # backorder-цикл выше: свой снимок SELECT'ом до цикла, тот же пропуск свежего claim'а
+    # (_claim_expired), запись ТОЛЬКО через _settle (тот же ABA-гард — F12), тот же ремень
+    # IntegrityError поверх. `sending`/`matched` — те же переменные, что и у backorder-цикла: одна
+    # правда для отчёта, независимо от канала.
+    from app.integrations.optimizator import OptimizatorClient, OptimizatorError, OptimizatorAmbiguous
+
+    with SessionLocal() as db:
+        opt_rows = db.execute(
+            select(AcquisitionOrder).where(
+                AcquisitionOrder.provider == "optimizator",
+                AcquisitionOrder.status == "ordering")
+        ).scalars().all()
+        oc = OptimizatorClient()
+        for o in opt_rows:
+            # Статус уже 'ordering' у ВСЕХ строк снимка (SQL-фильтр выше) — проверять его здесь
+            # незачем, в отличие от backorder-цикла (там снимок смешивает ordered/failed/ordering).
+            if not _claim_expired(o):
+                sending += 1                          # живой execute в полёте — не трогаем
+                continue
+            d = db.get(Domain, o.domain_id)
+            # check_domain даёт ТОЛЬКО «домен наш» или «нет» (включая транспортные сбои —
+            # неотличимы от «нет данных», нет отдельного None-сентинела). Консервативно: не
+            # смогли подтвердить -> 'failed', а не вечный 'ordering' — человек увидит строку в
+            # /queue и решит сам (в т.ч. вручную сверив на сайте провайдера), а не потеряет её
+            # из виду (design doc §3).
+            try:
+                existing = oc.check_domain(d.domain) if d is not None else None
+            except (OptimizatorError, OptimizatorAmbiguous):
+                existing = None
+            if existing is not None:
+                # УСПЕХ: регистрация прошла до обрыва. 'caught'-пути здесь нет (в отличие от
+                # backorder) — у optimizator нет фазы «поймали, но не наши»: домен либо уже под
+                # нашей анкетой, либо нет. d.status НЕ трогаем: он уже 'purchasing', человек сам
+                # переведёт в 'purchased' через mark_caught — симметрично backorder.
+                values: dict = {
+                    "status": "ordered", "claimed_at": None,
+                    "result": {**(o.result or {}), "data_end": existing.get("data_end"),
+                               "note": "восстановлено после обрыва: check_domain подтвердил "
+                                       "регистрацию"}}
+            else:
+                values = {
+                    "status": "failed", "claimed_at": None,
+                    "result": {**{k: v for k, v in (o.result or {}).items() if k != "maybe_sent"},
+                               "error": "отправка оборвалась (процесс перезапустили?), а "
+                                        "check_domain регистрацию не подтвердил — деньги, "
+                                        "возможно, не ушли. Можно повторить или снять заявку."}}
+            try:
+                if not _settle(db, o, **values):
+                    # СТРОКУ УВЕЛИ ИЗ-ПОД СНИМКА — тот же ABA-гард, что и у backorder-цикла: не
+                    # пишем ничего, следующая сверка возьмёт свежий ответ.
+                    db.rollback()
+                    continue
+                db.commit()
+            except IntegrityError:                    # ремень поверх гарда (симметрично backorder)
+                db.rollback()
+                matched += 1
+                conflicts += 1
+                continue
+            matched += 1
     # `sending`/`lost` — про застрявшие отправки (F11), и молчать о них нельзя: оператор жмёт
     # «сверить» ИМЕННО из-за такой строки. `sending` — «не тронули, там живой execute»,
     # `lost` — «разобрали: провайдер про заказ не знает». Без них поллинг отвечал бы «сверено 0»

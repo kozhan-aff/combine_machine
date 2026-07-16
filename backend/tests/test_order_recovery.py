@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app.db as db
-from app.integrations import backorder
+from app.integrations import backorder, optimizator
 from app.models.domain import AcquisitionOrder, Domain
 from app.services import acquisition
 
@@ -82,6 +82,40 @@ def _send_and_die(monkeypatch, name="crash.ru") -> tuple[int, int]:
     # падал бы на старом коде первым (колонки не было) и прятал бы за собой ровно то поведение,
     # которое тесты обязаны доказать: до фикса застрявшую отправку не разбирал НИКТО. Часы claim'а
     # сторожит отдельный тест (`test_poll_leaves_a_live_send_alone`).
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).status == "ordering", (
+            "claim коммитится отдельно от отправки — он обязан пережить смерть процесса")
+    return did, oid
+
+
+def _send_and_die_optimizator(monkeypatch, name="crash-opt.ru") -> tuple[int, int]:
+    """`_send_and_die`, только для второго канала (Task 3 — закрывает пробел, который явно
+    предсказан в докстринге `poll_orders`: «как только у канала появится транспорт — ему
+    понадобится свой разбор застрявшей отправки»). Тот же живой денежный путь настоящим кодом
+    (заявка -> подтверждение человеком -> отправка), тот же момент смерти процесса — между
+    атомарным claim'ом (-> 'ordering', уже закоммичен) и ответом провайдера. `register()` бросает
+    `_ProcessKilled` — как `order()` у backorder-хелпера.
+
+    `check_domain` во время самой отправки (внутри `execute_confirmed_order`, для идемпотентности)
+    мокнута отказом: домен ещё не наш, поэтому исполнение идёт до `register()`, где и обрывается.
+    Это НЕ то же самое, что итоговый ответ `check_domain` для recovery-цикла поллинга — тесты
+    перемокивают его заново под свой сценарий (домен нашёлся / не нашёлся)."""
+    monkeypatch.setattr(optimizator.OptimizatorClient, "prices",
+                        lambda self, zone="ru": {"price_registration": 179})
+    monkeypatch.setattr(optimizator.OptimizatorClient, "check_domain",
+                        lambda self, domain: (_ for _ in ()).throw(
+                            optimizator.OptimizatorError("not found", 404)))
+
+    def _die(self, domains):
+        raise _ProcessKilled("контейнер перезапустили в момент отправки")
+    monkeypatch.setattr(optimizator.OptimizatorClient, "register", _die)
+
+    did = _approved(name)
+    oid = acquisition.create_order(did, "optimizator")
+    acquisition.confirm_order(oid)                    # optimizator: ставку человек не выбирает
+    with pytest.raises(_ProcessKilled):
+        acquisition.execute_confirmed_order(oid)
+
     with db.SessionLocal() as s:
         assert s.get(AcquisitionOrder, oid).status == "ordering", (
             "claim коммитится отдельно от отправки — он обязан пережить смерть процесса")
@@ -378,6 +412,74 @@ def test_poll_does_not_drop_the_maybe_sent_a_racing_retry_just_set(sqlite_db, mo
     with db.SessionLocal() as s:
         assert s.get(Domain, did).status == "purchasing", (
             "домен вернулся в approved с возможно оплаченным заказом — подтвердим и купим второй раз")
+
+
+# --- F11 для optimizator: тот же класс бага, второй канал (Task 3) ------------------------
+
+
+def test_optimizator_stuck_ordering_recovers_when_registered(sqlite_db, monkeypatch):
+    """Процесс убили между claim'ом и ответом ПОСЛЕ реальной регистрации — check_domain на
+    сверке подтверждает "наш", строка выходит в 'ordered', а не висит вечно (F11 для optimizator)."""
+    did, oid = _send_and_die_optimizator(monkeypatch, "recovered-opt.ru")
+    _age_the_claim(oid)
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [])
+    # Правда переигрывается: во время самой отправки check_domain отвечал "не наш" (см.
+    # _send_and_die_optimizator), а к моменту сверки регистрация уже прошла.
+    monkeypatch.setattr(optimizator.OptimizatorClient, "check_domain",
+                        lambda self, domain: {"data_end": "02.12.2027", "domain": domain.upper()})
+
+    r = acquisition.poll_orders()
+
+    o = _orders(did)[0]
+    assert o.status == "ordered", "застрявшую отправку не разобрал никто — заказ потерян"
+    assert o.claimed_at is None, "исход есть — claim обязан закрыться"
+    assert o.result.get("data_end") == "02.12.2027", "правда провайдера должна доехать до записи"
+    assert r["checked"] == 1
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "purchasing", (
+            "domain.status не трогаем — человек сам подтвердит поимку через mark_caught")
+
+
+def test_optimizator_stuck_ordering_recovers_when_not_registered(sqlite_db, monkeypatch):
+    """Тот же обрыв, но регистрация не прошла — check_domain падает, строка уходит в 'failed'
+    (деньги не считаем потраченными: не подтверждено, что списание было на отправке)."""
+    did, oid = _send_and_die_optimizator(monkeypatch, "lost-opt.ru")
+    _age_the_claim(oid)
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [])
+    # check_domain уже мокнут отказом (404) в _send_and_die_optimizator — сверка увидит то же самое.
+
+    r = acquisition.poll_orders()
+
+    o = _orders(did)[0]
+    assert o.status == "failed", "строка так и осталась могилой — домен заперт навсегда"
+    assert o.claimed_at is None, "claim обязан закрыться — иначе строка снова невидима поллингу"
+    assert "maybe_sent" not in (o.result or {}), (
+        "check_domain ОТВЕТИЛ (пусть и отказом) — неизвестности нет, деньги не потрачены")
+    assert (o.result or {}).get("error"), "человек должен прочитать в очереди, что произошло"
+    assert r["checked"] == 1
+
+    # ВЫХОД ЕСТЬ: заявка снимается, домен возвращается в очередь кандидатов.
+    assert acquisition.cancel_order(oid)["status"] == "cancelled"
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "approved"
+    acquisition.create_order(did, "optimizator")      # домен снова покупаем — не узник
+
+
+def test_optimizator_fresh_ordering_claim_is_not_touched(sqlite_db, monkeypatch):
+    """ГАРД ПОРОГА (а не регрессия бага): свежий claim — живой execute в полёте у optimizator.
+    Recovery-цикл его не трогает, как и у backorder (тот же STUCK_CLAIM_MIN, тот же смысл)."""
+    did, oid = _send_and_die_optimizator(monkeypatch, "live-opt.ru")   # claim только что, не старим
+    monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [])
+
+    r = acquisition.poll_orders()
+
+    o = _orders(did)[0]
+    assert o.status == "ordering", "у живого execute вырвали строку — прямой путь заплатить дважды"
+    assert r["sending"] == 1, "строку пропустили молча — оператор решит, что сверка сломана"
+    assert r["checked"] == 0
+    with db.SessionLocal() as s:
+        assert s.get(AcquisitionOrder, oid).claimed_at is not None, (
+            "claim без часов неотличим от трупа — recovery разберёт живую отправку")
 
 
 # --- F12: отмена, приехавшая после отправки ------------------------------------------------
