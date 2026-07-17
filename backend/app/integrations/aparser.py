@@ -26,6 +26,41 @@ _RE_AHREFS = re.compile(
     re.I | re.M,
 )
 
+# SE::Google::SafeBrowsing resultString: '<domain>: 0|1\n' (1 = Google-флаг вредонос/фишинг),
+# живьём проверено 2026-07-16 на обоих тестовых доменах (оба вернули 0).
+_RE_SAFEBROWSING = re.compile(r":\s*([01])\s*$")
+
+# Rank::Archive resultString (preset no_proxy — default сломан через прокси, см. дизайн-документ):
+# '<domain>: <first|none> - <last|none> (<times|none> times)\n', даты dd.mm.yyyy.
+# Живьём проверено 2026-07-16: google.com (19936104), wikipedia.org (393880),
+# yandex.ru (506844), zudpopo.ru (19, 2023-2026).
+_RE_ARCHIVE = re.compile(
+    r":\s*(?P<first>none|\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<last>none|\d{2}\.\d{2}\.\d{4})"
+    r"\s*\((?P<times>none|\d+)\s*times\)",
+    re.I,
+)
+
+
+def _parse_safebrowsing(text: str) -> bool | None:
+    """True = зафлагован Google, False = чист, None = формат не распознан (вызывающий
+    код трактует как «не проверено», НЕ как «чисто» — см. scoring._funnel)."""
+    m = _RE_SAFEBROWSING.search(text or "")
+    return None if not m else m.group(1) == "1"
+
+
+def _parse_archive(text: str) -> dict:
+    """times=0 -> вызывающий код вправе пропустить дорогой Wayback-фетч; times=None ->
+    формат не распознан/сбой, фолбэк на реальный Wayback как раньше."""
+    m = _RE_ARCHIVE.search(text or "")
+    if not m:
+        return {"times": None, "first": None, "last": None}
+    times = m.group("times")
+    return {
+        "times": None if times.lower() == "none" else int(times),
+        "first": None if m.group("first").lower() == "none" else m.group("first"),
+        "last": None if m.group("last").lower() == "none" else m.group("last"),
+    }
+
 
 def _parse_ahrefs(text: str) -> dict:
     """resultString '<domain>: <rating|none>, <bl>, <domains>' -> dr/backlinks/
@@ -204,6 +239,26 @@ class AParserClient(BaseClient):
             ],
         })
         return _parse_ahrefs(self._result_string(res))
+
+    def safebrowsing_check(self, domain: str) -> bool | None:
+        """SE::Google::SafeBrowsing — не SERP-скрейпинг, прямой lookup, recaptcha не
+        задевает (в отличие от TrustCheck/Compromised, живьём проверено 2026-07-16)."""
+        res = self._call("oneRequest", {
+            "query": domain, "parser": "SE::Google::SafeBrowsing",
+            "configPreset": "default", "preset": "default",
+        })
+        return _parse_safebrowsing(self._result_string(res))
+
+    def archive_probe(self, domain: str) -> dict:
+        """Rank::Archive, ОБЯЗАТЕЛЬНО preset=no_proxy — default бьётся в archive.org
+        через прокси-пул и получает 502 на каждую попытку (живьём подтверждено
+        2026-07-16: getParserPreset показал useproxy=1 у default, логи oneRequest —
+        502 Bad Gateway на всех прокси). no_proxy живьём подтверждён рабочим."""
+        res = self._call("oneRequest", {
+            "query": domain, "parser": "Rank::Archive",
+            "configPreset": "default", "preset": "no_proxy",
+        })
+        return _parse_archive(self._result_string(res))
 
 
 if __name__ == "__main__":  # pure whois-parse self-check (no network)

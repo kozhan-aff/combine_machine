@@ -66,6 +66,7 @@ _BLIND_RU = {
     "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
+    "safebrowsing": "Google Safe Browsing НЕ проверен: сервис не ответил",
     "searxng": "эхо в индексе НЕ проверено",
 }
 
@@ -217,10 +218,12 @@ def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float)
     # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
     if status == "approved" and not sig.get("wayback_checked"):
         status = "scored"
-    # risk-guard: если проверка RKN или blacklist упала (ключ сигнала отсутствует, ошибка
-    # осела в errors), нельзя подтверждать чистоту автоматом — уводим в ручной `scored`.
+    # risk-guard: если проверка RKN, blacklist или SafeBrowsing упала (ключ сигнала
+    # отсутствует, ошибка осела в errors), нельзя подтверждать чистоту автоматом —
+    # уводим в ручной `scored`.
     if status == "approved" and any(
-            e.startswith(("rkn:", "blacklist:")) for e in (sig.get("errors") or [])):
+            e.startswith(("rkn:", "blacklist:", "safebrowsing:"))
+            for e in (sig.get("errors") or [])):
         status = "scored"
     # whois-guard (аудит F6, доведён ревью Задачи 4): whois УПАЛ — гардим по САМОМУ ОТКАЗУ,
     # тем же механизмом, что кормит бейдж «оценён вслепую», а не по `age_years is None`.
@@ -481,6 +484,15 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
         sig["errors"].append(f"blacklist:{type(e).__name__}")
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
+
+    try:
+        sig["safebrowsing_flagged"] = c["aparser"].safebrowsing_check(d.domain)
+        if sig["safebrowsing_flagged"] is True:
+            return "safebrowsing"
+    except Exception as e:  # noqa: BLE001
+        sig["errors"].append(f"safebrowsing:{type(e).__name__}")
+    if sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in sig:
+        sig["errors"].append("safebrowsing:unavailable")  # формат не распознан -> risk-guard
 
     jobs.report(run, stage="echo")
     # indexed_echo

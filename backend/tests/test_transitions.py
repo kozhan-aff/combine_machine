@@ -51,6 +51,7 @@ def test_dirty_reason_sees_verdict_and_raw_signals():
     assert dirty_reason(d(reject_reason="rkn")) == "rkn"
     assert dirty_reason(d(reject_reason="history_dirty")) == "history_dirty"
     assert dirty_reason(d(reject_reason="feed_flag")) == "feed_flag"
+    assert dirty_reason(d(reject_reason="safebrowsing")) == "safebrowsing"
     assert dirty_reason(d(rkn_listed=True)) == "rkn"              # вердикт стёрли, сигнал остался
     assert dirty_reason(d(blacklisted=True)) == "blacklist"
     assert dirty_reason(d(prior_flags={"casino": True})) == "history_dirty"

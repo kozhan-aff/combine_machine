@@ -27,6 +27,7 @@ REJECT_RU = {
     "low_rd": "мало доноров", "feed_flag": "флаг источника", "too_young": "моложе порога",
     "rkn": "реестр РКН", "blacklist": "блэклист", "history_dirty": "грязная история",
     "low_score": "низкий скор", "not_acquirable": "нельзя купить",
+    "safebrowsing": "Google Safe Browsing",
 }
 
 LANE_RU = {"bid": "ставка", "free": "свободный"}
@@ -61,5 +62,6 @@ if __name__ == "__main__":  # self-check без БД
     assert status_ru("approved") == "одобрен" and status_ru("zzz") == "zzz"
     assert status_ru(None) == "" and lane_ru("bid") == "ставка"
     assert reject_ru("not_acquirable") == "нельзя купить"
+    assert reject_ru("safebrowsing") == "Google Safe Browsing"
     assert index_ru("unknown") == "не знаю (движки молчат)" and index_ru(None) == ""
     print("labels ok")

@@ -28,6 +28,8 @@ def _clients(wayback, created):
     поэтому T1 короткозамкнут лейном и «занят» — норма), РКН/блэклист чисты, эхо есть."""
     class _W:
         def whois_probe(self, dom): return {"available": False, "created": created}
+        def safebrowsing_check(self, dom): return False
+        def archive_probe(self, dom): return {"times": None, "first": None, "last": None}
     class _R:
         def is_listed(self, dom): return False
     class _B:

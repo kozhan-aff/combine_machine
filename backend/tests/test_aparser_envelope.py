@@ -206,6 +206,8 @@ def _clients(whois, wayback=None):
             if isinstance(whois, Exception):
                 raise whois
             return whois
+        def safebrowsing_check(self, dom): return False
+        def archive_probe(self, dom): return {"times": None, "first": None, "last": None}
     class _R:
         def is_listed(self, dom): return False
     class _B:
