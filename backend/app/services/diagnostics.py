@@ -37,6 +37,8 @@ def _spec():
          lambda: __import__("app.integrations.searxng", fromlist=["x"]).SearxngClient().ping()),
         ("backorder", "Backorder", "M1 · discovery", "1", "M1", True,  # публичный фид, кред не нужен
          lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
+        ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M1", False,
+         lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
         ("wayback", "Wayback", "M1 · история", "1", "M1", True,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("rkn", "РКН (antizapret)", "M1 · блок-лист", settings.RKN_SOURCE_URL, "M1", True,

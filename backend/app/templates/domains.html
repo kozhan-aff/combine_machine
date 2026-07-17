@@ -251,7 +251,11 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
             <input type="hidden" name="status" value="rejected">
             <button class="btn-sm btn-bad" title="убрать из витрины выкупа">✗ отклонить</button></form>
         {% else %}
-          <form class="inline" method="post" action="/domains/{{ d.id }}/queue">
+          <form class="inline" method="post" action="/domains/{{ d.id }}/queue" style="display:flex; gap:8px; align-items:center">
+            <select name="provider" title="куда отправлять заказ: backorder — ставка на перехват (ценные дропы), optimizator — фиксированная цена (свободные чистые)">
+              <option value="backorder" {{ 'selected' if d.lane != 'free' }}>backorder</option>
+              <option value="optimizator" {{ 'selected' if d.lane == 'free' }}>optimizator</option>
+            </select>
             <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="purchased">
