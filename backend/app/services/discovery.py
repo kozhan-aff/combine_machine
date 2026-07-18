@@ -181,7 +181,23 @@ def run_discovery() -> int:
                 new_rd = c.get("referring_domains") or 0
                 if new_rd > (d.referring_domains or 0):
                     d.referring_domains = new_rd
-                for attr in ("lane", "acquire_deadline", "feed_flags", "visitors", "tic"):
+                # feed_flags — safety-сигнал (РКН/судебные/блок), должен отражать САМЫЙ
+                # СВЕЖИЙ снимок фида, а не первый увиденный (S18, аудит 2026-07-18):
+                # fill-once маскировал бы позднее РКН-флагирование под "чистую" историю,
+                # T0 hard-reject `feed_flag` тогда не сработал бы на реально грязном домене.
+                if c.get("feed_flags") is not None:
+                    d.feed_flags = c["feed_flags"]
+                # source/acquire_price (S19, аудит 2026-07-18): раз backorder увидел
+                # домен — он становится авторитетным денежным каналом для него (сетка
+                # тиров/лейн/дедлайн, чего нет у сырых источников). Апгрейд НЕОБРАТИМ:
+                # backorder никогда не откатываем обратно на сырой source. Без этого
+                # refresh_backorder_prices() (селектит по source=='backorder') навсегда
+                # пропускает домен, впервые увиденный сырым реестром.
+                if c.get("source") == "backorder" and d.source != "backorder":
+                    d.source = "backorder"
+                    if c.get("price") is not None:
+                        d.acquire_price = c["price"]
+                for attr in ("lane", "acquire_deadline", "visitors", "tic"):
                     if getattr(d, attr, None) is None and c.get(attr) is not None:
                         setattr(d, attr, c.get(attr))
             db.add_all(Domain(

@@ -162,6 +162,66 @@ def test_existing_discovered_row_enriched_on_rediscovery(monkeypatch):
         assert d.referring_domains == 42 and d.lane == "bid"     # обогатилось, не пропущено
 
 
+def test_existing_discovered_row_feed_flags_refreshed_on_rediscovery(monkeypatch):
+    """S18 (аудит 2026-07-18): feed_flags — safety-сигнал, fill-once маскировал бы позднее
+    РКН-флагирование под "чистую" историю. Домен впервые увиден чистым ({}), повторный
+    прогон приносит свежий снимок с rkn=True — флаги обязаны обновиться, не остаться {}."""
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import discovery
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="flagged.ru", source="cctld", status="discovered",
+                     referring_domains=None, lane=None, feed_flags={})); s.commit()
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
+        {"domain": "flagged.ru", "source": "backorder", "referring_domains": 1, "lane": "bid",
+         "acquire_deadline": None, "visitors": None, "tic": None, "feed_flags": {"rkn": True}}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.feed_flags == {"rkn": True}     # не осталось {} — свежий снимок победил
+
+
+def test_existing_discovered_row_upgraded_to_backorder_source_and_price(monkeypatch):
+    """S19 (аудит 2026-07-18): домен впервые увиден сырым источником (без цены), позже
+    появляется в backorder-фиде с ценой — source и acquire_price должны апгрейднуться,
+    иначе refresh_backorder_prices() (селектит по source=='backorder') его никогда не найдёт."""
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import discovery
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="priced.ru", source="cctld", status="discovered",
+                     referring_domains=None, lane=None, acquire_price=None)); s.commit()
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
+        {"domain": "priced.ru", "source": "backorder", "referring_domains": 1, "lane": "bid",
+         "acquire_deadline": None, "visitors": None, "tic": None, "feed_flags": {},
+         "price": 555.0}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.source == "backorder" and d.acquire_price == 555.0
+
+
+def test_existing_backorder_source_not_touched_by_upgrade_branch(monkeypatch):
+    """S19 регресс: апгрейд однонаправленный и срабатывает ОДИН раз — домен, уже стоящий
+    на source='backorder', не должен лишний раз трогаться веткой апгрейда на каждый
+    повторный прогон (условие `d.source != "backorder"` — не перезаписывать уже верный
+    источник; текущая цена держится отдельным сервисом refresh_backorder_prices())."""
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import discovery
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="already-bo.ru", source="backorder", status="discovered",
+                     referring_domains=None, lane="bid", acquire_price=100.0)); s.commit()
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
+        {"domain": "already-bo.ru", "source": "backorder", "referring_domains": 1, "lane": "bid",
+         "acquire_deadline": None, "visitors": None, "tic": None, "feed_flags": {},
+         "price": 999.0}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.source == "backorder" and d.acquire_price == 100.0     # ветка не сработала повторно
+
+
 def test_normalize_row_sentinels_and_price():
     from app.services.discovery import normalize_row
     nr = normalize_row({"domainname": "x.ru", "links": 5, "visitors": -1, "yandex_tic": -1, "price": 190})
