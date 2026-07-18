@@ -40,3 +40,60 @@ def test_allowed_when_both_set(monkeypatch):
     monkeypatch.setattr(settings, "PANEL_USER", "u")
     monkeypatch.setattr(settings, "PANEL_PASS", "p")
     panel._require_cf_write(None)  # не поднимает исключение
+
+
+# ===========================================================================
+# S8 (аудит 2026-07-18): POST /sites/{id}/provision — НАСТОЯЩАЯ CF-мутация
+# (зона + DNS + SSL-режим боевым токеном), которая до этого фикса не звала
+# _require_cf_write вовсе — гейт висел только на read-only /settings/cloudflare/sync.
+# Тесты ниже — первый end-to-end (HTTP-уровневый) потребитель гейта на этом роуте,
+# по образцу test_cf_job.py::test_cf_sync_route_requires_configured_panel_auth.
+# ===========================================================================
+def _seed_provisioning_site() -> int:
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    from app.models.site import Site
+    with SessionLocal() as s:
+        d = Domain(domain="gate-provision-test.ru", source="backorder", status="purchased")
+        s.add(d)
+        s.commit()
+        s.refresh(d)
+        site = Site(domain_id=d.id, status="provisioning",
+                    doc_root="/www/wwwroot/gate-provision-test.ru")
+        s.add(site)
+        s.commit()
+        s.refresh(site)
+        return site.id
+
+
+def test_provision_route_blocked_without_configured_auth(client, monkeypatch):
+    """Без настроенных PANEL_USER/PANEL_PASS (дефолт autouse _no_panel_auth) запрос обязан
+    остановиться на 403 ДО похода в provisioning.provision — сентинел ниже роняет тест, если
+    гейт всё же пропустил вызов дальше."""
+    import app.services.provisioning as provisioning
+
+    def _boom(site_id):
+        raise AssertionError("provisioning.provision() не должен вызываться — гейт обязан "
+                             "остановить запрос раньше")
+    monkeypatch.setattr(provisioning, "provision", _boom)
+    sid = _seed_provisioning_site()
+
+    monkeypatch.setattr(settings, "PANEL_USER", "")
+    monkeypatch.setattr(settings, "PANEL_PASS", "")
+    r = client.post(f"/sites/{sid}/provision", follow_redirects=False)
+    assert r.status_code == 403
+
+
+def test_provision_route_proceeds_with_configured_auth(client, monkeypatch):
+    """С настроенными кредами гейт пропускает — запрос доходит до provisioning.provision()
+    (застабленного здесь: реальный вызов упёрся бы в живые CF/aaPanel креды, которых в тестовом
+    окружении нет — сути гейта это не касается, доказываем только что 403 не сработал)."""
+    import app.services.provisioning as provisioning
+
+    monkeypatch.setattr(provisioning, "provision", lambda site_id: {"status": "provisioned"})
+    sid = _seed_provisioning_site()
+
+    monkeypatch.setattr(settings, "PANEL_USER", "u")
+    monkeypatch.setattr(settings, "PANEL_PASS", "p")
+    r = client.post(f"/sites/{sid}/provision", auth=("u", "p"), follow_redirects=False)
+    assert r.status_code == 303  # редирект на карточку сайта — гейт НЕ остановил запрос на 403

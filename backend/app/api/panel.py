@@ -919,7 +919,13 @@ def attach_offer_action(site_id: int, offer_id: int = Form(...), db: Session = D
 
 
 @router.post("/sites/{site_id}/provision")
-def provision_action(site_id: int):
+def provision_action(site_id: int, request: Request):
+    """CF-write-гейт первой строкой (S8, аудит 2026-07-18): именно этот роут реально
+    создаёт CF-зону + DNS-запись + меняет SSL-режим боевым токеном — в отличие от
+    /settings/cloudflare/sync (read-only, но уже был гейтнут), эта настоящая мутация
+    гейта не имела. Без настроенных PANEL_USER/PANEL_PASS плоская LAN-панель пускала
+    бы к CF-операциям кого угодно, кто знает IP."""
+    _require_cf_write(request)
     from app.services import provisioning
     try:
         r = provisioning.provision(site_id)
