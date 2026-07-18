@@ -1,6 +1,6 @@
 """Provisioned sites and their content pages. See BUILD_SPEC.md §5."""
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime, Index, func
+from sqlalchemy import String, Text, Boolean, Float, JSON, ForeignKey, DateTime, Index, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
@@ -75,6 +75,12 @@ class Page(Base):
 
     index_status: Mapped[str] = mapped_column(String(32), default="unknown")  # unknown | indexed | not_indexed
     index_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Спека 4 (2026-07-18): advisory-оценка черновика вторым LLM-вызовом, ДО того как
+    # человек открыл страницу. НЕ гейт — mark_edited работает независимо от этих полей.
+    critic_score: Mapped[float | None] = mapped_column(Float)          # 0.0–1.0
+    critic_notes: Mapped[dict | None] = mapped_column(JSON)            # {"issues": [str]}
+    critic_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
