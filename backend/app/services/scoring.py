@@ -434,19 +434,26 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
         age = (now - wc).days / 365.25
         sig["age_years"] = round(age, 2)
         sig["age_source"] = "whois"      # ОТКУДА возраст — это не деталь: бейдж пишет по нему
-        if age < st["min_age_years"]:
-            return "too_young"
 
     if d.lane == "bid":
         sig["lane"] = "bid"
+        if age_known and age < st["min_age_years"]:
+            return "too_young"
     else:
         # сюда попадаем только при lane != "bid" (bid короткозамкнут выше), но передаём явно:
-        # вердикт судит bid-домены иначе, и умолчания здесь стоят слишком дорого
+        # вердикт судит bid-домены иначе, и умолчания здесь стоят слишком дорого.
+        # Приобретаемость — ПЕРЕД возрастом: домен, перехваченный снайпером сразу после
+        # дропа, отвечает whois'ом нового владельца (available=False, created=пару дней
+        # назад) — возраст почти всегда < min_age_years, и "too_young" замаскировал бы
+        # настоящую причину (домен не наш) под порог, который якобы можно ослабить в
+        # /settings. Для taken возраст вообще не смотрим — не наш домен, и точка.
         v = acquirability_verdict(pr.get("available"), d.acquire_deadline, now, lane=d.lane)
-        if v == "free":
-            sig["lane"] = "free"                    # свободен к регистрации
-        elif v == "taken":
-            return "not_acquirable"                 # занят, купить нельзя
+        if v == "taken":
+            return "not_acquirable"                 # занят, купить нельзя — возраст тут ни при чём
+        elif v == "free":
+            sig["lane"] = "free"                    # свободен к регистрации — тут возраст уже сигнал качества
+            if age_known and age < st["min_age_years"]:
+                return "too_young"
         else:
             # waiting — дроп ещё не наступил (перепробуем после даты);
             # unknown — whois ОТВЕТИЛ, но ответ не разобрали (available=None: нестандартный TLD,

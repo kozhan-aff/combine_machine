@@ -344,6 +344,27 @@ def test_raw_source_past_deadline_is_not_acquirable():
     assert wb.calls == 0
 
 
+def test_raw_source_sniped_after_drop_is_not_acquirable_not_too_young():
+    """Баг из аудита 2026-07-18 (S1): сырой домен дропнулся и тут же перехвачен снайпером —
+    whois отвечает данными НОВОГО владельца (available=False, created=пару дней назад).
+    Дедлайн дропа уже прошёл (за пределами DROP_GRACE) -> вердикт «занят» первичен.
+
+    БЫЛО: возраст (несколько дней, << min_age_years) проверялся ДО вердикта приобретаемости
+    и возвращал too_young раньше, чем код успевал дойти до not_acquirable — оператор видел
+    «режет порог», шёл ослаблять min_age_years в /settings, и это ничего не спасало: домен
+    был не наш, дело не в пороге. СТАЛО: для не-bid лейна вердикт приобретаемости считается
+    раньше возраста; taken -> not_acquirable сразу, возраст для этого случая не смотрим."""
+    past_deadline = datetime.now(timezone.utc) - timedelta(days=5)
+    recent_created = datetime.now(timezone.utc) - timedelta(days=2)   # снайпер зарегистрировал только что
+    did = _mk(domain="sniped.ru", lane=None, source="cctld",
+              referring_domains=10, acquire_deadline=past_deadline)
+    wb = _Wayback()
+    out = scoring.score_domain(
+        did, _clients(whois={"available": False, "created": recent_created}, wayback=wb))
+    assert out["status"] == "rejected" and out["reject_reason"] == "not_acquirable"
+    assert wb.calls == 0                      # not_acquirable — ранний выход, дорогой Wayback не тронут
+
+
 def test_drop_day_deadline_is_not_rejected():
     """Дедлайн = 00:00 СЕГОДНЯШНЕГО дня (именно так фид отдаёт delete_date — датой без
     времени), домен ещё занят: реестр освободит его в течение дня. Отбраковать здесь =
