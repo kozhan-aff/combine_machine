@@ -99,7 +99,14 @@ def provision(site_id: int) -> dict:
         # должно висеть обвинением.
         ssl_error = None
         try:
-            cf.set_ssl(zone["id"], "full")
+            current = cf.get_zone_setting(zone["id"], "ssl")
+            current_mode = (current or {}).get("value")
+            if current_mode not in ("full", "strict"):
+                cf.set_ssl(zone["id"], "full")
+            # уже "full" или "strict" — ничего не трогаем: idempotent no-op, и режим,
+            # который оператор осознанно поднял до "strict" после установки origin-
+            # сертификата, больше НЕ откатывается тихо обратно на "full" при повторном
+            # provision() (S6, аудит 2026-07-18).
         except Exception as e:  # noqa: BLE001  # an SSL hiccup must not block a working vhost
             ssl_error = f"{type(e).__name__}: {e}"[:500]
         site.ssl_error = ssl_error

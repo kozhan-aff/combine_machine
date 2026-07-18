@@ -243,11 +243,18 @@ def _fake_post(routes: dict):
 
 
 class _CF:
-    """Cloudflare: зона активна, A-запись ставится. set_ssl падает, если попросили."""
+    """Cloudflare: зона активна, A-запись ставится. set_ssl падает, если попросили.
 
-    def __init__(self, ssl_boom: Exception | None = None):
+    `ssl_current_mode` имитирует ТЕКУЩИЙ режим зоны, который provision() читает через
+    get_zone_setting перед set_ssl (S6, аудит 2026-07-18). Дефолт "off" — «ещё не
+    настроено»: сохраняет поведение существующих тестов, которые НЕ передают этот
+    параметр и ждут, что set_ssl всё равно позовётся ("off" не входит в ("full",
+    "strict"))."""
+
+    def __init__(self, ssl_boom: Exception | None = None, ssl_current_mode: str = "off"):
         self.ssl_boom = ssl_boom
         self.ssl_calls = 0
+        self.ssl_current_mode = ssl_current_mode
 
     def ensure_zone(self, domain):
         return {"id": "zone1", "status": "active", "name_servers": ["a.ns.cf", "b.ns.cf"]}
@@ -257,6 +264,9 @@ class _CF:
 
     def ensure_a_record(self, zid, name, ip, proxied=True):
         return {"id": "rec1"}
+
+    def get_zone_setting(self, zid, setting_id):
+        return {"value": self.ssl_current_mode}
 
     def set_ssl(self, zid, mode="full"):
         self.ssl_calls += 1
@@ -382,6 +392,44 @@ def test_provision_clears_ssl_error_when_ssl_recovers(monkeypatch):
     out = provisioning.provision(sid)
 
     assert "ssl_error" not in out
+    with db.SessionLocal() as s:
+        assert s.get(Site, sid).ssl_error is None
+
+
+def test_provision_does_not_downgrade_strict_ssl(monkeypatch):
+    """РЕГРЕССИЯ (S6, аудит 2026-07-18). provision() идемпотентен и может звонить повторно
+    (свип, повторное нажатие кнопки) — а безусловный `set_ssl(zone, "full")` на каждый
+    такой повтор молча откатывал режим, который оператор осознанно поднял до "strict"
+    после установки origin-сертификата. read-then-set: текущий режим уже "strict" ->
+    ничего не трогаем, set_ssl вовсе не зовётся."""
+    from app.services import provisioning
+    cf = _CF(ssl_current_mode="strict")
+    _panel_env(monkeypatch, cf=cf, getData=LIST_EMPTY, AddSite=ADD_OK)
+    sid = _seed_site()
+
+    out = provisioning.provision(sid)
+
+    assert out["status"] == "provisioned"
+    assert cf.ssl_calls == 0                     # strict не откатился на full
+    with db.SessionLocal() as s:
+        site = s.get(Site, sid)
+        assert site.status == "content"
+        assert site.ssl_error is None             # осознанный no-op — не ошибка
+
+
+def test_provision_still_sets_ssl_when_off(monkeypatch):
+    """ГРАНИЦА рядом с фиксом S6: домен, у которого SSL ещё не настроен ("off"/"flexible"),
+    по-прежнему получает set_ssl("full") — read-then-set не превращается в «никогда не
+    ставим SSL». Дефолт `_CF()` уже "off", тест лишь подтверждает поведение явно."""
+    from app.services import provisioning
+    cf = _CF(ssl_current_mode="off")
+    _panel_env(monkeypatch, cf=cf, getData=LIST_EMPTY, AddSite=ADD_OK)
+    sid = _seed_site()
+
+    out = provisioning.provision(sid)
+
+    assert out["status"] == "provisioned"
+    assert cf.ssl_calls == 1
     with db.SessionLocal() as s:
         assert s.get(Site, sid).ssl_error is None
 
