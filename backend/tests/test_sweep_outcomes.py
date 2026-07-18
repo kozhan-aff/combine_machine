@@ -182,6 +182,27 @@ def test_sweep_status_stays_done_when_nothing_fails():
     assert out["status"] == "done" and out["errors"] == []
 
 
+def test_whole_stage_failure_closes_jobrun_as_failed_not_done(monkeypatch):
+    """S3 (аудит 2026-07-18): когда стадия падает ЦЕЛИКОМ, свип ловит это локально и не
+    re-raise'ит — track закрыл бы JobRun дефолтным "done" (зелёным на Пульте), хотя AutonomyRun
+    честно пишет "failed". Симметричный дефект к done_warn. Теперь JobRun тоже "failed"."""
+    from app.services import jobs
+
+    def boom():
+        raise RuntimeError("discovery оборвалась целиком")
+
+    monkeypatch.setattr("app.services.discovery.run_discovery", boom)
+    autonomy.update_autonomy(autopilot_on=True, auto_discovery=True, auto_provision=False,
+                             auto_score=False, auto_queue=False, auto_generate=False,
+                             auto_publish=False, auto_check_index=False)
+
+    out = orch.run_sweep(trigger="cron")
+
+    assert out["status"] == "failed"                       # AutonomyRun (журнал /autopilot)
+    last = jobs.last("sweep")                              # JobRun (реестр Пульта)
+    assert last is not None and last["status"] == "failed"  # НЕ зелёный "done"
+
+
 # ── Б: генерация дозаполняет недостающие страницы, а не бросает сайт навсегда ──
 
 def test_generate_stage_reselects_site_with_partial_pages(monkeypatch):

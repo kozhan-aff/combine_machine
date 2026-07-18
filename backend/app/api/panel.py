@@ -17,6 +17,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -889,7 +890,14 @@ def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depe
         row = OfferSettings(id=1)
         db.add(row)
     row.reserve_offer_url = url or None
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # гонка на первом сохранении (двойной клик до появления строки id=1): второй
+        # коммит бьётся о PK — дружелюбный редирект вместо голого 500, как у всех
+        # прочих write-роутов этого файла.
+        db.rollback()
+        return _back("/offers", err="Резервный URL уже сохранён — обнови страницу")
     return _back("/offers", msg="Резервный URL сохранён" if url else "Резервный URL очищен")
 
 
@@ -899,7 +907,14 @@ def attach_offer_action(site_id: int, offer_id: int = Form(...), db: Session = D
         SiteOffer.site_id == site_id, SiteOffer.offer_id == offer_id)).scalar_one_or_none()
     if not exists:
         db.add(SiteOffer(site_id=site_id, offer_id=offer_id))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # TOCTOU на uq_site_offer (F24): под READ COMMITTED оба конкурентных запроса
+            # видят «нет» и оба вставляют — второй коммит бьётся об уникальный индекс.
+            # Дружелюбно, а не голым 500: оффер уже привязан — это и был желаемый исход.
+            db.rollback()
+            return _back(f"/sites/{site_id}", msg="Оффер уже привязан")
     return _back(f"/sites/{site_id}", msg="Оффер привязан")
 
 

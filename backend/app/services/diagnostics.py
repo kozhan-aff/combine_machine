@@ -11,6 +11,27 @@ from app.config import settings
 
 PING_TIMEOUT = 20.0  # сек на один пинг; Wayback стабильно ~15с — даём запас, чтобы не мигал
 
+# Поля настроек, чьё значение — секрет: если оно утекло в текст исключения (напр. httpx
+# кладёт полный URL с ?api_key=... в HTTPStatusError.str()), затираем ДО показа на /diag.
+# /diag доступен по Basic-auth в LAN, но сырой api_key в «деталях ошибки» — это утечка
+# ключа любому, кто откроет/залогирует страницу (в отличие от GITHUB_TOKEN, который
+# deploy.py уже скрабит везде). Список — все credential-поля Settings.
+_SECRET_FIELDS = (
+    "AHREFS_API_KEY", "CHECKTRUST_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
+    "SERPAPI_KEY", "YANDEX_WORDSTAT_TOKEN", "BACKORDER_LOGIN", "BACKORDER_PASSWORD",
+    "OPTIMIZATOR_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
+    "LLM_API_KEY", "APARSER_API_KEY", "GITHUB_TOKEN", "PANEL_PASS", "SPAMHAUS_DQS_KEY",
+)
+
+
+def _scrub(s: str) -> str:
+    """Затереть любое непустое значение секрета из настроек, встретившееся в тексте."""
+    for name in _SECRET_FIELDS:
+        val = getattr(settings, name, "")
+        if val and isinstance(val, str) and val in s:
+            s = s.replace(val, "***")
+    return s
+
 
 def _db_ping() -> bool:
     from sqlalchemy import text
@@ -63,7 +84,7 @@ def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
     except Exception as e:  # noqa: BLE001 — любой сбой интеграции = красный, не 500
         return {**base, "status": "fail",
                 "ms": int((time.monotonic() - t0) * 1000),
-                "error": f"{type(e).__name__}: {e}"[:200]}
+                "error": _scrub(f"{type(e).__name__}: {e}")[:200]}
 
 
 def run_diagnostics(specs=None) -> list[dict]:

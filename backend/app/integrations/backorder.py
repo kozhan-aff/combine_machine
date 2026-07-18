@@ -151,7 +151,20 @@ class BackorderClient(BaseClient):
             # Явный отказ провайдера: заказ НЕ создан — это не ambiguous, повтор безопасен.
             raise RuntimeError(self._scrub(f"backorder {func}: {msg}"))
         elem = data.get("elem") if isinstance(data, dict) else None
-        return elem if isinstance(elem, list) else []
+        if isinstance(elem, list):
+            return elem
+        # Форма НЕ распознана: ни `error`, ни `elem`-список. Для read-вызовов (money=False)
+        # это по-прежнему «пусто» — []. Но для денежного uniservice.order (money=True) форма
+        # success-ответа НЕ подтверждена вживую (docs/api/backorder.md gotcha #9: может быть
+        # {"doc":{...}} вместо {"elem":[...]}) — трактовать её как «пустой успех» значило бы
+        # выдать заказ с пустым provider_order_id и БЕЗ maybe_sent, хотя ушли ли деньги —
+        # неизвестно. Это ровно тот исход, ради которого существует AmbiguousSend (симметрично
+        # optimizator._unwrap, который уже так делает). money-путь: неизвестная форма -> ambiguous.
+        if money:
+            raise AmbiguousSend(self._scrub(
+                f"backorder {func}: неизвестная форма успешного ответа "
+                f"(ни error, ни elem) — исход отправки неизвестен"))
+        return []
 
     def balance(self, ttl: float = 60.0) -> float | None:
         """Остаток на лицевом счёте. uniservice.order идёт с paynow=on — при 0 ₽ заказ

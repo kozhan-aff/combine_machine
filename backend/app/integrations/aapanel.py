@@ -274,12 +274,18 @@ class AaPanelClient(BaseClient):
                     remove_ftp: bool = True, remove_db: bool = True) -> dict:
         """Teardown (M6). VERIFIED 7.x: DeleteSite validates id(int), webname, path(int) —
         the flags MUST be integers (empty strings fail with 'path must be integer').
-        path=1 also deletes the docroot; pass remove_dir=False to keep files (301 migration)."""
-        return self._post(
+        path=1 also deletes the docroot; pass remove_dir=False to keep files (301 migration).
+
+        Как все write-методы файла — проверяем конверт через _ok(): панель отвечает HTTP 200
+        даже на отказ ({"status": false, "msg": ...}), и без _ok() провалившийся teardown
+        (протухший api_sk / нет прав / ошибка БД) вернулся бы как успех, а вызывающий M6
+        пометил бы сайт снесённым, пока vhost/файлы ещё живы (инвариант файла: «отказ —
+        поднять RuntimeError, глотать его нельзя»)."""
+        return _ok(self._post(
             "/site?action=DeleteSite",
             {"id": site_id, "webname": site_name, "path": int(remove_dir),
              "ftp": int(remove_ftp), "database": int(remove_db)},
-        )
+        ), "DeleteSite")
 
     # -- files (M5 deploy) --------------------------------------------------
 

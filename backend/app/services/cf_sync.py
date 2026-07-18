@@ -113,6 +113,12 @@ def sync_connection(db, conn: CloudflareConnection, *, run=None) -> None:
             accounts, accounts_ok, accounts_err = cf.list_accounts_paginated(), True, None
         except Exception as exc:
             accounts, accounts_ok, accounts_err = [], False, _safe(exc)
+            # verify_token прошёл (conn.status="ok"), но листинг аккаунтов упал — без явного
+            # error-статуса settings_cloudflare.html показывает зелёный «ok» и НЕ рендерит
+            # last_error_safe (он виден только при status=='error'), и отказ синка полностью
+            # невидим: ни одной зоны не наблюдалось, а оператор думает, что всё синхронно.
+            # Ставим error как на уровне аккаунта/зоны ниже (acc_row.status="error").
+            conn.status = "error"
             conn.last_error_safe = accounts_err
             _observe(db, conn.id, None, "user", None, "accounts_read", "denied", accounts_err)
     for a in accounts:

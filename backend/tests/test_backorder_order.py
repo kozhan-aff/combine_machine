@@ -84,6 +84,22 @@ def test_ambiguous_vs_explicit_rejection():
         c.order("example.ru", price_id="1", period_id="2")
 
 
+def test_money_call_with_unknown_success_shape_is_ambiguous():
+    """S11 (аудит 2026-07-18): success-конверт БЕЗ error и БЕЗ elem-списка.
+
+    docs/api/backorder.md gotcha #9: форма ответа uniservice.order живьём не подтверждена,
+    может быть {"doc":{...}} вместо {"elem":[...]}. Для money-вызова такую неизвестную форму
+    НЕЛЬЗЯ трактовать как «пустой успех» ([]): ушли ли деньги — неизвестно, это AmbiguousSend
+    (симметрично optimizator._unwrap). Для read-вызова (money=False) неизвестная форма — []."""
+    c = _client({"doc": {"id": 42}})       # ни error, ни elem
+    with pytest.raises(backorder.AmbiguousSend):
+        c.order("example.ru", price_id="1", period_id="2")   # money=True внутри order()
+
+    # read-путь (money=False) неизменен: неизвестная форма — пустой результат, не исключение
+    c2 = _client({"doc": {"id": 42}})
+    assert c2._billmgr("accountinfo") == []
+
+
 def _raising(c, exc):
     def fake(method, url, **kw):
         raise exc

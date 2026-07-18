@@ -82,6 +82,15 @@ def _post_update(old: str) -> dict:
     except FileNotFoundError:
         ok = False
         alembic_warn = "alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
+    except subprocess.TimeoutExpired:
+        # Миграция вышла за 120с (медленный DDL на населённой таблице / блокировка PG):
+        # subprocess убивает alembic на середине. Без этой ветки TimeoutExpired улетал бы
+        # в /admin/pull голым 500 (нет app-level handler), а схема могла остаться
+        # ЧАСТИЧНО накатанной при уже сдвинутом git HEAD — ровно то расхождение код/схема,
+        # которое докстринг этой функции запрещает выдавать за чистый успех. ok=False —
+        # деплой честно «с проблемой», баннер объясняет что случилось.
+        ok = False
+        alembic_warn = "миграция не завершилась за 120с и была прервана — проверь схему БД вручную"
     cur = deploy_status()
     new = cur.get("hash", "")
     return {"ok": ok, "old": old, "new": new, "subject": cur.get("subject", ""),

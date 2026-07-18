@@ -5,12 +5,13 @@
 
 ## Порядок чтения
 1. Этот файл — правила, состояние, что делать первым.
-2. `docs/PIPELINE.md` — вся логическая цепочка, диаграмма, state machine, гейты, пути отказа.
-3. `docs/DONORS.md` — методика оценки доменов/доноров (ядро скоринга).
-4. `docs/SERVICES.md` — какие сервисы нужны, где браузер/SERP-API/MCP.
-5. `BUILD_SPEC.md` — детальный тех-бриф (схема БД, спеки API, помодульная логика).
-6. `PLAN.md` — стратегия и фазы.
-7. `docs/api/README.md` — живые референсы интеграций (endpoints/auth/примеры) + локальная инфра 192.168.1.77.
+2. `README.md` (`## Что где`) — карта каталогов (кто за что отвечает в `backend/app/`).
+3. `docs/PIPELINE.md` — вся логическая цепочка, диаграмма, state machine, гейты, пути отказа.
+4. `docs/DONORS.md` — методика оценки доменов/доноров (ядро скоринга).
+5. `docs/SERVICES.md` — какие сервисы нужны, где браузер/SERP-API/MCP.
+6. `BUILD_SPEC.md` — детальный тех-бриф (схема БД, спеки API, помодульная логика).
+7. `PLAN.md` — стратегия и фазы.
+8. `docs/api/README.md` — живые референсы интеграций (endpoints/auth/примеры) + локальная инфра 192.168.1.77.
 
 ## Что за проект (в одном абзаце)
 Пользователь описывает офферы (бренд, промокод, ссылка, гео, язык). Система: находит
@@ -67,6 +68,15 @@ docker compose run --rm backend pytest backend/tests/test_name.py::test_case -v
 # Lint (pyflakes on app & tests)
 .venv/bin/python -m pyflakes backend/app backend/tests
 
+# Create a new migration — ID НЕ дефолтный alembic-хэш, а секвенциальный NNNN_description
+# (см. любой файл в backend/alembic/versions/ для конвенции revision/down_revision строками)
+docker compose run --rm backend alembic revision -m "description"
+# затем вручную переименовать файл в NNNN_description.py и выставить revision/down_revision
+
+# Apply migrations вручную (docker-compose делает это САМ при каждом старте backend —
+# `alembic upgrade head` в command:, идемпотентно, отдельно гонять обычно не нужно)
+docker compose run --rm backend alembic upgrade head
+
 # Smoke test (check all integrations) — открой /diag на запущенной панели (Basic-auth из
 # .env), пингует cloudflare/aapanel/searxng/llm/wayback/rkn/backorder/aparser/blacklist/db
 # по-настоящему (не skip). Отдельного CLI-скрипта нет — scripts/smoke.py удалён
@@ -74,7 +84,8 @@ docker compose run --rm backend pytest backend/tests/test_name.py::test_case -v
 # cloudflare/aapanel, которые /diag уже реально пингует.
 ```
 
-**Note:** Tests are hermetic (autouse-fixture blocks network). Live box testing on `192.168.1.77`.
+**Note:** Tests are hermetic (autouse-fixture `_no_live_network`,
+`backend/tests/conftest.py:47`, blocks network). Live box testing on `192.168.1.77`.
 
 ## Текущее состояние (2026-07-17)
 

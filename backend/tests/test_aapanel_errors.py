@@ -122,6 +122,33 @@ def test_refusal_is_raised_outside_retry():
     assert p.n("AddSite") == 1, p.calls
 
 
+def test_delete_site_refusal_raises():
+    """S17 (аудит 2026-07-18). delete_site был ЕДИНСТВЕННЫМ write-методом без _ok(): панель
+    отвечает 200 + {"status": false} на провал teardown (протух api_sk / нет прав), а метод
+    возвращал это как успех — вызывающий M6 пометил бы сайт снесённым, пока vhost ещё жив.
+    Теперь _ok() поднимает RuntimeError, как у всех соседей."""
+    class _DelPanel(_Panel):
+        def request(self, method, url, **kw):
+            self.calls.append(url)
+            assert "DeleteSite" in url
+            return httpx.Response(200, json=AUTH_FAIL, request=httpx.Request(method, url))
+
+    c = _client(_DelPanel())
+    with pytest.raises(RuntimeError, match="Secret key verification failed"):
+        c.delete_site("ex.ru", 7)
+
+
+def test_delete_site_success_passes():
+    """ГРАНИЦА: успешный DeleteSite ({"status": true, ...}) проходит без исключения."""
+    class _DelOkPanel(_Panel):
+        def request(self, method, url, **kw):
+            self.calls.append(url)
+            return httpx.Response(200, json={"status": True, "msg": "Deleted"},
+                                  request=httpx.Request(method, url))
+
+    assert _client(_DelOkPanel()).delete_site("ex.ru", 7) == {"status": True, "msg": "Deleted"}
+
+
 def test_add_site_success_envelope_passes():
     """ГРАНИЦА. Успешный AddSite приходит БЕЗ ключа `status` ({"siteStatus": true, ...}).
     Валидатор, требующий `status is True`, объявил бы ошибкой каждый успешный провижн."""

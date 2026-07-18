@@ -102,6 +102,24 @@ def test_pull_alembic_failure_is_not_ok(creds, monkeypatch):
     assert out["ok"] is False and "migration boom" in out["alembic_warn"]
 
 
+def test_pull_alembic_timeout_is_not_ok_and_has_banner(creds, monkeypatch):
+    """S22 (аудит 2026-07-18): миграция вышла за timeout -> subprocess.TimeoutExpired.
+    Раньше ловился только FileNotFoundError, и TimeoutExpired улетал голым 500 в /admin/pull.
+    Теперь ok=False + понятный баннер, деплой честно «с проблемой», а не крэш."""
+    r = Router(pull_rc=0)
+    base = r.__call__
+
+    def router(argv, **kw):
+        if argv and argv[0] == "alembic":
+            raise subprocess.TimeoutExpired(cmd="alembic upgrade head", timeout=120)
+        return base(argv, **kw)
+
+    monkeypatch.setattr(deploy.subprocess, "run", router)
+    out = deploy.git_pull()
+    assert out["ok"] is False
+    assert "120" in out["alembic_warn"] and "прерван" in out["alembic_warn"]
+
+
 def test_force_pull_no_git_clean(creds, monkeypatch):
     r = _patch(monkeypatch, Router())
     out = deploy.git_force_pull()

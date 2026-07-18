@@ -61,6 +61,27 @@ def test_failed_zone_list_does_not_mark_deleted(monkeypatch):
         assert m.status != "deleted"
 
 
+def test_accounts_read_failure_marks_connection_error(monkeypatch):
+    """S7 (аудит 2026-07-18): verify_token прошёл (status=ok), но листинг аккаунтов упал.
+    Без явного error-статуса settings_cloudflare.html показывал зелёный «ok» и прятал
+    last_error_safe (виден только при status=='error') — отказ синка был невидим оператору.
+    Теперь conn.status='error', ошибка видна."""
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "tok")
+
+    class _AccBoom(_FakeCF):
+        def list_accounts_paginated(self):
+            raise RuntimeError("accounts read denied")
+
+    with SessionLocal() as db:
+        c = _seed_conn(db)
+        _CURRENT[0] = _AccBoom([])
+        monkeypatch.setattr(cf_sync, "CloudflareClient", _AccBoom)
+        cf_sync.sync_connection(db, c)
+        db.refresh(c)
+        assert c.status == "error"
+        assert c.last_error_safe and "accounts read denied" in c.last_error_safe
+
+
 def test_empty_zone_list_marks_missing_not_deleted(monkeypatch):
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "tok")
     z = {"id": "zid1", "name": "a.ru", "status": "active", "account": {"id": "accHEX"}}

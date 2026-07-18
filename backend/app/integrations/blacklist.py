@@ -64,17 +64,26 @@ class BlacklistClient:
 
     def _ensure_control(self) -> None:
         """Тест-поинт Spamhaus всегда листнут; если наш резолвер его не видит —
-        публичный резолвер заблокирован, проверка бессмысленна → RAISE (fail-closed)."""
-        if BlacklistClient._control_ok is None:
-            try:
-                ip = self._resolve(self._dbl_host(_TESTPOINT))
-            except OSError:
-                ip = None
-            BlacklistClient._control_ok = bool(ip and ip.startswith("127."))
-        if not BlacklistClient._control_ok:
-            raise RuntimeError(
-                "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
-                "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
+        публичный резолвер заблокирован, проверка бессмысленна → RAISE (fail-closed).
+
+        Кэшируем ТОЛЬКО положительный результат (контроль прошёл — на процесс). Отрицательный
+        НЕ кэшируем: транзиентный сбой резолвера сразу после старта воркера иначе навсегда
+        (до рестарта контейнера) загонял бы КАЖДЫЙ последующий домен в путь «история не
+        проверена», хотя Spamhaus восстановился через секунду. RknClient уже делает так же —
+        при неудачной загрузке `_loaded_at` не выставляется, и следующий вызов ретраит."""
+        if BlacklistClient._control_ok:
+            return
+        try:
+            ip = self._resolve(self._dbl_host(_TESTPOINT))
+        except OSError:
+            ip = None
+        ok = bool(ip and ip.startswith("127."))
+        if ok:
+            BlacklistClient._control_ok = True     # кэшируем только успех
+            return
+        raise RuntimeError(
+            "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
+            "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
 
     def is_blacklisted(self, domain: str) -> bool | None:
         """True = листнут в Spamhaus DBL, False = чист, None = транзиентный сбой резолвера.

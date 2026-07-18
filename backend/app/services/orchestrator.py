@@ -381,6 +381,14 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     # свип не оборвался, он завершился С ЗАМЕЧАНИЯМИ.
                     status = "completed_with_errors"
                     jobs.finish(run, "done_warn")   # JobRun-карточка тоже «с замечаниями», не зелёная (F2.2)
+                elif status == "failed":
+                    # Стадия упала ЦЕЛИКОМ (ветка except Exception выше), но свип поймал это
+                    # локально и не re-raise'ит — значит track выходит штатно и по умолчанию
+                    # закрыл бы JobRun как "done" (jobs.py: _OUTCOME.pop(..., "done")). Без
+                    # этой ветки Пульт показывал бы зелёный «done» для свипа, реально
+                    # упавшего на стадии — симметричный дефект к done_warn (F2.2), тот же
+                    # класс лжи об успехе. AutonomyRun при этом честно пишет "failed" в finally.
+                    jobs.finish(run, "failed")
                 jobs.report(run, done=total, total=total, current="",
                             message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
             except jobs.Cancelled:
