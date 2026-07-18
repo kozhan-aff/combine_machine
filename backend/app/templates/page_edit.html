@@ -11,6 +11,26 @@
   страницы публикация выкладывает на сайт. Скрипты и опасные теги вырежутся автоматически (sanitize),
   останутся только текстовые: h2–h4, p, списки, ссылки, таблицы.</p>
 
+<form method="post" action="/pages/{{ page.id }}/critique" style="margin-bottom:14px">
+  <button class="btn" title="второй LLM-вызов — подсказка человеку, не решение; сохранить как edited можно независимо от балла">🔍 Оценить черновик</button>
+  {% if page.critic_checked_at %}
+    {% if page.critic_score is not none %}
+      <span class="badge" title="балл критика: чем выше, тем меньше правок скорее всего нужно — это ПОДСКАЗКА, не гейт">
+        критик: {{ (page.critic_score * 100)|round|int }}/100
+      </span>
+      {% if page.critic_notes and page.critic_notes.issues %}
+        <ul class="hint" style="margin:6px 0 0">
+          {% for issue in page.critic_notes.issues %}
+            <li>{{ issue }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% else %}
+      <span class="hint">критик не смог оценить черновик (сбой LLM) — открой и решай сам</span>
+    {% endif %}
+  {% endif %}
+</form>
+
 <form method="post" action="/pages/{{ page.id }}/save">
   <div class="edit-grid">
     <label class="f">HTML страницы — правится здесь

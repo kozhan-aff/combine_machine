@@ -972,6 +972,20 @@ def page_save_action(page_id: int, body: str = Form(""), db: Session = Depends(g
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
 
+@router.post("/pages/{page_id}/critique")
+def critique_page_action(page_id: int):
+    """Advisory-оценка черновика вторым LLM-вызовом (Спека 4). НЕ гейт: результат
+    только показывается на экране редактуры, mark_edited им не связан."""
+    from app.services import content_critic
+    try:
+        content_critic.critique_page(page_id)
+    except ValueError as e:
+        return _back(f"/pages/{page_id}", err=str(e))
+    except Exception as e:  # noqa: BLE001 — критик advisory, сбой не должен ронять UI
+        return _back(f"/pages/{page_id}", err=f"критик: {e}")
+    return _back(f"/pages/{page_id}", msg="Черновик оценён")
+
+
 @router.post("/sites/{site_id}/publish")
 def publish_action(site_id: int):
     from app.services import publish
