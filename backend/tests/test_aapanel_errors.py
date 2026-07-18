@@ -122,6 +122,35 @@ def test_refusal_is_raised_outside_retry():
     assert p.n("AddSite") == 1, p.calls
 
 
+def test_post_recomputes_signature_on_each_retry_attempt(monkeypatch):
+    """РЕГРЕССИЯ (S16, аудит 2026-07-18). Раньше payload (включая request_time/
+    request_token) строился ОДИН раз до первой попытки — ретрай слал ту же, стареющую
+    подпись. Теперь каждая попытка _post строит payload заново: request_time второй
+    попытки должен отличаться от первой."""
+    times = iter([1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0])
+    monkeypatch.setattr("app.integrations.aapanel.time.time", lambda: next(times))
+
+    class _FlakyPanel:
+        def __init__(self):
+            self.seen_request_times = []
+
+        def request(self, method, url, **kw):
+            self.seen_request_times.append(kw.get("data", {}).get("request_time"))
+            if len(self.seen_request_times) == 1:
+                return httpx.Response(500, json={"msg": "boom"},
+                                      request=httpx.Request(method, url))
+            return httpx.Response(200, json=ADD_OK, request=httpx.Request(method, url))
+
+        def close(self):
+            pass
+
+    panel = _FlakyPanel()
+    c = _client(panel)
+    c.add_site("ex.ru", "/www/wwwroot/ex.ru")   # первая попытка 500 -> ретрай -> вторая 200
+    assert len(panel.seen_request_times) == 2
+    assert panel.seen_request_times[0] != panel.seen_request_times[1]
+
+
 def test_delete_site_refusal_raises():
     """S17 (аудит 2026-07-18). delete_site был ЕДИНСТВЕННЫМ write-методом без _ok(): панель
     отвечает 200 + {"status": false} на провал teardown (протух api_sk / нет прав), а метод

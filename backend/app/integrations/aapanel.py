@@ -25,9 +25,10 @@ import json
 import time
 
 import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
-from app.integrations.base import BaseClient
+from app.integrations.base import BaseClient, _is_retryable
 
 
 def _md5(s: str) -> str:
@@ -123,14 +124,26 @@ class AaPanelClient(BaseClient):
         t = str(int(time.time()))
         return {"request_time": t, "request_token": _make_token(self.api_sk, t)}
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10),
+           retry=retry_if_exception(_is_retryable), reraise=True)
     def _post(self, path: str, data: dict | None = None) -> dict:
         """POST form fields (endpoint params + auth) to base_url+path, return parsed JSON.
 
         Note: a few endpoints (e.g. /ajax?action=GetTaskCount) return a bare JSON
         scalar, so callers should not assume dict blindly.
+
+        @retry ЗДЕСЬ, а не на BaseClient.request (S16, аудит 2026-07-18): подпись
+        aaPanel (`_auth()`) живёт короткое окно свежести (clock-skew), а
+        wait_exponential-backoff между попытками (до ~10с) мог успеть её состарить,
+        если ретрай слал ТОТ ЖЕ payload, собранный один раз до первой попытки —
+        транзиентный сетевой сбой тогда отклонялся панелью как auth-fail, и оператор
+        шёл чинить несуществующий протухший api_sk. Каждая попытка этого декоратора
+        заново строит payload -> свежий request_time/request_token. Вызываем
+        `self._request_once` (БЕЗ собственного ретрая), а не `self.request` — иначе
+        ретраи бы удвоились (3 попытки _post x 3 попытки request = 9).
         """
         payload = {**(data or {}), **self._auth()}
-        resp = self.request("POST", f"{self.base_url}{path}", data=payload)
+        resp = self._request_once("POST", f"{self.base_url}{path}", data=payload)
         return resp.json()
 
     # -- system -------------------------------------------------------------

@@ -20,12 +20,18 @@ class BaseClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout, follow_redirects=True)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10),
-           retry=retry_if_exception(_is_retryable), reraise=True)
-    def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+    def _request_once(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Одна попытка, БЕЗ ретрая — для вызывающих, которым нужно пересобрать
+        request-scoped данные (например, подпись с окном свежести) на каждую попытку
+        ретрая самим (см. AaPanelClient._post, S16, аудит 2026-07-18)."""
         resp = self._client.request(method, url, **kwargs)
         resp.raise_for_status()
         return resp
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10),
+           retry=retry_if_exception(_is_retryable), reraise=True)
+    def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        return self._request_once(method, url, **kwargs)
 
     def ping(self) -> bool:
         """Lightweight auth/connectivity check. Implement per client."""
