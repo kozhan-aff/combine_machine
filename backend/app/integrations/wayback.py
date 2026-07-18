@@ -84,6 +84,26 @@ _TAG = re.compile(r"<[^>]*>")
 # `charset=`. Ищем в БАЙТАХ: до декодирования строки ещё нет.
 _META_CHARSET = re.compile(rb"""<meta[^>]*?charset\s*=\s*["']?\s*([\w.:-]+)""", re.I)
 
+# Single-byte кодеки, у которых КАЖДЫЙ байт 0x00-0xFF — валидный код-поинт (тотальное отображение).
+# Они НИКОГДА не бросают UnicodeDecodeError, независимо от реального содержимого байтов — значит
+# «не упал» здесь ничего не доказывает (см. _looks_like_mojibake / _decode).
+_SINGLE_BYTE_UNSAFE = {"iso-8859-1", "iso8859-1", "latin-1", "latin1", "cp1252",
+                       "windows-1252", "l1"}
+
+
+def _looks_like_mojibake(text: str) -> bool:
+    """Кириллица cp1251, ошибочно раскодированная как latin-1/cp1252 (тотальные single-byte
+    кодеки, НИКОГДА не бросающие UnicodeDecodeError — см. _decode), ложится в узкую полосу
+    латиницы с диакритикой (символы U+00C0..U+00FF). Настоящий западноевропейский текст изредка
+    использует эти буквы (é/ü/ö/ß и т.п.), но НЕ такой плотностью — там доминируют обычные
+    ASCII-буквы. Не строгий детектор (эвристика), а достаточный признак: если латиницы-с-
+    диакритикой подозрительно много, декодер соврал, что справился."""
+    sample = text[:4096]
+    if len(sample) < 20:            # слишком коротко для статистики — не рискуем
+        return False
+    suspicious = sum(1 for ch in sample if "À" <= ch <= "ÿ")
+    return suspicious / len(sample) > 0.12
+
 
 def _decode(raw: bytes, header_charset: str | None) -> str:
     """Байты архивного снимка -> текст. Кодировку берём У СТРАНИЦЫ, а не у httpx.
@@ -98,14 +118,29 @@ def _decode(raw: bytes, header_charset: str | None) -> str:
     кириллице cp1251 надёжно падает (её буквы 0xC0–0xFF не образуют валидных продолжений), так
     что фолбэк срабатывает именно там, где нужен. Битая кодировка НЕ роняет проверку истории
     целиком: последний шаг — cp1251 с errors='replace'.
+
+    «Не бросил UnicodeDecodeError» != «декодировал верно» для single-byte кодеков из
+    `_SINGLE_BYTE_UNSAFE` — они тотальные, ошибок не бывает НИКОГДА. Архивный .ru-снимок с
+    ошибочной меткой `charset=ISO-8859-1` (частая Apache-мисконфигурация 2000-х; реальные байты
+    на самом деле cp1251) «успешно» декодируется в мозаику — кириллица ложится в узкую полосу
+    латиницы с диакритикой, и ни одно русское стоп-слово в ней не находится (S15, аудит
+    2026-07-18). Такой результат отбраковывается `_looks_like_mojibake`, цепочка идёт ДАЛЬШЕ, а не возвращает
+    правдоподобно выглядящий, но неверный текст.
     """
     meta = _META_CHARSET.search(raw[:4096])
     for enc in (header_charset, meta.group(1).decode("ascii", "ignore") if meta else None, "utf-8"):
         if enc:
+            norm = enc.strip().lower().replace("_", "-")
             try:
-                return raw.decode(enc)
+                text = raw.decode(enc)
             except (LookupError, UnicodeDecodeError, ValueError):
                 continue
+            if norm in _SINGLE_BYTE_UNSAFE and _looks_like_mojibake(text):
+                # "не бросил исключение" != "декодировал верно" для тотальных single-byte
+                # кодеков (S15, аудит 2026-07-18) — идём дальше по цепочке фолбэков, а не
+                # доверяем результату вслепую
+                continue
+            return text
     return raw.decode("cp1251", errors="replace")
 
 

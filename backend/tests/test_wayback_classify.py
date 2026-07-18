@@ -220,6 +220,46 @@ def test_broken_bytes_do_not_sink_the_snapshot():
     assert isinstance(_decode(b"\xff\xfe\x00\x01 casino", "no-such-codec-42"), str)
 
 
+# ---- S15: single-byte "тотальные" кодеки НИКОГДА не бросают UnicodeDecodeError ----
+#
+# `iso-8859-1`/`latin-1` отображают КАЖДЫЙ байт 0x00-0xFF в валидный код-поинт — они не могут
+# упасть, что бы ни лежало в байтах. Архивная .ru-страница с ошибочной HTTP/meta-меткой
+# `charset=ISO-8859-1` (реальные байты — cp1251, частая Apache-мисконфигурация 2000-х)
+# "успешно" декодируется в мозаику: кириллица cp1251 (0xC0-0xFF) ложится в узкую полосу
+# латиницы с диакритикой. `_classify_text` не находит в мозаике ни одного русского стоп-слова —
+# русское казино тихо проходит как чистая история (аудит 2026-07-18).
+
+def test_mojibake_from_wrong_header_charset_falls_back_to_cp1251():
+    """HTTP-заголовок соврал `charset=iso-8859-1`, реальные байты — cp1251. `_decode` не имеет
+    права поверить успешному (но лживому) latin-1-декодированию — обязан пойти дальше по цепочке
+    фолбэков и вернуть читаемую кириллицу, а не мозаику."""
+    raw = "Вулкан казино: игровые автоматы".encode("cp1251")
+    out = _decode(raw, "iso-8859-1")
+    assert "казино" in out, f"мозаика не распознана, вернулся мусор: {out!r}"
+
+
+def test_mojibake_from_wrong_meta_charset_falls_back_to_cp1251():
+    """Та же ловушка, но кодировка приходит не из HTTP-заголовка, а из `<meta charset=...>`
+    самой страницы — второй источник кандидата в `_decode`, должен проверяться так же."""
+    body = ("<html><head><meta charset=\"cp1252\"></head><body>"
+            "<h1>Вулкан казино</h1><p>Игровые автоматы онлайн</p></body></html>")
+    raw = body.encode("cp1251")
+    out = _decode(raw, None)
+    assert "казино" in out, f"мозаика не распознана, вернулся мусор: {out!r}"
+
+
+def test_legitimate_latin_text_is_not_flagged_as_mojibake():
+    """Обратная сторона: настоящий французский/немецкий текст (реалистичная плотность
+    диакритики, не искусственно сгущённая) обязан декодироваться КАК ЕСТЬ через latin-1 —
+    эвристика не имеет права принять его за мозаику и утащить в cp1251-фолбэк (тот дал бы
+    другой мусор на этих же байтах)."""
+    text = ("Bienvenue sur notre site. Nous proposons des produits de qualité pour toute la "
+            "famille, avec une livraison rapide partout en France. Découvrez nos offres "
+            "spéciales dès aujourd'hui.")
+    raw = text.encode("latin-1")
+    assert _decode(raw, "iso-8859-1") == text
+
+
 # ---- F4: topic_switch — флаг-призрак ----
 
 def test_topic_switch_key_is_gone_from_prior_flags():
