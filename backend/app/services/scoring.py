@@ -35,6 +35,28 @@ def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def _jsonable(v):
+    """Рекурсивно приводит sig к JSON-совместимому виду для записи в domain_score_log.
+
+    sig несёт РЕАЛЬНЫЕ datetime-объекты (`acquirability_checked_at`, `whois_created`,
+    `first_seen` — whois/Wayback отдают их как datetime, не строки), а JSONB на этом
+    стеке (и Postgres-адаптер, и sqlite-shim в conftest.py) сериализует через голый
+    `json.dumps` без кастомного encoder'а — TypeError на первом же datetime. Не
+    мутирует исходный sig: setattr(d, col, ...) чуть выше по коду в score_domain()
+    уже забрал из него настоящие datetime-значения для колонок Domain, им нужен
+    именно datetime, а не строка."""
+    from datetime import date, datetime
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    return v
+
+
 # Чипы воронки в панели: ключ -> подпись. Порядок = порядок проверок в _funnel.
 # Ahrefs шестой: он платный (капча за штуку) и при max_ahrefs_per_run=0 помечается skip —
 # честнее показать выключенную стадию, чем спрятать её.
@@ -563,6 +585,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
     from datetime import datetime, timezone
     from app.db import SessionLocal
     from app.models.domain import Domain
+    from app.models.domain_score_log import DomainScoreLog
     from app.services.settings import get_settings
 
     st = get_settings()
@@ -592,7 +615,9 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             # один шанс, иначе домен никогда не увидит собственного дропа.
             if sig.get("acquirability_checked_at"):
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
-                db.commit()
+            db.add(DomainScoreLog(domain_id=d.id, run_id=run, outcome="unresolved",
+                                  reject_reason=None, score=None, sig=_jsonable(sig)))
+            db.commit()
             return {"domain": d.domain, "status": d.status, "unresolved": True,
                     "why": sig.get("unresolved_why"), "errors": sig.get("errors", [])}
 
@@ -671,6 +696,10 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         # Ставим только здесь: unresolved-возврат выше (whois не разобрал/бюджет исчерпан)
         # оставляет домен discovered — воронка НЕ дошла до решения, значит и не "оценила" его.
         d.scored_at = datetime.now(timezone.utc)
+        db.add(DomainScoreLog(
+            domain_id=d.id, run_id=run,
+            outcome="rejected" if result["status"] == "rejected" else "scored",
+            reject_reason=d.reject_reason, score=result["score"], sig=_jsonable(sig)))
         db.commit()
         return {"domain": d.domain, **result, "reject_reason": d.reject_reason,
                 "errors": sig.get("errors", [])}

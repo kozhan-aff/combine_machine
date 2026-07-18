@@ -22,10 +22,12 @@ import app.models.monitoring
 import app.models.settings
 import app.models.autonomy
 import app.models.job
+import app.models.domain_score_log
 # reference the modules so their table-registration side effect (create_all needs
 # every table, incl. index_history from publish.check_index) isn't seen as a dead import
 _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring,
-                    app.models.settings, app.models.autonomy, app.models.job)
+                    app.models.settings, app.models.autonomy, app.models.job,
+                    app.models.domain_score_log)
 
 
 @compiles(JSONB, "sqlite")
