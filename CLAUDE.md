@@ -87,7 +87,41 @@ docker compose run --rm backend alembic upgrade head
 **Note:** Tests are hermetic (autouse-fixture `_no_live_network`,
 `backend/tests/conftest.py:47`, blocks network). Live box testing on `192.168.1.77`.
 
-## Текущее состояние (2026-07-17)
+## Текущее состояние (2026-07-18)
+
+**Полный мультиагентный дебаг проекта закрыт.** 13 finder-агентов прочитали каждую
+подсистему целиком → 25 сырых находок → адверсариальная верификация двумя независимыми
+скептиками каждая (по умолчанию «опровергнута») → **22 подтверждены** (16 обоими
+скептиками), 3 отклонены как ложные. Целостность цепочки миграций проверена вручную
+(22 ревизии, линейна, одна голова). Лог-план (гитигнорится, локальный) —
+`audit_notes/2026-07-18_full_debug/PLAN.md`.
+
+- **8 находок починены немедленно** (f564fa6): критический денежный баг в backorder
+  (`_billmgr()` при незнакомой форме success-ответа с `money=True` тихо возвращал `[]`
+  вместо `AmbiguousSend` — заказ с неизвестным исходом выглядел пустым), утечка секрета
+  в `/diag`, упавшая целиком стадия свипа не закрывала JobRun как failed, вечный кэш
+  отрицательного контроль-пробинга Spamhaus, невидимый оператору отказ CF-sync, голый
+  500 на таймаут alembic при git-pull, два TOCTOU (attach-offer/reserve-url) на голый
+  500 вместо дружелюбного редиректа, `delete_site()` без проверки конверта ответа.
+- **9 находок (P1-P9) + спутник S13 закрыты той же ночью** subagent-driven-development
+  (implementer + `combine-reviewer` per-task, 0 Critical/Important на КАЖДОЙ): порядок
+  `reject_reason` (`too_young` маскировал `not_acquirable` для снайпнутых не-bid
+  доменов, b23673e); наследование lang/offer_id при дозаполнении страниц сайта
+  (969e5cc); merge-политика discovery — `feed_flags` всегда свежие, source/price
+  апгрейдятся до backorder (7e31d28); read-then-set SSL, `strict` больше не
+  откатывается (b34cc57); CF-write-гейт на реальную мутацию `/sites/{id}/provision`
+  (be9afc7); детект mojibake для тотальных single-byte кодеков в разборе истории
+  Wayback (85e51b1); подпись aaPanel пересчитывается на каждый retry, не одну на всю
+  серию (af53b2e); явный-URL git pull/fetch обновляет `refs/remotes/origin/main`
+  (a862f14); тариф backorder — по зоне домена, не единый .RU всем (2b8431e);
+  `optimizator.balance()` не маскирует отсутствие поля под 0 ₽ (77bb5f4).
+- **P10 (optimizator `prices(zone)` не сверяет зону ответа для punycode `.РФ`)
+  ЗАБЛОКИРОВАН честно** — требует живого пробинга формата (Тред-D дисциплина: не
+  гадать), бокс (`192.168.1.77`) проверен на доступность ТРИЖДЫ за прогон, оба порта
+  (`:9091`/`:8000`) не поднялись ни разу. Живой код `prices()` не тронут.
+- Сьют: 655 → **686 passed**, pyflakes чист на каждом шаге.
+
+## Предыдущее состояние (2026-07-17)
 
 **Тред D закрыт полностью.** Ветки `feat/threadd-safebrowsing-archive` (SafeBrowsing
 hard-reject) и `feat/optimizator-integration` (второй канал выкупа) смержены в `main`
