@@ -137,8 +137,10 @@ def run_discovery() -> int:
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
+    from app.integrations.backorder import zone_of
     from app.models.domain import Domain
     from app.services import jobs
+    from app.services.pricing import cached_backorder_price
     from app.services.settings import get_settings
 
     enabled = get_settings()["sources_enabled"]
@@ -208,7 +210,7 @@ def run_discovery() -> int:
                 acquire_deadline=candidates[n].get("acquire_deadline"),
                 visitors=candidates[n].get("visitors"), tic=candidates[n].get("tic"),
                 acquire_price=(candidates[n].get("price")
-                               or (__import__("app.services.pricing", fromlist=["x"]).cached_backorder_price()
+                               or (cached_backorder_price(zone_of(candidates[n]["domain"]) or ".RU")
                                    if candidates[n].get("source") == "backorder" else None)),
             ) for n in fresh)
             db.commit()

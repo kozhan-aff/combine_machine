@@ -153,10 +153,10 @@ def _no_panel_auth():
 
 @pytest.fixture(autouse=True)
 def _reset_pricing_cache():
-    """Кэш тарифа в pricing.py живёт на процесс (`_TARIFF`), а pytest гоняет всю сессию
-    в одном процессе — без сброса test_refresh_prices_only_backorder (мутирует _TARIFF["price"])
-    протекает в последующие файлы (run_discovery() в test_sources.py увидел бы чужую цену
-    вместо None). Save/restore-стиль, как _no_panel_auth."""
+    """Кэш тарифа в pricing.py живёт на процесс (`_TARIFF`, по зоне: `.RU`/`.РФ`), а pytest
+    гоняет всю сессию в одном процессе — без сброса test_refresh_prices_only_backorder
+    (мутирует `_TARIFF`) протекает в последующие файлы (run_discovery() в test_sources.py
+    увидел бы чужую цену вместо None). Save/restore-стиль, как _no_panel_auth."""
     from app.services import pricing
     saved = dict(pricing._TARIFF)
     yield
