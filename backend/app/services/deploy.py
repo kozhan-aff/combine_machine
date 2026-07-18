@@ -106,7 +106,12 @@ def git_pull() -> dict:
     try:
         old = deploy_status().get("hash", "")
         try:
-            pull = _git(["pull", "--ff-only", _clean_url(), "main"], timeout=120, env=_git_env())
+            # S21 (аудит 2026-07-18): явный URL (не имя remote'а) + голое имя ветки пишет
+            # ТОЛЬКО FETCH_HEAD — refs/remotes/origin/main не обновляется, а именно его
+            # читает deploy_status() для ahead/behind. Явный destination-refspec чинит это,
+            # не меняя поведение мержа (--ff-only по-прежнему мержит из FETCH_HEAD).
+            pull = _git(["pull", "--ff-only", _clean_url(), "+main:refs/remotes/origin/main"],
+                       timeout=120, env=_git_env())
         except FileNotFoundError:
             return {"ok": False, "error": "git не установлен в контейнере — пересобери образ (docker compose build)"}
         if pull.returncode != 0:
@@ -131,7 +136,9 @@ def git_force_pull() -> dict:
         env = _git_env()
         old = deploy_status().get("hash", "")
         try:
-            fetch = _git(["fetch", _clean_url(), "main"], timeout=30, env=env)
+            # S21: тот же явный-URL/refspec фикс, что в git_pull() — иначе refs/remotes/origin/main
+            # не обновится и deploy_status() покажет устаревшие ahead/behind после force-pull.
+            fetch = _git(["fetch", _clean_url(), "+main:refs/remotes/origin/main"], timeout=30, env=env)
         except FileNotFoundError:
             return {"ok": False, "error": "git не установлен в контейнере — пересобери образ (docker compose build)"}
         if fetch.returncode != 0:

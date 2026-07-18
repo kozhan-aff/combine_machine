@@ -144,6 +144,25 @@ def test_no_token(monkeypatch):
         settings.GITHUB_TOKEN = old
 
 
+def test_pull_updates_origin_main_tracking_ref(creds, monkeypatch):
+    """РЕГРЕССИЯ (S21, аудит 2026-07-18). Явный-URL pull без destination-refspec НЕ
+    обновлял refs/remotes/origin/main -> deploy_status() после успешного pull видел
+    устаревший ahead/behind. Проверяем, что refspec явно просит обновить tracking-ref."""
+    router = _patch(monkeypatch, Router(pull_rc=0))
+    deploy.git_pull()
+    pull_call = next(c for c in router.calls if "pull" in c)
+    assert "+main:refs/remotes/origin/main" in pull_call
+
+
+def test_force_pull_updates_origin_main_tracking_ref(creds, monkeypatch):
+    """РЕГРЕССИЯ (S21, аудит 2026-07-18). Тот же баг в git_force_pull(): явный-URL fetch
+    без destination-refspec не обновлял refs/remotes/origin/main."""
+    router = _patch(monkeypatch, Router(fetch_rc=0))
+    deploy.git_force_pull()
+    fetch_call = next(c for c in router.calls if "fetch" in c)
+    assert "+main:refs/remotes/origin/main" in fetch_call
+
+
 def test_single_flight(creds, monkeypatch):
     _patch(monkeypatch, Router())
     deploy._LOCK.acquire()
