@@ -71,6 +71,75 @@ def test_empty_llm_page_is_skipped_not_fatal(monkeypatch):
     assert paths == {"/", "/setup"}           # the empty "/vs" page was skipped
 
 
+# ── S4+S5 (аудит 2026-07-18): дозаполнение наследует lang/offer_id, не резолвит заново ──
+def test_dofill_inherits_lang_not_the_second_call_parameter(monkeypatch):
+    """S4. Первый вызов пишет "/" и "/setup" на lang='ru' (LLM вернул пустое тело для "/vs" —
+    та же осечка, что в test_empty_llm_page_is_skipped_not_fatal). Второй вызов передаёт
+    lang='en' (второй клик в панели / автопилотная стадия generate с дефолтным параметром) —
+    досозданная "/vs" обязана унаследовать 'ru' от уже существующих страниц сайта, а НЕ взять
+    'en' из параметра, иначе сайт получает страницы на двух языках одновременно."""
+    from app.services.content import generate_site
+
+    site_id = _make_site(domain="dofill-lang.ru")
+    oid = _add(Offer(brand="NordVPN", affiliate_link="https://ex.com/nord", active=True))
+    _add(SiteOffer(site_id=site_id, offer_id=oid))
+
+    monkeypatch.setattr(
+        "app.integrations.llm.LlmClient.complete",
+        lambda self, system, prompt, **kw: "" if "против конкурентов" in prompt else "<h2>ok</h2><p>t</p>")
+    assert generate_site(site_id, lang="ru") == 2       # "/vs" skipped (empty LLM output)
+
+    monkeypatch.setattr(
+        "app.integrations.llm.LlmClient.complete",
+        lambda self, system, prompt, **kw: "<h2>vs</h2><p>t</p>")   # now succeeds
+    assert generate_site(site_id, lang="en") == 1        # dofills "/vs" only
+
+    with db.SessionLocal() as s:
+        pages = s.query(Page).filter(Page.site_id == site_id).all()
+    assert {p.url_path for p in pages} == {"/", "/setup", "/vs"}
+    assert all(p.lang == "ru" for p in pages), \
+        "дозаполненная страница унаследовала 'en' от параметра вызова вместо 'ru' сайта"
+
+
+def test_dofill_inherits_offer_not_the_currently_active_one(monkeypatch):
+    """S5. Между первым (частичным) и вторым вызовом generate_site оператор меняет активный
+    оффер сайта. Досозданная страница обязана унаследовать offer_id ПЕРВОГО оффера (тот, под
+    который писались уже существующие страницы), а не «текущий активный» — иначе publish.py
+    склеит один сайт из страниц про два разных бренда."""
+    from app.services.content import generate_site
+
+    site_id = _make_site(domain="dofill-offer.ru")
+    offer_a = _add(Offer(brand="NordVPN", affiliate_link="https://ex.com/nord", active=True))
+    _add(SiteOffer(site_id=site_id, offer_id=offer_a))
+
+    monkeypatch.setattr(
+        "app.integrations.llm.LlmClient.complete",
+        lambda self, system, prompt, **kw: "" if "против конкурентов" in prompt else "<h2>ok</h2><p>t</p>")
+    assert generate_site(site_id, lang="ru") == 2       # "/vs" skipped (empty LLM output)
+
+    # оператор переключает активный оффер сайта на другой бренд ПОСЛЕ частичной генерации
+    with db.SessionLocal() as s:
+        s.query(Offer).filter_by(id=offer_a).first().active = False
+        s.commit()
+    offer_b = _add(Offer(brand="Surfshark", affiliate_link="https://ex.com/surf", active=True))
+    with db.SessionLocal() as s:
+        s.query(SiteOffer).filter_by(site_id=site_id).delete()
+        s.add(SiteOffer(site_id=site_id, offer_id=offer_b))
+        s.commit()
+
+    monkeypatch.setattr(
+        "app.integrations.llm.LlmClient.complete",
+        lambda self, system, prompt, **kw: f"<p>{prompt}</p>")     # echoes brand into the body
+    assert generate_site(site_id, lang="ru") == 1        # dofills "/vs" only
+
+    with db.SessionLocal() as s:
+        pages = s.query(Page).filter(Page.site_id == site_id).all()
+        vs = next(p for p in pages if p.url_path == "/vs")
+    assert all(p.offer_id == offer_a for p in pages), \
+        "дозаполненная страница унаследовала текущий активный оффер вместо оффера сайта"
+    assert "NordVPN" in vs.body and "Surfshark" not in vs.body
+
+
 def test_llm_complete_returns_empty_on_null_or_missing_content(monkeypatch):
     from app.integrations.llm import LlmClient
 

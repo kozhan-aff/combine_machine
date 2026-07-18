@@ -106,20 +106,37 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
         site = db.get(Site, site_id)
         if site is None:
             raise ValueError(f"site {site_id} not found")
-        # тематическая связность: бренд берём из оффера, ПРИВЯЗАННОГО к сайту (как в publish),
-        # иначе контент напишется про один бренд, а ссылка при публикации уйдёт на другой
-        # deterministic order_by(Offer.id): publish (_pick_offer) MUST pick the same offer,
-        # else content is written about one brand and the sponsored link points at another.
-        offer = db.execute(
-            select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
-            .where(SiteOffer.site_id == site_id, Offer.active.is_(True))
-            .order_by(Offer.id).limit(1)
+
+        existing_page = db.execute(
+            select(Page).where(Page.site_id == site_id).order_by(Page.id).limit(1)
         ).scalar_one_or_none()
-        if offer is None:  # fall back to any active offer
+
+        if existing_page is not None:
+            # Дозаполнение (S4/S5, аудит 2026-07-18): сайт уже частично сгенерирован —
+            # наследуем lang/offer от уже существующих страниц, а не резолвим заново.
+            # Иначе повторный вызов (второй клик / автопилотная стадия generate после
+            # LLM-осечки на части спек) может дописать недостающие страницы на другом
+            # языке или под другим брендом, чем уже созданные, — нарушая "один домен =
+            # одно гео/язык" и рассинхронизируя publish.py с телом контента.
+            lang = existing_page.lang
+            offer = db.get(Offer, existing_page.offer_id) if existing_page.offer_id else None
+            brand = offer.brand if offer else (site.niche or "VPN")
+        else:
+            # тематическая связность: бренд берём из оффера, ПРИВЯЗАННОГО к сайту (как в
+            # publish), иначе контент напишется про один бренд, а ссылка при публикации уйдёт
+            # на другой. deterministic order_by(Offer.id): publish (_pick_offer) MUST pick the
+            # same offer, else content is written about one brand and the sponsored link
+            # points at another.
             offer = db.execute(
-                select(Offer).where(Offer.active.is_(True)).order_by(Offer.id).limit(1)
+                select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
+                .where(SiteOffer.site_id == site_id, Offer.active.is_(True))
+                .order_by(Offer.id).limit(1)
             ).scalar_one_or_none()
-        brand = offer.brand if offer else (site.niche or "VPN")
+            if offer is None:  # fall back to any active offer
+                offer = db.execute(
+                    select(Offer).where(Offer.active.is_(True)).order_by(Offer.id).limit(1)
+                ).scalar_one_or_none()
+            brand = offer.brand if offer else (site.niche or "VPN")
 
         # information gain (PLAN §2): подмешиваем реальные факты вертикали, если бренд знаком.
         # Явно переданный vertical_data приоритетнее (напр. свежий фид). Неизвестный бренд -> None.
