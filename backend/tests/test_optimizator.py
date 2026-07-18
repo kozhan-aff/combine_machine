@@ -33,6 +33,13 @@ def test_balance_parses_real_live_format(monkeypatch):
     assert c.balance() == 0
 
 
+def test_balance_returns_none_when_field_missing(monkeypatch):
+    """S13 (аудит 2026-07-18, спутник P10). Раньше `.get("balance") or 0` маскировал
+    отсутствие ключа "balance" под подтверждённый 0 ₽ — неизвестность ≠ факт."""
+    c = _client(monkeypatch, [{"something_else": 1}])
+    assert c.balance() is None
+
+
 def test_prices_parses_real_live_format(monkeypatch):
     c = _client(monkeypatch, [{"domain": "RU", "price_registration": 179, "price_renewal": 199}])
     out = c.prices("ru")

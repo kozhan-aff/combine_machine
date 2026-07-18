@@ -70,8 +70,12 @@ class OptimizatorClient(BaseClient):
         self._get("balance")
         return True
 
-    def balance(self) -> float:
-        return float(self._get("balance").get("balance") or 0)
+    def balance(self) -> float | None:
+        """None — поле "balance" отсутствует в ответе (неизвестность), НЕ то же самое,
+        что подтверждённый 0 ₽ (было `.get("balance") or 0`, маскировало отсутствие
+        ключа под факт — см. BackorderClient.balance())."""
+        b = self._get("balance").get("balance")
+        return float(b) if b is not None else None
 
     def prices(self, zone: str = "ru") -> dict:
         return self._get("prices", domain=zone)
