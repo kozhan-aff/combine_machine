@@ -447,7 +447,7 @@ def _fake_clients() -> dict:
             return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
                     "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": _WB()}
+            "wayback": _WB(), "tci": type("T", (), {"handles": lambda self, d: False})()}
 
 
 def test_score_pending_isolates_failure(monkeypatch):

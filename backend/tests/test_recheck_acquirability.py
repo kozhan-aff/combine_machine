@@ -15,6 +15,21 @@ from app.services import scoring
 NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _tci_disabled(monkeypatch):
+    """Этот файл целиком написан против A-Parser (`_whois()` монкейтчит именно
+    `AParserClient.whois_probe`, а `recheck_acquirability()` строит клиентов сама через
+    `_make_clients()` — внедрить фейковый `clients` словарь ему было бы некуда). Домены здесь
+    все .ru, и настоящий `TciWhoisClient` их бы "handles()"'ил — реальный сокет упёрся бы в
+    `_no_live_network` (BaseException) прямо из фонового потока (`/run/recheck`), а её не
+    ловит ни `except Exception` в recheck_acquirability, ни `_drain()` в jobs.py (нарочно, см.
+    conftest.py) — и роняет ТЕСТОВЫЙ ХАРНЕСС каскадом на соседние файлы. `handles=False`
+    заставляет маршрутизатор всегда падать в ветку aparser — ровно как было ДО появления TCI,
+    поведение тестов не меняется."""
+    from app.integrations.whois_tci import TciWhoisClient
+    monkeypatch.setattr(TciWhoisClient, "handles", lambda self, domain: False)
+
+
 def _add(**kw):
     d = Domain(source="backorder", **kw)
     with db.SessionLocal() as s:
@@ -304,6 +319,7 @@ def test_scoring_stamps_acquirability_so_recheck_does_not_redo_it(sqlite_db, mon
         "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
         "blacklist": type("B", (), {"is_listed": lambda self, d: False})(),
         "searxng": type("S", (), {"indexed_echo": lambda self, d: False})(),
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     scoring.score_domain(did, clients)
     with db.SessionLocal() as s:

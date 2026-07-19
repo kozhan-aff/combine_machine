@@ -9,6 +9,7 @@ import math
 from datetime import timedelta
 
 from app.services import scoring_config as cfg
+from app.services import whois as whois_router
 
 # Запас после дедлайна дропа, прежде чем считать домен потерянным навсегда.
 #
@@ -327,9 +328,10 @@ def _make_clients() -> dict:
     from app.integrations.blacklist import BlacklistClient
     from app.integrations.searxng import SearxngClient
     from app.integrations.aparser import AParserClient
+    from app.integrations.whois_tci import TciWhoisClient
     return {
         "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
-        "searxng": SearxngClient(), "aparser": AParserClient(),
+        "searxng": SearxngClient(), "aparser": AParserClient(), "tci": TciWhoisClient(),
     }
 
 
@@ -433,7 +435,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
     try:
         if whois_budget is not None:
             whois_budget[0] -= 1
-        pr = c["aparser"].whois_probe(d.domain)
+        pr = whois_router.probe(d.domain, c)
     except Exception as e:  # noqa: BLE001
         sig["errors"].append(f"whois:{type(e).__name__}")
         if d.lane != "bid":                         # сырому источнику whois нужен для лейна
@@ -448,6 +450,7 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
     # (а подсказка «N не сверялись» краснеет сразу после Score).
     if pr.get("available") is not None:
         sig["acquirability_checked_at"] = now
+    sig["whois_source"] = pr.get("whois_source")   # чем судили: tci|aparser|aparser_fallback|None
 
     wc = pr.get("created")
     sig["whois_created"] = wc
@@ -886,7 +889,7 @@ def recheck_acquirability(limit: int = 200) -> dict:
             now = datetime.now(timezone.utc)
             out["checked"] += 1                           # вызов состоялся — бюджет потрачен
             try:
-                pr = c["aparser"].whois_probe(name)
+                pr = whois_router.probe(name, c)
             except Exception:  # noqa: BLE001 — падение одного домена не топит батч
                 logging.getLogger(__name__).exception("whois-перепроверка %s упала", name)
                 out["unknown"] += 1

@@ -36,7 +36,8 @@ def _clients(wayback, created):
         def is_blacklisted(self, dom): return False
     class _S:
         def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
+            "tci": type("T", (), {"handles": lambda self, d: False})()}
 
 
 # ---- вердикт ----

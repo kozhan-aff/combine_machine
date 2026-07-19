@@ -140,6 +140,7 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": False, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     out = scoring.score_domain(did, clients=clients)
     assert out["reject_reason"] is None and out["status"] in ("approved", "scored")
@@ -448,6 +449,7 @@ def _clients(**over):
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": True, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     return {**c, **over}
 

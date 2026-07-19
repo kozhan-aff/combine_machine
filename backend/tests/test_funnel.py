@@ -48,7 +48,7 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback}
+            "wayback": wayback, "tci": type("T", (), {"handles": lambda self, d: False})()}
 
 
 def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
@@ -67,7 +67,7 @@ def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wb}
+            "wayback": wb, "tci": type("T", (), {"handles": lambda self, d: False})()}
 
 
 def _id_of(domain: str):

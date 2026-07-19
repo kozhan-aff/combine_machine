@@ -58,6 +58,7 @@ def _survives_to_score(whois_created) -> dict:
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "wayback": _CleanWayback(),
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
 
 
@@ -118,7 +119,8 @@ def test_early_t0_reject_does_not_erase_saved_evidence():
 
     guard = _MustNotBeCalled()
     clients = {"aparser": guard, "rkn": guard, "blacklist": guard, "searxng": guard,
-               "wayback": guard}
+               "wayback": guard,
+               "tci": type("T", (), {"handles": lambda self, d: False})()}
 
     out = scoring.score_domain(did, clients=clients)
 

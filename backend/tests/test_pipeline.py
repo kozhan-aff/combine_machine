@@ -55,7 +55,7 @@ def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
             return wb_flags or {"prior_flags": {}, "wayback_checked": True,
                                 "first_seen": None, "age_years": 10.0}
     return {"aparser": _W(), "rkn": _R(), "blacklist": _Bl(), "searxng": _S(),
-            "wayback": _Wb()}
+            "wayback": _Wb(), "tci": type("T", (), {"handles": lambda self, d: False})()}
 
 
 def test_scoring_persists_and_jsonb_roundtrips():
