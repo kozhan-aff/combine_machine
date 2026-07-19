@@ -691,7 +691,11 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                              "sampled": _kept("sampled"),
                              # 'whois' | 'wayback' | None — по нему blind_reason выбирает,
                              # ЧТО именно осталось непроверенным (возраст или только занятость)
-                             "age_source": _kept("age_source")}
+                             "age_source": _kept("age_source"),
+                             # 'tci' | 'aparser' | 'aparser_fallback' | None — ЧЕМ судили
+                             # приобретаемость в этом прогоне (ревью Задачи 1, 2026-07-19):
+                             # раньше whois_source терялся в sig и до оператора не доходил.
+                             "whois_source": _kept("whois_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку до решения — до этой колонки узнать было

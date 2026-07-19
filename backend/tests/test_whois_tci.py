@@ -56,6 +56,23 @@ def test_handles_only_tci_zones():
     assert c.handles("example.net") is False
 
 
+def test_handles_rejects_third_level_domains():
+    """CRITICAL (ревью 2026-07-19): TCI обслуживает СТРОГО второй уровень. `endswith`
+    по хвосту пропускал бы третий уровень в TCI — а там 'No entries found' дословно как
+    у свободного .ru, хотя домен ЗАНЯТ (поддомен под чужой делегированной зоной). Живая
+    проба: shop.com.ru/www.msk.ru -> 'No entries found'; сами com.ru/msk.ru/pp.ru/spb.ru
+    — валидные домены ВТОРОГО уровня (полная запись) — их занижать до TLD-суффикса нельзя."""
+    c = TciWhoisClient()
+    assert c.handles("shop.com.ru") is False
+    assert c.handles("www.msk.ru") is False
+    assert c.handles("x.pp.ru") is False
+    assert c.handles("y.spb.ru") is False
+    assert c.handles("com.ru") is True     # сам по себе валидный домен второго уровня в зоне ru
+    assert c.handles("msk.ru") is True
+    assert c.handles("pp.ru") is True
+    assert c.handles("spb.ru") is True
+
+
 # --- маршрутизатор ---------------------------------------------------------------
 
 class _FakeTci:
@@ -109,3 +126,55 @@ def test_router_falls_back_visibly_when_tci_fails():
     assert r["whois_source"] == "aparser_fallback"
     assert ap.calls == ["clara-c.ru"]
     assert r["free_date"] is None
+
+
+# --- воронка целиком: _funnel -> whois.probe -> TCI, без единого касания A-Parser ------------
+
+class _FunnelWayback:
+    """Чистая старая история — домен доживает до approved, но это не суть теста."""
+    def classify_history(self, domain):
+        return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
+                "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
+
+
+def _mk_ru_domain(**kw):
+    import app.db as db
+    from app.models.domain import Domain
+    with db.SessionLocal() as s:
+        d = Domain(domain=kw.pop("domain", "tcigood.ru"), source=kw.pop("source", "cctld"),
+                   status="discovered", **kw)
+        s.add(d); s.commit(); s.refresh(d)
+        return d.id
+
+
+def test_funnel_uses_tci_for_ru_without_touching_aparser():
+    """IMPORTANT (ревью 2026-07-19): нулевое интеграционное покрытие связки
+    `_funnel -> whois.probe -> TCI` — все фейки в остальных тестовых файлах ставят
+    `handles -> False`. Опечатка в ключе "tci" (services/scoring.py::_make_clients)
+    отключила бы маршрутизацию целиком, и сьют остался бы зелёным. Требование спеки
+    §Тестирование: домен .ru проходит T1 БЕЗ единого обращения к A-Parser."""
+    from datetime import datetime, timedelta, timezone
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+
+    did = _mk_ru_domain(domain="tcigood.ru", referring_domains=3000, lane="bid")
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    tci = _FakeTci({"available": False, "created": old, "free_date": None})
+    ap = _FakeAparser()
+    clients = {
+        "aparser": ap, "tci": tci,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": _FunnelWayback(),
+    }
+    out = scoring.score_domain(did, clients=clients)
+
+    assert ap.calls == []                       # A-Parser не звали — TCI закрыл whois целиком
+    assert tci.calls == ["tcigood.ru"]
+    assert out["status"] in ("approved", "scored") and out["reject_reason"] is None
+
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.score_breakdown["whois_source"] == "tci"      # видно оператору после фикса Задачи 1

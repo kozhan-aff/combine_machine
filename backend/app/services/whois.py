@@ -4,6 +4,9 @@
 
 См. docs/superpowers/specs/2026-07-19-tci-whois-design.md.
 """
+import logging
+
+_log = logging.getLogger(__name__)
 
 
 def probe(domain: str, clients: dict) -> dict:
@@ -16,8 +19,15 @@ def probe(domain: str, clients: dict) -> dict:
     if tci is not None and tci.handles(domain):
         try:
             return {**tci.probe(domain), "whois_source": "tci"}
-        except Exception:                      # noqa: BLE001 — сбой канала, не приговор домену
-            source = "aparser_fallback"        # видно оператору в score_breakdown
+        except Exception as e:                # noqa: BLE001 — сбой канала, не приговор домену
+            # Безусловный след сбоя — только этот лог. score_breakdown.whois_source
+            # получает "aparser_fallback" ТОЛЬКО когда домен проходит полный _funnel
+            # (scoring.py кладёт его туда через whitelist-хелпер _kept) — а
+            # recheck_acquirability whois_source из ответа вообще не читает, там
+            # источник сбоя виден исключительно здесь.
+            _log.warning("TCI whois сбой для %s (%s: %s) — фолбэк на A-Parser",
+                         domain, type(e).__name__, e)
+            source = "aparser_fallback"
         pr = clients["aparser"].whois_probe(domain)
     else:
         source = "aparser"

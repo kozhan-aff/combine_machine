@@ -8,6 +8,15 @@ docs/superpowers/specs/2026-07-19-tci-whois-design.md.
 ЖЁСТКО по зоне: на не-TCI домен (example.com) сервер отвечает 'No entries found'
 дословно как на свободный .ru — наивная маршрутизация пометила бы каждый
 занятый .com свободным.
+
+Зачем СТРОГО по второму уровню (не `endswith` по хвосту): TCI обслуживает ТОЛЬКО
+домены второго уровня. Живая проба 2026-07-19: `shop.com.ru`/`www.msk.ru` (третий
+уровень) отвечают 'No entries found' — дословно как свободный .ru, хотя оба ЗАНЯТЫ
+(это поддомены под чужой делегированной зоной); а `com.ru`/`msk.ru`/`pp.ru`/`spb.ru`
+САМИ — валидные домены второго уровня (зарегистрированы, отвечают полной записью,
+как и `yandex.ru`) — их нельзя путать с TLD-суффиксом. Тот же класс ловушки, что
+example.com, но уровнем ниже: наивный `endswith` отдал бы занятый `shop.com.ru` как
+свободный (available=True) -> вердикт free -> в очередь выкупа. Денежный риск.
 """
 import re
 import socket
@@ -16,6 +25,7 @@ from datetime import date, datetime, timezone
 _HOST = "whois.tcinet.ru"
 _PORT = 43
 _TIMEOUT = 10.0
+_MAX_RESPONSE = 64 * 1024  # потолок объёма ответа — медленный/зависший сервер не держит поток вечно
 
 # Зоны, которые обслуживает этот сервер (punycode-хвосты). Всё остальное — A-Parser.
 _ZONES = ("ru", "su", "xn--p1ai")
@@ -67,8 +77,13 @@ class TciWhoisClient:
     """Сырой TCP на порт 43. httpx здесь не при чём — whois не HTTP."""
 
     def handles(self, domain: str) -> bool:
+        """True ТОЛЬКО для домена ВТОРОГО уровня в одной из `_ZONES` (см. модульный
+        докстринг): `len(parts) == 2` считает МЕТКИ, а не хвост строки — `endswith`
+        пропускал бы `shop.com.ru`/`bar.msk.ru` (третий уровень, TCI их не обслуживает
+        и путает с свободными) в TCI."""
         d = _punycode(domain)
-        return any(d.endswith("." + z) for z in _ZONES)
+        parts = d.split(".")
+        return len(parts) == 2 and parts[1] in _ZONES
 
     def query(self, domain: str) -> str:
         """Сырой ответ сервера. Сетевой сбой ПРОБРАСЫВАЕТСЯ — судит вызывающий
@@ -77,11 +92,13 @@ class TciWhoisClient:
         with socket.create_connection((_HOST, _PORT), timeout=_TIMEOUT) as s:
             s.sendall((d + "\r\n").encode("ascii"))
             chunks = []
-            while True:
+            total = 0
+            while total < _MAX_RESPONSE:
                 c = s.recv(4096)
                 if not c:
                     break
                 chunks.append(c)
+                total += len(c)
         return b"".join(chunks).decode("utf-8", "replace")
 
     def probe(self, domain: str) -> dict:

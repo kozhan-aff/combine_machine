@@ -66,6 +66,11 @@ def _spec():
          lambda: __import__("app.integrations.rkn", fromlist=["x"]).RknClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
+        # Не critical: TCI — оптимизация (37мс вместо секунд A-Parser) для .ru/.рф/.su, не
+        # единственный путь к whois — сбой молча фолбэчит на A-Parser (services/whois.py),
+        # воронка не встаёт. Публичный сервис координатора зон, кред не нужен.
+        ("tci", "TCI whois", "M1 · whois .ru/.рф/.su (мимо A-Parser)", "1", "M1", False,
+         lambda: __import__("app.integrations.whois_tci", fromlist=["x"]).TciWhoisClient().ping()),
         ("blacklist", "Spamhaus/SURBL", "M1 · спам-лист", "1", "M1", False,
          lambda: __import__("app.integrations.blacklist", fromlist=["x"]).BlacklistClient().ping()),
         ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
