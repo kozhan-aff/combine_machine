@@ -66,3 +66,39 @@ def test_repeated_scoring_appends_not_overwrites(monkeypatch):
         rows = s.execute(select(DomainScoreLog).where(
             DomainScoreLog.domain_id == did)).scalars().all()
         assert len(rows) == 2
+
+
+def test_score_history_endpoint_returns_newest_first(client):
+    did = _seed_domain()
+    with db.SessionLocal() as s:
+        s.add(DomainScoreLog(domain_id=did, run_id=None, outcome="rejected",
+                             reject_reason="low_rd", score=0.0, sig={"a": 1}))
+        s.commit()
+    with db.SessionLocal() as s:
+        s.add(DomainScoreLog(domain_id=did, run_id=None, outcome="scored",
+                             reject_reason=None, score=0.8, sig={"b": 2}))
+        s.commit()
+    r = client.get(f"/api/domains/{did}/score-history")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 2
+    assert body[0]["outcome"] == "scored"     # новая запись первая
+    assert body[1]["outcome"] == "rejected"
+
+
+def test_score_history_endpoint_empty_for_domain_without_history(client):
+    did = _seed_domain()
+    r = client.get(f"/api/domains/{did}/score-history")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_score_history_endpoint_respects_limit(client):
+    did = _seed_domain()
+    with db.SessionLocal() as s:
+        for i in range(3):
+            s.add(DomainScoreLog(domain_id=did, run_id=None, outcome="rejected",
+                                 reject_reason="low_rd", score=0.0, sig={}))
+        s.commit()
+    r = client.get(f"/api/domains/{did}/score-history?limit=2")
+    assert len(r.json()) == 2

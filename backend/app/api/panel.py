@@ -671,6 +671,26 @@ def jobs_live():
     }))
 
 
+@router.get("/api/domains/{domain_id}/score-history")
+def domain_score_history(domain_id: int, limit: int = 50):
+    """История решений score_domain() по домену — новые сверху. Append-only лог
+    (domain_score_log), не перезаписывается на рескоре, в отличие от
+    Domain.score_breakdown (последний снимок для UI-бейджей)."""
+    from fastapi.responses import JSONResponse
+    from app.models.domain_score_log import DomainScoreLog
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(DomainScoreLog).where(DomainScoreLog.domain_id == domain_id)
+            .order_by(DomainScoreLog.created_at.desc()).limit(limit)
+        ).scalars().all()
+        return JSONResponse(jsonable_encoder([{
+            "id": r.id, "run_id": r.run_id, "outcome": r.outcome,
+            "reject_reason": r.reject_reason, "score": r.score, "sig": r.sig,
+            "created_at": r.created_at,
+        } for r in rows]))
+
+
 @router.post("/domains/{domain_id}/score")
 def score_one_action(domain_id: int):
     from app.services import scoring
