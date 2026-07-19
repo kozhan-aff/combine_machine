@@ -74,16 +74,31 @@ def _parse(text: str) -> dict:
 
 
 class TciWhoisClient:
-    """Сырой TCP на порт 43. httpx здесь не при чём — whois не HTTP."""
+    """Сырой TCP на порт 43. httpx здесь не при чём — whois не HTTP.
+
+    `consecutive_failures` — только счётчик подряд идущих сбоев `probe()`, чистые
+    данные без решения: ВЕДЁТ его (инкремент/сброс) и СУДИТ по нему (когда считать
+    канал мёртвым на этот прогон) вызывающий код (`services/whois.probe` — конвенция
+    проекта «integrations/ = только транспорт, логика в services/», это её выбор
+    канала, не транспорта). Инстанс создаётся заново на каждый прогон воронки
+    (`scoring._make_clients()`), поэтому счётчик физически не может пережить один
+    свип — отдельного сброса между прогонами не нужно."""
+
+    def __init__(self):
+        self.consecutive_failures = 0
 
     def handles(self, domain: str) -> bool:
         """True ТОЛЬКО для домена ВТОРОГО уровня в одной из `_ZONES` (см. модульный
         докстринг): `len(parts) == 2` считает МЕТКИ, а не хвост строки — `endswith`
         пропускал бы `shop.com.ru`/`bar.msk.ru` (третий уровень, TCI их не обслуживает
-        и путает с свободными) в TCI."""
+        и путает с свободными) в TCI. `all(parts)` режет пустые метки (`.ru`) — на
+        них `_punycode` бросает `UnicodeError` (label empty), фолбэк отдаёт строку
+        как есть, и `split` даёт `['', 'ru']`, что без этой проверки засчиталось бы
+        валидным доменом второго уровня (ответ TCI на такой мусор безопасен —
+        'Invalid request.' -> available=None, но незачем стучаться в сеть впустую)."""
         d = _punycode(domain)
         parts = d.split(".")
-        return len(parts) == 2 and parts[1] in _ZONES
+        return len(parts) == 2 and all(parts) and parts[1] in _ZONES
 
     def query(self, domain: str) -> str:
         """Сырой ответ сервера. Сетевой сбой ПРОБРАСЫВАЕТСЯ — судит вызывающий

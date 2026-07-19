@@ -56,6 +56,17 @@ def test_handles_only_tci_zones():
     assert c.handles("example.net") is False
 
 
+def test_handles_rejects_empty_label():
+    """MINOR (повторное ревью 2026-07-20): пустая метка перед точкой (".ru") проходила
+    бы `handles` как валидный домен второго уровня — `_punycode` на "label empty"
+    бросает UnicodeError, фолбэк отдаёт строку как есть, `split` даёт ['', 'ru'].
+    Направление безопасное (TCI ответит 'Invalid request.' -> available=None), но
+    стучаться в сеть с мусором незачем — режем на `handles()`."""
+    c = TciWhoisClient()
+    assert c.handles(".ru") is False
+    assert c.handles(".su") is False
+
+
 def test_handles_rejects_third_level_domains():
     """CRITICAL (ревью 2026-07-19): TCI обслуживает СТРОГО второй уровень. `endswith`
     по хвосту пропускал бы третий уровень в TCI — а там 'No entries found' дословно как
@@ -128,6 +139,70 @@ def test_router_falls_back_visibly_when_tci_fails():
     assert r["free_date"] is None
 
 
+class _FlakyTci:
+    """Фейк с настраиваемым исходом НА КАЖДЫЙ вызов (в отличие от `_FakeTci`, у
+    которого `boom` фиксирован на весь фейк) — нужен тестам предохранителя, где
+    сбой/успех чередуются по заранее заданному списку."""
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = []
+
+    def handles(self, domain):
+        return True
+
+    def probe(self, domain):
+        self.calls.append(domain)
+        outcome = self._outcomes.pop(0)
+        if outcome == "boom":
+            raise OSError("соединение отклонено")
+        return outcome
+
+
+_OK = {"available": False, "created": None, "free_date": None}
+
+
+def test_circuit_breaker_skips_tci_after_three_consecutive_failures():
+    """IMPORTANT 1 (повторное ревью 2026-07-20): блэкхол на 43/tcp (пакеты дропаются,
+    не connection refused — типично для фильтрации исходящего 43/tcp на боксе
+    Windows+Docker Desktop) платил бы полным _TIMEOUT на КАЖДЫЙ .ru-домен и ВСЁ РАВНО
+    уходил в A-Parser — на капе max_whois_per_run=200 это ~33 минуты чистого ожидания
+    за прогон. После 3 сбоев ПОДРЯД предохранитель обязан сработать: четвёртый домен
+    уходит в A-Parser МИНУЯ tci.probe() вообще (список исходов намеренно ровно из 3
+    элементов — если бы предохранитель не сработал, 4-й вызов уронил бы тест
+    IndexError'ом на пустом списке)."""
+    from app.services import whois
+    tci = _FlakyTci(["boom", "boom", "boom"])
+    ap = _FakeAparser()
+    clients = {"tci": tci, "aparser": ap}
+
+    for i in range(3):
+        r = whois.probe(f"fail{i}.ru", clients)
+        assert r["whois_source"] == "aparser_fallback"
+    assert len(tci.calls) == 3
+
+    r = whois.probe("fourth.ru", clients)
+    assert r["whois_source"] == "aparser_fallback"
+    assert len(tci.calls) == 3     # предохранитель сработал — tci.probe() на 4-й домен НЕ звали
+    assert ap.calls == ["fail0.ru", "fail1.ru", "fail2.ru", "fourth.ru"]
+
+
+def test_circuit_breaker_resets_on_success_between_failures():
+    """Успешный ответ TCI между сбоями сбрасывает счётчик — предохранитель не должен
+    срабатывать раньше времени на череде "2 сбоя / успех / 2 сбоя" (всего 4 сбоя,
+    но НИ РАЗУ не подряд 3)."""
+    from app.services import whois
+    tci = _FlakyTci(["boom", "boom", _OK, "boom", "boom"])
+    ap = _FakeAparser()
+    clients = {"tci": tci, "aparser": ap}
+
+    assert whois.probe("a.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 1
+    assert whois.probe("b.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 2
+    assert whois.probe("c.ru", clients)["whois_source"] == "tci"                # успех -> сброс
+    assert whois.probe("d.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 1 (заново)
+    assert whois.probe("e.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 2 (заново)
+    assert len(tci.calls) == 5     # предохранитель НЕ сработал — до 3 подряд не дошли ни разу
+
+
 # --- воронка целиком: _funnel -> whois.probe -> TCI, без единого касания A-Parser ------------
 
 class _FunnelWayback:
@@ -178,3 +253,39 @@ def test_funnel_uses_tci_for_ru_without_touching_aparser():
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
     assert d.score_breakdown["whois_source"] == "tci"      # видно оператору после фикса Задачи 1
+
+
+def test_funnel_whois_decides_acquirability_for_non_bid_domain():
+    """MINOR 2 (повторное ревью 2026-07-20): тест выше идёт по lane="bid", где для
+    bid-лейна приобретаемость берётся из ИСТОЧНИКА (backorder), а не из whois — T1
+    короткозамкнут лейном (см. `_funnel`), ответ TCI до `acquirability_verdict` не
+    доходит. Именно денежный путь, ради которого чинился CRITICAL прошлого ревью
+    (TCI сказал available=True -> вердикт "free" -> домен в очередь выкупа), сквозным
+    тестом не был закрыт. Здесь источник cctld БЕЗ лейна (discovery его не проставляет
+    сырым источникам) — acquirability_verdict реально читает ответ TCI."""
+    from datetime import datetime, timedelta, timezone
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+
+    did = _mk_ru_domain(domain="tcifree.ru", referring_domains=3000)   # lane не задан (NULL)
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
+    tci = _FakeTci({"available": True, "created": old, "free_date": None})
+    ap = _FakeAparser()
+    clients = {
+        "aparser": ap, "tci": tci,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": _FunnelWayback(),
+    }
+    out = scoring.score_domain(did, clients=clients)
+
+    assert ap.calls == []                       # A-Parser не звали — TCI закрыл whois целиком
+    assert tci.calls == ["tcifree.ru"]
+    assert out["status"] in ("approved", "scored") and out["reject_reason"] is None
+
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.lane == "free"                                 # приобретаемость решил whois, не источник
+    assert d.score_breakdown["whois_source"] == "tci"
