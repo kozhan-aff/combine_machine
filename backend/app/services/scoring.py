@@ -409,6 +409,21 @@ def scorable(now):
     )
 
 
+def _deadline_from_whois(existing, pr: dict):
+    """Дедлайн выкупа из whois free-date, ТОЛЬКО если его ещё нет.
+
+    None = «не знаем», а известный дедлайн из фида backorder приходит вместе с
+    лейном и ценой — он авторитетнее и перезаписи не подлежит (инвариант
+    проекта: None никогда не затирает проверенное значение)."""
+    from datetime import datetime, time, timezone
+    if existing is not None:
+        return existing
+    fd = pr.get("free_date")
+    if fd is None:
+        return None
+    return datetime.combine(fd, time.min, tzinfo=timezone.utc)
+
+
 def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
@@ -451,6 +466,11 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
     if pr.get("available") is not None:
         sig["acquirability_checked_at"] = now
     sig["whois_source"] = pr.get("whois_source")   # чем судили: tci|aparser|aparser_fallback|None
+
+    # free-date (TCI) закрывает пустой дедлайн ДО вердикта приобретаемости — иначе
+    # домен без даты дропа ещё один цикл судится по старому правилу (unknown/taken-
+    # без-даты). Известный дедлайн (backorder: лейн+цена) не трогаем — см. docstring.
+    d.acquire_deadline = _deadline_from_whois(d.acquire_deadline, pr)
 
     wc = pr.get("created")
     sig["whois_created"] = wc

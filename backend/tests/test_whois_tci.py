@@ -289,3 +289,19 @@ def test_funnel_whois_decides_acquirability_for_non_bid_domain():
         d = s.get(Domain, did)
     assert d.lane == "free"                                 # приобретаемость решил whois, не источник
     assert d.score_breakdown["whois_source"] == "tci"
+
+
+# --- Задача 2: free-date заполняет пустой acquire_deadline -----------------------------------
+
+def test_free_date_fills_missing_deadline_only():
+    """free-date заполняет ПУСТОЙ acquire_deadline. Уже известный дедлайн (из
+    фида backorder — источник с ценой и лейном) НЕ перезаписывается."""
+    from datetime import date, datetime, timezone
+    from app.services import scoring
+
+    known = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for existing, expect_day in ((None, 21), (known, 1)):
+        pr = {"available": False, "created": None,
+              "free_date": date(2026, 7, 21), "whois_source": "tci"}
+        got = scoring._deadline_from_whois(existing, pr)
+        assert got.day == expect_day
