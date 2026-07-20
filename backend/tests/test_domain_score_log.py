@@ -15,9 +15,20 @@ def _seed_domain(**kw) -> int:
         return d.id
 
 
+def _fake_wave_t0_reject(states, st):
+    """Замена реальной T0-волны: рубит батч на первой же стадии волнового конвейера
+    ровно так же, как раньше _funnel возвращал reject_reason сразу — остальные волны
+    (whois/risk/history/ahrefs) видят пустой alive-список и становятся no-op (см.
+    _run_concurrent: `alive = [...]; if not alive: return`), а _commit_result уже
+    настоящий — именно он и пишет DomainScoreLog, это и проверяет тест."""
+    for s in states:
+        s.reject_reason = "low_rd"
+        s.alive = False
+
+
 def test_score_domain_logs_rejected_outcome(monkeypatch):
     from app.services import scoring
-    monkeypatch.setattr(scoring, "_funnel", lambda d, c, st, sig, *a, **kw: "low_rd")
+    monkeypatch.setattr(scoring, "_wave_t0", _fake_wave_t0_reject)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     did = _seed_domain()
     scoring.score_domain(did)
@@ -33,11 +44,11 @@ def test_score_domain_logs_rejected_outcome(monkeypatch):
 def test_score_domain_logs_unresolved_outcome(monkeypatch):
     from app.services import scoring
 
-    def _fake_funnel(d, c, st, sig, *a, **kw):
-        sig["acquirability_unresolved"] = True
-        sig["unresolved_why"] = "waiting"
-        return None
-    monkeypatch.setattr(scoring, "_funnel", _fake_funnel)
+    def _fake_wave_t0_unresolved(states, st):
+        for s in states:
+            s.unresolved_why = "waiting"
+            s.alive = False
+    monkeypatch.setattr(scoring, "_wave_t0", _fake_wave_t0_unresolved)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     did = _seed_domain()
     scoring.score_domain(did)
@@ -53,7 +64,7 @@ def test_repeated_scoring_appends_not_overwrites(monkeypatch):
     """РЕГРЕССИЯ — прямая проверка смысла фичи: второй вызов score_domain() на том
     же домене добавляет ВТОРУЮ строку, не перезаписывает первую."""
     from app.services import scoring
-    monkeypatch.setattr(scoring, "_funnel", lambda d, c, st, sig, *a, **kw: "low_rd")
+    monkeypatch.setattr(scoring, "_wave_t0", _fake_wave_t0_reject)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     did = _seed_domain()
     scoring.score_domain(did)
