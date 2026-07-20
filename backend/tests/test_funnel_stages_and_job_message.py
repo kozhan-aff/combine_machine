@@ -1,10 +1,7 @@
-"""Visual verification for Task 10: UI changes for wave-based scoring.
-
-Tests that:
-1. FUNNEL_STAGES has 5 stages (not 6)
-2. jobCard() renders waterfall message for running score jobs
-3. CSS changes are applied correctly
-"""
+"""FUNNEL_STAGES (5, не 6 — эхо слито в risk) и API-контракт, питающий волновую
+waterfall-строку в jobCard(). НЕ визуальные тесты: клиентский JS/CSS здесь не
+исполняется и не проверяется — это отдельно подтверждено живым рендером через
+chrome-devtools (см. review Task 10, 2026-07-21)."""
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
@@ -26,7 +23,8 @@ def test_task10_funnel_stages_has_5_not_6():
 
 
 def test_task10_job_card_shows_waterfall_for_running_score():
-    """Task 10: jobCard() renders job_run.message as waterfall for running score jobs."""
+    """/api/jobs/live отдаёт message/stages для running score-джобы — контракт, на
+    котором держится jobCard() (клиентский рендер этим тестом не покрыт)."""
     client = TestClient(app)
 
     # Seed a running score job with waterfall message
