@@ -6,7 +6,10 @@ Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo 
 """
 import logging
 import math
-from datetime import timedelta
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from app.services import scoring_config as cfg
 from app.services import whois as whois_router
@@ -1037,6 +1040,113 @@ def recheck_acquirability(limit: int = 200) -> dict:
             "Сначала оцени найденные — кнопка «Оценить домены»")
         jobs.report(run, done=total, total=total, current="", message=msg)
     return out
+
+
+# ============================================================================
+# Волновая архитектура (2026-07-20): дёшево->дорого волнами на ВЕСЬ пул, а не
+# по-доменно. См. docs/superpowers/specs/2026-07-20-scoring-wave-architecture-design.md.
+# ============================================================================
+
+# Границы конкурентности — ХАРДКОД, не /settings (решение пользователя): "если домен
+# занят whois — скипаем в этой волне" — сами лимиты волн оператор не крутит.
+# history=4 — вежливость к archive.org (проектная ценность, не число для тюнинга).
+# ahrefs=2 — капча за штуку, дорого и хрупко к нагрузке.
+_CONCURRENCY = {"whois": 12, "risk": 12, "history": 4, "ahrefs": 2}
+
+
+@dataclass
+class FunnelState:
+    """Домен на пути через волны — лёгкий снэпшот, НЕ ORM-объект: волны держат его в
+    памяти между несколькими вызовами без открытой сессии/транзакции. Финализация
+    (commit в БД) происходит ОТДЕЛЬНО, в момент выхода из конвейера (см. _commit_result)."""
+    domain_id: int
+    domain: str
+    lane: str | None
+    referring_domains: int | None
+    acquire_deadline: "datetime | None"
+    feed_flags: dict | None
+    sig: dict = field(default_factory=lambda: {"errors": []})
+    reject_reason: str | None = None
+    unresolved_why: str | None = None
+    alive: bool = True
+
+
+class Budget:
+    """Потокобезопасный счётчик бюджета — замена сегодняшнему [int] (безопасен только
+    при последовательном доступе). N потоков волны конкурентно зовут .take(); ровно N
+    успешных, если бюджет == N — не больше (голый `box[0] -= 1` под конкурентностью мог
+    бы пропустить декремент из-за гонки read-modify-write)."""
+    def __init__(self, n: int):
+        self._n = n
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._n <= 0:
+                return False
+            self._n -= 1
+            return True
+
+
+class _ListBudget:
+    """Адаптер легаси-контракта score_domain() ([int]-список) под протокол Budget.take().
+    Мутирует ТОТ ЖЕ список (не копию) — вызывающий код (тесты, ручной вызов из панели)
+    видит расход бюджета в своём списке, как и раньше."""
+    def __init__(self, box: list):
+        self._box = box
+
+    def take(self) -> bool:
+        if self._box[0] <= 0:
+            return False
+        self._box[0] -= 1
+        return True
+
+
+def _run_concurrent(states: list, workers: int, run: "int | None", stage: str, fn) -> None:
+    """Гоняет fn(state) на всех ALIVE states пулом `workers` потоков. fn мутирует state
+    IN PLACE (sig/reject_reason/unresolved_why/alive) и НЕ касается БД — коммит только
+    в _checkpoint, после того как волна целиком завершилась.
+
+    Прогресс: stage репортится ОДИН раз в начале (флип чипа волны в реестре) — done/total
+    без stage= на каждом тике (report() с stage= делает лишний SELECT stages на КАЖДЫЙ
+    вызов, см. jobs.py:330-334; сотни тиков волны не должны множить это на сотни
+    SELECT'ов). Отмена проверяется после КАЖДОГО завершения — как и в сегодняшнем
+    последовательном score_pending (по одной проверке на домен), просто теперь через
+    as_completed вместо for-цикла.
+    """
+    from app.services import jobs
+    alive = [s for s in states if s.alive]
+    if not alive:
+        return
+    jobs.report(run, stage=stage, done=0, total=len(alive))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(fn, s): s for s in alive}
+        done = 0
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                fut.result()
+            except Exception:  # noqa: BLE001 — сбой одного домена не топит волну
+                logging.getLogger(__name__).exception("%s упал для %s", stage, s.domain)
+            done += 1
+            jobs.report(run, done=done, total=len(alive))
+            if jobs.cancelled(run):
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise jobs.Cancelled()
+
+
+def _wave_t0(states: list, st: dict) -> None:
+    """T0 — фид, без сети, мгновенно. Без пула: I/O нет, конкурентность не нужна."""
+    for s in states:
+        if not s.alive:
+            continue
+        if s.feed_flags and any(s.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
+            s.reject_reason = "feed_flag"
+            s.alive = False
+        elif (s.referring_domains is not None
+              and s.referring_domains < st["min_referring_domains"]):
+            s.reject_reason = "low_rd"
+            s.alive = False
 
 
 if __name__ == "__main__":  # pure-function self-check (no I/O)
