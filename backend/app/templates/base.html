@@ -344,7 +344,9 @@
   .job-track { flex:1; height:10px; border-radius:999px; background:var(--panel2); overflow:hidden; }
   .job-fill { height:100%; width:0; border-radius:999px; background:var(--acc); transition:width .3s; }
   .job.err .job-fill { background:var(--bad); }
+  .job-tally { margin-bottom:10px; }
   .job-num { font-family:var(--mono); font-size:12.5px; color:var(--mut); white-space:nowrap; }
+  .job-num .rate { margin-left:10px; }
   .job-num b { font-size:16px; color:var(--acc); }
   .job.err .job-num b { color:var(--bad); }
   /* тонкая полоса в шапке — на экранах без #machine */
@@ -437,6 +439,28 @@
 const JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки',
                 recheck:'Перепроверка занятости', sweep:'Свип автопилота',
                 cf_sync:'Синхронизация Cloudflare'};
+// Скорость/ETA — чисто по данным, что уже в ответе (started_at + done/total), без похода в БД.
+// Бэкенд всегда пишет UTC, но SQLite (герметичный харнесс/локальный запуск) отдаёт datetime
+// БЕЗ смещения — Date.parse() без 'Z'/офсета трактует такую строку как ЛОКАЛЬНОЕ время браузера,
+// а не UTC (сам ловил на визуальной проверке этой карточки — Postgres на проде офсет пишет
+// всегда, поэтому там строка и так корректна, но полагаться на дисциплину бэкенда не стоит).
+function toUtcMs(iso){
+  if (!iso) return NaN;
+  return Date.parse(/[Zz]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + 'Z');
+}
+function rateText(j){
+  if (j.status !== 'running' || j.stale || !j.started_at || !j.done) return '';
+  const elapsedMs = Date.now() - toUtcMs(j.started_at);
+  if (elapsedMs <= 0) return '';
+  const perDomainS = elapsedMs / j.done / 1000;
+  let s = '≈' + (perDomainS < 10 ? perDomainS.toFixed(1) : Math.round(perDomainS)) + ' с/домен';
+  if (j.total > j.done){
+    const remainMin = Math.round(perDomainS * (j.total - j.done) / 60);
+    const h = Math.floor(remainMin / 60), m = remainMin - h * 60;
+    s += ' · осталось ~' + (h > 0 ? h + ' ч ' + m + ' мин' : m + ' мин');
+  }
+  return s;
+}
 function jobCard(j){
   const dead = j.status==='failed' || j.stale;       // stale = процесс убит, бар врал бы «идёт»
   const el = document.createElement('div');
@@ -479,6 +503,19 @@ function jobCard(j){
     }
     el.appendChild(chips);
   }
+  if (j.status === 'running' && !j.stale && j.tally){
+    // Чипы выше — путь ТЕКУЩЕГО домена (каждый новый снова начинает с RD, см. jobs._advance).
+    // Это годится показать, что происходит СЕЙЧАС, но не отвечает на «а дешёвые стадии вообще
+    // отсеивают быстро?» — для этого нужна раскладка по ВСЕМ обработанным доменам прогона.
+    const t = j.tally;
+    const info = document.createElement('div'); info.className = 'job-tally hint';
+    info.textContent = t.total + ' обработано: ' + t.before_wayback + ' до Wayback (дёшево), '
+                      + t.reached_wayback + ' дошли до Wayback';
+    info.title = 'Живая раскладка исхода ЭТОГО прогона: сколько доменов решились на дешёвых ' +
+                 'стадиях (RD из фида, whois-возраст, РКН/блэклист, SafeBrowsing) ДО дорогой ' +
+                 'Wayback-истории, и сколько реально до неё дошло.';
+    el.appendChild(info);
+  }
   const bar = document.createElement('div'); bar.className = 'job-bar';
   const track = document.createElement('div'); track.className = 'job-track';
   const fill = document.createElement('div'); fill.className = 'job-fill';
@@ -492,6 +529,11 @@ function jobCard(j){
   b.textContent = dead ? 'встала' : j.status==='cancelled' ? 'остановлена' : pct + '%';
   num.appendChild(b);
   num.appendChild(document.createTextNode(j.total ? ' ' + j.done + ' / ' + j.total : ''));
+  const rate = rateText(j);
+  if (rate){
+    const r = document.createElement('span'); r.className = 'rate'; r.textContent = rate;
+    num.appendChild(r);
+  }
   bar.appendChild(num); el.appendChild(bar);
   return el;
 }

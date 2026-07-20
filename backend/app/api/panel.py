@@ -668,14 +668,71 @@ def run_cancel_action(request: Request, job: str):
     return _back_here(request)
 
 
+# Джобы, что прогоняют scoring.score_domain() по одному домену за раз (T0-T3b) — им и
+# нужна живая раскладка исхода, у discovery/sweep/cf_sync domain_score_log вообще не пишется.
+_FUNNEL_JOBS = ("score", "recheck")
+
+
+def _funnel_tally(db: Session, run_id: int) -> dict | None:
+    """Живая раскладка исходов ЭТОГО прогона по domain_score_log — сколько уже отсеяно
+    ДО дорогого Wayback (T0-T2: RD/whois/РКН-блэклист/safebrowsing) и сколько реально дошло
+    до него (scored — Wayback пройден по определению; rejected/history_dirty — дошёл и там
+    отклонён историей; rejected/low_score — дошёл, история чистая, но не дотянул итоговый
+    балл, см. scoring.py:799). Чипы стадий в jobCard() показывают только ТЕКУЩИЙ домен (и
+    правильно — каждый начинает с RD, см. jobs._advance) — без этого счётчика оператор не
+    видел ничего, что подтверждает: дешёвые стадии реально отсеивают быстро, а не «все домены
+    идут по кругу». None, если для этого прогона ещё нет ни одной строки (свежий старт) —
+    карточка ничего не покажет, а не нарисует нулевую раскладку как будто уже что-то
+    посчитано."""
+    from app.models.domain_score_log import DomainScoreLog
+    rows = db.execute(
+        select(DomainScoreLog.outcome, DomainScoreLog.reject_reason, func.count())
+        .where(DomainScoreLog.run_id == run_id)
+        .group_by(DomainScoreLog.outcome, DomainScoreLog.reject_reason)
+    ).all()
+    if not rows:
+        return None
+    total = 0
+    scored = unresolved = 0
+    by_reason: dict[str, int] = {}
+    reached_wayback = 0
+    for outcome, reason, n in rows:
+        total += n
+        if outcome == "scored":
+            scored += n
+            reached_wayback += n           # scored всегда прошёл T3 — таков порядок _funnel
+        elif outcome == "unresolved":
+            unresolved += n
+        elif outcome == "rejected":
+            label = _reject_ru(reason) if reason else "?"
+            by_reason[label] = by_reason.get(label, 0) + n
+            # history_dirty и low_score рождаются ТОЛЬКО когда _funnel() прошёл ДО КОНЦА
+            # (вернул None) — history_dirty на самом T3, low_score позже, на самом _decide()
+            # по уже посчитанному score (scoring.py:799: `reject_reason = reject or
+            # ("low_score" if rejected)`, т.е. low_score — это "остальное всё прошли, score
+            # не дотянул"). Без low_score здесь счётчик "решено дёшево" завышался бы —
+            # ровно те домены, что реально сожгли Wayback, попадали в "дёшево" и рисовали
+            # оператору успокаивающую (и неверную) картину (находка ревью 2026-07-20).
+            if reason in ("history_dirty", "low_score"):
+                reached_wayback += n
+    return {"total": total, "scored": scored, "unresolved": unresolved,
+            "reached_wayback": reached_wayback, "before_wayback": total - reached_wayback,
+            "by_reason": by_reason}
+
+
 @router.get("/api/jobs/live")
 def jobs_live():
     """Что машина делает прямо сейчас + итог последнего прогона каждой задачи.
     Один эндпоинт на всю панель: карточки на Пульте/M1 и тонкая полоса в шапке."""
     from fastapi.responses import JSONResponse
     from app.services import jobs
+    live_jobs = jobs.live()
+    with SessionLocal() as db:
+        for j in live_jobs:
+            if j["name"] in _FUNNEL_JOBS and j.get("id") is not None:
+                j["tally"] = _funnel_tally(db, j["id"])
     return JSONResponse(jsonable_encoder({
-        "jobs": jobs.live(),
+        "jobs": live_jobs,
         "last": {name: jobs.last(name) for name in _JOBS},
     }))
 

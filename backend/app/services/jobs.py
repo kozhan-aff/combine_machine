@@ -159,7 +159,7 @@ def _as_dict(r) -> dict:
     # `/api/jobs/live` (panel.py) от формата не зависит — там jsonable_encoder есть и сам бы
     # сериализовал datetime, не в нём подвох. ISO-строка — тот же формат, в котором это всё равно
     # уйдёт по HTTP, так что менять её здесь не с чем.
-    return {"name": r.name, "trigger": r.trigger, "status": r.status, "stage": r.stage,
+    return {"id": r.id, "name": r.name, "trigger": r.trigger, "status": r.status, "stage": r.stage,
             "stages": r.stages or [], "done": r.done, "total": r.total, "current": r.current,
             "message": r.message, "error": r.error, "cancel_requested": r.cancel_requested,
             "running": r.status == "running", "stale": _is_stale(r),

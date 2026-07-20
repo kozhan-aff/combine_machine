@@ -1,4 +1,7 @@
 """HTTP-поверхность реестра: живой список, стоп, возврат туда, откуда нажали."""
+import app.db as db
+from app.models.domain import Domain
+from app.models.domain_score_log import DomainScoreLog
 from app.services import jobs
 
 
@@ -11,6 +14,59 @@ def test_live_lists_running_job(client):
         assert body["jobs"][0]["name"] == "score"
         assert body["jobs"][0]["done"] == 3 and body["jobs"][0]["current"] == "a.ru"
         assert body["jobs"][0]["stages"][0]["state"] == "active"
+
+
+def _mk_domain(name="tally.ru") -> int:
+    with db.SessionLocal() as s:
+        d = Domain(domain=name, source="cctld", status="discovered")
+        s.add(d); s.commit(); s.refresh(d)
+        return d.id
+
+
+def _seed_log(domain_id, run_id, outcome, reject_reason=None, n=1):
+    with db.SessionLocal() as s:
+        for _ in range(n):
+            s.add(DomainScoreLog(domain_id=domain_id, run_id=run_id, outcome=outcome,
+                                 reject_reason=reject_reason, score=None, sig={}))
+        s.commit()
+
+
+def test_live_includes_funnel_tally_for_score_job(client):
+    """Живая раскладка исхода прогона (F: индикатор так себе работал — все стадии выглядели
+    «на 1 домен разом», без видимости, что дешёвые реально отсеивают быстро)."""
+    did = _mk_domain()
+    with jobs.track("score") as run:
+        _seed_log(did, run, "rejected", "low_rd", n=3)
+        _seed_log(did, run, "rejected", "history_dirty", n=1)
+        _seed_log(did, run, "rejected", "low_score", n=1)
+        _seed_log(did, run, "scored", n=2)
+        _seed_log(did, run, "unresolved", n=1)
+        jobs.report(run, done=8, total=100, current="x.ru")
+        body = client.get("/api/jobs/live").json()
+        t = body["jobs"][0]["tally"]
+        assert t["total"] == 8
+        assert t["scored"] == 2 and t["unresolved"] == 1
+        # low_score рождается ТОЛЬКО когда _funnel() прошёл ДО КОНЦА без раннего выхода
+        # (scoring.py:799) — значит Wayback уже сожжён, ровно как у history_dirty (находка
+        # ревью 2026-07-20: без low_score здесь счётчик "решено дёшево" завышался бы).
+        assert t["reached_wayback"] == 4      # 2 scored + 1 history_dirty + 1 low_score
+        assert t["before_wayback"] == 4        # остальное — до Wayback не дошло
+        assert t["by_reason"]["мало доноров"] == 3     # reject_ru("low_rd")
+
+
+def test_live_tally_absent_before_any_row_and_for_non_funnel_jobs(client):
+    """Свежий старт (ещё ни одной строки в domain_score_log) — tally=None, не нулевая
+    раскладка как будто уже что-то посчитано. discovery/sweep/cf_sync его вообще не считают."""
+    with jobs.track("score") as run:
+        jobs.report(run, done=0, total=100)
+        body = client.get("/api/jobs/live").json()
+        assert body["jobs"][0]["tally"] is None
+    did = _mk_domain("tally2.ru")
+    with jobs.track("discovery") as run2:
+        jobs.report(run2, done=1, total=1)
+        _seed_log(did, run2, "scored", n=1)     # даже если бы строки были — discovery не считаем
+        body = client.get("/api/jobs/live").json()
+        assert "tally" not in body["jobs"][0]
 
 
 def test_live_reports_last_run_when_idle(client):
