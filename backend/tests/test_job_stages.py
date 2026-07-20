@@ -12,16 +12,20 @@ def _seed(n: int) -> None:
 
 
 def test_score_pending_reports_funnel_stages(monkeypatch):
-    """Пока скорится домен, в реестре видно, на какой стадии воронки он висит."""
+    """Пока скорится домен, в реестре видно, на какой стадии воронки он висит.
+
+    Task 9: score_pending больше не зовёт score_domain по одному — весь батч уходит ОДНИМ
+    вызовом _run_waves (здесь батч из 1 домена, так что перехват на этом уровне равносилен
+    перехвату на уровне score_domain, как было до Task 9)."""
     _seed(1)
     seen = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
-        jobs.report(run, stage="whois")                  # так репортит _funnel
+    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
+        jobs.report(run, stage="whois")                  # так репортит _run_waves/_run_concurrent
         seen.append(jobs.progress("score")["stage"])
-        return {"domain": "d0.ru"}
+        return [{"domain": "d0.ru"}]
 
-    monkeypatch.setattr(scoring, "score_domain", fake_score)
+    monkeypatch.setattr(scoring, "_run_waves", fake_run_waves)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     assert scoring.score_pending(limit=10) == 1
     assert seen == ["whois"]
@@ -31,19 +35,26 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
 
 
 def test_score_pending_stops_on_cancel(monkeypatch):
-    """Стоп-кнопка: прогон завершается cancelled, оставшиеся домены не трогаются."""
+    """Стоп-кнопка: прогон завершается cancelled, реестр честно закрывается.
+
+    Task 9: волны обрабатывают домены КОНКУРЕНТНО (workers=12 в _wave_whois) — гарантия
+    дореформенного последовательного цикла «ровно один домен успел, остальные 4 даже не
+    начаты» здесь физически не воспроизводима (это смена модели конкурентности, не
+    регрессия — см. task-9-brief.md). Проверяем то, что осталось настоящим внешним
+    контрактом: cancel не проглатывается молча, job закрывается как cancelled с тем
+    done/total, что успели отчитать до отмены."""
     _seed(5)
-    scored = []
 
-    def fake_score(did, clients=None, whois_budget=None, ahrefs_budget=None, run=None):
-        scored.append(did)
-        jobs.request_cancel("score")                      # человек нажал «стоп» на первом домене
-        return {}
+    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
+        jobs.report(run, done=1, total=len(states))       # как реально отчиталась бы волна
+        jobs.request_cancel("score")                      # человек нажал «стоп»
+        if jobs.cancelled(run):
+            raise jobs.Cancelled()
+        return [{}]
 
-    monkeypatch.setattr(scoring, "score_domain", fake_score)
+    monkeypatch.setattr(scoring, "_run_waves", fake_run_waves)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=5)
-    assert len(scored) == 1                              # второй домен уже не начали
     p = jobs.progress("score")
     assert p["status"] == "cancelled" and p["done"] == 1 and p["total"] == 5
 

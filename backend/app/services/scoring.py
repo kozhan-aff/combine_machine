@@ -521,7 +521,9 @@ def score_pending(limit: int = 100) -> int:
                     (expired, 1),                             # окно дропа закрыто — уже упустили
                     else_=0)                                  # окно открыто/впереди — вот они и важны
         rows = db.execute(
-            select(Domain.id, Domain.domain).where(Domain.status == "discovered", scorable(now))
+            select(Domain.id, Domain.domain, Domain.lane, Domain.referring_domains,
+                   Domain.acquire_deadline, Domain.feed_flags)
+            .where(Domain.status == "discovered", scorable(now))
             .order_by(tier,
                       Domain.acquire_deadline.asc(),          # внутри яруса — ближайший дроп первым
                       Domain.referring_domains.desc().nulls_last())   # равных по сроку разводит RD
@@ -561,22 +563,38 @@ def score_pending(limit: int = 100) -> int:
     clients = _make_clients()
     whois_budget = [int(st["max_whois_per_run"])]
     ahrefs_budget = [int(st["max_ahrefs_per_run"])]
-    total, done = len(rows), 0
+    total = len(rows)
+    states = [FunnelState(domain_id=did, domain=name, lane=lane,
+                          referring_domains=rd, acquire_deadline=deadline,
+                          feed_flags=flags)
+             for (did, name, lane, rd, deadline, flags) in rows]
+    done = 0
     with jobs.track("score", stages=stages) as run:
-        for i, (did, name) in enumerate(rows, 1):
-            # ПОРЯДОК ВАЖЕН: репорт ДО проверки стопа. done = i-1 — это ровно столько доменов,
-            # сколько уже дошли до конца. Проверь стоп раньше репорта — и в реестре останется
-            # done от прошлой итерации, то есть «остановлена на 0 / 5» после одного домена.
-            jobs.report(run, done=i - 1, total=total, current=name)
-            if jobs.cancelled(run):
-                raise jobs.Cancelled()
+        if not states:
+            jobs.report(run, done=0, total=0, current="", message=idle_msg or "")
+        else:
             try:
-                score_domain(did, clients, whois_budget, ahrefs_budget, run=run)
-            except Exception:  # noqa: BLE001 — падение одного домена не топит батч
-                logging.getLogger(__name__).exception("score_domain %s упал", name)
-            done = i
-        jobs.report(run, done=total, total=total, current="",
-                    message=idle_msg or f"прогнано {total} доменов через воронку")
+                results = _run_waves(states, clients, st, whois_budget, ahrefs_budget, run=run)
+            except jobs.Cancelled:
+                # _run_waves() на отмене RAISE'ит ДО своего `return results` (см. его тело) —
+                # локальный список результатов теряется вместе со стеком, ХОТЯ _checkpoint()
+                # внутри уже мог реально закоммитить в БД часть states волной(ами) РАНЬШЕ той,
+                # на которой прилетела отмена (T0/whois/risk/history each пишут в БД сразу по
+                # завершении своей волны, до общего возврата). Если считать done=0 в этом
+                # случае — контракт «частичное число, не len(rows)» соврёт: репорт покажет
+                # «отменено, 0 из N», а в БД у части доменов уже честный терминальный статус.
+                # Источник правды — САМА БД: сколько id из ЭТОГО батча реально покинули
+                # discovered, не длина потерянного results.
+                ids = [s.domain_id for s in states]
+                with SessionLocal() as s2:
+                    done = s2.execute(
+                        select(func.count()).select_from(Domain)
+                        .where(Domain.id.in_(ids), Domain.status != "discovered")
+                    ).scalar() or 0
+                raise
+            done = len(results)
+            jobs.report(run, done=total, total=total, current="",
+                        message=idle_msg or f"прогнано {total} доменов через воронку")
     return done
 
 

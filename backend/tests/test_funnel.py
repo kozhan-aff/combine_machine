@@ -635,8 +635,8 @@ def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkey
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain",
-                        lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=50)
 
@@ -664,7 +664,8 @@ def test_scorable_excludes_domain_whose_drop_is_tomorrow(sqlite_db, monkeypatch)
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=50)
 
@@ -689,7 +690,8 @@ def test_scorable_includes_domain_whose_drop_already_happened(sqlite_db, monkeyp
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=50)
 
@@ -742,7 +744,8 @@ def test_domain_without_deadline_gets_rechecked_after_cooldown(sqlite_db, monkey
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=50)
     with db.SessionLocal() as s:
@@ -791,7 +794,8 @@ def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=2)              # места мало — очередь решает всё
 
@@ -821,7 +825,8 @@ def test_expired_drop_does_not_outrank_todays_drop(sqlite_db, monkeypatch):
         s.commit()
 
     seen = []
-    monkeypatch.setattr(scoring, "score_domain", lambda did, *a, **kw: seen.append(did) or {})
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain_id for s in states) or [])
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     scoring.score_pending(limit=1)                                 # место ровно одно
 

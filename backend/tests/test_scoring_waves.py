@@ -591,3 +591,81 @@ def test_run_waves_cancellation_between_waves_preserves_partial_progress():
                            ahrefs_budget=None, run=run)
     last = jobs.last("score")
     assert last["status"] == "cancelled"
+
+
+# ============================================================================
+# score_pending() batch wiring (Task 9) — SELECT builds FunnelState, ONE _run_waves call
+# ============================================================================
+
+def test_score_pending_builds_states_with_lane_and_rd_from_one_query(monkeypatch):
+    """score_pending больше не должен грузить lane/referring_domains/acquire_deadline
+    доменом по домену внутри волны — они обязаны прийти из ИСХОДНОГО SELECT (см. Task 9),
+    иначе каждая волна платила бы отдельным SELECT на КАЖДЫЙ домен пачки."""
+    did = _mk_domain(domain="batch1.ru", referring_domains=5, lane="bid")
+
+    captured = {}
+    calls = {"n": 0}
+    real_run_waves = scoring._run_waves
+
+    def _spy(states, *a, **kw):
+        calls["n"] += 1
+        captured["states"] = list(states)
+        return real_run_waves(states, *a, **kw)
+    monkeypatch.setattr(scoring, "_run_waves", _spy)
+
+    class _Ap:
+        def whois_probe(self, d):
+            return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
+        def safebrowsing_check(self, d): return False
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {
+        "aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": _FakeWayback(), "_whois_lock": threading.Lock(),
+        "_safebrowsing_lock": threading.Lock()})
+
+    scoring.score_pending(limit=10)
+    assert calls["n"] == 1              # ОДИН вызов на весь батч, не по домену
+    assert len(captured["states"]) == 1
+    assert captured["states"][0].domain_id == did
+    assert captured["states"][0].lane == "bid"
+    assert captured["states"][0].referring_domains == 5
+
+
+def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits(monkeypatch):
+    """Task 9 self-review (c). `_run_waves()` на отмене делает `raise jobs.Cancelled()` ДО
+    своего `return results` (см. его тело, между КАЖДОЙ парой волн) — локальный список
+    результатов теряется вместе со стеком развёртывания, ХОТЯ `_checkpoint()` внутри уже мог
+    реально закоммитить в БД домены волной(ами) РАНЬШЕ той, где прилетела отмена (T0/whois
+    пишут в БД сразу по завершении своей волны, до общего возврата `_run_waves`). Если считать
+    `done=len(results)` голым — при отмене он ВСЕГДА 0, даже если реально отброшено N доменов:
+    контракт docstring'а («частичное число, не len(rows)») соврёт. Проверено эмпирически
+    (see task-9-report.md) — 2 домена low_rd (T0) + 3 too_young (whois) реально осели в БД
+    как rejected, а голый `len(results)` показал бы 0."""
+    ids = [_mk_domain(domain=f"lowrd{i}.ru", referring_domains=0, lane="bid") for i in range(2)]
+    ids += [_mk_domain(domain=f"young{i}.ru", referring_domains=5, lane="bid") for i in range(3)]
+
+    from app.services import jobs as jobs_mod
+    real_wave_risk = scoring._wave_risk
+
+    def spy_risk(states, clients, run):
+        # к этому моменту T0 и whois УЖЕ закоммитили все 5 (alive пуст) — отмена здесь
+        # проверяет именно то, что происходит МЕЖДУ волнами, после реальных чекпоинтов.
+        jobs_mod.request_cancel("score")
+        return real_wave_risk(states, clients, run)
+    monkeypatch.setattr(scoring, "_wave_risk", spy_risk)
+
+    class _Ap:
+        def whois_probe(self, d):
+            return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=10)}
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {
+        "aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
+        "_whois_lock": threading.Lock()})
+
+    n = scoring.score_pending(limit=10)
+    assert n == 5                        # все 5 реально осели в БД, не 0
+    assert jobs_mod.last("score")["status"] == "cancelled"
+    with db.SessionLocal() as s:
+        statuses = {s.get(Domain, i).status for i in ids}
+    assert statuses == {"rejected"}
