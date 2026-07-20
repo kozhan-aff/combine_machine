@@ -17,6 +17,20 @@ Docker Desktop), каждый .ru-домен платил бы полным `_TI
 переживает свип — следующий прогон получает новый инстанс со счётчиком 0 и
 пробует TCI заново.
 
+Предохранитель А-Parser whois (аудит серии 2026-07-20, находки 1/5): та же болезнь, что
+и TCI, только на другом канале. `whois_probe()` у A-Parser вызывается ДВАЖДЫ без всякой
+защиты — как фолбэк после срабатывания TCI-предохранителя (`aparser_fallback`), так и
+безусловно для доменов вне зоны TCI (`aparser`, третий уровень типа shop.com.ru или
+gTLD). Если A-Parser в это время сам недоступен (живой инцидент 2026-07-20 — тот же
+день, когда чинили safebrowsing_check), КАЖДЫЙ такой домен платит полный ретрай-шторм
+BaseClient (3 попытки × exponential backoff, ~30 с) — ровно тот симптом, ради которого
+и заводился предохранитель SafeBrowsing, просто на соседнем вызове того же клиента.
+Счётчик — `clients["aparser"].whois_failures`, тот же приём (атрибут инстанса,
+пересоздаётся `_make_clients()` раз в прогон). Сработавший предохранитель не глотает
+домен молча: `_aparser_whois()` поднимает исключение дальше — _funnel уже умеет
+обрабатывать сбой whois (sig["errors"], acquirability_unresolved для не-bid) ровно так
+же, как обычный сетевой сбой.
+
 См. docs/superpowers/specs/2026-07-19-tci-whois-design.md.
 """
 import logging
@@ -25,6 +39,28 @@ _log = logging.getLogger(__name__)
 
 # После скольких сбоев ПОДРЯД канал TCI считается мёртвым на этот прогон.
 _TCI_FAILURE_LIMIT = 3
+# То же самое для A-Parser whois (фолбэк TCI + домены вне его зоны).
+_APARSER_WHOIS_FAILURE_LIMIT = 3
+
+
+def _aparser_whois(ap, domain: str) -> dict:
+    """whois_probe с предохранителем — см. модульный докстринг. Поднимает исключение
+    и на срабатывании предохранителя (не только на реальном сетевом сбое): вызывающий
+    код (_funnel) уже трактует любое исключение отсюда как «whois не удался», разница
+    лишь в том, что тут мы не платим за ретрай, зная, что канал мёртв в этом прогоне."""
+    if getattr(ap, "whois_failures", 0) >= _APARSER_WHOIS_FAILURE_LIMIT:
+        raise RuntimeError("A-Parser whois: предохранитель сработал, канал пропускается до конца прогона")
+    try:
+        pr = ap.whois_probe(domain)
+        ap.whois_failures = 0          # канал жив — счётчик сбоев сброшен
+        return pr
+    except Exception:
+        ap.whois_failures = getattr(ap, "whois_failures", 0) + 1
+        if ap.whois_failures >= _APARSER_WHOIS_FAILURE_LIMIT:
+            _log.warning(
+                "A-Parser whois: %d сбоев подряд — предохранитель сработал, "
+                "до конца прогона канал пропускается", _APARSER_WHOIS_FAILURE_LIMIT)
+        raise
 
 
 def probe(domain: str, clients: dict) -> dict:
@@ -66,9 +102,9 @@ def probe(domain: str, clients: dict) -> dict:
                         "до конца прогона TCI пропускается, whois идёт через A-Parser",
                         _TCI_FAILURE_LIMIT)
                 source = "aparser_fallback"
-        pr = clients["aparser"].whois_probe(domain)
+        pr = _aparser_whois(clients["aparser"], domain)
     else:
         source = "aparser"
-        pr = clients["aparser"].whois_probe(domain)
+        pr = _aparser_whois(clients["aparser"], domain)
     return {"available": pr.get("available"), "created": pr.get("created"),
             "free_date": None, "whois_source": source}

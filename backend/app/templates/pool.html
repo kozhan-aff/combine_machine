@@ -78,8 +78,9 @@
   {% for d in rows %}
     <tr>
       <td class="dom">
+        {% set projected = (d.score_breakdown or {}).get('deadline_source') == 'whois_projection' %}
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
-          title="источник: {{ d.source or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
+          title="источник: {{ d.source or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · {{ 'прогноз whois' if projected else 'дедлайн' }} {{ d.acquire_deadline.strftime('%d.%m') }}{% if projected %} (не подтверждённый дроп — освободится, ЕСЛИ владелец не продлит){% endif %}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
           >{{ {'backorder':'bo','cctld':'cc','reg_ru':'rg','sweb':'sw'}.get(d.source, (d.source or '?')[:2]) }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
            title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>

@@ -207,3 +207,27 @@ def test_expired_feed_deadline_still_shows_window_closed(client):
     _add(domain="sniped.ru", status="scored", score=0.7, acquire_deadline=past)
     html = client.get("/domains").text
     assert "окно закрыто" in html
+
+
+def test_pool_labels_projection_deadline_too(client):
+    """Ревью 2026-07-20 (аудит серии TCI-whois): /domains/pool — ОТДЕЛЬНЫЙ шаблон
+    (pool.html) от /domains (domains.html), и метка «проекция, не подтверждённый дроп»
+    туда не доехала — тултип показывал голое «дедлайн DD.MM» на любой дате, включая
+    whois-проекцию. Это экран для расследований, но именно там оператор ищет причину,
+    почему домен занят — врать честной датой нельзя и там."""
+    soon = datetime.now(timezone.utc) + timedelta(days=5)
+    _add(domain="poolprojected.ru", status="scored", score=0.7, acquire_deadline=soon,
+         score_breakdown={"deadline_source": "whois_projection"})
+    html = client.get("/domains/pool").text
+    assert "прогноз whois" in html
+    assert "не подтверждённый дроп" in html
+
+
+def test_pool_keeps_plain_deadline_label_for_feed_date(client):
+    """Обратная сторона в пуле: подтверждённая дата из фида остаётся простым «дедлайн»,
+    без ложной пометки «прогноз»."""
+    soon = datetime.now(timezone.utc) + timedelta(days=5)
+    _add(domain="poolfromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)
+    html = client.get("/domains/pool").text
+    assert "дедлайн" in html
+    assert "прогноз whois" not in html

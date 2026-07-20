@@ -199,9 +199,27 @@ def run_discovery() -> int:
                     d.source = "backorder"
                     if c.get("price") is not None:
                         d.acquire_price = c["price"]
-                for attr in ("lane", "acquire_deadline", "visitors", "tic"):
+                for attr in ("lane", "visitors", "tic"):
                     if getattr(d, attr, None) is None and c.get(attr) is not None:
                         setattr(d, attr, c.get(attr))
+                # acquire_deadline: fill-once, С ИСКЛЮЧЕНИЕМ whois-проекции (находка ревью
+                # 2026-07-20). Только backorder/cctld кладут дату в кандидата (normalize_row/
+                # CctldClient.list_dropping) — это ВСЕГДА авторитетная дата дропа, не whois
+                # free-date "освободится, если не продлят" (scoring._deadline_from_whois).
+                # Без исключения: домен из бездедлайнового пула получает whois-проекцию в
+                # пустой acquire_deadline при скоринге, а когда его ПОЗЖЕ подхватывает
+                # backorder-фид — fill-once видит уже НЕ-NULL поле и навсегда прячет реальный
+                # delete_date за устаревшим прогнозом. score_breakdown.deadline_source сносим
+                # тут же — иначе панель продолжит подписывать свежую авторитетную дату как
+                # "ОСВОБОДИТСЯ*" (см. domains.html), хотя это уже не проекция.
+                if c.get("acquire_deadline") is not None and (
+                    d.acquire_deadline is None
+                    or (d.score_breakdown or {}).get("deadline_source") == "whois_projection"
+                ):
+                    d.acquire_deadline = c["acquire_deadline"]
+                    if d.score_breakdown and "deadline_source" in d.score_breakdown:
+                        d.score_breakdown = {k: v for k, v in d.score_breakdown.items()
+                                            if k != "deadline_source"}
             db.add_all(Domain(
                 domain=candidates[n]["domain"], source=candidates[n]["source"],
                 referring_domains=candidates[n].get("referring_domains"),

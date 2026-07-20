@@ -3,6 +3,8 @@
 падал бы громко на socket.getaddrinfo, а не тихо уезжал в интернет)."""
 from datetime import date
 
+import pytest
+
 from app.integrations.whois_tci import TciWhoisClient, _parse
 
 _TAKEN = """% TCI Whois Service. Terms of use:
@@ -82,6 +84,29 @@ def test_handles_rejects_third_level_domains():
     assert c.handles("msk.ru") is True
     assert c.handles("pp.ru") is True
     assert c.handles("spb.ru") is True
+
+
+def test_query_hits_the_live_network_killswitch_not_the_real_socket():
+    """Важно (аудит 2026-07-20, находка 9): все остальные тесты этого файла гоняют чистый
+    _parse()/handles() или мок-клиент — ни один не проверял, что рубильник живой сети
+    (`_no_live_network` в conftest) реально ловит СЫРОЙ TCP-транспорт TCI, а не тихо
+    выпускает его в интернет. `socket.create_connection((host, port))` резолвит host через
+    `socket.getaddrinfo` — тот же вызов, что патчит рубильник. Это регресс-страховка:
+    завтрашний рефакторинг `query()` (например, пре-резолв хоста в IP + голый
+    `socket.socket().connect((ip, port))` в обход `create_connection`) обойдёт
+    `getaddrinfo` и эта проверка покраснеет первой, а не тихой утечкой в прод-сеть из CI.
+
+    Проверяем ПО ИМЕНИ ТИПА, а не импортом класса: `LiveNetworkAttempt` — наследник
+    BaseException (намеренно, conftest.py), значит `pytest.raises(Exception)` его не
+    поймает вовсе, а `pytest.raises(BaseException)` поймал бы ЛЮБОЙ сбой (включая
+    настоящий сетевой таймаут, если бы рубильник не сработал) и тест стал бы ложно-зелёным."""
+    try:
+        TciWhoisClient().probe("nic.ru")
+    except BaseException as e:                    # noqa: BLE001 — ловим ЛЮБОЙ исход нарочно
+        assert type(e).__name__ == "LiveNetworkAttempt", (
+            f"ожидали рубильник живой сети, получили {type(e).__name__}: {e}")
+    else:
+        pytest.fail("query() не поймал рубильник — реальный сетевой вызов не был заблокирован")
 
 
 # --- маршрутизатор ---------------------------------------------------------------
@@ -201,6 +226,81 @@ def test_circuit_breaker_resets_on_success_between_failures():
     assert whois.probe("d.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 1 (заново)
     assert whois.probe("e.ru", clients)["whois_source"] == "aparser_fallback"   # сбой 2 (заново)
     assert len(tci.calls) == 5     # предохранитель НЕ сработал — до 3 подряд не дошли ни разу
+
+
+class _FlakyAparser:
+    """whois_probe с настраиваемым исходом на каждый вызов — для предохранителя A-Parser
+    (находки 1/5 повторного аудита 2026-07-20: whois_probe вызывался без защиты, в отличие
+    от safebrowsing_check, получившего предохранитель в том же наборе коммитов)."""
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = []
+
+    def whois_probe(self, domain):
+        self.calls.append(domain)
+        outcome = self._outcomes.pop(0)
+        if outcome == "boom":
+            raise OSError("connect error")
+        return outcome
+
+
+_AP_OK = {"available": False, "created": None}
+
+
+def test_aparser_whois_circuit_breaker_skips_after_three_consecutive_failures():
+    """A-Parser упал -> whois_probe за фолбэком (TCI уже мёртв) или за не-TCI-зоной платил
+    бы полный ретрай-шторм BaseClient на КАЖДЫЙ домен. Первые 3 вызова — РЕАЛЬНЫЕ попытки
+    (падают исходным OSError), 4-й — предохранитель уже открыт (RuntimeError, whois_probe
+    не звали вовсе — список исходов НАМЕРЕННО ровно из 3, иначе поймали бы IndexError)."""
+    from app.services import whois
+    ap = _FlakyAparser(["boom", "boom", "boom"])
+    clients = {"tci": None, "aparser": ap}     # tci=None -> все домены сразу идут в aparser
+
+    for i in range(3):
+        with pytest.raises(OSError):
+            whois.probe(f"fail{i}.com", clients)
+    assert len(ap.calls) == 3
+
+    with pytest.raises(RuntimeError):
+        whois.probe("fourth.com", clients)
+    assert len(ap.calls) == 3      # предохранитель сработал — 4-й вызов whois_probe не звали
+
+
+def test_aparser_whois_circuit_breaker_resets_on_success_between_failures():
+    """Успешный ответ между сбоями сбрасывает счётчик — предохранитель не срабатывает раньше
+    времени на череде "2 сбоя / успех / 2 сбоя" (4 сбоя всего, но НИ РАЗУ подряд 3)."""
+    from app.services import whois
+    ap = _FlakyAparser(["boom", "boom", _AP_OK, "boom", "boom"])
+    clients = {"tci": None, "aparser": ap}
+
+    with pytest.raises(OSError):
+        whois.probe("a.com", clients)
+    with pytest.raises(OSError):
+        whois.probe("b.com", clients)
+    r = whois.probe("c.com", clients)              # успех -> сброс
+    assert r["available"] is False
+    with pytest.raises(OSError):
+        whois.probe("d.com", clients)
+    with pytest.raises(OSError):
+        whois.probe("e.com", clients)
+    assert len(ap.calls) == 5      # предохранитель НЕ сработал — до 3 подряд не дошли ни разу (все OSError)
+
+
+def test_aparser_whois_circuit_breaker_covers_fallback_path_too():
+    """Предохранитель защищает ОБА пути к A-Parser whois — не только "домен вне зоны TCI"
+    (тест выше), но и "TCI сам сработал предохранителем, фолбэк идёт в A-Parser"."""
+    from app.services import whois
+    tci = _FlakyTci(["boom", "boom", "boom"])      # TCI-предохранитель сработает на 3-м домене
+    ap = _FlakyAparser(["boom", "boom", "boom"])
+    clients = {"tci": tci, "aparser": ap}
+
+    for i in range(3):
+        with pytest.raises(OSError):
+            whois.probe(f"both{i}.ru", clients)
+    assert len(ap.calls) == 3
+    with pytest.raises(RuntimeError):
+        whois.probe("both3.ru", clients)
+    assert len(ap.calls) == 3      # A-Parser-предохранитель тоже сработал
 
 
 # --- воронка целиком: _funnel -> whois.probe -> TCI, без единого касания A-Parser ------------
@@ -369,6 +469,24 @@ def test_deadline_from_whois_never_touches_free_lane():
     assert scoring._deadline_from_whois(stale, fresh_fd, now, "free") == stale
     # а для бездедлайнового пула (lane=NULL) — обновляется, это и есть смысл фикса
     assert scoring._deadline_from_whois(stale, fresh_fd, now, None).date() == fresh_fd
+
+
+def test_deadline_from_whois_bid_free_guard_also_covers_empty_deadline():
+    """Повторное ревью 2026-07-20: исключение bid/free раньше проверялось ТОЛЬКО в ветке
+    "уже был дедлайн" — пустой `existing=None` уходил в СВОЮ ветку (`if existing is None:
+    return new`) ДО проверки лейна и получал проекцию в обход гарда. free-лейн домен
+    нормально держит acquire_deadline=None (у свободного домена нет даты дропа); если его
+    перекупили и whois принёс проекцию — она НЕ должна лечь в пустое поле, тот же принцип,
+    что и для уже известного дедлайна (свой законный терминал, не устаревшая проекция)."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    fresh_fd = (now + timedelta(days=60)).date()
+    assert scoring._deadline_from_whois(None, fresh_fd, now, "free") is None
+    assert scoring._deadline_from_whois(None, fresh_fd, now, "bid") is None
+    # а для бездедлайнового пула (lane=NULL) пустое поле по-прежнему заполняется
+    assert scoring._deadline_from_whois(None, fresh_fd, now, None).date() == fresh_fd
 
 
 def test_funnel_fills_empty_deadline_from_tci_and_stays_waiting():

@@ -201,6 +201,58 @@ def test_existing_discovered_row_upgraded_to_backorder_source_and_price(monkeypa
         assert d.source == "backorder" and d.acquire_price == 555.0
 
 
+def test_backorder_deadline_overrides_stale_whois_projection(monkeypatch):
+    """Ревью 2026-07-20 (аудит серии TCI-whois): домен из бездедлайнового пула получил
+    whois-проекцию free-date в пустой acquire_deadline (scoring._deadline_from_whois) — она
+    НЕ авторитетна. Когда тот же домен позже подхватывает backorder-фид с реальным
+    delete_date, fill-once (`is None`) видел бы уже занятое поле и НАВСЕГДА прятал бы
+    настоящий дедлайн за устаревшим прогнозом. Авторитетная дата обязана победить, и
+    deadline_source обязан слезть — иначе панель продолжит подписывать её "ОСВОБОДИТСЯ*"."""
+    import app.db as db
+    from datetime import datetime, timezone
+    from app.models.domain import Domain
+    from app.services import discovery
+    projection = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    real_deadline = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="projected.ru", source="cctld", status="discovered",
+                     referring_domains=None, lane=None, acquire_deadline=projection,
+                     score_breakdown={"whois_source": "tci", "deadline_source": "whois_projection"}))
+        s.commit()
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
+        {"domain": "projected.ru", "source": "backorder", "referring_domains": 5, "lane": "bid",
+         "acquire_deadline": real_deadline, "visitors": None, "tic": None, "feed_flags": {}}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.acquire_deadline.replace(tzinfo=timezone.utc) == real_deadline
+        assert d.score_breakdown.get("deadline_source") != "whois_projection"
+        assert d.score_breakdown.get("whois_source") == "tci"   # остальной breakdown не тронут
+
+
+def test_fresh_deadline_not_overwritten_by_second_rediscovery(monkeypatch):
+    """Fill-once по-прежнему держит уже-авторитетный дедлайн: второй прогон backorder'а с
+    ДРУГОЙ датой не должен переписывать уже принятую (нет deadline_source=projection — сносить
+    нечего, и это не тот случай, когда дедлайн устарел)."""
+    import app.db as db
+    from datetime import datetime, timezone
+    from app.models.domain import Domain
+    from app.services import discovery
+    first = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(Domain(domain="already-dated.ru", source="backorder", status="discovered",
+                     referring_domains=1, lane="bid", acquire_deadline=first))
+        s.commit()
+    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
+        {"domain": "already-dated.ru", "source": "backorder", "referring_domains": 1, "lane": "bid",
+         "acquire_deadline": datetime(2026, 9, 1, tzinfo=timezone.utc),
+         "visitors": None, "tic": None, "feed_flags": {}}])
+    discovery.run_discovery()
+    with db.SessionLocal() as s:
+        d = s.execute(__import__("sqlalchemy").select(Domain)).scalars().one()
+        assert d.acquire_deadline.replace(tzinfo=timezone.utc) == first
+
+
 def test_existing_backorder_source_not_touched_by_upgrade_branch(monkeypatch):
     """S19 регресс: апгрейд однонаправленный и срабатывает ОДИН раз — домен, уже стоящий
     на source='backorder', не должен лишний раз трогаться веткой апгрейда на каждый
