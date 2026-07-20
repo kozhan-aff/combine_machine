@@ -51,3 +51,53 @@ def test_wave_t0_rejects_feed_flag_and_low_rd_without_touching_alive_ones():
     assert flagged.alive is False and flagged.reject_reason == "feed_flag"
     assert low_rd.alive is False and low_rd.reject_reason == "low_rd"
     assert ok.alive is True and ok.reject_reason is None
+
+
+def test_run_concurrent_calls_fn_only_on_alive_and_survives_one_failure():
+    """Находка ревью Task 1 (2026-07-21): _run_concurrent — общий харнесс, на котором
+    поедут ВСЕ следующие волны (whois/risk/history/ahrefs), отгружался без прямого
+    теста — только косвенно через _wave_t0, который его даже не вызывает (T0 без сети,
+    без пула). Проверяем сам харнесс: мёртвые не трогаются, сбой одного домена не топит
+    остальных."""
+    calls = []
+    lock = threading.Lock()
+
+    def fn(s):
+        if s.domain == "boom.ru":
+            raise RuntimeError("boom")
+        with lock:
+            calls.append(s.domain)
+
+    dead = scoring.FunnelState(domain_id=1, domain="dead.ru", lane=None,
+                               referring_domains=None, acquire_deadline=None,
+                               feed_flags=None, alive=False)
+    boom = scoring.FunnelState(domain_id=2, domain="boom.ru", lane=None,
+                               referring_domains=None, acquire_deadline=None,
+                               feed_flags=None)
+    ok = scoring.FunnelState(domain_id=3, domain="ok.ru", lane=None,
+                             referring_domains=None, acquire_deadline=None,
+                             feed_flags=None)
+    scoring._run_concurrent([dead, boom, ok], workers=4, run=None, stage="whois", fn=fn)
+    assert calls == ["ok.ru"]        # dead пропущен (fn не вызван), boom упал и не помешал ok
+
+
+def test_run_concurrent_raises_cancelled_when_stop_requested():
+    """Отмена (кнопка «✕ Отменить») проверяется после каждого завершения внутри волны,
+    не только между волнами — request_cancel ДО старта харнесса должен оборвать волну
+    ещё на первом завершившемся домене, а не тихо доработать весь пакет.
+
+    НЕ ловим jobs.Cancelled сами: jobs.track() ловит его ВНУТРИ своего generator'а
+    (except Cancelled -> _close(..., "cancelled"), БЕЗ re-raise) — если поймать
+    исключение раньше, до границы `with`, track() увидит нормальный выход и закроет
+    прогон как "done", а не "cancelled" (поймано на этом самом тесте при первом
+    написании)."""
+    from app.services import jobs
+
+    states = [scoring.FunnelState(domain_id=i, domain=f"c{i}.ru", lane=None,
+                                  referring_domains=None, acquire_deadline=None,
+                                  feed_flags=None) for i in range(5)]
+    with jobs.track("score") as run:
+        jobs.request_cancel("score")
+        scoring._run_concurrent(states, workers=2, run=run, stage="whois",
+                                fn=lambda s: None)
+    assert jobs.last("score")["status"] == "cancelled"

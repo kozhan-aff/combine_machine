@@ -1316,6 +1316,11 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
 
 
 def test_run_waves_cancellation_between_waves_preserves_partial_progress():
+    """НЕ ловим jobs.Cancelled сами вокруг вызова: jobs.track() ловит его ВНУТРИ своего
+    generator'а (except Cancelled -> _close(..., "cancelled"), БЕЗ re-raise) — поймай
+    исключение раньше, до границы `with`, и track() увидит нормальный выход из `with`,
+    закрыв прогон как "done", а не "cancelled" (найдено ревью Task 1, 2026-07-21, тот же
+    паттерн уже сломал сходный тест в test_scoring_waves.py при первом написании)."""
     from app.services import jobs
 
     ids = [_mk_domain(domain=f"cancel{i}.ru", referring_domains=5) for i in range(5)]
@@ -1331,12 +1336,8 @@ def test_run_waves_cancellation_between_waves_preserves_partial_progress():
 
     with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
         jobs.request_cancel("score")
-        try:
-            scoring._run_waves(states, clients, st, whois_budget=None,
-                               ahrefs_budget=None, run=run)
-            raise AssertionError("ожидалась jobs.Cancelled")
-        except jobs.Cancelled:
-            pass
+        scoring._run_waves(states, clients, st, whois_budget=None,
+                           ahrefs_budget=None, run=run)
     last = jobs.last("score")
     assert last["status"] == "cancelled"
 ```
