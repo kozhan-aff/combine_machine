@@ -1447,12 +1447,6 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                 "errors": sig.get("errors", [])}
 
 
-def _wave_survivor_counts(states: list, stage_labels: list) -> str:
-    """Собрать waterfall-строку 'RD: 10 → 6 · whois: 6 → 4 · ...' по факту, кто ещё alive
-    ПОСЛЕ каждой волны — вызывается из _run_waves сразу после _checkpoint каждой стадии."""
-    return " · ".join(stage_labels)
-
-
 def _checkpoint(states: list, run, st: dict) -> list:
     """Финализировать в БД тех, кто вышел из конвейера НА ЭТОЙ волне (reject_reason ИЛИ
     unresolved_why выставлены), вернуть список результатов _commit_result. Выжившие
