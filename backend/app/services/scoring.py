@@ -1447,6 +1447,87 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                 "errors": sig.get("errors", [])}
 
 
+def _wave_survivor_counts(states: list, stage_labels: list) -> str:
+    """Собрать waterfall-строку 'RD: 10 → 6 · whois: 6 → 4 · ...' по факту, кто ещё alive
+    ПОСЛЕ каждой волны — вызывается из _run_waves сразу после _checkpoint каждой стадии."""
+    return " · ".join(stage_labels)
+
+
+def _checkpoint(states: list, run, st: dict) -> list:
+    """Финализировать в БД тех, кто вышел из конвейера НА ЭТОЙ волне (reject_reason ИЛИ
+    unresolved_why выставлены), вернуть список результатов _commit_result. Выжившие
+    (state.alive) остаются в states — вызывающий сам передаёт их в следующую волну."""
+    out = []
+    for s in states:
+        if not s.alive:
+            out.append(_commit_result(s, run, st))
+    return out
+
+
+def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budget,
+               run) -> list:
+    """Оркестратор: волны по порядку дёшево->дорого, между каждой — checkpoint (коммит
+    вышедших, отчёт волновой истории), отмена проверяется между волнами (внутри волны —
+    в _run_concurrent). Выжившие после ПОСЛЕДНЕЙ волны финализируются как решённые
+    (score/approved/scored) — см. _commit_result. Возвращает результаты в порядке
+    завершения (порядок не важен вызывающим — score_pending считает только длину,
+    score_domain — единственный элемент списка)."""
+    from app.services import jobs
+
+    whois_b = whois_budget if whois_budget is None or hasattr(whois_budget, "take") \
+        else _ListBudget(whois_budget)
+    ahrefs_b = ahrefs_budget if ahrefs_budget is None or hasattr(ahrefs_budget, "take") \
+        else _ListBudget(ahrefs_budget)
+
+    results = []
+    waterfall = []
+    total0 = len(states)
+
+    _wave_t0(states, st)
+    if jobs.cancelled(run):
+        raise jobs.Cancelled()
+    results += _checkpoint(states, run, st)
+    alive = [s for s in states if s.alive]
+    waterfall.append(f"RD: {total0} → {len(alive)}")
+    jobs.report(run, message=" · ".join(waterfall))
+
+    _wave_whois(alive, clients, whois_b, st, run)
+    if jobs.cancelled(run):
+        raise jobs.Cancelled()
+    results += _checkpoint(alive, run, st)
+    before = len(alive); alive = [s for s in alive if s.alive]
+    waterfall.append(f"whois: {before} → {len(alive)}")
+    jobs.report(run, message=" · ".join(waterfall))
+
+    _wave_risk(alive, clients, run)
+    if jobs.cancelled(run):
+        raise jobs.Cancelled()
+    results += _checkpoint(alive, run, st)
+    before = len(alive); alive = [s for s in alive if s.alive]
+    waterfall.append(f"risk: {before} → {len(alive)}")
+    jobs.report(run, message=" · ".join(waterfall))
+
+    _wave_history(alive, clients, st, run)
+    if jobs.cancelled(run):
+        raise jobs.Cancelled()
+    results += _checkpoint(alive, run, st)
+    before = len(alive); alive = [s for s in alive if s.alive]
+    waterfall.append(f"history: {before} → {len(alive)}")
+    jobs.report(run, message=" · ".join(waterfall))
+
+    _wave_ahrefs(alive, clients, ahrefs_b, run)
+    if jobs.cancelled(run):
+        raise jobs.Cancelled()
+    # выжившие после ПОСЛЕДНЕЙ волны — все ещё alive (Ahrefs никогда не отбраковывает),
+    # финализируем как решённых (compute_score внутри _commit_result)
+    for s in alive:
+        results.append(_commit_result(s, run, st))
+    waterfall.append(f"ahrefs: {len(alive)} решено")
+    jobs.report(run, message=" · ".join(waterfall))
+
+    return results
+
+
 if __name__ == "__main__":  # pure-function self-check (no I/O)
     # clean old domain -> manual review at least
     clean = compute_score({"wayback_checked": True, "prior_flags": {},

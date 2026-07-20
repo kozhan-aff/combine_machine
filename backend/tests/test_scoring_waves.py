@@ -519,3 +519,75 @@ def test_commit_result_computes_score_for_survivor():
     with db.SessionLocal() as sess:
         d = sess.get(Domain, did)
         assert float(d.score) == out["score"] and d.status == out["status"]
+
+
+# ============================================================================
+# _run_waves orchestrator tests
+# ============================================================================
+
+def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
+    """100 -> 40 после whois (RKN не проверяем — часть отвалится раньше) -> итог: waterfall
+    в job_run.message показывает уменьшение пула по волнам."""
+    from app.services import jobs
+
+    ids = [_mk_domain(domain=f"pool{i}.ru", referring_domains=5) for i in range(10)]
+    states = [scoring.FunnelState(domain_id=did, domain=f"pool{i}.ru", lane=None,
+                                  referring_domains=5, acquire_deadline=None, feed_flags=None)
+             for i, did in enumerate(ids)]
+    # чётные домены "слишком молоды" на whois — отвалятся на первой сетевой волне
+    young = datetime.now(timezone.utc) - timedelta(days=100)
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 10)
+
+    class _Ap:
+        def __init__(self):
+            self.n = 0
+        def whois_probe(self, d):
+            self.n += 1
+            age = young if self.n % 2 == 0 else old
+            return {"available": True, "created": age}
+        def safebrowsing_check(self, d): return False
+        def ahrefs_probe(self, d): return {"dr": 1.0, "backlinks": 0, "referring_domains": None}
+    clients = {"aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
+              "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+              "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+              "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+              "wayback": _FakeWayback(dirty=False, age_years=9.0),
+              "_whois_lock": threading.Lock(), "_safebrowsing_lock": threading.Lock()}
+    st = {"min_age_years": 3.0, "approve_at": 0.7, "manual_review_at": 0.4,
+         "min_referring_domains": 1}
+
+    with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
+        out = scoring._run_waves(states, clients, st, whois_budget=None,
+                                 ahrefs_budget=None, run=run)
+    assert len(out) == 10
+    survived = [s for s in states if s.alive]
+    assert 0 < len(survived) < 10          # реально сжалось, не всё выжило и не всё умерло
+    last = jobs.last("score")
+    assert "whois" in last["message"] and ("->" in last["message"] or "→" in last["message"])
+
+
+def test_run_waves_cancellation_between_waves_preserves_partial_progress():
+    """НЕ ловим jobs.Cancelled сами вокруг вызова: jobs.track() ловит его ВНУТРИ своего
+    generator'а (except Cancelled -> _close(..., "cancelled"), БЕЗ re-raise) — поймай
+    исключение раньше, до границы `with`, и track() увидит нормальный выход из `with`,
+    закрыв прогон как "done", а не "cancelled" (найдено ревью Task 1, 2026-07-21, тот же
+    паттерн уже сломал сходный тест в test_scoring_waves.py при первом написании)."""
+    from app.services import jobs
+
+    ids = [_mk_domain(domain=f"cancel{i}.ru", referring_domains=5) for i in range(5)]
+    states = [scoring.FunnelState(domain_id=did, domain=f"cancel{i}.ru", lane=None,
+                                  referring_domains=5, acquire_deadline=None, feed_flags=None)
+             for i, did in enumerate(ids)]
+    clients = {"aparser": type("Ap", (), {
+                  "whois_probe": lambda self, d: {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}})(),
+              "tci": type("T", (), {"handles": lambda self, d: False})(),
+              "_whois_lock": threading.Lock()}
+    st = {"min_age_years": 3.0, "approve_at": 0.7, "manual_review_at": 0.4,
+         "min_referring_domains": 1}
+
+    with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
+        jobs.request_cancel("score")
+        scoring._run_waves(states, clients, st, whois_budget=None,
+                           ahrefs_budget=None, run=run)
+    last = jobs.last("score")
+    assert last["status"] == "cancelled"
