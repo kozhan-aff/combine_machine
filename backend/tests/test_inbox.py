@@ -161,3 +161,26 @@ def test_expired_domain_is_marked_in_inbox_and_in_ready(client):
          acquire_deadline=now - timedelta(days=30))
     html = client.get("/domains").text
     assert html.count("окно закрыто") == 2      # и в инбоксе, и в «готовы к выкупу»
+
+
+def test_projection_deadline_is_labelled_honestly(client):
+    """Дата из whois free-date — ПРОЕКЦИЯ «освободится, если не продлят» (она есть даже
+    у yandex.ru, живая проба 2026-07-20), а дата из фида — подтверждённый дроп. Панель
+    обязана подписывать их по-разному: иначе оператор видит «СРОК ДРОПА» на домене,
+    который просто продлевают из года в год, и идёт его выкупать."""
+    soon = datetime.now(timezone.utc) + timedelta(days=5)
+    _add(domain="projected.ru", status="scored", score=0.7, acquire_deadline=soon,
+         score_breakdown={"deadline_source": "whois_projection"})
+    html = client.get("/domains").text
+    assert "ОСВОБОДИТСЯ*" in html
+    assert "СРОК ДРОПА" not in html
+
+
+def test_feed_deadline_keeps_drop_label(client):
+    """Обратная сторона: дедлайн из фида (backorder/cctld) остаётся «СРОК ДРОПА» —
+    подпись не должна размыться до бессмысленной для ВСЕХ доменов."""
+    soon = datetime.now(timezone.utc) + timedelta(days=5)
+    _add(domain="fromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)
+    html = client.get("/domains").text
+    assert "СРОК ДРОПА" in html
+    assert "ОСВОБОДИТСЯ*" not in html

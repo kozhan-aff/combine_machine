@@ -294,14 +294,134 @@ def test_funnel_whois_decides_acquirability_for_non_bid_domain():
 # --- Задача 2: free-date заполняет пустой acquire_deadline -----------------------------------
 
 def test_free_date_fills_missing_deadline_only():
-    """free-date заполняет ПУСТОЙ acquire_deadline. Уже известный дедлайн (из
-    фида backorder — источник с ценой и лейном) НЕ перезаписывается."""
-    from datetime import date, datetime, timezone
+    """free-date заполняет ПУСТОЙ acquire_deadline. Уже известный АКТУАЛЬНЫЙ дедлайн
+    (из фида backorder — источник с ценой и лейном, ещё не просроченный) не трогается."""
+    from datetime import datetime, timedelta, timezone
     from app.services import scoring
 
-    known = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    for existing, expect_day in ((None, 21), (known, 1)):
-        pr = {"available": False, "created": None,
-              "free_date": date(2026, 7, 21), "whois_source": "tci"}
-        got = scoring._deadline_from_whois(existing, pr)
-        assert got.day == expect_day
+    now = datetime.now(timezone.utc)
+    known = now + timedelta(days=12)             # дедлайн из фида, ещё не наступил
+    fd = (now + timedelta(days=1)).date()
+    for existing, expect in ((None, fd), (known, known.date())):
+        got = scoring._deadline_from_whois(existing, fd, now, "free")
+        assert got.date() == expect
+
+
+# --- финальное ревью 2026-07-20: находки 1/2/6 (протухшая проекция терминально хоронит домен) -
+
+def test_deadline_from_whois_refreshes_stale_projection_forward():
+    """IMPORTANT 1: протухшая проекция (дедлайн прошёл с запасом, домен всё ещё занят —
+    владелец продлил) обновляется НОВЫМ free-date, если он дальше старого. Раньше
+    `existing is not None` выбрасывал свежий ответ целиком, и вердикт судил по трупу
+    даты (см. docstring _deadline_from_whois)."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=30)                          # протух давно, с запасом DROP_GRACE
+    fresh_fd = (now + timedelta(days=60)).date()
+    got = scoring._deadline_from_whois(stale, fresh_fd, now, "free")
+    assert got.date() == fresh_fd
+
+
+def test_deadline_from_whois_does_not_move_backward_or_within_grace():
+    """Свежий free_date РАНЬШЕ старой (уже протухшей) даты не двигает дедлайн назад,
+    а дедлайн, который ещё в пределах DROP_GRACE, не считается протухшим."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=30)
+    earlier_fd = (now - timedelta(days=40)).date()             # дальше в прошлом, чем stale
+    assert scoring._deadline_from_whois(stale, earlier_fd, now, "free") == stale
+
+    within_grace = now - timedelta(hours=6)                    # прошёл, но ещё в пределах запаса
+    later_fd = (now + timedelta(days=60)).date()
+    assert scoring._deadline_from_whois(within_grace, later_fd, now, "free") == within_grace
+
+
+def test_deadline_from_whois_never_touches_bid_lane():
+    """Регресс (денежный путь M2): для lane='bid' дедлайн из фида backorder не
+    обновляется НИКОГДА, даже если он давно просрочен, а whois принёс свежий free-date
+    вперёд — иначе перехваченный конкурентом домен получил бы free-date НОВОГО владельца
+    и завис бы в пуле на год вместо честного not_acquirable."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=30)
+    fresh_fd = (now + timedelta(days=60)).date()
+    assert scoring._deadline_from_whois(stale, fresh_fd, now, "bid") == stale
+
+
+def test_funnel_fills_empty_deadline_from_tci_and_stays_waiting():
+    """IMPORTANT 2: сквозной тест на _funnel (не только на чистый хелпер) — .ru-домен
+    lane=NULL без дедлайна, TCI отвечает "занят" + free_date впереди. После score_domain
+    дедлайн должен лечь в БД, а домен остаться discovered с unresolved_why='waiting'
+    (а не 'taken_undated', как было бы без даты)."""
+    from datetime import datetime, timedelta, timezone
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+
+    did = _mk_ru_domain(domain="tciwait.ru", referring_domains=3000)   # lane=NULL, дедлайна нет
+    fd = (datetime.now(timezone.utc) + timedelta(days=10)).date()
+    tci = _FakeTci({"available": False, "created": None, "free_date": fd})
+    ap = _FakeAparser()
+    clients = {
+        "aparser": ap, "tci": tci,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": _FunnelWayback(),
+    }
+    out = scoring.score_domain(did, clients=clients)
+
+    assert out.get("unresolved") is True
+    assert out.get("why") == "waiting"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.status == "discovered"
+    assert d.acquire_deadline is not None
+    assert d.acquire_deadline.date() == fd
+    # Дедлайн, заполненный из free-date, — ТАКАЯ ЖЕ проекция «освободится, если не
+    # продлят», как и обновлённый: панель обязана подписать его иначе, чем дату из фида.
+    # Домен при этом остаётся discovered (waiting), то есть идёт по пути unresolved,
+    # где score_breakdown целиком не собирается — ключ кладётся точечно.
+    assert d.score_breakdown["deadline_source"] == "whois_projection"
+
+
+def test_funnel_refreshes_stale_deadline_and_does_not_reject_renewed_domain():
+    """IMPORTANT 1 через полную воронку: домен с ПРОТУХШИМ дедлайном (из бездедлайнового
+    пула — уже ждал свой дроп) на этом прогоне отвечает whois'ом "всё ещё занят" СО СВЕЖИМ
+    free-date вперёд (владелец продлил). До фикса это терминально хоронило домен в
+    rejected/not_acquirable; после — дедлайн обновляется, домен остаётся в discovered,
+    ожидая уже НОВОГО срока."""
+    from datetime import datetime, timedelta, timezone
+    import app.db as db
+    from app.models.domain import Domain
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=30)
+    did = _mk_ru_domain(domain="tcirenewed.ru", referring_domains=3000, acquire_deadline=stale)
+    fresh_fd = (now + timedelta(days=60)).date()
+    tci = _FakeTci({"available": False, "created": None, "free_date": fresh_fd})
+    ap = _FakeAparser()
+    clients = {
+        "aparser": ap, "tci": tci,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": _FunnelWayback(),
+    }
+    out = scoring.score_domain(did, clients=clients)
+
+    assert out.get("unresolved") is True
+    assert out.get("why") == "waiting"                # НЕ not_acquirable/rejected
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert d.status == "discovered"
+    assert d.reject_reason is None
+    assert d.acquire_deadline.date() == fresh_fd       # проекция сдвинулась вперёд
+    assert d.score_breakdown["deadline_source"] == "whois_projection"

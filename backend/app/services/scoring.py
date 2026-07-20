@@ -409,19 +409,34 @@ def scorable(now):
     )
 
 
-def _deadline_from_whois(existing, pr: dict):
-    """Дедлайн выкупа из whois free-date, ТОЛЬКО если его ещё нет.
+def _deadline_from_whois(existing, free_date, now, lane):
+    """Дедлайн выкупа из whois free-date.
 
-    None = «не знаем», а известный дедлайн из фида backorder приходит вместе с
-    лейном и ценой — он авторитетнее и перезаписи не подлежит (инвариант
-    проекта: None никогда не затирает проверенное значение)."""
+    `free_date` — ПРОЕКЦИЯ «освободится, если не продлят» (paid-till + запас реестра),
+    она есть у КАЖДОГО занятого .ru-домена (живой факт: у yandex.ru/mail.ru она тоже
+    есть, хотя оба продлеваются из года в год) — не путать с гарантированной датой
+    дропа. None = «не знаем».
+
+    Пустой дедлайн она заполняет всегда. Уже известный — только если он ПРОТУХ:
+    без этого домен из бездедлайнового пула, получивший проекцию, дождавшийся её и
+    ПРОДЛЁННЫЙ владельцем, навсегда застревал бы на мёртвой дате — следующий whois
+    честно приносит свежий free_date, а старое правило (`existing is not None`) его
+    выбрасывало, вердикт судил по трупу даты и хоронил домен в not_acquirable/rejected
+    (находка финального ревью, 2026-07-20)."""
     from datetime import datetime, time, timezone
-    if existing is not None:
+    if free_date is None:
         return existing
-    fd = pr.get("free_date")
-    if fd is None:
-        return None
-    return datetime.combine(fd, time.min, tzinfo=timezone.utc)
+    new = datetime.combine(free_date, time.min, tzinfo=timezone.utc)
+    if existing is None:
+        return new
+    ex = existing if existing.tzinfo else existing.replace(tzinfo=timezone.utc)
+    # Обновляем ТОЛЬКО просроченную проекцию и ТОЛЬКО вперёд, и НИКОГДА для bid:
+    # у backorder дедлайн из фида (лейн+цена, денежный путь M2), и «дедлайн прошёл,
+    # а домен всё ещё занят» там — это снайпнутый конкурентом домен, законный терминал,
+    # а не устаревшая проекция, которую можно тихо переписать чужим free-date.
+    if lane != "bid" and now > ex + DROP_GRACE and new > ex:
+        return new
+    return existing
 
 
 def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> str | None:
@@ -469,8 +484,22 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
 
     # free-date (TCI) закрывает пустой дедлайн ДО вердикта приобретаемости — иначе
     # домен без даты дропа ещё один цикл судится по старому правилу (unknown/taken-
-    # без-даты). Известный дедлайн (backorder: лейн+цена) не трогаем — см. docstring.
-    d.acquire_deadline = _deadline_from_whois(d.acquire_deadline, pr)
+    # без-даты). Известный АКТУАЛЬНЫЙ дедлайн (backorder: лейн+цена) не трогаем, а
+    # ПРОТУХШИЙ — обновляем вперёд; см. docstring _deadline_from_whois.
+    #
+    # MINOR 3 (ревью 2026-07-20): пишем в d.acquire_deadline мимо whitelist'а sig,
+    # которым ниже по коду setattr() применяет остальные наблюдения — НАМЕРЕННО.
+    # Whitelist защищает от отмывания грязи МЕЖДУ ПРОГОНАМИ (рескор без Wayback не должен
+    # стирать вчерашний rkn_listed=True). Здесь мутация синхронна с САМИМ whois-ответом
+    # этого прогона и идемпотентна (_deadline_from_whois детерминирована по (existing,
+    # free_date, now, lane)) — прятать её в sig и applying позже добавило бы шаг без
+    # смысла, не безопасности.
+    prev_deadline = d.acquire_deadline
+    d.acquire_deadline = _deadline_from_whois(d.acquire_deadline, pr.get("free_date"), now, d.lane)
+    if d.acquire_deadline != prev_deadline:
+        # эта дата — whois-проекция «освободится, если не продлят», не факт из фида
+        # (MINOR 4, ревью 2026-07-20): панель обязана подписывать её иначе, чем СРОК ДРОПА.
+        sig["deadline_source"] = "whois_projection"
 
     wc = pr.get("created")
     sig["whois_created"] = wc
@@ -638,6 +667,16 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             # один шанс, иначе домен никогда не увидит собственного дропа.
             if sig.get("acquirability_checked_at"):
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
+            # Дедлайн на этом пути уже переписан whois-проекцией (_funnel, T1), а
+            # score_breakdown целиком здесь НЕ собирается — домен не оценён, собирать
+            # нечего. Но подпись источника даты обязана дойти до панели именно отсюда:
+            # домен с проекцией даёт вердикт `waiting` и остаётся discovered, то есть
+            # ВСЯ популяция проекций живёт на этом пути. Без этой строки панель
+            # подписывала бы проекцию «СРОК ДРОПА» (дата из фида) ровно там, где она
+            # проекция и есть. Кладём ОДИН ключ, не трогая остальной breakdown.
+            if sig.get("deadline_source"):
+                d.score_breakdown = {**(d.score_breakdown or {}),
+                                     "deadline_source": sig["deadline_source"]}
             db.add(DomainScoreLog(domain_id=d.id, run_id=run, outcome="unresolved",
                                   reject_reason=None, score=None, sig=_jsonable(sig)))
             db.commit()
@@ -715,7 +754,15 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                              # 'tci' | 'aparser' | 'aparser_fallback' | None — ЧЕМ судили
                              # приобретаемость в этом прогоне (ревью Задачи 1, 2026-07-19):
                              # раньше whois_source терялся в sig и до оператора не доходил.
-                             "whois_source": _kept("whois_source")}
+                             "whois_source": _kept("whois_source"),
+                             # 'whois_projection' | None(='feed') — ЧЕМ является текущий
+                             # acquire_deadline (MINOR 4, ревью 2026-07-20): проекцией TCI
+                             # («освободится, если не продлят») или авторитетной датой из
+                             # фида (backorder delete_date / cctld архив). _kept — тот же
+                             # приём, что у whois_source: этот прогон мог не трогать
+                             # deadline вовсе (whois не звался/bid/дедлайн ещё свежий), а
+                             # прошлая классификация не должна теряться молча.
+                             "deadline_source": _kept("deadline_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку до решения — до этой колонки узнать было
