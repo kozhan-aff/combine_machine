@@ -664,16 +664,69 @@ def test_wave_risk_fills_echo_without_rejecting():
     assert s.alive is True and s.sig["indexed_echo"] is True
 
 
-def test_wave_risk_safebrowsing_breaker_survives_concurrency():
+class _SlowFakeRiskClients(_FakeRiskClients):
+    """SafeBrowsing с задержкой — форсирует РЕАЛЬНОЕ перекрытие потоков на предохранителе.
+    Без задержки первый воркер успевал бы отработать (гейт-чек + инкремент) до того, как
+    остальные вообще стартовали бы, и "safebrowsing_failures <= LIMIT" прошёл бы ОДИНАКОВО
+    что с рабочим локом, что без него (тот же баг теста, что нашло ревью Task 2 для
+    whois-предохранителя — см. test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap;
+    сломанный лок ТЕРЯЕТ инкременты => счётчик МЕНЬШЕ => тоже <= LIMIT => ложный зелёный)."""
+    def safebrowsing_check(self, d):
+        self.sb_calls += 1
+        time.sleep(0.02)
+        raise RuntimeError("timeout")
+
+
+def test_wave_risk_safebrowsing_breaker_lock_has_no_lost_increments_under_real_overlap():
+    """Инвариант замка напрямую: ни один инкремент не потерян (failures == calls) —
+    точное число попыток до срабатывания НЕ проверяем (зависит от планировщика ОС,
+    был бы флаки-тестом)."""
     states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
                                   referring_domains=5, acquire_deadline=None,
                                   feed_flags=None) for i in range(20)]
-    clients = _risk_clients(sb_fail_times=10_000)
+    ap = _SlowFakeRiskClients()
+    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap,
+              "_safebrowsing_lock": threading.Lock()}
     scoring._wave_risk(states, clients, run=None)
-    assert clients["aparser"].safebrowsing_failures <= 3
     assert all(s.alive for s in states)   # SafeBrowsing-сбой не отбраковывает, только errors
     assert any("safebrowsing:" in e for s in states for e in s.sig["errors"])
+    assert ap.safebrowsing_failures == ap.sb_calls    # ни один инкремент не потерян под локом
+    assert 3 <= ap.safebrowsing_failures < 20         # предохранитель реально сработал
+
+
+def test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment():
+    """Детерминированная проверка структуры блокировки (не таймингом) — тот же паттерн,
+    что test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment для
+    whois-предохранителя: спай-лок считает входы, а не полагается на редкую гонку GIL."""
+    class _SpyLock:
+        def __init__(self):
+            self._real = threading.Lock()
+            self.enters = 0
+        def __enter__(self):
+            self._real.acquire()
+            self.enters += 1
+        def __exit__(self, *a):
+            self._real.release()
+
+    class _AlwaysFailsSb:
+        def is_listed(self, d): return False
+        def is_blacklisted(self, d): return False
+        def indexed_echo(self, d): return True
+        def safebrowsing_check(self, d): raise RuntimeError("timeout")
+
+    lock = _SpyLock()
+    ap = _AlwaysFailsSb()
+    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap}
+    for i in range(3):        # ровно до порога (_APARSER_SAFEBROWSING_LIMIT=3)
+        s = scoring.FunnelState(domain_id=i, domain=f"x{i}.ru", lane=None,
+                                referring_domains=5, acquire_deadline=None, feed_flags=None)
+        scoring._risk_one(s, clients, lock)
+    assert lock.enters == 6     # 3 попытки x (гейт-чек + инкремент)
+    assert ap.safebrowsing_failures == 3
 ```
+
+Добавить `import time` к импортам `test_scoring_waves.py`, если ещё не добавлен (Task 2 уже
+должен был его добавить для своего аналогичного теста — если нет, добавить здесь).
 
 - [ ] **Step 2: Запустить, убедиться что падает**
 
@@ -765,7 +818,8 @@ def _wave_risk(states: list, clients: dict, run) -> None:
 - [ ] **Step 4: Запустить тесты**
 
 Run: `docker compose run --rm backend pytest backend/tests/test_scoring_waves.py -v -k wave_risk`
-Expected: `3 passed`
+Expected: `4 passed` (rejects_rkn, fills_echo, breaker_lock_has_no_lost_increments,
+safebrowsing_lock_covers_gate_check_and_increment)
 
 - [ ] **Step 5: Регрессия + pyflakes**
 
