@@ -364,11 +364,15 @@ class _FakeWayback:
 
 
 def test_wave_history_rejects_dirty():
+    """Находка ревью Task 4: отказ — тоже вердикт, и улики обязаны дойти до записи ДАЖЕ
+    когда домен отклонён (иначе инбокс показал бы «грязная история» без единого снимка,
+    подтверждающего вердикт) — assert только на alive/reject_reason это не ловил."""
     s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=5,
                             acquire_deadline=None, feed_flags=None)
     st = {"min_age_years": 3.0}
     scoring._wave_history([s], {"wayback": _FakeWayback(dirty=True)}, st, run=None)
     assert s.alive is False and s.reject_reason == "history_dirty"
+    assert s.sig["wayback_checked"] is True and s.sig["sampled"] == 5
 
 
 def test_wave_history_age_fallback_rejects_too_young_when_whois_had_no_age():
