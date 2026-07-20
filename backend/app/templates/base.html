@@ -326,7 +326,7 @@
 
   /* ---- машина сейчас: одна карточка задачи, и на Пульте, и на M1 ---- */
   .job { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--acc);
-         border-radius:var(--r); padding:14px 16px; margin-bottom:10px; }
+         border-radius:var(--r); padding:18px 20px; margin-bottom:14px; }
   .job.err { border-left-color:var(--bad); }
   .job.cancelled { border-left-color:var(--line2); }
   .job-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
@@ -345,6 +345,8 @@
   .job-fill { height:100%; width:0; border-radius:999px; background:var(--acc); transition:width .3s; }
   .job.err .job-fill { background:var(--bad); }
   .job-tally { margin-bottom:10px; }
+  .job-waterfall { margin-bottom:12px; font-size:13px; color:var(--ink);
+                   font-family:var(--mono); line-height:1.6; }
   .job-num { font-family:var(--mono); font-size:12.5px; color:var(--mut); white-space:nowrap; }
   .job-num .rate { margin-left:10px; }
   .job-num b { font-size:16px; color:var(--acc); }
@@ -503,17 +505,24 @@ function jobCard(j){
     }
     el.appendChild(chips);
   }
+  if (j.status === 'running' && !j.stale && j.name === 'score' && j.message){
+    // Волновая waterfall: "RD: 5510 -> 4310 · whois: 4310 -> 3800 · risk: идёт, 1200/3800" —
+    // сколько домена ВЫЖИЛО после каждой волны (не путь одного домена — чипы выше теперь
+    // и так монотонны для всего батча, см. jobs._advance). Источник — job_run.message,
+    // который _run_waves перезаписывает после каждой волны (services/scoring.py).
+    const wf = document.createElement('div'); wf.className = 'job-waterfall';
+    wf.textContent = j.message;
+    wf.title = 'Сколько доменов пережило каждую волну целиком (не путь одного домена): ' +
+               'воронка идёт дёшево->дорого волнами на весь пакет сразу, не по одному домену.';
+    el.appendChild(wf);
+  }
   if (j.status === 'running' && !j.stale && j.tally){
-    // Чипы выше — путь ТЕКУЩЕГО домена (каждый новый снова начинает с RD, см. jobs._advance).
-    // Это годится показать, что происходит СЕЙЧАС, но не отвечает на «а дешёвые стадии вообще
-    // отсеивают быстро?» — для этого нужна раскладка по ВСЕМ обработанным доменам прогона.
     const t = j.tally;
     const info = document.createElement('div'); info.className = 'job-tally hint';
     info.textContent = t.total + ' обработано: ' + t.before_wayback + ' до Wayback (дёшево), '
                       + t.reached_wayback + ' дошли до Wayback';
-    info.title = 'Живая раскладка исхода ЭТОГО прогона: сколько доменов решились на дешёвых ' +
-                 'стадиях (RD из фида, whois-возраст, РКН/блэклист, SafeBrowsing) ДО дорогой ' +
-                 'Wayback-истории, и сколько реально до неё дошло.';
+    info.title = 'Живая раскладка исхода ЭТОГО прогона по ПРИЧИНЕ отказа (дополняет строку ' +
+                 'волн выше, которая считает по СТАДИИ).';
     el.appendChild(info);
   }
   const bar = document.createElement('div'); bar.className = 'job-bar';
