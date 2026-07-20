@@ -303,7 +303,7 @@ def test_free_date_fills_missing_deadline_only():
     known = now + timedelta(days=12)             # дедлайн из фида, ещё не наступил
     fd = (now + timedelta(days=1)).date()
     for existing, expect in ((None, fd), (known, known.date())):
-        got = scoring._deadline_from_whois(existing, fd, now, "free")
+        got = scoring._deadline_from_whois(existing, fd, now, None)
         assert got.date() == expect
 
 
@@ -320,7 +320,7 @@ def test_deadline_from_whois_refreshes_stale_projection_forward():
     now = datetime.now(timezone.utc)
     stale = now - timedelta(days=30)                          # протух давно, с запасом DROP_GRACE
     fresh_fd = (now + timedelta(days=60)).date()
-    got = scoring._deadline_from_whois(stale, fresh_fd, now, "free")
+    got = scoring._deadline_from_whois(stale, fresh_fd, now, None)
     assert got.date() == fresh_fd
 
 
@@ -333,11 +333,11 @@ def test_deadline_from_whois_does_not_move_backward_or_within_grace():
     now = datetime.now(timezone.utc)
     stale = now - timedelta(days=30)
     earlier_fd = (now - timedelta(days=40)).date()             # дальше в прошлом, чем stale
-    assert scoring._deadline_from_whois(stale, earlier_fd, now, "free") == stale
+    assert scoring._deadline_from_whois(stale, earlier_fd, now, None) == stale
 
     within_grace = now - timedelta(hours=6)                    # прошёл, но ещё в пределах запаса
     later_fd = (now + timedelta(days=60)).date()
-    assert scoring._deadline_from_whois(within_grace, later_fd, now, "free") == within_grace
+    assert scoring._deadline_from_whois(within_grace, later_fd, now, None) == within_grace
 
 
 def test_deadline_from_whois_never_touches_bid_lane():
@@ -352,6 +352,23 @@ def test_deadline_from_whois_never_touches_bid_lane():
     stale = now - timedelta(days=30)
     fresh_fd = (now + timedelta(days=60)).date()
     assert scoring._deadline_from_whois(stale, fresh_fd, now, "bid") == stale
+
+
+def test_deadline_from_whois_never_touches_free_lane():
+    """Регресс (ревью 2026-07-20): lane='free' — второй законный терминал. whois уже
+    подтвердил, что домен БЫЛ свободен; если он снова занят, значит его КУПИЛИ, и это
+    честный not_acquirable, а не устаревшая проекция. Обновляя дедлайн, мы бы подставили
+    free-date НОВОГО владельца, вердикт стал бы waiting, и перекупленный домен висел бы
+    в инбоксе кандидатом к выкупу вечно. Целевая популяция находки — lane=NULL."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import scoring
+
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=30)
+    fresh_fd = (now + timedelta(days=60)).date()
+    assert scoring._deadline_from_whois(stale, fresh_fd, now, "free") == stale
+    # а для бездедлайнового пула (lane=NULL) — обновляется, это и есть смысл фикса
+    assert scoring._deadline_from_whois(stale, fresh_fd, now, None).date() == fresh_fd
 
 
 def test_funnel_fills_empty_deadline_from_tci_and_stays_waiting():

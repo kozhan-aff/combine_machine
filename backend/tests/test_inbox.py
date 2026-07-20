@@ -184,3 +184,26 @@ def test_feed_deadline_keeps_drop_label(client):
     html = client.get("/domains").text
     assert "СРОК ДРОПА" in html
     assert "ОСВОБОДИТСЯ*" not in html
+
+
+def test_projection_never_shows_window_closed(client):
+    """«окно закрыто — домен занят» — утверждение о ФАКТЕ, и над проекцией оно ложно.
+    Домен, дождавшийся своей free-date и реально дропнувшийся, приходит в инбокс с
+    прошедшей датой (при available=True свежего free-date нет, обновлять нечем). Если
+    прогон Score отстал больше чем на DROP_GRACE, свободный домен носил бы красную
+    метку «занят» на экране, с которого идут покупать (ревью 2026-07-20)."""
+    past = datetime.now(timezone.utc) - timedelta(days=10)
+    _add(domain="dropped.ru", status="scored", score=0.7, acquire_deadline=past,
+         score_breakdown={"deadline_source": "whois_projection"})
+    html = client.get("/domains").text
+    assert "dropped.ru" in html
+    assert "окно закрыто" not in html
+
+
+def test_expired_feed_deadline_still_shows_window_closed(client):
+    """Обратная сторона: для подтверждённой даты из фида метка остаётся — без неё
+    оператор одобряет покойника и идёт его выкупать."""
+    past = datetime.now(timezone.utc) - timedelta(days=10)
+    _add(domain="sniped.ru", status="scored", score=0.7, acquire_deadline=past)
+    html = client.get("/domains").text
+    assert "окно закрыто" in html
