@@ -1385,6 +1385,12 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
         else:
+            # F25: Ahrefs зовётся ТОЛЬКО когда фид не дал RD (_wave_ahrefs) — при рескоре
+            # уже приобретённого RD-домена sig["dr"] не наполняется, хотя d.dr в БД уже
+            # хранит проверенное значение с прошлого прогона. Без setdefault compute_score
+            # считал бы authority от 0.0, будто Ahrefs вообще не спрашивали. float(): `dr` —
+            # Numeric, ORM отдаёт его как Decimal при чтении этой (свежей) строки — Decimal/
+            # float в compute_score роняет TypeError.
             sig.setdefault("referring_domains", d.referring_domains)
             sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
             result = compute_score(sig, st.get("weights"))
@@ -1392,6 +1398,14 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                 result = {**result, "status": _decide(result["score"], sig,
                                                       st["approve_at"], st["manual_review_at"])}
 
+        # СИГНАЛЫ ПИШЕМ ТОЛЬКО ИЗ ПРОВЕРОК, КОТОРЫЕ В ЭТОМ ПРОГОНЕ РЕАЛЬНО ОТРАБОТАЛИ —
+        # НЕ blind overwrite. Воронка выходит рано на разных волнах (T0 не зовёт вообще
+        # ничего, whois-волна — только whois); РКН/блэклист/Wayback при таком выходе не
+        # исполнялись, sig о них молчит. Безусловный `setattr` отсюда отмывал бы грязь:
+        # домен, отклонённый за РКН, после рескора терял бы ВСЕ улики (rkn_listed=None) и
+        # снова становился чистым для политики — кнопка реабилитации сработала бы не «по
+        # новым уликам», а по их ОТСУТСТВИЮ. Отсутствие значения — «не проверяли», оно не
+        # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
                     "indexed_echo", "dr", "referring_domains"):
@@ -1403,6 +1417,11 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         prev = d.score_breakdown or {}
 
         def _kept(key):
+            """То же правило для УЛИК: снимок, который этот прогон не смотрел, не исчезает
+            (fallback — ИМЕННО существующий score_breakdown, снятый ДО этого прогона).
+            Иначе prior_flags (только что сохранённый выше) остался бы вердиктом без
+            единого подтверждения: инбокс пишет «история грязная — смотри снимки», а
+            смотреть нечего."""
             v = sig.get(key)
             return v if v is not None else prev.get(key)
 
@@ -1415,6 +1434,9 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "deadline_source": _kept("deadline_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
+        # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку ДО РЕШЕНИЯ — unresolved-возврат
+        # выше оставляет домен discovered (воронка НЕ дошла до решения, значит и не
+        # "оценила" его), поэтому эта отметка ставится только на пути ниже.
         d.scored_at = datetime.now(timezone.utc)
         db.add(DomainScoreLog(
             domain_id=d.id, run_id=run,
