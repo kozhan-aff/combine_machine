@@ -1322,6 +1322,29 @@ def _wave_history(states: list, clients: dict, st: dict, run) -> None:
                     lambda s: _history_one(s, clients, st))
 
 
+def _ahrefs_one(s: FunnelState, clients: dict, budget) -> None:
+    """Тело T3b для ОДНОГО домена: Ahrefs ТОЛЬКО если фид не дал RD и бюджет жив.
+    Прямой перенос T3b (было строки 647-661). Никогда не отбраковывает."""
+    if s.referring_domains is not None or budget is None or not budget.take():
+        return
+    try:
+        ah = clients["aparser"].ahrefs_probe(s.domain)
+        s.sig["dr"] = ah["dr"]
+        s.sig["ahrefs_backlinks"] = ah["backlinks"]
+        if ah["referring_domains"] is not None:
+            s.sig["referring_domains"] = ah["referring_domains"]
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"ahrefs:{type(e).__name__}")
+
+
+def _wave_ahrefs(states: list, clients: dict, budget, run) -> None:
+    """T3b — Ahrefs, конкурентно (потолок 2 — капча за штуку, дорого и хрупко к нагрузке)
+    на весь выживший после history пул. budget=None -> волна не вызывает Ahrefs вовсе
+    (отличие от whois, где None = безлимит) — Ahrefs платный, дефолт "выключено"."""
+    _run_concurrent(states, _CONCURRENCY["ahrefs"], run, "ahrefs",
+                    lambda s: _ahrefs_one(s, clients, budget))
+
+
 if __name__ == "__main__":  # pure-function self-check (no I/O)
     # clean old domain -> manual review at least
     clean = compute_score({"wayback_checked": True, "prior_flags": {},

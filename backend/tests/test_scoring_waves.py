@@ -392,3 +392,48 @@ def test_wave_history_keeps_whois_age_over_wayback_fallback():
     scoring._wave_history([s], {"wayback": _FakeWayback(age_years=1.0)}, st, run=None)
     assert s.alive is True
     assert "age_source" not in s.sig or s.sig.get("age_source") != "wayback"
+
+
+class _FakeAhrefs:
+    def __init__(self, dr=5.0, backlinks=100, rd=50, raises=False):
+        self.dr, self.backlinks, self.rd, self.raises = dr, backlinks, rd, raises
+        self.calls = 0
+
+    def ahrefs_probe(self, domain):
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("captcha failed")
+        return {"dr": self.dr, "backlinks": self.backlinks, "referring_domains": self.rd}
+
+
+def test_wave_ahrefs_skips_domain_with_feed_rd():
+    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=500,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs()
+    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
+    assert ap.calls == 0 and "dr" not in s.sig
+
+
+def test_wave_ahrefs_probes_when_feed_has_no_rd_and_budget_available():
+    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=None,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs(dr=7.0)
+    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
+    assert ap.calls == 1 and s.sig["dr"] == 7.0
+
+
+def test_wave_ahrefs_none_budget_means_disabled():
+    s = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None, referring_domains=None,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs()
+    scoring._wave_ahrefs([s], {"aparser": ap}, budget=None, run=None)
+    assert ap.calls == 0
+
+
+def test_wave_ahrefs_failure_does_not_reject():
+    s = scoring.FunnelState(domain_id=4, domain="d.ru", lane=None, referring_domains=None,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs(raises=True)
+    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
+    assert s.alive is True
+    assert any("ahrefs:" in e for e in s.sig["errors"])
