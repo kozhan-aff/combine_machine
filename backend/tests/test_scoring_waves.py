@@ -1,5 +1,6 @@
 """Волновой оркестратор скоринга: FunnelState, Budget, конкурентный харнесс, волны."""
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.services import scoring
@@ -161,16 +162,79 @@ def test_wave_whois_budget_exhausted_marks_unresolved_without_network_call():
     assert aparser.calls == 0          # бюджет исчерпан ДО сети — вызова не было
 
 
-def test_wave_whois_concurrent_batch_does_not_corrupt_breaker_counter():
-    """20 доменов, whois всегда падает, конкурентность 12 — предохранитель обязан
-    сработать РОВНО на пороге, счётчик не должен убегать выше лимита из-за гонки."""
+class _SlowAlwaysFailAparser:
+    """Всегда падает, с искусственной задержкой в whois_probe — форсирует РЕАЛЬНОЕ
+    перекрытие потоков. Без задержки первый воркер успевал бы отработать (гейт-чек +
+    инкремент) до того, как остальные 11 вообще стартовали бы — счётчик тогда растёт
+    строго последовательно, и тест "whois_failures <= LIMIT" проходит ОДИНАКОВО что с
+    замком, что без него (находка ревью Task 2, 2026-07-21: сломанный замок ТЕРЯЕТ
+    инкременты -> счётчик становится МЕНЬШЕ -> тоже <= LIMIT -> ложный зелёный)."""
+    def __init__(self):
+        self._calls_lock = threading.Lock()   # bookkeeping самой фикстуры, не код под тестом
+        self.calls = 0
+        self.whois_failures = 0
+
+    def whois_probe(self, domain):
+        with self._calls_lock:
+            self.calls += 1
+        time.sleep(0.02)
+        raise RuntimeError("timeout")
+
+
+def test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap():
+    """20 доменов, конкурентность 12, whois всегда падает С ЗАДЕРЖКОЙ (форсирует
+    настоящее перекрытие потоков, не последовательный проход). Проверяем ИНВАРИАНТ
+    ЗАМКА напрямую: ни один инкремент не потерян (whois_failures == calls) — именно
+    это гонка read-modify-write без лока и ломает. Предохранитель реально остановил
+    часть волны (calls < 20), но точное число попыток до срабатывания (обычно 12,
+    ширина пула) НЕ проверяем — оно зависит от планировщика ОС и было бы флаки-тестом."""
     st = {"min_age_years": 3.0}
-    states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
+    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.ru", lane=None,
                                   referring_domains=5, acquire_deadline=None,
                                   feed_flags=None) for i in range(20)]
-    aparser = _FakeAparserWhois(fail_times=10_000)  # всегда падает
+    aparser = _SlowAlwaysFailAparser()
     clients = {"aparser": aparser, "tci": type("T", (), {"handles": lambda self, d: False})(),
-               "_whois_lock": threading.Lock()}
+              "_whois_lock": threading.Lock()}
     scoring._wave_whois(states, clients, budget=None, st=st, run=None)
     assert all(not s.alive and s.unresolved_why == "whois_failed" for s in states)
-    assert aparser.whois_failures <= 3    # предохранитель ограничивает, не растёт без края
+    assert aparser.whois_failures == aparser.calls    # ни один инкремент не потерян под локом
+    assert 3 <= aparser.whois_failures < 20           # предохранитель реально сработал и что-то остановил
+
+
+class _SpyLock:
+    """Обёртка над настоящим Lock, которая ЗАПИСЫВАЕТ каждый вход — доказывает, что
+    _aparser_whois реально берёт лок вокруг ОБЕИХ операций (гейт-чек чтения И запись
+    счётчика), а не только вокруг одной из них. Гонка на голом += 1 под GIL слишком
+    редкая, чтобы ловить её таймингом надёжно за разумное число прогонов (проверено
+    вручную: даже БЕЗ лока 5/5 прогонов соседнего теста не потеряли ни одного
+    инкремента) — этот тест проверяет структуру блокировки напрямую, детерминированно."""
+    def __init__(self):
+        self._real = threading.Lock()
+        self.enters = 0
+
+    def __enter__(self):
+        self._real.acquire()
+        self.enters += 1
+
+    def __exit__(self, *a):
+        self._real.release()
+
+
+def test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment():
+    from app.services import whois as whois_router
+
+    class _AlwaysFails:
+        def whois_probe(self, d):
+            raise RuntimeError("timeout")
+
+    lock = _SpyLock()
+    ap = _AlwaysFails()
+    for _ in range(3):          # ровно до порога (_APARSER_WHOIS_FAILURE_LIMIT=3)
+        try:
+            whois_router._aparser_whois(ap, "x.ru", lock)
+        except RuntimeError:
+            pass
+    # каждая из 3 попыток (ДО срабатывания) берёт лок дважды: гейт-чек чтения + запись
+    # инкремента. Пропуск любого из двух входов означает непокрытую гонку.
+    assert lock.enters == 6
+    assert ap.whois_failures == 3
