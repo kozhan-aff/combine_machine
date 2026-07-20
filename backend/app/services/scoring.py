@@ -335,6 +335,7 @@ def _make_clients() -> dict:
     return {
         "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
         "searxng": SearxngClient(), "aparser": AParserClient(), "tci": TciWhoisClient(),
+        "_whois_lock": threading.Lock(),
     }
 
 
@@ -1147,6 +1148,76 @@ def _wave_t0(states: list, st: dict) -> None:
               and s.referring_domains < st["min_referring_domains"]):
             s.reject_reason = "low_rd"
             s.alive = False
+
+
+def _whois_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
+    """Тело T1 для ОДНОГО домена — вызывается конкурентно из _wave_whois. Прямой перенос
+    сегодняшнего _funnel T1 (scoring.py, было строки 478-570), без изменения логики: budget
+    вместо мутируемого [int], state вместо ORM Domain + sig."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    if budget is not None and not budget.take():
+        s.unresolved_why = "budget"
+        s.alive = False
+        return
+
+    age_known = False
+    age = None
+    try:
+        pr = whois_router.probe(s.domain, clients)
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"whois:{type(e).__name__}")
+        if s.lane != "bid":
+            s.unresolved_why = "whois_failed"
+            s.alive = False
+            return
+        pr = {"available": None, "created": None}
+
+    if pr.get("available") is not None:
+        s.sig["acquirability_checked_at"] = now
+    s.sig["whois_source"] = pr.get("whois_source")
+
+    prev_deadline = s.acquire_deadline
+    s.acquire_deadline = _deadline_from_whois(s.acquire_deadline, pr.get("free_date"), now, s.lane)
+    if s.acquire_deadline != prev_deadline:
+        s.sig["deadline_source"] = "whois_projection"
+
+    wc = pr.get("created")
+    s.sig["whois_created"] = wc
+    if wc is not None:
+        age_known = True
+        age = (now - wc).days / 365.25
+        s.sig["age_years"] = round(age, 2)
+        s.sig["age_source"] = "whois"
+
+    if s.lane == "bid":
+        s.sig["lane"] = "bid"
+        if age_known and age < st["min_age_years"]:
+            s.reject_reason = "too_young"
+            s.alive = False
+        return
+
+    v = acquirability_verdict(pr.get("available"), s.acquire_deadline, now, lane=s.lane)
+    if v == "taken":
+        s.reject_reason = "not_acquirable"
+        s.alive = False
+    elif v == "free":
+        s.sig["lane"] = "free"
+        if age_known and age < st["min_age_years"]:
+            s.reject_reason = "too_young"
+            s.alive = False
+    else:
+        s.unresolved_why = ("waiting" if v == "waiting"
+                            else "whois_unclear" if pr.get("available") is None
+                            else "taken_undated")
+        s.alive = False
+
+
+def _wave_whois(states: list, clients: dict, budget, st: dict, run) -> None:
+    """T1 — приобретаемость + возраст, конкурентно на весь выживший после T0 пул."""
+    _run_concurrent(states, _CONCURRENCY["whois"], run, "whois",
+                    lambda s: _whois_one(s, clients, budget, st))
 
 
 if __name__ == "__main__":  # pure-function self-check (no I/O)

@@ -1,5 +1,6 @@
 """Волновой оркестратор скоринга: FunnelState, Budget, конкурентный харнесс, волны."""
 import threading
+from datetime import datetime, timedelta, timezone
 
 from app.services import scoring
 
@@ -101,3 +102,75 @@ def test_run_concurrent_raises_cancelled_when_stop_requested():
         scoring._run_concurrent(states, workers=2, run=run, stage="whois",
                                 fn=lambda s: None)
     assert jobs.last("score")["status"] == "cancelled"
+
+
+class _FakeAparserWhois:
+    def __init__(self, available=False, created=None, fail_times=0):
+        self.available = available
+        self.created = created
+        self.fail_times = fail_times
+        self.calls = 0
+        self.whois_failures = 0
+
+    def whois_probe(self, domain):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError("timeout")
+        return {"available": self.available, "created": self.created}
+
+    def safebrowsing_check(self, domain):
+        return False
+
+
+def _clients_no_tci(**kw):
+    return {"aparser": _FakeAparserWhois(**kw),
+            "tci": type("T", (), {"handles": lambda self, d: False})(),
+            "_whois_lock": threading.Lock()}
+
+
+def test_wave_whois_rejects_too_young_bid_domain():
+    st = {"min_age_years": 3.0}
+    young = datetime.now(timezone.utc) - timedelta(days=200)
+    s = scoring.FunnelState(domain_id=1, domain="young.ru", lane="bid",
+                            referring_domains=5, acquire_deadline=None, feed_flags=None)
+    clients = _clients_no_tci(available=False, created=young)
+    scoring._wave_whois([s], clients, budget=None, st=st, run=None)
+    assert s.alive is False and s.reject_reason == "too_young"
+
+
+def test_wave_whois_marks_free_lane_and_survives():
+    st = {"min_age_years": 3.0}
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 10)
+    s = scoring.FunnelState(domain_id=2, domain="free.ru", lane=None,
+                            referring_domains=5, acquire_deadline=None, feed_flags=None)
+    clients = _clients_no_tci(available=True, created=old)
+    scoring._wave_whois([s], clients, budget=None, st=st, run=None)
+    assert s.alive is True and s.sig["lane"] == "free"
+
+
+def test_wave_whois_budget_exhausted_marks_unresolved_without_network_call():
+    st = {"min_age_years": 3.0}
+    s = scoring.FunnelState(domain_id=3, domain="over.ru", lane=None,
+                            referring_domains=5, acquire_deadline=None, feed_flags=None)
+    aparser = _FakeAparserWhois(available=True)
+    clients = {"aparser": aparser, "tci": type("T", (), {"handles": lambda self, d: False})(),
+               "_whois_lock": threading.Lock()}
+    budget = scoring.Budget(0)
+    scoring._wave_whois([s], clients, budget=budget, st=st, run=None)
+    assert s.alive is False and s.unresolved_why == "budget"
+    assert aparser.calls == 0          # бюджет исчерпан ДО сети — вызова не было
+
+
+def test_wave_whois_concurrent_batch_does_not_corrupt_breaker_counter():
+    """20 доменов, whois всегда падает, конкурентность 12 — предохранитель обязан
+    сработать РОВНО на пороге, счётчик не должен убегать выше лимита из-за гонки."""
+    st = {"min_age_years": 3.0}
+    states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
+                                  referring_domains=5, acquire_deadline=None,
+                                  feed_flags=None) for i in range(20)]
+    aparser = _FakeAparserWhois(fail_times=10_000)  # всегда падает
+    clients = {"aparser": aparser, "tci": type("T", (), {"handles": lambda self, d: False})(),
+               "_whois_lock": threading.Lock()}
+    scoring._wave_whois(states, clients, budget=None, st=st, run=None)
+    assert all(not s.alive and s.unresolved_why == "whois_failed" for s in states)
+    assert aparser.whois_failures <= 3    # предохранитель ограничивает, не растёт без края

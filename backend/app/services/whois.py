@@ -34,6 +34,7 @@ BaseClient (3 попытки × exponential backoff, ~30 с) — ровно то
 См. docs/superpowers/specs/2026-07-19-tci-whois-design.md.
 """
 import logging
+from contextlib import nullcontext
 
 _log = logging.getLogger(__name__)
 
@@ -43,20 +44,28 @@ _TCI_FAILURE_LIMIT = 3
 _APARSER_WHOIS_FAILURE_LIMIT = 3
 
 
-def _aparser_whois(ap, domain: str) -> dict:
-    """whois_probe с предохранителем — см. модульный докстринг. Поднимает исключение
-    и на срабатывании предохранителя (не только на реальном сетевом сбое): вызывающий
-    код (_funnel) уже трактует любое исключение отсюда как «whois не удался», разница
-    лишь в том, что тут мы не платим за ретрай, зная, что канал мёртв в этом прогоне."""
-    if getattr(ap, "whois_failures", 0) >= _APARSER_WHOIS_FAILURE_LIMIT:
+def _aparser_whois(ap, domain: str, lock=None) -> dict:
+    """whois_probe с предохранителем — см. модульный докстринг. `lock` — общий на волну
+    (создаётся в _make_clients под ключом "_whois_lock"): под конкурентностью несколько
+    потоков волны могут одновременно читать/писать ap.whois_failures на ОДНОМ инстансе
+    клиента — голый += 1 не атомарен (LOAD/ADD/STORE — GIL может переключить поток между
+    ними), гонка занижала бы счётчик или логировала срабатывание предохранителя дважды.
+    lock=None (вызов вне волны, тесты) — используем no-op контекст, поведение как раньше."""
+    cm = lock if lock is not None else nullcontext()
+    with cm:
+        breaker_open = getattr(ap, "whois_failures", 0) >= _APARSER_WHOIS_FAILURE_LIMIT
+    if breaker_open:
         raise RuntimeError("A-Parser whois: предохранитель сработал, канал пропускается до конца прогона")
     try:
         pr = ap.whois_probe(domain)
-        ap.whois_failures = 0          # канал жив — счётчик сбоев сброшен
+        with cm:
+            ap.whois_failures = 0          # канал жив — счётчик сбоев сброшен
         return pr
     except Exception:
-        ap.whois_failures = getattr(ap, "whois_failures", 0) + 1
-        if ap.whois_failures >= _APARSER_WHOIS_FAILURE_LIMIT:
+        with cm:
+            ap.whois_failures = getattr(ap, "whois_failures", 0) + 1
+            tripped = ap.whois_failures >= _APARSER_WHOIS_FAILURE_LIMIT
+        if tripped:
             _log.warning(
                 "A-Parser whois: %d сбоев подряд — предохранитель сработал, "
                 "до конца прогона канал пропускается", _APARSER_WHOIS_FAILURE_LIMIT)
@@ -70,41 +79,43 @@ def probe(domain: str, clients: dict) -> dict:
     ключей available/created не ломаются. whois_source показывает, ЧЕМ судили
     домен: сбой TCI молча не превращается в «A-Parser так решил».
 
+    `clients.get("_whois_lock")` — общий лок волны (см. scoring._make_clients),
+    None вне волны (одиночный score_domain, юнит-тесты) — nullcontext, поведение
+    как раньше (потокобезопасность не нужна при последовательном вызове).
+
     Предохранитель (см. модульный докстринг): пока `tci.consecutive_failures`
     < `_TCI_FAILURE_LIMIT`, TCI пробуется как обычно; успешный ответ сбрасывает
     счётчик в 0. Как только порог достигнут — TCI больше не вызывается вовсе
     (даже для доменов, что ему принадлежат по зоне), и это ОДИН раз логируется
     в момент срабатывания — не на каждый последующий домен."""
+    cm = clients.get("_whois_lock") or nullcontext()
     tci = clients.get("tci")
     if tci is not None and tci.handles(domain):
-        if getattr(tci, "consecutive_failures", 0) >= _TCI_FAILURE_LIMIT:
+        with cm:
+            breaker_open = getattr(tci, "consecutive_failures", 0) >= _TCI_FAILURE_LIMIT
+        if breaker_open:
             source = "aparser_fallback"    # предохранитель уже сработал в этом прогоне — TCI не трогаем
         else:
             try:
                 result = {**tci.probe(domain), "whois_source": "tci"}
-                tci.consecutive_failures = 0    # канал жив — счётчик сбоев сброшен
+                with cm:
+                    tci.consecutive_failures = 0    # канал жив — счётчик сбоев сброшен
                 return result
             except Exception as e:                # noqa: BLE001 — сбой канала, не приговор домену
-                # Безусловный след сбоя — только этот лог. score_breakdown.whois_source
-                # получает "aparser_fallback" ТОЛЬКО когда домен проходит полный _funnel
-                # (scoring.py кладёт его туда через whitelist-хелпер _kept) — а
-                # recheck_acquirability whois_source из ответа вообще не читает, там
-                # источник сбоя виден исключительно здесь.
                 _log.warning("TCI whois сбой для %s (%s: %s) — фолбэк на A-Parser",
                              domain, type(e).__name__, e)
-                tci.consecutive_failures = getattr(tci, "consecutive_failures", 0) + 1
-                if tci.consecutive_failures >= _TCI_FAILURE_LIMIT:
-                    # Срабатывание предохранителя — ОТДЕЛЬНЫЙ безусловный лог, ровно один раз
-                    # на прогон (а не на каждый из оставшихся доменов, что и было находкой
-                    # ревью): дальше domains до конца свипа даже не долетают до try выше.
+                with cm:
+                    tci.consecutive_failures = getattr(tci, "consecutive_failures", 0) + 1
+                    tripped = tci.consecutive_failures >= _TCI_FAILURE_LIMIT
+                if tripped:
                     _log.warning(
                         "TCI whois: %d сбоев подряд — предохранитель сработал, "
                         "до конца прогона TCI пропускается, whois идёт через A-Parser",
                         _TCI_FAILURE_LIMIT)
                 source = "aparser_fallback"
-        pr = _aparser_whois(clients["aparser"], domain)
+        pr = _aparser_whois(clients["aparser"], domain, cm if clients.get("_whois_lock") else None)
     else:
         source = "aparser"
-        pr = _aparser_whois(clients["aparser"], domain)
+        pr = _aparser_whois(clients["aparser"], domain, cm if clients.get("_whois_lock") else None)
     return {"available": pr.get("available"), "created": pr.get("created"),
             "free_date": None, "whois_source": source}
