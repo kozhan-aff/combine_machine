@@ -437,3 +437,24 @@ def test_wave_ahrefs_failure_does_not_reject():
     scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
     assert s.alive is True
     assert any("ahrefs:" in e for e in s.sig["errors"])
+
+
+def test_wave_ahrefs_exhausted_budget_skips_without_call():
+    """Находка ревью Task 5: пробел покрытия — исчерпанный (не None) бюджет не был
+    отдельно проверен на реальный отказ от сети."""
+    s = scoring.FunnelState(domain_id=5, domain="e.ru", lane=None, referring_domains=None,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs()
+    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(0), run=None)
+    assert ap.calls == 0 and "dr" not in s.sig
+
+
+def test_wave_ahrefs_does_not_overwrite_referring_domains_with_none():
+    """Находка ревью Task 5: sig["referring_domains"] обязан обновляться ТОЛЬКО когда
+    Ahrefs реально вернул значение — None от Ahrefs не должен затирать ключ пустотой."""
+    s = scoring.FunnelState(domain_id=6, domain="f.ru", lane=None, referring_domains=None,
+                            acquire_deadline=None, feed_flags=None)
+    ap = _FakeAhrefs(rd=None)
+    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
+    assert ap.calls == 1
+    assert "referring_domains" not in s.sig
