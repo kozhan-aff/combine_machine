@@ -458,3 +458,64 @@ def test_wave_ahrefs_does_not_overwrite_referring_domains_with_none():
     scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
     assert ap.calls == 1
     assert "referring_domains" not in s.sig
+
+
+# ============================================================================
+# _commit_result tests — БД-трогающие, используют real SessionLocal() с SQLite
+# ============================================================================
+
+import app.db as db
+from app.models.domain import Domain
+from app.models.domain_score_log import DomainScoreLog
+
+
+def _mk_domain(**kw):
+    with db.SessionLocal() as s:
+        d = Domain(domain=kw.pop("domain", "commit.ru"), source="cctld",
+                   status="discovered", **kw)
+        s.add(d); s.commit(); s.refresh(d)
+        return d.id
+
+
+def test_commit_result_writes_rejected_and_log_row():
+    did = _mk_domain()
+    s = scoring.FunnelState(domain_id=did, domain="commit.ru", lane=None,
+                            referring_domains=5, acquire_deadline=None,
+                            feed_flags=None)
+    s.reject_reason = "rkn"
+    s.alive = False
+    out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
+    assert out["status"] == "rejected" and out["reject_reason"] == "rkn"
+    with db.SessionLocal() as sess:
+        d = sess.get(Domain, did)
+        assert d.status == "rejected" and d.reject_reason == "rkn"
+        log = sess.query(DomainScoreLog).filter_by(domain_id=did).one()
+        assert log.outcome == "rejected" and log.reject_reason == "rkn"
+
+
+def test_commit_result_writes_unresolved_and_leaves_domain_discovered():
+    did = _mk_domain()
+    s = scoring.FunnelState(domain_id=did, domain="commit2.ru", lane=None,
+                            referring_domains=5, acquire_deadline=None,
+                            feed_flags=None)
+    s.unresolved_why = "waiting"
+    s.alive = False
+    out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
+    assert out["unresolved"] is True and out["why"] == "waiting"
+    with db.SessionLocal() as sess:
+        d = sess.get(Domain, did)
+        assert d.status == "discovered"
+
+
+def test_commit_result_computes_score_for_survivor():
+    did = _mk_domain()
+    s = scoring.FunnelState(domain_id=did, domain="commit3.ru", lane=None,
+                            referring_domains=5000, acquire_deadline=None,
+                            feed_flags=None)
+    s.sig.update({"wayback_checked": True, "prior_flags": {}, "age_years": 10,
+                 "indexed_echo": True, "dr": None})
+    out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
+    assert out["status"] in ("approved", "scored") and out["score"] > 0
+    with db.SessionLocal() as sess:
+        d = sess.get(Domain, did)
+        assert float(d.score) == out["score"] and d.status == out["status"]

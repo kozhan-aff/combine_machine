@@ -1345,6 +1345,86 @@ def _wave_ahrefs(states: list, clients: dict, budget, run) -> None:
                     lambda s: _ahrefs_one(s, clients, budget))
 
 
+def _commit_result(state: FunnelState, run, st: dict) -> dict:
+    """Записать итог ОДНОГО FunnelState в БД — прямой перенос хвоста сегодняшнего
+    score_domain() (после вызова _funnel, было строки 684-811), но принимает state
+    вместо только что вычисленного sig/reject внутри той же функции: волны финализируют
+    домен в момент его выхода из конвейера (см. _run_waves), не в конце одной функции.
+
+    Открывает СВОЮ сессию — тот же паттерн, что и раньше: разные domain_id — разные
+    строки, конкурентная запись безопасна."""
+    from datetime import timezone
+    from app.db import SessionLocal
+    from app.models.domain import Domain
+    from app.models.domain_score_log import DomainScoreLog
+
+    sig, reject = state.sig, state.reject_reason
+    with SessionLocal() as db:
+        d = db.get(Domain, state.domain_id)
+        if d is None or d.status not in ("discovered", "scored", "rejected"):
+            return {"domain": state.domain, "status": d.status if d else "gone",
+                    "skipped": "status"}
+
+        if state.unresolved_why is not None:
+            if sig.get("acquirability_checked_at"):
+                d.acquirability_checked_at = sig["acquirability_checked_at"]
+            if sig.get("deadline_source"):
+                d.score_breakdown = {**(d.score_breakdown or {}),
+                                     "deadline_source": sig["deadline_source"]}
+            if state.acquire_deadline != d.acquire_deadline:
+                d.acquire_deadline = state.acquire_deadline
+            db.add(DomainScoreLog(domain_id=d.id, run_id=run, outcome="unresolved",
+                                  reject_reason=None, score=None, sig=_jsonable(sig)))
+            db.commit()
+            return {"domain": d.domain, "status": d.status, "unresolved": True,
+                    "why": state.unresolved_why, "errors": sig.get("errors", [])}
+
+        if state.acquire_deadline != d.acquire_deadline:
+            d.acquire_deadline = state.acquire_deadline
+
+        if reject:
+            result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
+        else:
+            sig.setdefault("referring_domains", d.referring_domains)
+            sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
+            result = compute_score(sig, st.get("weights"))
+            if "hard_reject" not in result["breakdown"]:
+                result = {**result, "status": _decide(result["score"], sig,
+                                                      st["approve_at"], st["manual_review_at"])}
+
+        for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
+                    "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
+                    "indexed_echo", "dr", "referring_domains"):
+            v = sig.get(col)
+            if v is not None:
+                setattr(d, col, v)
+        d.clean = result["status"] != "rejected"
+        d.score = result["score"]
+        prev = d.score_breakdown or {}
+
+        def _kept(key):
+            v = sig.get(key)
+            return v if v is not None else prev.get(key)
+
+        d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
+                             "ahrefs_backlinks": _kept("ahrefs_backlinks"),
+                             "history_evidence": _kept("history_evidence") or [],
+                             "sampled": _kept("sampled"),
+                             "age_source": _kept("age_source"),
+                             "whois_source": _kept("whois_source"),
+                             "deadline_source": _kept("deadline_source")}
+        d.status = result["status"]
+        d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
+        d.scored_at = datetime.now(timezone.utc)
+        db.add(DomainScoreLog(
+            domain_id=d.id, run_id=run,
+            outcome="rejected" if result["status"] == "rejected" else "scored",
+            reject_reason=d.reject_reason, score=result["score"], sig=_jsonable(sig)))
+        db.commit()
+        return {"domain": d.domain, **result, "reject_reason": d.reject_reason,
+                "errors": sig.get("errors", [])}
+
+
 if __name__ == "__main__":  # pure-function self-check (no I/O)
     # clean old domain -> manual review at least
     clean = compute_score({"wayback_checked": True, "prior_flags": {},
