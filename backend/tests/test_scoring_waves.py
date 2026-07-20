@@ -182,12 +182,17 @@ class _SlowAlwaysFailAparser:
 
 
 def test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap():
-    """20 доменов, конкурентность 12, whois всегда падает С ЗАДЕРЖКОЙ (форсирует
-    настоящее перекрытие потоков, не последовательный проход). Проверяем ИНВАРИАНТ
-    ЗАМКА напрямую: ни один инкремент не потерян (whois_failures == calls) — именно
-    это гонка read-modify-write без лока и ломает. Предохранитель реально остановил
-    часть волны (calls < 20), но точное число попыток до срабатывания (обычно 12,
-    ширина пула) НЕ проверяем — оно зависит от планировщика ОС и было бы флаки-тестом."""
+    """20 доменов, конкурентность 12, whois всегда падает С ЗАДЕРЖКОЙ (форсирует настоящее
+    перекрытие потоков, не последовательный проход) — интеграционный смоук-тест волны под
+    реальной нагрузкой, а НЕ ловец гонки на счётчике (честно, по итогам повторной проверки
+    ревью, 2026-07-21): read-modify-write внутри `with cm:` — пара строк без I/O между ними,
+    и вручную повторено 30/30 и 60/60 прогонов БЕЗ лока (`nullcontext`) с тем же результатом
+    "не потеряно ни одного инкремента" — таймингом эту гонку не форсировать за разумное
+    число прогонов. Настоящую гарантию, что _aparser_whois берёт лок вокруг ОБЕИХ операций,
+    даёт детерминированный `test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment`
+    ниже (спай-лок, считает реальные входы, не зависит от таймингов ОС). Этот тест остаётся
+    полезным как регрессия на бухгалтерию волны (breaker реально трипает и реально
+    останавливает часть вызовов под конкурентной нагрузкой, домены помечаются корректно)."""
     st = {"min_age_years": 3.0}
     states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.ru", lane=None,
                                   referring_domains=5, acquire_deadline=None,
@@ -197,7 +202,7 @@ def test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap():
               "_whois_lock": threading.Lock()}
     scoring._wave_whois(states, clients, budget=None, st=st, run=None)
     assert all(not s.alive and s.unresolved_why == "whois_failed" for s in states)
-    assert aparser.whois_failures == aparser.calls    # ни один инкремент не потерян под локом
+    assert aparser.whois_failures == aparser.calls    # держится и без гонки — см. докстринг
     assert 3 <= aparser.whois_failures < 20           # предохранитель реально сработал и что-то остановил
 
 
@@ -205,9 +210,10 @@ class _SpyLock:
     """Обёртка над настоящим Lock, которая ЗАПИСЫВАЕТ каждый вход — доказывает, что
     _aparser_whois реально берёт лок вокруг ОБЕИХ операций (гейт-чек чтения И запись
     счётчика), а не только вокруг одной из них. Гонка на голом += 1 под GIL слишком
-    редкая, чтобы ловить её таймингом надёжно за разумное число прогонов (проверено
-    вручную: даже БЕЗ лока 5/5 прогонов соседнего теста не потеряли ни одного
-    инкремента) — этот тест проверяет структуру блокировки напрямую, детерминированно."""
+    редкая, чтобы ловить её таймингом надёжно за разумное число прогонов (перепроверено
+    ревью Task 3 и независимо здесь: 30-60 прогонов соседнего теста БЕЗ лока — 0 потерянных
+    инкрементов что с локом, что без него) — этот тест проверяет структуру блокировки
+    напрямую, детерминированно, а не полагается на то, чтобы гонку "поймать" вовремя."""
     def __init__(self):
         self._real = threading.Lock()
         self.enters = 0
@@ -291,9 +297,15 @@ class _SlowFakeRiskClients(_FakeRiskClients):
 
 
 def test_wave_risk_safebrowsing_breaker_lock_has_no_lost_increments_under_real_overlap():
-    """Инвариант замка напрямую: ни один инкремент не потерян (failures == calls) —
-    точное число попыток до срабатывания НЕ проверяем (зависит от планировщика ОС,
-    был бы флаки-тестом)."""
+    """Интеграционный смоук-тест волны под реальной нагрузкой, а НЕ ловец гонки на
+    счётчике (честно, по итогам повторной проверки ревью, 2026-07-21: read-modify-write
+    внутри `with cm:` — пара строк без I/O между ними, 30-60 прогонов подряд БЕЗ лока
+    (`nullcontext`) давали тот же результат "инкременты не потеряны" — таймингом эту
+    гонку не форсировать за разумное число прогонов). Настоящую гарантию, что
+    _risk_one берёт лок вокруг ОБЕИХ операций, даёт детерминированный
+    test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment ниже (спай-лок,
+    считает реальные входы). Этот тест остаётся полезным как регрессия на бухгалтерию
+    волны под конкурентной нагрузкой."""
     states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
                                   referring_domains=5, acquire_deadline=None,
                                   feed_flags=None) for i in range(20)]
@@ -303,7 +315,7 @@ def test_wave_risk_safebrowsing_breaker_lock_has_no_lost_increments_under_real_o
     scoring._wave_risk(states, clients, run=None)
     assert all(s.alive for s in states)   # SafeBrowsing-сбой не отбраковывает, только errors
     assert any("safebrowsing:" in e for s in states for e in s.sig["errors"])
-    assert ap.safebrowsing_failures == ap.sb_calls    # ни один инкремент не потерян под локом
+    assert ap.safebrowsing_failures == ap.sb_calls    # держится и без гонки — см. докстринг
     assert 3 <= ap.safebrowsing_failures < 20         # предохранитель реально сработал
 
 

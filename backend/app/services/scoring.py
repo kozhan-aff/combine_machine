@@ -8,6 +8,7 @@ import logging
 import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -1224,7 +1225,6 @@ def _risk_one(s: FunnelState, clients: dict, sb_lock) -> None:
     """Тело T2 для ОДНОГО домена: РКН -> блэклист -> SafeBrowsing (с предохранителем,
     та же схема, что _APARSER_SAFEBROWSING_LIMIT в _funnel) -> indexed_echo. Прямой
     перенос scoring.py T2 (было строки 572-616): rkn/blacklist отбраковывают, echo — нет."""
-    from contextlib import nullcontext
     cm = sb_lock if sb_lock is not None else nullcontext()
     try:
         s.sig["rkn_listed"] = clients["rkn"].is_listed(s.domain)
