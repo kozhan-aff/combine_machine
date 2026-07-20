@@ -348,3 +348,43 @@ def test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment():
         scoring._risk_one(s, clients, lock)
     assert lock.enters == 6     # 3 попытки x (гейт-чек + инкремент)
     assert ap.safebrowsing_failures == 3
+
+
+class _FakeWayback:
+    def __init__(self, dirty=False, age_years=9.0, checked=True):
+        self.dirty, self.age_years, self.checked = dirty, age_years, checked
+        self.calls = 0
+
+    def classify_history(self, domain):
+        self.calls += 1
+        pf = {"adult": False, "pharma": False, "casino": self.dirty,
+              "gambling": False, "spam": False}
+        return {"prior_flags": pf, "first_seen": None, "age_years": self.age_years,
+                "wayback_checked": self.checked, "sampled": 5}
+
+
+def test_wave_history_rejects_dirty():
+    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=5,
+                            acquire_deadline=None, feed_flags=None)
+    st = {"min_age_years": 3.0}
+    scoring._wave_history([s], {"wayback": _FakeWayback(dirty=True)}, st, run=None)
+    assert s.alive is False and s.reject_reason == "history_dirty"
+
+
+def test_wave_history_age_fallback_rejects_too_young_when_whois_had_no_age():
+    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=5,
+                            acquire_deadline=None, feed_flags=None)
+    st = {"min_age_years": 3.0}
+    scoring._wave_history([s], {"wayback": _FakeWayback(age_years=1.0)}, st, run=None)
+    assert s.alive is False and s.reject_reason == "too_young"
+    assert s.sig["age_source"] == "wayback"
+
+
+def test_wave_history_keeps_whois_age_over_wayback_fallback():
+    s = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None, referring_domains=5,
+                            acquire_deadline=None, feed_flags=None)
+    s.sig["whois_created"] = "2010-01-01"      # whois УЖЕ дал возраст — Wayback не должен его затирать
+    st = {"min_age_years": 3.0}
+    scoring._wave_history([s], {"wayback": _FakeWayback(age_years=1.0)}, st, run=None)
+    assert s.alive is True
+    assert "age_source" not in s.sig or s.sig.get("age_source") != "wayback"

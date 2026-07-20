@@ -1286,6 +1286,42 @@ def _wave_risk(states: list, clients: dict, run) -> None:
                     lambda s: _risk_one(s, clients, lock))
 
 
+def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
+    """Тело T3 для ОДНОГО домена: Wayback-история + категорийный hard-reject + фолбэк
+    возраста (только если whois его не дал). Прямой перенос T3 (было строки 617-646)."""
+    try:
+        hist = clients["wayback"].classify_history(s.domain)
+        pf = hist.get("prior_flags") or {}
+        s.sig["prior_flags"] = pf
+        s.sig["wayback_checked"] = hist.get("wayback_checked")
+        s.sig["history_evidence"] = hist.get("evidence") or []
+        s.sig["sampled"] = hist.get("sampled")
+        s.sig["first_seen"] = hist.get("first_seen")
+        if s.sig.get("whois_created") is None and hist.get("age_years") is not None:
+            s.sig["age_years"] = hist["age_years"]
+            s.sig["age_source"] = "wayback"
+        if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
+            s.reject_reason = "history_dirty"
+            s.alive = False
+            return
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"wayback:{type(e).__name__}")
+
+    # непроверяемый по whois возраст всё равно проходит гейт молодости (ПОСЛЕ history_dirty)
+    if (s.sig.get("whois_created") is None
+            and s.sig.get("age_years") is not None
+            and s.sig["age_years"] < st["min_age_years"]):
+        s.reject_reason = "too_young"
+        s.alive = False
+
+
+def _wave_history(states: list, clients: dict, st: dict, run) -> None:
+    """T3 — Wayback-история, конкурентно на весь выживший после risk пул. Конкурентность
+    жёстко 4 — вежливость к archive.org, некрутящаяся константа (не /settings)."""
+    _run_concurrent(states, _CONCURRENCY["history"], run, "history",
+                    lambda s: _history_one(s, clients, st))
+
+
 if __name__ == "__main__":  # pure-function self-check (no I/O)
     # clean old domain -> manual review at least
     clean = compute_score({"wayback_checked": True, "prior_flags": {},
