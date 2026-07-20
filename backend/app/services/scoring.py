@@ -444,6 +444,17 @@ def _deadline_from_whois(existing, free_date, now, lane):
     return existing
 
 
+# После скольких сбоев ПОДРЯД safebrowsing_check (A-Parser) перестаём его звать до конца
+# прогона. Живой инцидент 2026-07-20: A-Parser упал, а BaseClient.request ретраит каждый
+# transport-сбой 3 раза с exponential backoff (~30 с) — T2, задуманный как «средний» по
+# цене, платил полный ретрай-шторм НА КАЖДЫЙ домен, доживший до risk-стадии (whois уже
+# летал через TCI за 30 мс). Снаружи это выглядело как «воронка снова ходит по кругу всеми
+# инструментами разом» — на самом деле один сломанный T2-вызов маскировался под нормальную
+# стоимость этапа. Счётчик живёт на самом клиенте (как TciWhoisClient.consecutive_failures),
+# клиент создаётся заново на каждый прогон (_make_clients()) — предохранитель не переживает свип.
+_APARSER_SAFEBROWSING_LIMIT = 3
+
+
 def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> str | None:
     """Ступени дёшево→дорого с ранним выходом. Возвращает reject_reason или None,
     наполняя sig. Приобретаемость — гейт на T1: whois решает free/занят для сырых
@@ -571,14 +582,26 @@ def _funnel(d, c, st, sig, whois_budget=None, ahrefs_budget=None, run=None) -> s
     if sig.get("blacklisted") is None and "blacklisted" in sig:
         sig["errors"].append("blacklist:unavailable")   # транзиент -> risk-guard -> manual
 
-    try:
-        sig["safebrowsing_flagged"] = c["aparser"].safebrowsing_check(d.domain)
-        if sig["safebrowsing_flagged"] is True:
-            return "safebrowsing"
-    except Exception as e:  # noqa: BLE001
-        sig["errors"].append(f"safebrowsing:{type(e).__name__}")
-    if sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in sig:
-        sig["errors"].append("safebrowsing:unavailable")  # формат не распознан -> risk-guard
+    ap = c["aparser"]
+    if getattr(ap, "safebrowsing_failures", 0) >= _APARSER_SAFEBROWSING_LIMIT:
+        sig["errors"].append("safebrowsing:circuit_open")  # предохранитель уже сработал в этом прогоне
+    else:
+        try:
+            sig["safebrowsing_flagged"] = ap.safebrowsing_check(d.domain)
+            ap.safebrowsing_failures = 0  # канал жив — счётчик сбоев сброшен
+            if sig["safebrowsing_flagged"] is True:
+                return "safebrowsing"
+        except Exception as e:  # noqa: BLE001
+            sig["errors"].append(f"safebrowsing:{type(e).__name__}")
+            ap.safebrowsing_failures = getattr(ap, "safebrowsing_failures", 0) + 1
+            if ap.safebrowsing_failures >= _APARSER_SAFEBROWSING_LIMIT:
+                # Срабатывание — ОТДЕЛЬНЫЙ безусловный лог, ровно один раз на прогон, не на
+                # каждый из оставшихся доменов (та же находка, что и у предохранителя TCI).
+                logging.getLogger(__name__).warning(
+                    "A-Parser SafeBrowsing: %d сбоев подряд — предохранитель сработал, "
+                    "до конца прогона пропускается", _APARSER_SAFEBROWSING_LIMIT)
+        if sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in sig:
+            sig["errors"].append("safebrowsing:unavailable")  # формат не распознан -> risk-guard
 
     jobs.report(run, stage="echo")
     # indexed_echo

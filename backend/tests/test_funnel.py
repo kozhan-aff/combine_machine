@@ -517,6 +517,100 @@ def test_safebrowsing_error_does_not_reject_and_is_logged():
     assert any(e.startswith("safebrowsing:") for e in out["errors"])
 
 
+class _AparserAlwaysFailsSB:
+    """whois_probe отвечает нормально, а safebrowsing_check падает КАЖДЫЙ раз — живой
+    инцидент 2026-07-20 (A-Parser упал целиком, а не только по одному домену)."""
+    def __init__(self):
+        self.sb_calls = 0
+
+    def whois_probe(self, dom):
+        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
+
+    def safebrowsing_check(self, dom):
+        self.sb_calls += 1
+        raise RuntimeError("connect error")
+
+
+def test_safebrowsing_circuit_breaker_skips_after_three_consecutive_failures():
+    """A-Parser упал -> BaseClient.request ретраит transport-сбой 3 раза с backoff (~30 с)
+    НА КАЖДЫЙ вызов -> T2 (задуманный «средним» по цене) платил бы полный ретрай-шторм
+    на КАЖДЫЙ домен, доживший до risk-стадии (whois уже летал через TCI за 30 мс) — снаружи
+    это и есть «воронка снова ходит по кругу всеми инструментами разом» из живого отчёта.
+    После 3 сбоёв ПОДРЯД safebrowsing_check для остальных доменов ЭТОГО прогона не зовётся —
+    один и тот же `clients` дели́тся между вызовами `score_domain`, как в реальном
+    `score_pending` (см. scoring.py:878, `clients = _make_clients()` один раз на прогон)."""
+    ap = _AparserAlwaysFailsSB()
+    wb = _Wayback()
+    clients = {
+        "aparser": ap,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": wb,
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
+    }
+
+    for i in range(3):
+        did = _mk(domain=f"sbfail{i}.ru", referring_domains=50, lane="bid")
+        out = scoring.score_domain(did, clients=clients)
+        assert "safebrowsing:RuntimeError" in out["errors"]
+    assert ap.sb_calls == 3
+
+    did = _mk(domain="sbfourth.ru", referring_domains=50, lane="bid")
+    out = scoring.score_domain(did, clients=clients)
+    assert "safebrowsing:circuit_open" in out["errors"]
+    assert ap.sb_calls == 3   # предохранитель сработал — 4-й вызов safebrowsing_check не звали
+
+
+class _AparserFlakySB:
+    """whois_probe стабилен; safebrowsing_check выдаёт исход из заранее заданного списка,
+    по одному на вызов — нужен тесту чередования "сбой/успех", где один и тот же
+    `clients` дели́тся между вызовами `score_domain` (как в реальном `score_pending`)."""
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+
+    def whois_probe(self, dom):
+        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
+
+    def safebrowsing_check(self, dom):
+        outcome = self._outcomes.pop(0)
+        if outcome == "boom":
+            raise RuntimeError("connect error")
+        return outcome
+
+
+def test_safebrowsing_circuit_breaker_resets_on_success_between_failures():
+    """Успешный ответ между сбоями сбрасывает счётчик — предохранитель не должен срабатывать
+    раньше времени на череде "2 сбоя / успех / 2 сбоя" (всего 4 сбоя, но НИ РАЗУ подряд 3)."""
+    ap = _AparserFlakySB(["boom", "boom", False, "boom", "boom"])
+    wb = _Wayback()
+    clients = {
+        "aparser": ap,
+        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
+        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "wayback": wb,
+        "tci": type("T", (), {"handles": lambda self, d: False})(),
+    }
+
+    for i in range(2):                                  # сбой 1, сбой 2
+        did = _mk(domain=f"sbmix-fail{i}.ru", referring_domains=50, lane="bid")
+        out = scoring.score_domain(did, clients=clients)
+        assert "safebrowsing:RuntimeError" in out["errors"]
+    assert ap.safebrowsing_failures == 2
+
+    did_ok = _mk(domain="sbmix-ok.ru", referring_domains=50, lane="bid")
+    out = scoring.score_domain(did_ok, clients=clients)  # успех — сброс счётчика
+    assert out["reject_reason"] is None
+    assert ap.safebrowsing_failures == 0
+
+    for i in range(2):                                  # сбой 3, сбой 4 — НИ РАЗУ подряд 3
+        did = _mk(domain=f"sbmix-again{i}.ru", referring_domains=50, lane="bid")
+        out = scoring.score_domain(did, clients=clients)
+        assert "safebrowsing:RuntimeError" in out["errors"]
+    assert ap.safebrowsing_failures == 2                # предохранитель НЕ сработал
+
+
 # --- квота: воронка не платит whois'ом дважды за детерминированный ответ ---------
 
 def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkeypatch):
