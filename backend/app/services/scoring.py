@@ -335,7 +335,7 @@ def _make_clients() -> dict:
     return {
         "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
         "searxng": SearxngClient(), "aparser": AParserClient(), "tci": TciWhoisClient(),
-        "_whois_lock": threading.Lock(),
+        "_whois_lock": threading.Lock(), "_safebrowsing_lock": threading.Lock(),
     }
 
 
@@ -1218,6 +1218,72 @@ def _wave_whois(states: list, clients: dict, budget, st: dict, run) -> None:
     """T1 — приобретаемость + возраст, конкурентно на весь выживший после T0 пул."""
     _run_concurrent(states, _CONCURRENCY["whois"], run, "whois",
                     lambda s: _whois_one(s, clients, budget, st))
+
+
+def _risk_one(s: FunnelState, clients: dict, sb_lock) -> None:
+    """Тело T2 для ОДНОГО домена: РКН -> блэклист -> SafeBrowsing (с предохранителем,
+    та же схема, что _APARSER_SAFEBROWSING_LIMIT в _funnel) -> indexed_echo. Прямой
+    перенос scoring.py T2 (было строки 572-616): rkn/blacklist отбраковывают, echo — нет."""
+    from contextlib import nullcontext
+    cm = sb_lock if sb_lock is not None else nullcontext()
+    try:
+        s.sig["rkn_listed"] = clients["rkn"].is_listed(s.domain)
+        if s.sig["rkn_listed"]:
+            s.reject_reason = "rkn"
+            s.alive = False
+            return
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"rkn:{type(e).__name__}")
+    try:
+        s.sig["blacklisted"] = clients["blacklist"].is_blacklisted(s.domain)
+        if s.sig["blacklisted"] is True:
+            s.reject_reason = "blacklist"
+            s.alive = False
+            return
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"blacklist:{type(e).__name__}")
+    if s.sig.get("blacklisted") is None and "blacklisted" in s.sig:
+        s.sig["errors"].append("blacklist:unavailable")
+
+    ap = clients["aparser"]
+    with cm:
+        breaker_open = getattr(ap, "safebrowsing_failures", 0) >= _APARSER_SAFEBROWSING_LIMIT
+    if breaker_open:
+        s.sig["errors"].append("safebrowsing:circuit_open")
+    else:
+        try:
+            s.sig["safebrowsing_flagged"] = ap.safebrowsing_check(s.domain)
+            with cm:
+                ap.safebrowsing_failures = 0
+            if s.sig["safebrowsing_flagged"] is True:
+                s.reject_reason = "safebrowsing"
+                s.alive = False
+                return
+        except Exception as e:  # noqa: BLE001
+            s.sig["errors"].append(f"safebrowsing:{type(e).__name__}")
+            with cm:
+                ap.safebrowsing_failures = getattr(ap, "safebrowsing_failures", 0) + 1
+                tripped = ap.safebrowsing_failures >= _APARSER_SAFEBROWSING_LIMIT
+            if tripped:
+                logging.getLogger(__name__).warning(
+                    "A-Parser SafeBrowsing: %d сбоев подряд — предохранитель сработал, "
+                    "до конца прогона пропускается", _APARSER_SAFEBROWSING_LIMIT)
+        if s.sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in s.sig:
+            s.sig["errors"].append("safebrowsing:unavailable")
+
+    try:
+        s.sig["indexed_echo"] = clients["searxng"].indexed_echo(s.domain)
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"searxng:{type(e).__name__}")
+
+
+def _wave_risk(states: list, clients: dict, run) -> None:
+    """T2 — РКН/блэклист/SafeBrowsing/эхо, конкурентно на весь выживший после whois пул.
+    Эхо не отбраковывает (сигнал score, не гейт), но живёт в этой же волне — тот же
+    сетевой поход, отдельный пул был бы лишней сложностью без причины."""
+    lock = clients.get("_safebrowsing_lock")
+    _run_concurrent(states, _CONCURRENCY["risk"], run, "risk",
+                    lambda s: _risk_one(s, clients, lock))
 
 
 if __name__ == "__main__":  # pure-function self-check (no I/O)

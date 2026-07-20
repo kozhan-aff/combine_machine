@@ -238,3 +238,101 @@ def test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment():
     # инкремента. Пропуск любого из двух входов означает непокрытую гонку.
     assert lock.enters == 6
     assert ap.whois_failures == 3
+
+
+class _FakeRiskClients:
+    def __init__(self, rkn=False, bl=False, sb=False, echo=True, sb_fail_times=0):
+        self.rkn, self.bl, self.sb, self.echo = rkn, bl, sb, echo
+        self.sb_fail_times = sb_fail_times
+        self.sb_calls = 0
+        self.safebrowsing_failures = 0
+
+    def is_listed(self, d): return self.rkn
+    def is_blacklisted(self, d): return self.bl
+    def indexed_echo(self, d): return self.echo
+    def safebrowsing_check(self, d):
+        self.sb_calls += 1
+        if self.sb_calls <= self.sb_fail_times:
+            raise RuntimeError("timeout")
+        return self.sb
+
+
+def _risk_clients(**kw):
+    ap = _FakeRiskClients(**kw)
+    return {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap,
+           "_safebrowsing_lock": threading.Lock()}
+
+
+def test_wave_risk_rejects_rkn():
+    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=5,
+                            acquire_deadline=None, feed_flags=None)
+    scoring._wave_risk([s], _risk_clients(rkn=True), run=None)
+    assert s.alive is False and s.reject_reason == "rkn"
+
+
+def test_wave_risk_fills_echo_without_rejecting():
+    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=5,
+                            acquire_deadline=None, feed_flags=None)
+    scoring._wave_risk([s], _risk_clients(echo=True), run=None)
+    assert s.alive is True and s.sig["indexed_echo"] is True
+
+
+class _SlowFakeRiskClients(_FakeRiskClients):
+    """SafeBrowsing с задержкой — форсирует РЕАЛЬНОЕ перекрытие потоков на предохранителе.
+    Без задержки первый воркер успевал бы отработать (гейт-чек + инкремент) до того, как
+    остальные вообще стартовали бы, и "safebrowsing_failures <= LIMIT" прошёл бы ОДИНАКОВО
+    что с рабочим локом, что без него (тот же баг теста, что нашло ревью Task 2 для
+    whois-предохранителя — см. test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap;
+    сломанный лок ТЕРЯЕТ инкременты => счётчик МЕНЬШЕ => тоже <= LIMIT => ложный зелёный)."""
+    def safebrowsing_check(self, d):
+        self.sb_calls += 1
+        time.sleep(0.02)
+        raise RuntimeError("timeout")
+
+
+def test_wave_risk_safebrowsing_breaker_lock_has_no_lost_increments_under_real_overlap():
+    """Инвариант замка напрямую: ни один инкремент не потерян (failures == calls) —
+    точное число попыток до срабатывания НЕ проверяем (зависит от планировщика ОС,
+    был бы флаки-тестом)."""
+    states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
+                                  referring_domains=5, acquire_deadline=None,
+                                  feed_flags=None) for i in range(20)]
+    ap = _SlowFakeRiskClients()
+    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap,
+              "_safebrowsing_lock": threading.Lock()}
+    scoring._wave_risk(states, clients, run=None)
+    assert all(s.alive for s in states)   # SafeBrowsing-сбой не отбраковывает, только errors
+    assert any("safebrowsing:" in e for s in states for e in s.sig["errors"])
+    assert ap.safebrowsing_failures == ap.sb_calls    # ни один инкремент не потерян под локом
+    assert 3 <= ap.safebrowsing_failures < 20         # предохранитель реально сработал
+
+
+def test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment():
+    """Детерминированная проверка структуры блокировки (не таймингом) — тот же паттерн,
+    что test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment для
+    whois-предохранителя: спай-лок считает входы, а не полагается на редкую гонку GIL."""
+    class _SpyLockRisk:
+        def __init__(self):
+            self._real = threading.Lock()
+            self.enters = 0
+        def __enter__(self):
+            self._real.acquire()
+            self.enters += 1
+        def __exit__(self, *a):
+            self._real.release()
+
+    class _AlwaysFailsSb:
+        def is_listed(self, d): return False
+        def is_blacklisted(self, d): return False
+        def indexed_echo(self, d): return True
+        def safebrowsing_check(self, d): raise RuntimeError("timeout")
+
+    lock = _SpyLockRisk()
+    ap = _AlwaysFailsSb()
+    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap}
+    for i in range(3):        # ровно до порога (_APARSER_SAFEBROWSING_LIMIT=3)
+        s = scoring.FunnelState(domain_id=i, domain=f"x{i}.ru", lane=None,
+                                referring_domains=5, acquire_deadline=None, feed_flags=None)
+        scoring._risk_one(s, clients, lock)
+    assert lock.enters == 6     # 3 попытки x (гейт-чек + инкремент)
+    assert ap.safebrowsing_failures == 3
