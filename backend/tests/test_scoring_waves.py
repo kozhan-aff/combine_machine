@@ -246,6 +246,31 @@ def test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment():
     assert ap.whois_failures == 3
 
 
+def test_wave_whois_actually_runs_concurrently_not_serially():
+    """Сеть в тесте эмулирована time.sleep(0.05) на 24 домена. Последовательно это было бы
+    >=1.2с; при конкурентности 12 — не больше ~0.15с (2 партии по 12). Пороговое значение
+    щедрое (0.5с), чтобы не флапать на медленном CI, но 10x-разница гарантирует, что пул
+    реально работает, а не притворяется."""
+    st = {"min_age_years": 3.0}
+    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.ru", lane=None,
+                                  referring_domains=5, acquire_deadline=None,
+                                  feed_flags=None) for i in range(24)]
+
+    class _SlowAparser:
+        def whois_probe(self, d):
+            time.sleep(0.05)
+            return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
+
+    clients = {"aparser": _SlowAparser(),
+              "tci": type("T", (), {"handles": lambda self, d: False})(),
+              "_whois_lock": threading.Lock()}
+    start = time.monotonic()
+    scoring._wave_whois(states, clients, budget=None, st=st, run=None)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.5, f"волна заняла {elapsed:.2f}с — похоже на последовательный обход"
+    assert all(s.alive for s in states)
+
+
 class _FakeRiskClients:
     def __init__(self, rkn=False, bl=False, sb=False, echo=True, sb_fail_times=0):
         self.rkn, self.bl, self.sb, self.echo = rkn, bl, sb, echo
