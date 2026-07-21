@@ -4,6 +4,7 @@ Reject domains in the Russian blocked registry. Source: settings.RKN_SOURCE_URL
 (antizapret export = plain UTF-8 domain list; z-i mirror froze 2025-10). Loaded once,
 refreshed daily, membership checked locally (domain + parent suffixes).
 """
+import threading
 import time
 from app.config import settings
 from app.integrations.base import BaseClient
@@ -31,27 +32,35 @@ class RknClient(BaseClient):
     # (score_pending makes a client per domain — don't re-download the dump each time).
     _blocked: set[str] = set()
     _loaded_at: float | None = None
+    # Волновая архитектура (2026-07-20) зовёт is_listed() конкурентно из _wave_risk (до 12
+    # потоков разом) — без лока все 12 видят "кэш холодный/протух" ОДНОВРЕМЕННО и синхронно
+    # бьют source_url по разу каждый (thundering herd на antizapret на каждой холодной/протухшей
+    # границе). Класс-уровневый, не per-инстанс: _blocked/_loaded_at сами класс-уровневые, и два
+    # РАЗНЫХ прогона (свои _make_clients(), свои инстансы RknClient) racing на одном кэше — не
+    # гипотеза, а тот же случай, что и внутри одного прогона, лок должен жить на классе.
+    _load_lock = threading.Lock()
 
     def __init__(self):
         super().__init__()
         self.source_url = settings.RKN_SOURCE_URL
 
     def _ensure_loaded(self) -> None:
-        now = time.monotonic()
-        if RknClient._loaded_at is None or (now - RknClient._loaded_at) > _REFRESH_SEC:
-            r = self.request("GET", self.source_url)
-            blocked = {_normalize(ln) for ln in r.text.splitlines()
-                       if ln.strip() and "." in ln}
-            # sanity: пустой/обрезанный ответ (HTTP 200, но мало строк) НЕ кэшируем на сутки
-            # и не выключаем проверку молча. Есть валидный кэш — оставляем его; нет — падаем.
-            if len(blocked) < _MIN_DUMP_LINES:
-                if RknClient._loaded_at is None:
-                    raise RuntimeError(
-                        f"RKN dump подозрительно мал ({len(blocked)} строк) — не кэширую, "
-                        f"проверка не должна молча выключаться")
-                return  # оставляем прежний валидный кэш до следующего refresh
-            RknClient._blocked = blocked
-            RknClient._loaded_at = now
+        with RknClient._load_lock:
+            now = time.monotonic()
+            if RknClient._loaded_at is None or (now - RknClient._loaded_at) > _REFRESH_SEC:
+                r = self.request("GET", self.source_url)
+                blocked = {_normalize(ln) for ln in r.text.splitlines()
+                           if ln.strip() and "." in ln}
+                # sanity: пустой/обрезанный ответ (HTTP 200, но мало строк) НЕ кэшируем на сутки
+                # и не выключаем проверку молча. Есть валидный кэш — оставляем его; нет — падаем.
+                if len(blocked) < _MIN_DUMP_LINES:
+                    if RknClient._loaded_at is None:
+                        raise RuntimeError(
+                            f"RKN dump подозрительно мал ({len(blocked)} строк) — не кэширую, "
+                            f"проверка не должна молча выключаться")
+                    return  # оставляем прежний валидный кэш до следующего refresh
+                RknClient._blocked = blocked
+                RknClient._loaded_at = now
 
     def is_listed(self, domain: str) -> bool:
         self._ensure_loaded()

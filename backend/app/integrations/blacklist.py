@@ -28,6 +28,7 @@ on its free public zone: set DNS_RESOLVER to your own unbound (fixes the public-
 case only), or set SPAMHAUS_DQS_KEY (free, lifts both restrictions).
 """
 import socket
+import threading
 from app.config import settings
 
 _TESTPOINT = "test"     # DBL-домен, всегда листнут (127.0.1.2) — контроль доступности
@@ -35,6 +36,14 @@ _TESTPOINT = "test"     # DBL-домен, всегда листнут (127.0.1.2
 
 class BlacklistClient:
     _control_ok: bool | None = None       # кэш контроля на процесс
+    # Волновая архитектура (2026-07-20): is_blacklisted() зовётся конкурентно из _wave_risk (до
+    # 12 потоков). Без лока несколько потоков одновременно видят _control_ok в исходном None и
+    # КАЖДЫЙ шлёт свой DNS-запрос тест-поинта — не только лишняя нагрузка на резолвер, а реальная
+    # гонка результата: если ОДИН из этих параллельных запросов транзиентно не резолвится (пакет
+    # потерян), его домен ловит RuntimeError и уходит в ручной обзор ("оценён вслепую"), хотя
+    # СОСЕДНИЙ поток тем же миллисекундами резолвит тест-поинт успешно — резолвер живой, просто
+    # не повезло с таймингом. Лок сериализует контроль: один реальный запрос на всех, детерминированно.
+    _control_lock = threading.Lock()
 
     def _resolve(self, host: str) -> str | None:
         """A-запись IP или None на NXDOMAIN. Через свой DNS_RESOLVER, если задан
@@ -71,19 +80,20 @@ class BlacklistClient:
         (до рестарта контейнера) загонял бы КАЖДЫЙ последующий домен в путь «история не
         проверена», хотя Spamhaus восстановился через секунду. RknClient уже делает так же —
         при неудачной загрузке `_loaded_at` не выставляется, и следующий вызов ретраит."""
-        if BlacklistClient._control_ok:
-            return
-        try:
-            ip = self._resolve(self._dbl_host(_TESTPOINT))
-        except OSError:
-            ip = None
-        ok = bool(ip and ip.startswith("127."))
-        if ok:
-            BlacklistClient._control_ok = True     # кэшируем только успех
-            return
-        raise RuntimeError(
-            "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
-            "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
+        with BlacklistClient._control_lock:
+            if BlacklistClient._control_ok:
+                return
+            try:
+                ip = self._resolve(self._dbl_host(_TESTPOINT))
+            except OSError:
+                ip = None
+            ok = bool(ip and ip.startswith("127."))
+            if ok:
+                BlacklistClient._control_ok = True     # кэшируем только успех
+                return
+            raise RuntimeError(
+                "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
+                "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
 
     def is_blacklisted(self, domain: str) -> bool | None:
         """True = листнут в Spamhaus DBL, False = чист, None = транзиентный сбой резолвера.

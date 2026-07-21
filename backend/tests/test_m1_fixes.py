@@ -300,6 +300,39 @@ def test_rkn_small_dump_keeps_old_cache(monkeypatch):
     assert c.is_listed("only.ru") is False          # обрезанный дамп НЕ затёр кэш
 
 
+# ---------- волновая конкурентность (найдено при перепроверке 2026-07-21): _ensure_loaded
+# сериализован локом — иначе 12 потоков _wave_risk видят "кэш холодный" разом и синхронно
+# бьют antizapret по разу каждый. Таймингового теста тут недостаточно (см. сессионный урок
+# про голый += 1 под sleep — не ловит гонку надёжнее угадывания): доказываем детерминированно
+# спай-локом, считающим реальные входы в `with`. ----------
+
+class _SpyLock:
+    def __init__(self, real):
+        self._real = real
+        self.enters = 0
+
+    def __enter__(self):
+        self.enters += 1
+        return self._real.__enter__()
+
+    def __exit__(self, *a):
+        return self._real.__exit__(*a)
+
+
+def test_rkn_ensure_loaded_serialized_by_class_lock(monkeypatch):
+    from app.integrations.rkn import RknClient
+    monkeypatch.setattr(RknClient, "_loaded_at", None)
+    monkeypatch.setattr(RknClient, "_blocked", set())
+    spy = _SpyLock(RknClient._load_lock)
+    monkeypatch.setattr(RknClient, "_load_lock", spy)
+    c = RknClient()
+    dump = "\n".join(f"a{i}.ru" for i in range(1200))
+    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp(dump))
+    c._ensure_loaded()
+    assert spy.enters == 1          # проверка условия и сама загрузка — под ОДНИМ входом в лок
+    assert RknClient._loaded_at is not None
+
+
 # ---------- I4: гонка двух discovery не теряет батч ----------
 
 def test_discovery_survives_insert_race(monkeypatch):
