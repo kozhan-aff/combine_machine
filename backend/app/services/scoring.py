@@ -1175,7 +1175,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     results += _checkpoint(states, run, st)
     alive = [s for s in states if s.alive]
     waterfall.append(f"RD: {total0} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall))
+    jobs.report(run, message=" · ".join(waterfall),
+               stage_key="rd", stage_before=total0, stage_after=len(alive))
 
     _wave_whois(alive, clients, whois_b, st, run)
     if jobs.cancelled(run):
@@ -1183,7 +1184,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     results += _checkpoint(alive, run, st)
     before = len(alive); alive = [s for s in alive if s.alive]
     waterfall.append(f"whois: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall))
+    jobs.report(run, message=" · ".join(waterfall),
+               stage_key="whois", stage_before=before, stage_after=len(alive))
 
     _wave_risk(alive, clients, run)
     if jobs.cancelled(run):
@@ -1191,7 +1193,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     results += _checkpoint(alive, run, st)
     before = len(alive); alive = [s for s in alive if s.alive]
     waterfall.append(f"risk: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall))
+    jobs.report(run, message=" · ".join(waterfall),
+               stage_key="risk", stage_before=before, stage_after=len(alive))
 
     _wave_history(alive, clients, st, run)
     if jobs.cancelled(run):
@@ -1199,7 +1202,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     results += _checkpoint(alive, run, st)
     before = len(alive); alive = [s for s in alive if s.alive]
     waterfall.append(f"history: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall))
+    jobs.report(run, message=" · ".join(waterfall),
+               stage_key="history", stage_before=before, stage_after=len(alive))
 
     _wave_ahrefs(alive, clients, ahrefs_b, run)
     if jobs.cancelled(run):
@@ -1209,7 +1213,9 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     for s in alive:
         results.append(_commit_result(s, run, st))
     waterfall.append(f"ahrefs: {len(alive)} решено")
-    jobs.report(run, message=" · ".join(waterfall))
+    # before==after: Ahrefs не фильтрует — полоска покажет "решено целиком", не отсев
+    jobs.report(run, message=" · ".join(waterfall),
+               stage_key="ahrefs", stage_before=len(alive), stage_after=len(alive))
 
     return results
 

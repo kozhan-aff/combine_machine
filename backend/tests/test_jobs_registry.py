@@ -83,6 +83,25 @@ def test_report_outside_track_is_noop():
     assert jobs.progress("score")["running"] is False
 
 
+def test_stage_counts_attach_before_after_to_one_stage_only():
+    """Мини-полоски на чипах (2026-07-21): stage_key/before/after пишут ТОЛЬКО на элемент
+    с этим key, не трогая state (им заведует stage=/_advance, отдельный вызов) и не трогая
+    другие стадии."""
+    with jobs.track("score", stages=STAGES) as run:
+        jobs.report(run, stage="whois")                    # rd done, whois active
+        jobs.report(run, stage_key="rd", stage_before=5056, stage_after=181)
+        p = jobs.progress("score")
+        by_key = {s["key"]: s for s in p["stages"]}
+        assert by_key["rd"]["before"] == 5056 and by_key["rd"]["after"] == 181
+        assert by_key["rd"]["state"] == "done"              # state не тронут этим вызовом
+        assert "before" not in by_key["whois"]               # другую стадию не задело
+        jobs.report(run, stage_key="whois", stage_before=181, stage_after=42)
+        p = jobs.progress("score")
+        by_key = {s["key"]: s for s in p["stages"]}
+        assert by_key["whois"]["before"] == 181 and by_key["whois"]["after"] == 42
+        assert by_key["rd"]["before"] == 5056                # прошлый вызов пережил второй
+
+
 def test_stale_run_is_shown_not_killed():
     """Чтение реестра НЕ гасит прогон: поллер панели зовёт live() каждые 1.5с, а стадия свипа
     (LLM по 5 сайтам) законно молчит дольше STALE_MIN. Реап на пути чтения убил бы ЖИВУЮ задачу

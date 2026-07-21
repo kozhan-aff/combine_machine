@@ -333,23 +333,33 @@
   .job-head .nm { font-weight:700; font-size:14px; }
   .job-head .cur { font-family:var(--mono); font-size:12.5px; color:var(--ink); }
   .job-head form { margin-left:auto; }
-  .job-chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+  .job-chips { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+  .chip-st-wrap { display:flex; flex-direction:column; gap:5px; min-width:126px; }
   .chip-st { font-family:var(--mono); font-size:11px; padding:3px 9px; border-radius:999px;
              border:1px solid var(--line); color:var(--mut); background:var(--panel2); }
   .chip-st.done   { color:var(--ok); background:var(--ok-soft); border-color:#bfe6cd; }
   .chip-st.active { color:#fff; background:var(--acc); border-color:var(--acc); }
   .chip-st.fail   { color:var(--bad); background:var(--bad-soft); border-color:#f2c4c4; }
   .chip-st.skip   { opacity:.45; }
+  /* мини-полоска ПОД чипом — сколько домена ПЕРЕЖИЛО именно эту волну (before->after,
+     scoring._run_waves пишет их в stages[].before/after после каждой волны, jobs.report
+     stage_key=). У "active"-чипа — живой прогресс ЭТОЙ волны (j.done/j.total, они и есть
+     счётчик текущей волны — см. _run_concurrent), у "done" — доля выживших. */
+  .chip-st-bar { height:6px; border-radius:999px; background:var(--panel2); overflow:hidden; }
+  .chip-st-fill { height:100%; width:0; border-radius:999px; transition:width .3s; }
+  .chip-st-fill.fill-done { background:var(--ok); }
+  .chip-st-fill.fill-active { background:var(--acc); }
+  .chip-st-count { font-family:var(--mono); font-size:10.5px; color:var(--mut); white-space:nowrap; }
   .job-bar { display:flex; align-items:center; gap:14px; }
-  .job-track { flex:1; height:10px; border-radius:999px; background:var(--panel2); overflow:hidden; }
+  .job-track { flex:1; height:13px; border-radius:999px; background:var(--panel2); overflow:hidden; }
   .job-fill { height:100%; width:0; border-radius:999px; background:var(--acc); transition:width .3s; }
   .job.err .job-fill { background:var(--bad); }
   .job-tally { margin-bottom:10px; }
   .job-waterfall { margin-bottom:12px; font-size:13px; color:var(--ink);
                    font-family:var(--mono); line-height:1.6; }
-  .job-num { font-family:var(--mono); font-size:12.5px; color:var(--mut); white-space:nowrap; }
+  .job-num { font-family:var(--mono); font-size:13px; color:var(--mut); white-space:nowrap; }
   .job-num .rate { margin-left:10px; }
-  .job-num b { font-size:16px; color:var(--acc); }
+  .job-num b { font-size:19px; color:var(--acc); }
   .job.err .job-num b { color:var(--bad); }
   /* тонкая полоса в шапке — на экранах без #machine */
   .mbar { display:none; align-items:center; gap:12px; margin:0 0 14px; padding:8px 14px;
@@ -496,12 +506,38 @@ function jobCard(j){
   if ((j.stages || []).length){
     const chips = document.createElement('div'); chips.className = 'job-chips';
     for (const s of j.stages){
+      const wrap = document.createElement('div'); wrap.className = 'chip-st-wrap';
       const c = document.createElement('span');
       const brokeHere = dead && s.key === j.stage;   // ЗДЕСЬ встала — вот что нужно оператору
-      c.className = 'chip-st ' + (brokeHere ? 'fail' : s.state);
+      const st = brokeHere ? 'fail' : s.state;
+      c.className = 'chip-st ' + st;
       c.textContent = (brokeHere ? '✕ ' : s.state==='done' ? '✓ '
                      : s.state==='active' ? '● ' : '○ ') + s.label;
-      chips.appendChild(c);
+      wrap.appendChild(c);
+      // мини-полоска: у "done" — доля выживших этой волны (before/after пишет
+      // scoring._run_waves); у "active" — живой прогресс ИМЕННО этой волны (j.done/j.total
+      // и есть счётчик текущей волны, см. _run_concurrent). "pending"/"skip" — без полоски,
+      // им ещё/уже нечего показывать.
+      let pct = null, label = '';
+      if (st === 'done' && typeof s.before === 'number' && typeof s.after === 'number' && s.before > 0){
+        pct = 100 * s.after / s.before;
+        label = s.before + ' → ' + s.after;
+      } else if (st === 'active' && j.total){
+        pct = 100 * j.done / j.total;
+        label = j.done + ' / ' + j.total;
+      }
+      if (pct !== null){
+        const bar = document.createElement('div'); bar.className = 'chip-st-bar';
+        const fill = document.createElement('div');
+        fill.className = 'chip-st-fill ' + (st === 'done' ? 'fill-done' : 'fill-active');
+        fill.style.width = Math.max(2, Math.min(100, pct)) + '%';
+        bar.appendChild(fill);
+        wrap.appendChild(bar);
+        const cnt = document.createElement('span'); cnt.className = 'chip-st-count';
+        cnt.textContent = label;
+        wrap.appendChild(cnt);
+      }
+      chips.appendChild(wrap);
     }
     el.appendChild(chips);
   }

@@ -589,6 +589,12 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
     assert 0 < len(survived) < 10          # реально сжалось, не всё выжило и не всё умерло
     last = jobs.last("score")
     assert "whois" in last["message"] and ("->" in last["message"] or "→" in last["message"])
+    # мини-полоски на чипах (2026-07-21): before/after написаны на КАЖДУЮ стадию, не только
+    # в текстовый waterfall — jobCard() их и рисует.
+    by_key = {s["key"]: s for s in last["stages"]}
+    assert by_key["rd"]["before"] == 10 and by_key["rd"]["after"] == 10
+    assert by_key["whois"]["before"] == 10 and by_key["whois"]["after"] == len(survived)
+    assert by_key["ahrefs"]["before"] == by_key["ahrefs"]["after"] == len(survived)
 
 
 def test_run_waves_cancellation_between_waves_preserves_partial_progress():

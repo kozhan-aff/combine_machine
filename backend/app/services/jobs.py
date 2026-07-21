@@ -300,7 +300,8 @@ def _advance(stages: list, active: str) -> list:
 
 def report(run_id: int | None, done: int | None = None, total: int | None = None,
            current: str | None = None, stage: str | None = None,
-           message: str | None = None) -> None:
+           message: str | None = None, stage_key: str | None = None,
+           stage_before: int | None = None, stage_after: int | None = None) -> None:
     """Обновить СВОЙ прогон (run_id из track). Вне track (одиночный score_domain, юнит-тест)
     run_id=None — no-op.
 
@@ -309,6 +310,14 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
     находил не свою мёртвую строку, а ЖИВОЙ прогон преемника и дописывал прогресс в него:
     панель показывала чужие домены и чужой счётчик как свои. Промах по id безвреден и молчалив,
     попадание в чужой прогон — нет.
+
+    `stage_key`/`stage_before`/`stage_after` (2026-07-21, мини-полоски выживаемости на чипах
+    воронки) — пишут before/after ТОЛЬКО на ОДИН элемент `stages` (по key), не трогая его
+    `state` (тем занимается `stage=`/`_advance`, отдельный вызов из другого места: `stage=`
+    зовётся В НАЧАЛЕ волны из `_run_concurrent`, before/after — В КОНЦЕ волны из `_run_waves`,
+    когда survivors уже известны). Независимый блок, а не слияние с веткой `stage=` выше:
+    оба читают `known` СВЕЖИМ из БД перед записью, поэтому два последовательных вызова
+    компонуются корректно без явного combine — второй увидит то, что записал первый.
     """
     if run_id is None:                       # вне track (одиночный score_domain, юнит-тест) — no-op
         return                               # раньше это глушил только _own в конце, но стадийная
@@ -332,6 +341,13 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
         with _DB_LOCK, SessionLocal() as db:
             known = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
         values["stages"] = _advance(known, stage)
+    if stage_key is not None:
+        with _DB_LOCK, SessionLocal() as db:
+            known = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
+        values["stages"] = [
+            {**s, "before": stage_before, "after": stage_after} if s.get("key") == stage_key else s
+            for s in (known or [])
+        ]
     _own(run_id, **values)
 
 
