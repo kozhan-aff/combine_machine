@@ -276,7 +276,7 @@ def test_pool_offers_rescore_instead_of_return_for_dirt(client):
     assert "↩ вернуть в approved" not in dirty_html
     assert "▶ перепроверить" in dirty_html               # честный путь назад — через воронку
 
-    _add(domain="weak.ru", status="rejected", reject_reason="low_score", score=0.3)
+    _add(domain="weak.com", status="rejected", reject_reason="low_score", score=0.3)
     both_html = client.get("/domains/pool?status=rejected").text
     assert "↩ вернуть в approved" in both_html           # порог — возвращается
 

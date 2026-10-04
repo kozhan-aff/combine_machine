@@ -195,7 +195,7 @@ def test_stale_verdict_is_named_but_not_locked(client):
     не одобряет ничего (Р2), а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
     завести ту самую тихую ловушку, от которой ветка избавлялась. Но сказать правду в строке —
     обязан."""
-    _add(domain="stale.ru", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
+    _add(domain="stale.com", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
          prior_flags=_CLEAN_FLAGS,
          score_breakdown={"errors": ["wayback:RuntimeError"], "deep_checked": True})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 0}

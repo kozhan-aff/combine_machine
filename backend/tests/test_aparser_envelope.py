@@ -115,7 +115,7 @@ def _in_bulk(sig: dict, out: dict, **breakdown) -> bool:
     его и проверяем, на пороге 0.0, чтобы исключал именно гард, а не балл."""
     from app.api.panel import _bulk_candidates
     with db.SessionLocal() as s:
-        d = Domain(domain="bulk-probe.ru", source="backorder", status="scored", score=out["score"],
+        d = Domain(domain="bulk-probe.com", source="backorder", status="scored", score=out["score"],
                    wayback_checked=sig.get("wayback_checked"), prior_flags=sig.get("prior_flags"),
                    age_years=sig.get("age_years"),
                    score_breakdown={"errors": sig.get("errors", []), "history_evidence": [],

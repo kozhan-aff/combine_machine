@@ -36,3 +36,13 @@ def test_filters_registered_on_templates():
     assert templates.env.filters["status_ru"]("approved") == "одобрен"
     assert templates.env.filters["reject_ru"]("not_acquirable") == "нельзя купить"
     assert templates.env.filters["lane_ru"]("bid") == "ставка"
+
+
+def test_v2_labels():
+    from app.services.labels import reject_ru, source_badge, source_ru
+    assert reject_ru("spam_anchors") == "спам-анкоры" and reject_ru("legacy_ru") == "РФ (архив v1)"
+    assert reject_ru("tld_closed") == "зона не наша" and reject_ru("trademark") == "чужой бренд"
+    assert source_ru("nominet") == "Nominet" and source_ru("emd") == "EMD" and source_ru(None) == ""
+    # 6.2: бейдж — явная карта, не срез [:3] («вру», «reg» путался с reg.ru)
+    assert [source_badge(s) for s in ("dropcatch", "nominet", "mx", "emd", "list")] == ["dc", "uk", "mx", "emd", "руч"]
+    assert source_badge("backorder") == "bo" and source_badge("zzz") == "?" and source_badge(None) == "?"

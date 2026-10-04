@@ -9,21 +9,23 @@
   <summary>Легенда: статусы доменов и колонки таблицы</summary>
   <div class="legend-grid">
     <span class="badge b-discovered">{{ 'discovered'|status_ru }}</span><span class="who">машина</span>
-      <span class="desc">найден в фиде, ещё не оценён — ждёт ▶ Запуск проверки</span>
+      <span class="desc">найден источником или добавлен списком, ещё не оценён — ждёт «▶ Оценить домены»</span>
     <span class="badge b-scored">{{ 'scored'|status_ru }}</span><span class="who">машина</span>
-      <span class="desc">оценён, но не дотянул до авто-одобрения — реши сам: ✓ или ✗</span>
-    <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">машина / ты</span>
-      {# «чистый» здесь было ЛОЖЬЮ (аудит F13): approve ставит и человек — в т.ч. домену, чью
+      <span class="desc">прошёл шесть волн — машина сама не одобряет ничего, решаешь ты: ✓ или ✗</span>
+    <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">только ты</span>
+      {# «чистый» здесь было ЛОЖЬЮ (аудит F13): approve ставит человек — в т.ч. домену, чью
          историю подтвердить не удалось. Статус говорит «решение принято», а не «проверено». #}
       <span class="desc">одобрен к выкупу — купи руками у провайдера, потом отметь 🛒.
-        <b>«Одобрен» ≠ «история чистая»</b>: одобрить может и человек, в том числе домен, чью
-        историю машина не подтвердила. Вердикт истории и снимки — в <a href="/domains">инбоксе M1</a></span>
+        <b>«Одобрен» ≠ «история чистая»</b>: одобрить можно и домен, чью историю машина не
+        подтвердила. Вердикт истории и снимки — в <a href="/domains">инбоксе M1</a></span>
     <span class="badge b-rejected">{{ 'rejected'|status_ru }}</span><span class="who">машина / ты</span>
-      <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>):
-      <code>low_rd</code> мало доноров, <code>feed_flag</code> флаг источника, <code>too_young</code>
-      моложе порога, <code>rkn</code> реестр РКН, <code>blacklist</code> блэклист,
-      <code>history_dirty</code> грязная история, <code>low_score</code> низкий скор,
-      <code>not_acquirable</code> нельзя купить (занят, не на бэкордере)</span>
+      <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>) по волнам:
+      W0 <code>tld_closed</code> зона не наша, <code>trademark</code> чужой бренд, <code>feed_flag</code>
+      флаг источника · W2 <code>not_acquirable</code> занят · W3 <code>blacklist</code> Web Risk / Spamhaus ·
+      W4 <code>low_rd</code> мало доноров · W5 <code>history_dirty</code> грязная история,
+      <code>too_young</code> моложе порога · W6 <code>spam_anchors</code> спам-анкоры · итог
+      <code>low_score</code> низкий скор. Легаси v1: <code>legacy_ru</code> архив РФ-пула,
+      <code>rkn</code> реестр РКН, <code>safebrowsing</code> Google Safe Browsing</span>
     <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span><span class="who">только ты</span>
       <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
     <span class="badge b-live">{{ 'live'|status_ru }}</span><span class="who">машина</span>
@@ -31,13 +33,14 @@
   </div>
   <div class="legend-grid" style="border-top:1px dashed var(--line)">
     <span class="hint">score</span><span class="who">0–1</span>
-      <span class="desc">сводная оценка качества: история + возраст + ссылки + индекс</span>
-    <span class="hint">RD</span><span class="who">из фида</span>
-      <span class="desc">referring domains — сколько доменов ссылается (авторитетность)</span>
-    <span class="hint">echo</span><span class="who">SearXNG</span>
-      <span class="desc">✓ = домен ещё встречается в поисковом индексе (был жив)</span>
-    <span class="hint">флаги</span><span class="who">Wayback/РКН</span>
-      <span class="desc">красные метки грязной истории — любой флаг = авто-reject</span>
+      <span class="desc">сводная оценка: история + тема прошлого сайта + возраст + доноры + DR + анкоры + трафик</span>
+    <span class="hint">RD</span><span class="who">Ahrefs (W4)</span>
+      <span class="desc">referring domains — сколько доменов ссылается; на дропах раздут спамом</span>
+    <span class="hint">DR</span><span class="who">Ahrefs</span>
+      <span class="desc"><a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a> —
+      главный честный сигнал на спам-дропах</span>
+    <span class="hint">флаги</span><span class="who">Wayback</span>
+      <span class="desc">красные метки грязной истории — любой флаг = отказ (метка РКН — у легаси v1)</span>
     <span class="hint">⌛</span><span class="who">ссылка</span>
       <span class="desc">открыть историю домена в Wayback — глянуть глазами перед решением</span>
   </div>
@@ -80,20 +83,20 @@
 
 <div class="wrap">
 {% if rows %}
+<div class="hint" style="margin-bottom:6px">DR — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
 <table>
   <thead><tr>
     <th>домен</th><th>статус</th><th>лейн</th><th class="num">цена</th><th>score</th><th class="num">RD</th>
-    <th class="num">возраст</th><th>echo</th><th>флаги истории</th><th class="num">найден</th>
+    <th class="num">возраст</th><th class="num" title="Domain Rating by Ahrefs">DR</th><th>флаги истории</th><th class="num">найден</th>
     <th>следующий шаг</th>
   </tr></thead>
   <tbody>
   {% for d in rows %}
     <tr>
       <td class="dom">
-        {% set projected = (d.score_breakdown or {}).get('deadline_source') == 'whois_projection' %}
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
-          title="источник: {{ d.source or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · {{ 'прогноз whois' if projected else 'дедлайн' }} {{ d.acquire_deadline.strftime('%d.%m') }}{% if projected %} (не подтверждённый дроп — освободится, ЕСЛИ владелец не продлит){% endif %}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
-          >{{ {'backorder':'bo','cctld':'cc','reg_ru':'rg','sweb':'sw'}.get(d.source, (d.source or '?')[:2]) }}</span>{{ d.domain }}
+          title="источник: {{ d.source|source_ru or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
+          >{{ d.source|source_badge }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
            title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
       <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status|status_ru }}</span>
@@ -108,7 +111,7 @@
       </td>
       <td class="num">{{ d.referring_domains if d.referring_domains is not none else '—' }}</td>
       <td class="num">{{ '%.1f'|format(d.age_years|float) if d.age_years is not none else '—' }}</td>
-      <td>{% if d.indexed_echo %}<span style="color:var(--ok)" title="домен встречается в поисковом индексе">✓</span>{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td class="num">{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</td>
       <td>
         {% set pf = d.prior_flags or {} %}
         {% for k in ['adult','pharma','casino','gambling','spam'] %}
@@ -174,6 +177,9 @@
           {% if d.id in dirty_by_id %}
             <span class="hint" style="color:var(--bad)"
                   title="РКН, блэклист, грязная история или флаг источника — это факт о домене, а не наш порог. Ослабить его нечем: портфель держится на чистой истории. Единственный путь назад — перепроверка: если проверки сегодня скажут «чист», воронка сама снимет отметку.">⛔ грязь — не возвращается</span>
+          {% elif d.id in closed_ids %}
+            {# R2-19: зона вне белого списка — политика (transitions.zone_closed) в approved не пустит #}
+            <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке — не возвращается</span>
           {% else %}
             <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
               <input type="hidden" name="status" value="approved">
@@ -188,8 +194,9 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни со станции
-  «↻ Поиск дропов» — фид принесёт свежие дропы, затем «▶ Запуск проверки» их оценит.</div>
+<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни с
+  «↻ Найти дропы» в <a href="/domains">инбоксе M1</a> (или добавь домены списком выше), затем
+  «▶ Оценить домены».</div>
 {% endif %}
 </div>
 

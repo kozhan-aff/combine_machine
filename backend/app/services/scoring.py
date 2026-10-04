@@ -160,6 +160,17 @@ def history_evidence(d) -> list[dict]:
     return out
 
 
+def emd_newreg(d) -> bool:
+    """EMD без единого прочитанного снимка (находка R2-14): у новорега пустой архив — норма, а не
+    «история НЕ проверена». Пометка «⚠ … ▶ перепроверить» звала бы перепроверять то, чего нет; пакет
+    EMD всё равно не берёт (балла нет). Снимки есть, но прочитано мало (`history_evidence`), или
+    Wayback упал (`wayback:` в errors) — не сюда: тогда история и правда не проверена."""
+    bd = d.score_breakdown or {}
+    errors = [str(e) for e in (bd.get("errors") or [])]
+    return (bool(bd.get("emd")) and bd.get("sampled") == 0 and not bd.get("history_evidence")
+            and not any(e.startswith("wayback:") for e in errors))
+
+
 def blind_reason(d) -> str | None:
     """Домен оценён при недоступной/несостоявшейся проверке — в пакет одобрения он не идёт.
 
@@ -167,7 +178,9 @@ def blind_reason(d) -> str | None:
     историю»), и именно она молча выдавала непроверенное за чистое.
     """
     errors = [str(e) for e in ((d.score_breakdown or {}).get("errors") or [])]
-    if history_verdict(d) == "unknown":
+    # EMD-новорег с пустым архивом (R2-14): «история НЕ проверена» тут не тревога, а норма — строка
+    # инбокса скажет «архив пуст — новорег» (emd_newreg); остальные проверки ниже идут как обычно.
+    if history_verdict(d) == "unknown" and not emd_newreg(d):
         if any(e.startswith("wayback:") for e in errors):
             return "история НЕ проверена: Wayback был недоступен"
         if (d.score_breakdown or {}).get("history_evidence"):
@@ -191,7 +204,9 @@ def blind_reason(d) -> str | None:
     # Возраста не дал никто: ни RDAP/whois (`whois_created`), ни архив (`first_seen`/`age_years`)
     # — гейт «слишком молодой» не применялся ни разу. Раньше это держал гард _decide; авто-
     # одобрения больше нет (Р2), и единственная защита — пакет такой домен не берёт.
-    if d.whois_created is None and d.first_seen is None and d.age_years is None:
+    # У EMD возраст не критерий: новорег, гейт «слишком молодой» W5 его не судит (R2-14).
+    if (not (d.score_breakdown or {}).get("emd") and d.whois_created is None
+            and d.first_seen is None and d.age_years is None):
         return "возраст НЕ проверен: возраста нет ни из RDAP/whois, ни из архива"
     # Анкоры финалистов (W6) не проверены: кап W6, пол остатка units, Ahrefs не ответил, пустой
     # ответ при живых донорах — или домен оценён до W6 (ключа нет). На дропах RD раздут спамом:

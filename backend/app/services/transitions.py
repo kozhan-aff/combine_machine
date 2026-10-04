@@ -143,6 +143,18 @@ def refuse_dirty(d) -> None:
         raise TransitionDenied(_dirty_ru(reason, d.domain))
 
 
+def zone_closed(d, allowlist=None) -> bool:
+    """Зона домена вне белого списка (/settings) — ручной путь в `approved` закрыт (находка R2-19).
+    ОДИН предикат для политики (refuse_closed_zone), реестра (кнопка «↩ вернуть в approved») и пакета
+    (panel._bulk_candidates) — иначе кнопка предлагала бы то, что политика отвергнет.
+    `allowlist=None` — список из /settings; кто судит пачку доменов, передаёт его сам (одно чтение)."""
+    from app.services.domain_filters import tld_match
+    if allowlist is None:
+        from app.services.settings import get_settings
+        allowlist = get_settings()["tld_allowlist"]
+    return not tld_match(d.domain, allowlist)
+
+
 def refuse_closed_zone(d, allowlist=None) -> None:
     """Зона вне белого списка — в `approved` домен не вернуть даже руками. Бросает TransitionDenied.
 
@@ -153,11 +165,7 @@ def refuse_closed_zone(d, allowlist=None) -> None:
     R2-19). Зону добавили в белый список — домен возвращается той же кнопкой.
     `allowlist=None` — список из /settings; самопроверка без БД передаёт его явно.
     """
-    from app.services.domain_filters import tld_match
-    if allowlist is None:
-        from app.services.settings import get_settings
-        allowlist = get_settings()["tld_allowlist"]
-    if not tld_match(d.domain, allowlist):
+    if zone_closed(d, allowlist):
         raise TransitionDenied(
             f"домен «{d.domain}»: его зоны нет в белом списке зон (/settings) — v2 не судит и не "
             "выкупает такие домены, в approved его не вернуть")
