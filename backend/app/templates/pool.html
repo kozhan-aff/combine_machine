@@ -127,9 +127,14 @@
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
             <button class="btn-sm" title="прогнать проверки только для этого домена (≈5 с)">▶ отскорить</button></form>
         {% elif d.status == 'scored' %}
+          {% if d.id in closed_ids %}
+            {# R2-19: зона вне белого списка — «✓ одобрить» политика отвергнет #}
+            <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке</span>
+          {% else %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
             <button class="btn-sm btn-ok" title="одобрить: домен годен, пойдёт в очередь на покупку">✓ одобрить</button></form>
+          {% endif %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
             <button class="btn-sm btn-bad" title="отклонить: домен не годится, убрать из воронки">✗ отклонить</button></form>

@@ -337,8 +337,11 @@ def test_bulk_approve_never_stamps_dirt(client):
 
     # age_years обязателен: без возраста домен выпал бы из пакета по blind_reason, и тест
     # проходил бы даже без гарда грязи — исключать должен именно dirty_reason
-    _add(domain="scored-rkn.ru", status="scored", score=0.95, rkn_listed=True,
-         wayback_checked=True, age_years=10.0)
+    # prior_flags/deep_checked выставлены: иначе история «не проверена» и домен выпал бы из пакета
+    # сам по себе — гард грязи оказался бы невидим (мутация «убрать dirty_reason» не роняла тест)
+    _add(domain="scored-rkn.com", status="scored", score=0.95, rkn_listed=True,
+         wayback_checked=True, age_years=10.0, prior_flags={},
+         score_breakdown={"errors": [], "deep_checked": True})
     with db.SessionLocal() as s:
         d = s.execute(select(Domain)).scalar_one()
         assert scoring.bulk_ok(d) is False
@@ -354,7 +357,7 @@ def test_inbox_hides_approve_for_dirty_row(client):
     Пакет её уже не трогал (`bulk_ok`), политика бы отказала — то есть кнопка вела в
     ГАРАНТИРОВАННЫЙ отказ. Ложное предложение одобрить, ровно как «↩ вернуть» в реестре.
     """
-    _add(domain="scored-rkn.ru", status="scored", score=0.95, rkn_listed=True, wayback_checked=True)
+    _add(domain="scored-rkn.com", status="scored", score=0.95, rkn_listed=True, wayback_checked=True)
     html = client.get("/domains").text
     assert "✓ одобрить" not in html
     assert "выкуп запрещён — грязь" in html and "реестр РКН" in html
@@ -363,7 +366,7 @@ def test_inbox_hides_approve_for_dirty_row(client):
 
 def test_inbox_keeps_approve_for_clean_row(client):
     """ЧТО ЛОМАЕТСЯ у чистого домена: ничего — гейт курации остаётся кнопкой человека."""
-    _add(domain="clean.ru", status="scored", score=0.75, wayback_checked=True)
+    _add(domain="clean.com", status="scored", score=0.75, wayback_checked=True)
     assert "✓ одобрить" in client.get("/domains").text
 
 

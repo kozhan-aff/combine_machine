@@ -53,7 +53,7 @@ def test_bulk_approve_skips_blind_domains(client):
     молчавшая об этом поле, ровно его и покрывала собой."""
     _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
          prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
-    _add(domain="blind.ru", status="scored", score=0.9,
+    _add(domain="blind.com", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     _add(domain="weak.ru", status="scored", score=0.5, wayback_checked=True,
          prior_flags={}, score_breakdown={"errors": []})
@@ -61,13 +61,13 @@ def test_bulk_approve_skips_blind_domains(client):
     assert r.status_code == 303
     with SessionLocal() as db:
         st = {d.domain: d.status for d in db.query(Domain).all()}
-    assert st == {"clean.com": "approved", "blind.ru": "scored", "weak.ru": "scored"}
+    assert st == {"clean.com": "approved", "blind.com": "scored", "weak.ru": "scored"}
 
 
 def test_bulk_preview_counts(client):
     _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
          prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
-    _add(domain="blind.ru", status="scored", score=0.9,
+    _add(domain="blind.com", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     body = client.get("/domains/bulk-preview?min_score=0.8").json()
     assert body == {"n": 1, "skipped": 1}

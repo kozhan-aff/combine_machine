@@ -87,7 +87,7 @@ def test_blind_reason_still_names_dead_checks():
 
 def test_unchecked_history_stays_out_of_bulk(client):
     """РЕПРО АУДИТА: score 0.825, errors пуст, снимков не было — домен уходил в пакет как чистый."""
-    _add(domain="ghost.ru", status="scored", score=0.825, wayback_checked=False,
+    _add(domain="ghost.com", status="scored", score=0.825, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
     _add(domain="ok.com", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
          prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": [], "deep_checked": True})
@@ -96,7 +96,7 @@ def test_unchecked_history_stays_out_of_bulk(client):
     assert r.status_code == 303
     with db.SessionLocal() as s:
         st = {d.domain: d.status for d in s.query(Domain).all()}
-    assert st == {"ghost.ru": "scored", "ok.com": "approved"}   # непроверенный НЕ одобрен пакетом
+    assert st == {"ghost.com": "scored", "ok.com": "approved"}   # непроверенный НЕ одобрен пакетом
 
 
 def test_inbox_warns_instead_of_claiming_clean(client):
@@ -121,7 +121,7 @@ def test_row_and_bulk_share_one_predicate(client, monkeypatch):
     `bulk_ok` обязан остаться False (он сверяет ЕЩЁ И history_verdict, не только blind_reason),
     и строка не имеет права нести «история чистая» для домена, которого пакет не берёт.
     """
-    _add(domain="ghost2.ru", status="scored", score=0.9, wayback_checked=False,
+    _add(domain="ghost2.com", status="scored", score=0.9, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
     monkeypatch.setattr(scoring, "blind_reason", lambda d: None)
     # решающая проверка: строка инбокса и пакет обязаны совпасть — ни то ни другое не

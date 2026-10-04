@@ -234,11 +234,13 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import (blind_reason, bulk_ok, emd_newreg, history_evidence,
+    from app.services.scoring import (blind_reason, emd_newreg, history_evidence,
                                       history_note, history_verdict, stale_donors, topic_far,
                                       DROP_GRACE)
     from app.services.settings import get_settings
-    from app.services.transitions import dirty_reason
+    from app.services.transitions import dirty_reason, zone_closed
+    settings = get_settings()                        # одно чтение настроек на страницу
+    allow = settings["tld_allowlist"]
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
@@ -280,19 +282,22 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
         # вещи, а подпись «история чистая» не имеет права стоять ни под тем, ни под другим.
         # Улики (снимки Wayback, по которым машина судила) едут всегда, когда они есть: вердикт
         # ошибается — куратор должен мочь перепроверить и «грязно», и «чисто».
-        # `ok` — РЕЗУЛЬТАТ bulk_ok(d), ТОТ ЖЕ предикат, что решает пакетное одобрение
-        # (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
+        # `ok` — РЕЗУЛЬТАТ _bulk_eligible(d, allow) (зона + bulk_ok), ТОТ ЖЕ предикат, что решает
+        # пакетное одобрение (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
         # а не реконструировать условие из blind/hist на месте — иначе два места молча
         # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
-                   history_evidence(d), bulk_ok(d), history_note(d)) for d in inbox],
+                   history_evidence(d), _bulk_eligible(d, allow), history_note(d)) for d in inbox],
         "inbox_total": inbox_total, "langs": langs, "f_lang": lang or "",
         # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
         # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
         "newreg_ids": {d.id for d in inbox if emd_newreg(d)},
         # Р2: «пакет от скора» по умолчанию = «порог сильного кандидата» из /settings
-        "bulk_default": get_settings()["approve_at"],
+        "bulk_default": settings["approve_at"],
+        # зона вне белого списка: «✓ одобрить» политика отвергнет (R2-19) — строка рисует «зона не в
+        # белом списке» вместо кнопки и не пишет «история чистая» (тот же zone_closed, что у политики)
+        "closed_ids": {d.id for d in inbox + ready if zone_closed(d, allow)},
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
@@ -353,10 +358,20 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
         "dirty_by_id": {d.id: _reject_ru(r) for d in rows if (r := dirty_reason(d)) is not None},
         # зона вне белого списка (R2-19): тот же предикат, что у политики, — кнопку «↩ вернуть в
         # approved» шаблон не рисует (она вела в гарантированный отказ)
-        "closed_ids": {d.id for d in rows if d.status == "rejected" and zone_closed(d, allow)},
+        "closed_ids": {d.id for d in rows if d.status in ("rejected", "scored") and zone_closed(d, allow)},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
+
+
+def _bulk_eligible(d, allow) -> bool:
+    """Годен ли scored-домен к пакетному одобрению: зона в белом списке И `bulk_ok`. ОДИН предикат
+    для пакета (_bulk_candidates) и для строки инбокса (domains_view): строка подписывает «история
+    чистая» и рисует «✓ одобрить» именно по нему, иначе домен вне белого списка (оператор сузил
+    allowlist после скоринга) получал бы кнопку, которую политика гарантированно отвергнет."""
+    from app.services.scoring import bulk_ok
+    from app.services.transitions import zone_closed
+    return not zone_closed(d, allow) and bulk_ok(d)
 
 
 def _bulk_candidates(db: Session, min_score: float):
@@ -373,27 +388,28 @@ def _bulk_candidates(db: Session, min_score: float):
     отсеянный за казино в истории, объявлялся оператору «оценённым вслепую». Считаем то, что
     считаем: сколько строк пакет НЕ ТРОНУЛ.
     """
-    from app.services.scoring import bulk_ok
     from app.services.settings import get_settings
-    from app.services.transitions import zone_closed
     allow = get_settings()["tld_allowlist"]          # одно чтение настроек на пакет
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
     # Зона вне белого списка (R2-19): политика не пустит такой домен в approved — пакет его не
     # берёт (иначе падал бы отказом политики) и считает в «пропущено».
-    ok = [d for d in rows if not zone_closed(d, allow) and bulk_ok(d)]
+    ok = [d for d in rows if _bulk_eligible(d, allow)]
     return ok, len(rows) - len(ok)
 
 
 @router.get("/domains/bulk-preview")
-def bulk_preview(min_score: float = 0.8, db: Session = Depends(get_session)):
+def bulk_preview(min_score: float | None = None, db: Session = Depends(get_session)):
     from fastapi.responses import JSONResponse
+    from app.services.settings import get_settings
+    if min_score is None:                      # дефолт = «порог сильного кандидата» (/settings), не 0.8
+        min_score = get_settings()["approve_at"]
     ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
     return JSONResponse({"n": len(ok), "skipped": skipped})
 
 
 @router.post("/domains/bulk-approve")
-def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_session)):
+def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_session)):
     """Пакетное одобрение — это КЛИК ЧЕЛОВЕКА, гейт курации на месте (деньги не тратятся:
     approved != куплен). Домены, чью историю не подтвердили (Wayback лежал) или подтвердили как
     грязную, в пакет НЕ попадают — иначе пакет стал бы обходом того самого гейта, ради которого
@@ -405,7 +421,14 @@ def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_
     ВИДЕН оператору, а не проглочен молча.
     """
     from app.services import transitions
-    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    from app.services.settings import get_settings
+    # Очищенное поле формы приходит пустой строкой: порог по умолчанию — approve_at из /settings,
+    # а не зашитые 0.8 (иначе при approve_at=0.9 пакет брал бы НИЖЕ видимого оператору порога).
+    try:
+        threshold = float(min_score)
+    except ValueError:
+        threshold = get_settings()["approve_at"]
+    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, threshold)))
     approved, denied = 0, []
     for d in ok:
         try:

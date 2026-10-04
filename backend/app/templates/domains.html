@@ -131,8 +131,15 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
     <tr class="{{ 'urgent' if urgent }}">
       <td style="width:120px">
         {% if d.acquire_deadline %}
-          <div class="hint" style="font-size:10px; letter-spacing:.08em"
-               title="дата дропа из источника (DropCatch/Nominet)">СРОК ДРОПА</div>
+          {# source == 'list' (ручной список): лейн по статусу RDAP, дата = ВЕРХНЯЯ граница окна
+             (pending delete ≤5 сут., redemption ≤35) — это оценка, а не дата из источника #}
+          {% if d.source == 'list' %}
+            <div class="hint" style="font-size:10px; letter-spacing:.08em"
+                 title="по статусу RDAP: pending delete ≤5 сут., redemption ≤35 — реальный дроп может быть РАНЬШЕ">ОЦЕНКА ДРОПА</div>
+          {% else %}
+            <div class="hint" style="font-size:10px; letter-spacing:.08em"
+                 title="дата дропа из источника (DropCatch/Nominet/registry.mx)">СРОК ДРОПА</div>
+          {% endif %}
           <div style="font-weight:700; {{ 'color:var(--acc2)' if urgent else 'color:var(--mut)' }}">
             {{ d.acquire_deadline.strftime('%d.%m') }}</div>
           {# окно дропа закрыто — домен уже не купить. Без метки его одобряют и идут покупать
@@ -161,7 +168,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if bd.get('emd') %}
           <div class="hint" style="color:var(--acc2)" title="новорег под ключ: ни ссылок, ни истории — скору не из чего складываться">EMD — решение за тобой</div>
         {% elif d.topic %}
-          <div class="hint" title="тема прошлого сайта по снимкам Wayback (LLM). Политика Google «expired domain abuse»: далёкая от VPN прошлая тема — риск">тема: {{ d.topic }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
+          <div class="hint" title="тема прошлого сайта по снимкам Wayback (LLM): {{ d.topic }}. Политика Google «expired domain abuse»: далёкая от VPN прошлая тема — риск">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
         {% elif bd.get('topic_unknown') %}
           <div class="hint">тема не определена</div>
         {% endif %}
@@ -188,6 +195,8 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           </div>
         {% elif hist == 'dirty' %}
           <div class="hint" style="color:var(--bad)">история грязная — смотри снимки</div>
+        {# зона вне белого списка (R2-19): ни «история чистая», ни кнопки — одобрение закрыто политикой #}
+        {% elif d.id in closed_ids %}<div class="hint" style="color:var(--acc2)">зона не в белом списке — в пакет не идёт, одобрить нельзя</div>
         {% elif ok %}<div class="hint" style="color:var(--ok)">история чистая</div>
         {# история проверена и чиста, но пакет домен не берёт: далёкая тема или EMD (без балла) —
            причина названа строкой выше. «не подтверждена» здесь было бы неправдой. #}
@@ -229,6 +238,9 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
              перепроверка: реабилитацию даёт машина по новым уликам, а не кнопка. #}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
             <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+        {% elif d.id in closed_ids %}
+          {# R2-19: зона вне белого списка — политика (transitions.zone_closed) в approved не пустит #}
+          <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке</span>
         {% else %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
@@ -269,7 +281,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
     <tr>
       <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span>
         {# тема прошлого сайта — и здесь, откуда идут покупать (инвариант 4) #}
-        {% if d.topic %}<div class="hint">тема: {{ d.topic }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
+        {% if d.topic %}<div class="hint" title="{{ d.topic }}">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
         {% elif (d.score_breakdown or {}).get('emd') %}<div class="hint">EMD — новорег под ключ</div>{% endif %}
         {% if d.id in far_ids %}<div class="hint" style="color:var(--acc2)">⚠ прошлая тема далека от VPN</div>{% endif %}
         {# ГРЯЗЬ — прямо в строке, с которой идут покупать. Отмытый домен (approved с живым

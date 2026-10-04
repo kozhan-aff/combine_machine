@@ -137,6 +137,17 @@ def test_bulk_skips_domains_outside_the_zone_allowlist(client):
         _add(domain=name, source="nominet", status="scored", score=0.9, wayback_checked=True,
              prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
     assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 1, "skipped": 1}
+    # строка инбокса судит ТЕМ ЖЕ предикатом, что пакет: для закрытой зоны — ни голого «история чистая»,
+    # ни кнопки «✓ одобрить» (политика её отвергнет), а «зона не в белом списке»
+    html = client.get("/domains").text
+    rows = {m.group(1): m.group(0) for m in
+            re.finditer(r"<tr[^>]*>(?:(?!</tr>).)*?(v1-left\.ru|fresh\.com).*?</tr>", html, re.S)}
+    assert "история чистая" not in rows["v1-left.ru"] and "✓ одобрить" not in rows["v1-left.ru"]
+    assert "зона не в белом списке" in rows["v1-left.ru"]
+    assert "✓ одобрить" in rows["fresh.com"] and "история чистая" in rows["fresh.com"]
+    # и в реестре scored-строка закрытой зоны не получает «✓ одобрить»
+    pool = client.get("/domains/pool?status=scored").text
+    assert "зона не в белом списке" in pool and pool.count("✓ одобрить") == 1
     update_settings(tld_allowlist=["com", "ru"])
     assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 2, "skipped": 0}
 
@@ -204,3 +215,47 @@ def test_no_auto_approve_wording_in_panel_templates(client):
         html = client.get(url).text.lower()
         for bad in ("авто-одобр", "автоматически одобр", "auto-approve", "авто-reject", "авто-approve"):
             assert bad not in html, (url, bad)
+
+
+def test_bulk_approve_empty_threshold_falls_back_to_approve_at(client):
+    """M1: очищенное поле + «✓ Одобрить пакет» применяют approve_at из /settings, а не зашитые 0.8
+    (при approve_at=0.9 раньше брало бы НИЖЕ видимого оператору порога). Тот же дефолт у preview."""
+    from app.services.settings import update_settings
+    update_settings(approve_at=0.9)
+    _add(domain="mid.com", source="nominet", status="scored", score=0.85, wayback_checked=True,
+         prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
+    _add(domain="top.com", source="nominet", status="scored", score=0.95, wayback_checked=True,
+         prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
+    assert client.get("/domains/bulk-preview").json() == {"n": 1, "skipped": 0}   # 0.8 дало бы n=2
+    r = client.post("/domains/bulk-approve", data={"min_score": ""}, follow_redirects=False)
+    assert r.status_code == 303
+    with db.SessionLocal() as s:
+        st = {d.domain: d.status for d in s.query(Domain).all()}
+    assert st == {"mid.com": "scored", "top.com": "approved"}
+
+
+def test_long_topic_is_truncated_with_full_text_in_title(client):
+    """M2: тема до 120 символов не растягивает nowrap-ячейку — на экране 48, целиком в title."""
+    topic = "очень длинная тема прошлого сайта " * 4
+    _add(domain="longtopic.com", source="nominet", status="scored", score=0.6, topic=topic,
+         topical_relevance=0.8, score_breakdown=CHECKED)
+    html = client.get("/domains").text
+    assert f"{topic}. Политика" in html                 # полная тема — в title
+    assert "тема: очень длинная тема прошлого сайта" in html and "..." in html.split("тема: ", 1)[1][:80]
+    assert f"тема: {topic}" not in html
+
+
+def test_list_source_deadline_is_labelled_as_estimate(client):
+    """M3: у ручного списка (source='list') дата — верхняя граница окна по статусу RDAP, а не дата из
+    источника: подпись «ОЦЕНКА ДРОПА»; у остальных источников — «СРОК ДРОПА»."""
+    from datetime import datetime, timedelta, timezone
+    soon = datetime.now(timezone.utc) + timedelta(days=5)
+    _add(domain="manual-est.com", source="list", status="scored", score=0.6, acquire_deadline=soon,
+         score_breakdown=CHECKED)
+    html = client.get("/domains").text
+    assert "ОЦЕНКА ДРОПА" in html and "СРОК ДРОПА" not in html
+    assert "реальный дроп может быть РАНЬШЕ" in html
+    _add(domain="feed.com", source="nominet", status="scored", score=0.6, acquire_deadline=soon,
+         score_breakdown=CHECKED)
+    html = client.get("/domains").text
+    assert html.count("ОЦЕНКА ДРОПА") == 1 and html.count("СРОК ДРОПА") == 1
