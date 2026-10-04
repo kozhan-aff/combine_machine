@@ -89,7 +89,7 @@ def test_rkn_domain_cannot_be_returned_to_approved(client):
 
     Это первый шаг коридора: дальше домен неотличим от честно одобренного.
     """
-    did = _add(domain="rkn.ru", status="rejected", reject_reason="rkn", rkn_listed=True)
+    did = _add(domain="rkn.com", status="rejected", reject_reason="rkn", rkn_listed=True)
     r = client.post(f"/domains/{did}/set-status", data={"status": "approved"},
                     follow_redirects=False)
     assert r.status_code == 303                          # панель отвечает флэшем, а не 500
@@ -97,7 +97,7 @@ def test_rkn_domain_cannot_be_returned_to_approved(client):
 
 
 def test_history_dirty_domain_cannot_be_returned_to_approved(client):
-    did = _add(domain="casino.ru", status="rejected", reject_reason="history_dirty",
+    did = _add(domain="casino.com", status="rejected", reject_reason="history_dirty",
                prior_flags={"casino": True}, wayback_checked=True)
     client.post(f"/domains/{did}/set-status", data={"status": "approved"}, follow_redirects=False)
     assert _status(did) == "rejected"
@@ -466,7 +466,7 @@ def test_rescore_early_exit_does_not_erase_rkn_evidence():
     """
     from app.services import scoring, transitions
 
-    did = _add(domain="rkn-taken.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+    did = _add(domain="rkn-taken.com", status="rejected", reject_reason="rkn", rkn_listed=True,
                lane="free", referring_domains=300, wayback_checked=True,
                prior_flags={}, score=0.0)
     taken = type("A", (), {"whois_probe": lambda self, d: {   # занят -> ранний выход на T1
@@ -478,7 +478,7 @@ def test_rescore_early_exit_does_not_erase_rkn_evidence():
         d = s.get(Domain, did)
         assert d.rkn_listed is True                       # улику НЕ СТЁРЛИ: РКН никто не спрашивал
         assert transitions.dirty_reason(d) == "rkn"       # домен по-прежнему грязный
-        with pytest.raises(transitions.TransitionDenied):
+        with pytest.raises(transitions.TransitionDenied, match="грязный"):
             transitions.check(d, "approved")              # ...и в оборот не возвращается
 
 

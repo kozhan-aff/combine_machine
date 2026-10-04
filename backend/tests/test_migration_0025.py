@@ -39,7 +39,8 @@ def test_revision_chain():
 
 def test_archive_sql_hits_only_unbought_ru_candidates_and_is_reversible():
     rows = [("a.ru", "discovered"), ("b.xn--p1ai", "scored"), ("c.ru", "purchased"),
-            ("d.com", "discovered"), ("e.su", "approved"), ("f.com.ru", "rejected")]
+            ("d.com", "discovered"), ("e.su", "approved"), ("f.com.ru", "rejected"),
+            ("g.ru", "purchasing"), ("h.ru", "live")]
     with db.SessionLocal() as s:
         for name, st in rows:
             s.add(Domain(domain=name, status=st, reject_reason="rkn" if st == "rejected" else None))
@@ -51,6 +52,8 @@ def test_archive_sql_hits_only_unbought_ru_candidates_and_is_reversible():
     for name in ("a.ru", "b.xn--p1ai", "e.su"):
         assert got[name] == ("rejected", "legacy_ru"), name
     assert got["c.ru"] == ("purchased", None)          # купленный — не трогаем
+    assert got["g.ru"] == ("purchasing", None)         # живой заказ у M2 — не трогаем
+    assert got["h.ru"] == ("live", None)               # сайт живёт — не трогаем
     assert got["d.com"] == ("discovered", None)        # международный — не трогаем
     assert got["f.com.ru"] == ("rejected", "rkn")      # уже отклонённый — причину не перетираем
     with db.SessionLocal() as s:
@@ -108,8 +111,21 @@ def test_legacy_ru_and_closed_zone_never_back_to_approved():
         d = NS(domain="old.ru", status="rejected", reject_reason=reason, rkn_listed=None,
                blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown=None)
         assert transitions.dirty_reason(d) == reason
-        with pytest.raises(transitions.TransitionDenied):
+        with pytest.raises(transitions.TransitionDenied, match="грязный"):
             transitions.check(d, "approved")
+
+
+def test_dirt_is_refused_before_zone():
+    # порядок «грязь раньше зоны»: у грязного домена в закрытой зоне оператор видит причину-грязь
+    # (путь назад — перескор), а не «добавь зону в белый список»
+    from app.services import transitions
+    d = NS(domain="bad.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+           blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown=None)
+    with pytest.raises(transitions.TransitionDenied, match="грязный") as e:
+        transitions.check(d, "approved", allowlist=["com"])      # .ru вне списка
+    assert "белом списке" not in str(e.value)
+    with pytest.raises(transitions.TransitionDenied, match="грязный"):
+        transitions.check(d, "approved", allowlist=["com", "ru"])  # зона разрешена — отказ тот же
 
 
 def test_threshold_reject_outside_allowlist_cannot_return_to_approved():

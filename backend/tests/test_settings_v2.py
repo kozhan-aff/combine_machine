@@ -44,3 +44,33 @@ def test_units_floor_bounds():
     assert update_settings(units_floor=5_000_000)["units_floor"] == 2_000_000
     assert update_settings(units_floor=-1)["units_floor"] == 0               # 0 = пола нет
     assert update_settings(units_floor=150000)["units_floor"] == 150000
+
+
+def test_emd_non_string_items_are_dropped_not_stringified():
+    # str(None) -> «none», str(5) -> «5»: молча стали бы ключами/зонами
+    s = update_settings(emd_sets='[{"market":"x","lang":"es","keywords":["mejor vpn",null,5,true],'
+                                 '"tlds":["com",null,7,false]}]')
+    assert s["emd_sets"] == [{"market": "x", "lang": "es", "keywords": ["mejor vpn"], "tlds": ["com"]}]
+    assert update_settings(tld_allowlist=["com", None, 5, True, "mx"])["tld_allowlist"] == ["com", "mx"]
+
+
+def test_emd_dotted_keyword_rejected_without_losing_old():
+    # best.vpn + com = best.vpn.com — не регистрируемое имя
+    ok = update_settings(emd_sets='[{"keywords":["mejor vpn"],"tlds":["com"]}]')["emd_sets"]
+    with pytest.raises(ValueError, match="точк"):
+        update_settings(emd_sets='[{"keywords":["best.vpn"],"tlds":["com"]}]')
+    assert get_settings()["emd_sets"] == ok
+
+
+@pytest.mark.parametrize("bad", ['{"keywords":5,"tlds":["com"]}', '{"keywords":["a"],"tlds":true}',
+                                 '{"keywords":{"a":1},"tlds":["com"]}'])
+def test_emd_scalar_instead_of_list_is_value_error(bad):
+    with pytest.raises(ValueError):
+        update_settings(emd_sets="[" + bad + "]")
+
+
+def test_list_setting_scalar_is_value_error():
+    with pytest.raises(ValueError):
+        update_settings(tld_allowlist=True)
+    with pytest.raises(ValueError):
+        update_settings(brand_tokens=5)

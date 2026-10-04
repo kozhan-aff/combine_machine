@@ -181,11 +181,11 @@ if __name__ == "__main__":  # self-check без БД: политика чист�
               rkn_listed=False, blacklisted=None, prior_flags={}, wayback_checked=True)
     assert dirty_reason(rkn) == "rkn" and dirty_reason(weak) is None
     try:
-        check(rkn, "approved", allowlist=["com"])
+        check(rkn, "approved", allowlist=["com", "ru"])   # зона разрешена: отказ именно по грязи
         raise AssertionError("грязь обязана быть отвергнута")
     except TransitionDenied:
         pass
-    check(weak, "approved", allowlist=["com"])    # отсеянный ПОРОГОМ домен возвращается руками
+    check(weak, "approved", allowlist=["com", "ru"])    # отсеянный ПОРОГОМ домен возвращается руками
     try:
         check(NS(**{**vars(weak), "domain": "weak.ru"}), "approved", allowlist=["com"])
         raise AssertionError("зона вне белого списка обязана быть отвергнута")

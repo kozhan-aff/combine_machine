@@ -72,12 +72,22 @@ def _clean_weights(raw, base: dict | None = None) -> dict:
 
 def _clean_list(raw) -> list[str]:
     """Список с UI (textarea: строки/запятые/пробелы) или готовый список -> нижний регистр, без
-    точек по краям, без пустых и дублей. Порядок оператора сохраняется."""
+    точек по краям, без пустых и дублей. Порядок оператора сохраняется.
+
+    Берём только СТРОКИ: `str(None)` дал бы зону «none», `str(True)` — «true», и обе молча ушли бы
+    в белый список/генератор имён. Не-строка внутри списка отбрасывается; скаляр не-строка вместо
+    списка (`true`, `5`) — ValueError, а не TypeError на итерации (панель показывает ValueError)."""
+    if raw is None:
+        return []
     if isinstance(raw, str):
         raw = re.split(r"[\s,;]+", raw)
+    elif not isinstance(raw, (list, tuple)):
+        raise ValueError(f"ожидается список или строка, получено {type(raw).__name__}")
     out = []
-    for x in raw or ():
-        t = str(x).strip().strip(".").lower()
+    for x in raw:
+        if not isinstance(x, str):
+            continue
+        t = x.strip().strip(".").lower()
         if t and t not in out:
             out.append(t)
     return out[:_LIST_MAX]
@@ -88,7 +98,11 @@ def _clean_emd_sets(raw) -> list[dict]:
     панель покажет ошибку, а сохранённые наборы НЕ затрутся пустотой.
 
     Строка вместо списка в `keywords` — это ОДИН ключ: перебор строки дал бы буквы
-    (`"mejor vpn"` -> m.com, e.com, j.com…). `tlds` строкой разбирает `_clean_list`, как textarea."""
+    (`"mejor vpn"` -> m.com, e.com, j.com…). `tlds` строкой разбирает `_clean_list`, как textarea.
+
+    Ключ с точкой — ValueError, а не тихая чистка: `best.vpn` + зона `com` дал бы имя `best.vpn.com`,
+    а такого РЕГИСТРИРУЕМОГО имени не бывает (это поддомен) — генератор EMD выдавал бы мусор, который
+    не купить. Оператор должен увидеть опечатку и поправить её, а не гадать, куда делся ключ."""
     if isinstance(raw, str):
         raw = json.loads(raw) if raw.strip() else []       # JSONDecodeError — подкласс ValueError
     if not isinstance(raw, list):
@@ -97,11 +111,18 @@ def _clean_emd_sets(raw) -> list[dict]:
     for s in raw[:50]:
         if not isinstance(s, dict):
             continue
-        kw_raw = s.get("keywords") or []
-        if isinstance(kw_raw, str):
+        kw_raw = s.get("keywords")
+        if kw_raw is None:
+            kw_raw = []
+        elif isinstance(kw_raw, str):
             kw_raw = [kw_raw]
-        kws = [str(k).strip()[:60] for k in kw_raw if str(k).strip()][:50]
-        tlds = _clean_list(s.get("tlds") or [])[:20]
+        elif not isinstance(kw_raw, (list, tuple)):
+            raise ValueError(f"наборы EMD: keywords — список или строка, получено {type(kw_raw).__name__}")
+        kws = [k.strip()[:60] for k in kw_raw if isinstance(k, str) and k.strip()][:50]
+        if any("." in k for k in kws):
+            raise ValueError("наборы EMD: ключ не может содержать точку — получилось бы имя "
+                             "вида best.vpn.com, а не регистрируемый домен")
+        tlds = _clean_list(s.get("tlds"))[:20]
         if kws and tlds:
             out.append({"market": str(s.get("market") or "")[:16],
                         "lang": str(s.get("lang") or "")[:8].lower(),
