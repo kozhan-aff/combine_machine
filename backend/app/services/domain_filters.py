@@ -40,6 +40,9 @@ def tld_match(domain: str, allowlist) -> str | None:
     `x.com.mx` при списке [mx] — не наш (его зона com.mx, NameSilo её не продаёт). Без PSL:
     источники отдают регистрируемые имена, а белый список и есть наш перечень зон.
     """
+    # Нижний регистр и здесь, хотя discovery канонизирует имя: W0 судит строку из БД (ручной список,
+    # строки v1), и `Foo.COM` иначе ушёл бы в tld_closed при зоне в белом списке (финальное ревью).
+    domain = domain.lower()
     for raw in allowlist or ():
         t = str(raw).strip().strip(".").lower()
         if t and domain.endswith("." + t) and "." not in domain[: -len(t) - 1]:

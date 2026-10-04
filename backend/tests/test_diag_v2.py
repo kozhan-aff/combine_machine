@@ -91,11 +91,13 @@ def test_rdap_down_is_a_row_not_a_banner(monkeypatch):
 def test_critical_flags_follow_the_real_spec():
     """Minor 2: критичность — по настоящей таблице _spec(), не по синтетике. Некритичные источники
     дропов (и RDAP, чей сбой не останавливает воронку) не зажигают баннер; воронка без критичных
-    зависимостей (Wayback, A-Parser, Ahrefs, LLM, БД) остановилась бы."""
+    зависимостей (Wayback, A-Parser, LLM, БД) остановилась бы. Ahrefs — некритичный (финальное
+    ревью, minor «в»): остаток units 0 горел бы баннером на всех экранах до месячного сброса, а
+    остаток и так виден на /settings и в сообщении задачи."""
     crit = {s[0]: s[5] for s in diagnostics._spec()}
-    for k in ("nominet", "registry_mx", "dropcatch", "rdap", "webrisk"):
+    for k in ("nominet", "registry_mx", "dropcatch", "rdap", "webrisk", "ahrefs"):
         assert crit[k] is False, k
-    for k in ("wayback", "aparser", "ahrefs", "llm", "db"):
+    for k in ("wayback", "aparser", "llm", "db"):
         assert crit[k] is True, k
 
 
@@ -110,3 +112,20 @@ def test_registry_mx_ping_uses_head_not_full_csv(monkeypatch):
     monkeypatch.setattr(RegistryMxClient, "request", _req)
     assert RegistryMxClient().ping() is True
     assert methods == ["HEAD"]
+
+
+def test_ahrefs_units_exhausted_is_a_row_not_a_banner(monkeypatch):
+    """Финальное ревью (minor «в»): остаток units 0 — строка «fail» на /diag (с числом остатка), но не
+    красный баннер «Нет связи: Ahrefs API» на всех экранах до месячного сброса."""
+    from app.config import settings
+    from app.integrations.ahrefs import AhrefsClient
+    from app.services import diag_cache
+    monkeypatch.setattr(settings, "AHREFS_API_KEY", "k")
+    monkeypatch.setattr(AhrefsClient, "units_left", lambda self: 0)
+    monkeypatch.setattr(diag_cache, "_checks", None)
+    monkeypatch.setattr(diag_cache, "_checked_at", None)
+    monkeypatch.setattr(diag_cache, "run_diagnostics",
+                        lambda: diagnostics.run_diagnostics(specs=[_row("ahrefs")]))
+    checks = diag_cache.refresh()
+    assert checks[0]["status"] == "fail" and checks[0]["value"] == 0
+    assert diag_cache.alert()["down"] == []

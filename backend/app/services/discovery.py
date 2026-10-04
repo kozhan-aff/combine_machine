@@ -11,6 +11,7 @@
 не проходят: это выбор оператора / новореги, у которых ссылок и не должно быть.
 """
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -120,11 +121,14 @@ def _dr_remember(part: list, drs: dict, now: datetime) -> None:
 
 
 def _retry_after(e: httpx.HTTPStatusError) -> float:
-    """Секунды из Retry-After ответа 429; нет заголовка или в нём дата — 60 (окно лимита — минута)."""
+    """Секунды из Retry-After ответа 429; нет заголовка или в нём дата — 60 (окно лимита — минута).
+    Число — в [1, 120] (финальное ревью): огромное подвесило бы discovery на сутки, держа замок
+    задачи, а отрицательное, нулевое или NaN — повтор без паузы (NaN ещё и роняет сон ValueError)."""
     try:
-        return float(e.response.headers.get("Retry-After") or 60)
+        x = float(e.response.headers.get("Retry-After") or 60)
     except ValueError:
         return 60.0
+    return 1.0 if math.isnan(x) else min(max(x, 1.0), 120.0)
 
 
 def _dr_once(ahrefs, part: list) -> dict:
@@ -139,8 +143,11 @@ def _dr_once(ahrefs, part: list) -> dict:
         return ahrefs.dr_free(part)
 
 
-def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int, set]:
-    """({домен: DR} прошедших порог, сколько ПРОПУЩЕНО, имена, взятые из памяти dr_seen).
+def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int, set, list]:
+    """({домен: DR} прошедших порог, сколько ПРОПУЩЕНО, имена, взятые из памяти dr_seen, причины
+    пропуска). Причины — для сообщения задачи (финальное ревью, minor «е»): «DR недоступен — N»
+    без причины не говорил оператору, что чинить. Только класс исключения / HTTP-код — ни URL, ни
+    ключа (httpx кладёт полный URL в текст HTTPStatusError).
 
     Память (решение оператора Р4): домен, спрошенный за последние 4 суток, в Ahrefs не идёт.
     Отсеянные домены в `domains` не попадают, и без памяти их DR спрашивался бы на каждом прогоне
@@ -167,8 +174,12 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
     ask = [n for n in names if n not in memo]
     if ask and getattr(ahrefs, "api_key", None) == "":     # у фейков тестов атрибута нет
         logger.warning("DR-фильтр: AHREFS_API_KEY пуст — %d доменов без DR пропущены", len(ask))
-        return kept, len(ask), set(memo)
-    skipped = 0
+        return kept, len(ask), set(memo), ["ключ AHREFS_API_KEY не задан"]
+    skipped, why = 0, []
+
+    def _why(reason: str) -> None:
+        if reason not in why:                              # одна причина на сотню пачек — один раз
+            why.append(reason)
     for i in range(0, len(ask), _DR_BATCH):
         if jobs.cancelled(run):
             raise jobs.Cancelled()
@@ -180,6 +191,7 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
             got = _dr_once(ahrefs, part)
         except Exception as e:  # noqa: BLE001 — пачка без DR пропускается, прогон идёт дальше
             code = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+            _why(f"{type(e).__name__} {code}" if code else f"сбой Ahrefs: {type(e).__name__}")
             if code in (401, 403):
                 logger.warning("DR-фильтр: Ahrefs %s — ключ не принят, остаток %d пропущен",
                                code, len(ask) - i)
@@ -193,12 +205,15 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
         if not drs:
             logger.warning("DR-фильтр: в ответе нет ни одного из %d спрошенных — пачка пропущена",
                            len(part))
+            _why("ответ Ahrefs без спрошенных доменов")
             skipped += len(part)
             continue
+        if want - set(drs):
+            _why("доменов нет в ответе Ahrefs")
         skipped += len(want - set(drs))
         kept.update({d: dr for d, dr in drs.items() if dr >= min_dr})
         _dr_remember(part, drs, now)
-    return kept, skipped, set(memo)
+    return kept, skipped, set(memo), why
 
 
 def _new_domain(name: str, c: dict, dr):
@@ -297,8 +312,8 @@ def run_discovery() -> int:
         # свободного EMD ссылок и не должно быть, DR 0 — не повод его терять
         auto = [n for n in fresh if cand[n]["source"] in AUTO_SOURCES and n not in emd]
         jobs.report(run, stage="dr", current=f"DR для {len(auto)} новых")
-        drs, skipped, remembered = (_dr_filter(auto, min_dr, AhrefsClient(), run)
-                                    if auto else ({}, 0, set()))
+        drs, skipped, remembered, why = (_dr_filter(auto, min_dr, AhrefsClient(), run)
+                                         if auto else ({}, 0, set(), []))
         for n in fresh:
             if n not in remembered:              # «новых» = не известных и не спрошенных за 4 суток
                 stats[cand[n]["source"]]["new"] += 1
@@ -311,7 +326,7 @@ def run_discovery() -> int:
         if remembered:
             msg += f" · DR из памяти (4 сут) — {len(remembered)}"
         if skipped:
-            msg += f" · DR недоступен — {skipped} пропущено"
+            msg += f" · DR недоступен — {skipped} пропущено" + (f" ({'; '.join(why)})" if why else "")
         jobs.report(run, done=1, total=1, current="", message=" · ".join([msg, *fails]))
         return inserted
 

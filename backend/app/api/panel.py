@@ -398,13 +398,24 @@ def _bulk_candidates(db: Session, min_score: float):
     return ok, len(rows) - len(ok)
 
 
-@router.get("/domains/bulk-preview")
-def bulk_preview(min_score: float | None = None, db: Session = Depends(get_session)):
-    from fastapi.responses import JSONResponse
+def _bulk_threshold(raw: str | None) -> float:
+    """Порог пакета из поля инбокса: число -> в [0, 1]; пусто или мусор -> approve_at из /settings
+    («порог сильного кандидата»), а не зашитые 0.8 (иначе при approve_at=0.9 пакет брал бы НИЖЕ
+    видимого оператору порога). ОДИН разбор для превью-счётчика и самого пакета: очищенное поле
+    шлёт `?min_score=`, и float-параметр превью отвечал 422 — счётчик показывал «undefined», хотя
+    POST то же поле принимал (финальное ревью, minor «г»)."""
     from app.services.settings import get_settings
-    if min_score is None:                      # дефолт = «порог сильного кандидата» (/settings), не 0.8
-        min_score = get_settings()["approve_at"]
-    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    try:
+        threshold = float(raw)
+    except (TypeError, ValueError):
+        threshold = get_settings()["approve_at"]
+    return max(0.0, min(1.0, threshold))
+
+
+@router.get("/domains/bulk-preview")
+def bulk_preview(min_score: str = "", db: Session = Depends(get_session)):
+    from fastapi.responses import JSONResponse
+    ok, skipped = _bulk_candidates(db, _bulk_threshold(min_score))
     return JSONResponse({"n": len(ok), "skipped": skipped})
 
 
@@ -421,14 +432,8 @@ def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_ses
     ВИДЕН оператору, а не проглочен молча.
     """
     from app.services import transitions
-    from app.services.settings import get_settings
-    # Очищенное поле формы приходит пустой строкой: порог по умолчанию — approve_at из /settings,
-    # а не зашитые 0.8 (иначе при approve_at=0.9 пакет брал бы НИЖЕ видимого оператору порога).
-    try:
-        threshold = float(min_score)
-    except ValueError:
-        threshold = get_settings()["approve_at"]
-    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, threshold)))
+    # Очищенное поле формы приходит пустой строкой — порог по умолчанию approve_at (_bulk_threshold)
+    ok, skipped = _bulk_candidates(db, _bulk_threshold(min_score))
     approved, denied = 0, []
     for d in ok:
         try:

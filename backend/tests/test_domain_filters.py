@@ -12,6 +12,14 @@ def test_tld_match_takes_registrable_zone_only():
     assert tld_match("a.com", []) is None
 
 
+def test_tld_match_is_case_insensitive_for_the_domain():
+    """Финальное ревью: домен в смешанном регистре (ручной список, W0 по имени из БД) — тот же матч,
+    что и в нижнем: иначе `Foo.CO.UK` ушёл бы в tld_closed, хотя зона в белом списке."""
+    assert tld_match("Foo.CO.UK", ["uk", "co.uk"]) == "co.uk"
+    assert tld_match("WerKleittechnik.COM", ["com"]) == "com"
+    assert tld_match("X.Com.MX", ["mx"]) is None
+
+
 def test_brand_hit_substring_only_for_vpn_or_long_tokens():
     tokens = ["nordvpn", "surfshark", "pia", "avast", "norton"]
     # с «vpn» внутри или от 7 символов — подстрокой в имени без дефисов

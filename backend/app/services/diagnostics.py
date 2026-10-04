@@ -78,8 +78,12 @@ def _spec():
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
-        # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть
-        ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", True,
+        # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть.
+        # Не критичен (финальное ревью): остаток 0 — это «fail» до месячного сброса, и баннер «Нет
+        # связи» горел бы на всех экранах неделями. Остаток виден на /settings и в сообщении задачи
+        # (`_paid_gate`), сбой W4 — там же с HTTP-кодом. Цена: настоящая недоступность Ahrefs баннером
+        # не видна — только строкой здесь и в сообщении задачи скоринга.
+        ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", False,
          lambda: __import__("app.integrations.ahrefs", fromlist=["x"]).AhrefsClient().units_left()),
         # не критичен (R2-18): ping() проверяет только бутстрап IANA, при его падении W2 живёт на
         # встроенном _FALLBACK — красный баннер на всех экранах был бы ложной тревогой

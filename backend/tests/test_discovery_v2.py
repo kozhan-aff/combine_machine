@@ -399,3 +399,33 @@ def test_idn_and_mixed_case_source_rows_are_canonicalized_and_deduped(monkeypatc
     assert discovery.run_discovery() == 1
     assert set(_all()) == {"xn--e1afmkfd.com", "good.co.uk"}
     assert _Ahrefs.calls == [["good.co.uk"]]                     # известный пример.com — без DR
+
+
+# --- финальная фикс-волна (minor «е»): причина «DR недоступен» и потолок Retry-After -----------
+
+def test_dr_unavailable_message_names_the_reason_without_url(monkeypatch):
+    """«DR недоступен — N пропущено» без причины не говорил оператору, что чинить: ключ, доступ или
+    сбой. Причина — имя класса исключения / HTTP-код, никогда не URL и не ключ."""
+    update_settings(sources_enabled={"nominet": True})
+    _sources(monkeypatch, nominet=[_row("good.co.uk")])
+    assert discovery.run_discovery() == 0                       # autouse _no_paid_keys: ключ пуст
+    assert ("DR недоступен — 1 пропущено (ключ AHREFS_API_KEY не задан)"
+            in jobs.last("discovery")["message"])
+    _ahrefs(monkeypatch, {"good.co.uk": 12.0}, errors=[_http_error(401)])
+    discovery.run_discovery()
+    msg = jobs.last("discovery")["message"]
+    assert "DR недоступен — 1 пропущено (HTTPStatusError 401)" in msg and "ahrefs.com" not in msg
+    _ahrefs(monkeypatch, {}, fail=True)
+    discovery.run_discovery()
+    assert "DR недоступен — 1 пропущено (сбой Ahrefs: RuntimeError)" in jobs.last("discovery")["message"]
+
+
+@pytest.mark.parametrize("header,wait", [("100000", 120.0), ("-5", 1.0), ("0", 1.0), ("nan", 1.0)])
+def test_retry_after_is_capped_and_never_below_a_second(monkeypatch, slept, header, wait):
+    """Retry-After из ответа 429 — в [1, 120] с: огромное значение подвесило бы discovery на сутки
+    (и держало бы замок задачи), отрицательное/нулевое/NaN — ретрай без паузы (или ValueError сна)."""
+    update_settings(sources_enabled={"nominet": True})
+    _sources(monkeypatch, nominet=[_row("good.co.uk")])
+    _ahrefs(monkeypatch, {"good.co.uk": 12.0}, errors=[_http_error(429, {"Retry-After": header})])
+    assert discovery.run_discovery() == 1
+    assert slept == [wait]

@@ -259,3 +259,41 @@ def test_list_source_deadline_is_labelled_as_estimate(client):
          score_breakdown=CHECKED)
     html = client.get("/domains").text
     assert html.count("ОЦЕНКА ДРОПА") == 1 and html.count("СРОК ДРОПА") == 1
+
+
+def test_bulk_preview_empty_or_garbage_threshold_falls_back_to_approve_at(client):
+    """Финальное ревью (minor «г»): очищенное поле шлёт `?min_score=` (domains.html), мусор — `abc`.
+    Раньше float-параметр давал 422, и счётчик пакета показывал «undefined». Теперь разбор общий с
+    POST: пусто/мусор -> approve_at из /settings; 0 — честный ноль, дефолтом не подменяется."""
+    from app.services.settings import update_settings
+    update_settings(approve_at=0.9)
+    _add(domain="mid.com", source="nominet", status="scored", score=0.85, wayback_checked=True,
+         prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
+    _add(domain="top.com", source="nominet", status="scored", score=0.95, wayback_checked=True,
+         prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
+    for q in ("?min_score=", "?min_score=abc"):
+        r = client.get("/domains/bulk-preview" + q)
+        assert r.status_code == 200 and r.json() == {"n": 1, "skipped": 0}, q
+    assert client.get("/domains/bulk-preview?min_score=0").json() == {"n": 2, "skipped": 0}
+    # POST — тот же разбор: мусор -> approve_at (взят только top.com)
+    assert client.post("/domains/bulk-approve", data={"min_score": "abc"},
+                       follow_redirects=False).status_code == 303
+    with db.SessionLocal() as s:
+        assert {d.domain: d.status for d in s.query(Domain).all()} == {"mid.com": "scored",
+                                                                      "top.com": "approved"}
+
+
+def test_inbox_row_wraps_and_dr_attribution_sits_above_the_table(client):
+    """Финальное ревью (1024px): глобальный `th,td{white-space:nowrap}` плюс длинная строка score/DR/
+    атрибуция/RD/возраст/язык растягивали таблицу инбокса шире контейнера — «✗ отклонить» и «зона не
+    в белом списке» уезжали за край. Атрибуция «Domain Rating by Ahrefs» (лицензия) — одной подписью
+    над таблицей, как в реестре; у значения DR — подсказка `title`; ячейка домена переносится."""
+    _add(domain="wrap-a.com", source="nominet", status="scored", score=0.6, dr=33, market_lang="pl",
+         score_breakdown=CHECKED)
+    _add(domain="wrap-b.com", source="nominet", status="scored", score=0.5, dr=12, score_breakdown=CHECKED)
+    html = client.get("/domains").text
+    inbox = html[html.index("Ждёт твоего решения"):html.index("Готовы к выкупу")]
+    assert inbox.count(">Domain Rating by Ahrefs</a>") == 1                 # одна подпись, не в каждой строке
+    assert inbox.index(">Domain Rating by Ahrefs</a>") < inbox.index("<table>")   # и она над таблицей
+    assert '<span title="Domain Rating by Ahrefs">DR <b>33</b></span>' in inbox
+    assert inbox.count('<td class="dom" style="white-space:normal">') == 2  # строки переносятся

@@ -122,6 +122,9 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 {% endif %}
 
 <div class="wrap">
+{# атрибуция DR (лицензия Ahrefs) — одной подписью над таблицей, как в реестре: в каждой строке она
+   удлиняла nowrap-ячейку, и на 1024px «✗ отклонить» уезжала за край (финальное ревью) #}
+<div class="hint" style="margin-bottom:6px">DR — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
 <table>
   <tbody>
   {% for d, blind, urgent, hist, evidence, ok, note in inbox %}
@@ -149,16 +152,16 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           {% endif %}
         {% else %}<span class="hint">— без дедлайна</span>{% endif %}
       </td>
-      <td class="dom">
+      {# white-space:normal — ячейка домена переносится: глобальный th,td{nowrap} растягивал
+         таблицу шире контейнера, и кнопки справа уезжали за край на 1024px #}
+      <td class="dom" style="white-space:normal">
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
               title="источник: {{ d.source|source_ru or '—' }}">{{ d.source|source_badge }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
            title="посмотреть историю домена глазами" style="opacity:.6">⌛</a>
         <div class="hint">
           score <b>{{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</b> ·
-          DR <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b>
-          <a class="hint" href="https://ahrefs.com/" target="_blank" rel="noopener"
-             title="лицензия Ahrefs: DR показывается только с подписью">Domain Rating by Ahrefs</a> ·
+          <span title="Domain Rating by Ahrefs">DR <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b></span> ·
           RD <b>{{ d.referring_domains if d.referring_domains is not none else '—' }}</b> ·
           {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }} лет
           {% if d.market_lang %}· язык <b>{{ d.market_lang }}</b>{% endif %}
