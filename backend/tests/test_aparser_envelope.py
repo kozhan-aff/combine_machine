@@ -185,12 +185,16 @@ def test_blind_reason_names_whois_and_ahrefs():
     Здесь возраста не дал НИКТО (age_source пуст) — текст про непроверенный возраст правдив."""
     d = Domain(domain="mute.ru", wayback_checked=True, prior_flags=dict(_CLEAN_FLAGS),
                score_breakdown={"errors": ["whois:RuntimeError"], "history_evidence": []})
-    assert "возраст НЕ проверен" in scoring.blind_reason(d)
+    # «занятость» есть только в whois-ветке _BLIND_RU (в общей ветке возраста её нет) — так
+    # закреплён ключ "whois", а не просто «возраста нет»
+    assert "занятость" in scoring.blind_reason(d)
     assert scoring.bulk_ok(d) is False          # и в пакет одобрения не идёт
 
+    # возраст дан (10 лет): исключать домен должна именно пометка Ahrefs, а не пустой возраст
     a = Domain(domain="mute2.ru", wayback_checked=True, prior_flags=dict(_CLEAN_FLAGS),
+               age_years=10.0,
                score_breakdown={"errors": ["ahrefs:RuntimeError"], "history_evidence": []})
-    assert scoring.blind_reason(a) is not None
+    assert "Ahrefs" in scoring.blind_reason(a)
     assert scoring.bulk_ok(a) is False
 
 

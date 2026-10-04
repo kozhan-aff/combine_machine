@@ -331,8 +331,10 @@ def test_bulk_approve_never_stamps_dirt(client):
     """
     from app.services import scoring
 
+    # age_years обязателен: без возраста домен выпал бы из пакета по blind_reason, и тест
+    # проходил бы даже без гарда грязи — исключать должен именно dirty_reason
     _add(domain="scored-rkn.ru", status="scored", score=0.95, rkn_listed=True,
-         wayback_checked=True)
+         wayback_checked=True, age_years=10.0)
     with db.SessionLocal() as s:
         d = s.execute(select(Domain)).scalar_one()
         assert scoring.bulk_ok(d) is False
