@@ -29,6 +29,16 @@ def refresh() -> list[dict]:
     return checks
 
 
+def value(key: str):
+    """Число из последней проверки `key` (остаток units Ahrefs) или None, пока кэша нет. Без сети:
+    экран /settings не ждёт внешний сервис на рендере (находка 3.4)."""
+    with _LOCK:
+        for c in _checks or ():
+            if c["key"] == key:
+                return c.get("value")
+    return None
+
+
 def alert() -> dict | None:
     """None, пока кэша нет (до первой проверки). Иначе dict для баннера; down может быть
     пуст (всё поднялось) — тогда баннер не рендерится."""

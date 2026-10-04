@@ -63,6 +63,9 @@ def _spec():
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
+        # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть
+        ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", True,
+         lambda: __import__("app.integrations.ahrefs", fromlist=["x"]).AhrefsClient().units_left()),
         ("blacklist", "Spamhaus DBL (только с DQS)", "M1 · спам-лист", settings.SPAMHAUS_DQS_KEY, "M1", False,
          lambda: __import__("app.integrations.blacklist", fromlist=["x"]).BlacklistClient().ping()),
         ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
@@ -75,9 +78,12 @@ def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
         return {**base, "status": "skip", "ms": None, "error": "нет кредов в .env"}
     t0 = time.monotonic()
     try:
-        ok = bool(fn())
-        return {**base, "status": "ok" if ok else "fail",
-                "ms": int((time.monotonic() - t0) * 1000), "error": None}
+        v = fn()
+        out = {**base, "status": "ok" if v else "fail",
+               "ms": int((time.monotonic() - t0) * 1000), "error": None}
+        if isinstance(v, int) and not isinstance(v, bool):
+            out["value"] = v            # число (остаток units Ahrefs) — для экранов без сети
+        return out
     except Exception as e:  # noqa: BLE001 — любой сбой интеграции = красный, не 500
         return {**base, "status": "fail",
                 "ms": int((time.monotonic() - t0) * 1000),

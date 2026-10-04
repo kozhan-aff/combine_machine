@@ -133,22 +133,24 @@ def _next_steps(db: Session) -> list[dict]:
 def _pool_counts(db: Session, s: dict) -> dict:
     """Сколько доменов пула проходит каждый гейт при текущих порогах (превью эффекта).
 
-    Правила счёта зеркалят воронку (scoring._funnel), иначе превью врёт:
-    T0 режет только ИЗВЕСТНЫЙ RD < порога — NULL (сырой список без RD) проходит.
+    Правила счёта зеркалят волны (scoring._run_waves), иначе превью врёт: RD судит W4 и режет только
+    ИЗВЕСТНЫЙ RD < порога — NULL (ещё не спрошен) проходит; возраст — W5, по старшей из даты
+    RDAP/whois и первого снимка (Р5). Архив РФ-пула v1 (`legacy_ru`, миграция 0025) машина больше не
+    судит — в превью его нет (находка R2-16): тысячи старых .ru раздували бы каждый счётчик.
     """
     from datetime import datetime, timezone, timedelta
-    total = db.scalar(select(func.count()).select_from(Domain)) or 0
-    rd = db.scalar(select(func.count()).select_from(Domain).where(
-        or_(Domain.referring_domains.is_(None),
-            Domain.referring_domains >= s["min_referring_domains"]))) or 0
+    live = or_(Domain.reject_reason.is_(None), Domain.reject_reason != "legacy_ru")
+
+    def n(*where) -> int:
+        return db.scalar(select(func.count()).select_from(Domain).where(live, *where)) or 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=365.25 * s["min_age_years"])
-    age = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.whois_created.is_not(None), Domain.whois_created <= cutoff)) or 0
-    approve = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.score >= s["approve_at"])) or 0
-    manual = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])) or 0
-    return {"total": total, "rd": rd, "age": age, "approve": approve, "manual": manual}
+    return {"total": n(),
+            "rd": n(or_(Domain.referring_domains.is_(None),
+                        Domain.referring_domains >= s["min_referring_domains"])),
+            # возраст — старшая из даты RDAP/whois и первого снимка (Р5): age_years хранит решающий
+            "age": n(or_(Domain.whois_created <= cutoff, Domain.age_years >= s["min_age_years"])),
+            "approve": n(Domain.score >= s["approve_at"]),
+            "manual": n(Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])}
 
 
 def _gates(db: Session) -> dict:
@@ -437,12 +439,25 @@ def _require_cf_write(request: Request) -> None:
                             detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
 
 
-@router.get("/settings", response_class=HTMLResponse)
-def settings_view(request: Request, db: Session = Depends(get_session)):
+def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
+                   form_err: str | None = None, status_code: int = 200):
+    """Экран /settings. Остаток units Ahrefs — из кэша диагностики, без сети (находка 3.4).
+    Наборы EMD — json.dumps без \\u-экранирования (|tojson прятал «grátis»); `emd_draft` —
+    непринятый ввод оператора после ошибки JSON (находка 6.1)."""
+    import json
     from app.services import settings as st
     s = st.get_settings()
+    emd_text = emd_draft if emd_draft is not None else json.dumps(s["emd_sets"], ensure_ascii=False,
+                                                                  indent=1)
     return templates.TemplateResponse(request, "settings.html", {
-        "active": "settings", "s": s, "counts": _pool_counts(db, s)})
+        "active": "settings", "s": s, "counts": _pool_counts(db, s),
+        "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err},
+        status_code=status_code)
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_view(request: Request, db: Session = Depends(get_session)):
+    return _settings_page(request, db)
 
 
 @router.get("/settings/cloudflare", response_class=HTMLResponse)
@@ -1194,9 +1209,15 @@ def check_updates_action():
 
 
 @router.post("/settings/save")
-def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
+def settings_save(request: Request, db: Session = Depends(get_session),
+                  min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
-                  max_whois_per_run: int = Form(200),
+                  max_whois_per_run: int | None = Form(None),
+                  min_dr: float | None = Form(None), max_links_per_run: int | None = Form(None),
+                  max_deep_per_run: int | None = Form(None), units_floor: int | None = Form(None),
+                  spam_anchor_max: float | None = Form(None),
+                  tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
+                  emd_sets: str | None = Form(None), v2_lists: str = Form(""),
                   dropcatch: str = Form(""), nominet: str = Form(""),
                   mx: str = Form(""), emd: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
@@ -1211,11 +1232,27 @@ def settings_save(min_referring_domains: int = Form(...), min_age_years: float =
                                  ("topical_fit", w_topical_fit), ("age", w_age), ("rd", w_rd),
                                  ("authority", w_authority), ("anchor_quality", w_anchor_quality),
                                  ("traffic_history", w_traffic_history)) if v is not None}
-    st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
-                       approve_at=approve_at, manual_review_at=manual_review_at,
-                       max_whois_per_run=max_whois_per_run,
-                       sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
-                       weights=weights or None)
+    # Пустую textarea FastAPI отдаёт как «поля нет» (None). Форма v2 несёт маркер `v2_lists`: значит
+    # эти поля в ней БЫЛИ, и пустое — это «очистить», а не «не трогать» (находка 6.1). Форма без
+    # маркера (старый шаблон, curl) списки не трогает.
+    if v2_lists:
+        tld_allowlist, brand_tokens, emd_sets = tld_allowlist or "", brand_tokens or "", emd_sets or ""
+    try:
+        st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
+                           approve_at=approve_at, manual_review_at=manual_review_at,
+                           max_whois_per_run=max_whois_per_run,
+                           min_dr=min_dr, max_links_per_run=max_links_per_run,
+                           max_deep_per_run=max_deep_per_run, units_floor=units_floor,
+                           spam_anchor_max=spam_anchor_max, tld_allowlist=tld_allowlist,
+                           brand_tokens=brand_tokens, emd_sets=emd_sets,
+                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
+                           weights=weights or None)
+    except ValueError as e:
+        # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
+        # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
+        return _settings_page(request, db, emd_draft=emd_sets, status_code=400,
+                              form_err=f"Не сохранено ничего: {e}. Наборы EMD — JSON-список, "
+                                       "пример — в «зачем это» у станции EMD.")
     return _back("/settings", msg="Настройки сохранены")
 
 
