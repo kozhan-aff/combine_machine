@@ -17,7 +17,7 @@ PING_TIMEOUT = 20.0  # сек на один пинг; Wayback стабильно
 # ключа любому, кто откроет/залогирует страницу (в отличие от GITHUB_TOKEN, который
 # deploy.py уже скрабит везде). Список — все credential-поля Settings.
 _SECRET_FIELDS = (
-    "AHREFS_API_KEY", "CHECKTRUST_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
+    "AHREFS_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
     "SERPAPI_KEY", "YANDEX_WORDSTAT_TOKEN", "BACKORDER_LOGIN", "BACKORDER_PASSWORD",
     "OPTIMIZATOR_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
     "LLM_API_KEY", "APARSER_API_KEY", "GITHUB_TOKEN", "PANEL_PASS", "SPAMHAUS_DQS_KEY",

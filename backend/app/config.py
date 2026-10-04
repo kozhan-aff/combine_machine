@@ -8,10 +8,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://portfolio:portfolio@db:5432/portfolio"
     APP_ENV: str = "dev"
 
-    # metrics
-    METRICS_PROVIDER: str = "ahrefs"
+    # Ahrefs API v3 (integrations/ahrefs.py): DR-free, batch-analysis, анкоры, история трафика
     AHREFS_API_KEY: str = ""
-    CHECKTRUST_API_KEY: str = ""
 
     # serp + keywords
     SEO_DATA_PROVIDER: str = "dataforseo"
