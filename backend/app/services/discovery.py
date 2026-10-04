@@ -5,21 +5,11 @@ with status='discovered'. Feed `links` (donor count) rides straight into referri
 as a free RD signal. Transport lives in integrations; this is the business logic.
 """
 import logging
-import re
 from datetime import datetime, timezone
 
-logger = logging.getLogger(__name__)
+from app.services.domain_filters import canonical_domain   # реэкспорт: discovery.canonical_domain жив
 
-# Проверяем punycode-форму (ASCII), метка-за-меткой (аудит 2026-07-14, F30): старый
-# `[a-z0-9-]+` пропускал мусор, который потом платно бьётся о whois/Ahrefs —
-# ведущий/хвостовой дефис в метке ("-foo.ru"/"foo-.ru"), голый IP ("1.2.3.4" — цифровая
-# последняя метка ловится тем же правилом, что и числовой TLD) и однобуквенный TLD
-# ("foo.a"). Метка — не более 63 симв., не начинается/не кончается дефисом (RFC 1035);
-# TLD — та же форма МЕТКИ, но с минимум двумя символами и без права быть числом целиком
-# (punycode "xn--..." проходит: начинается/кончается буквой/цифрой, дефисы только внутри).
-_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-_TLD = r"(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])"     # >=2 симв. и не чисто цифровой
-_DOMAIN_RE = re.compile(rf"^(?:{_LABEL}\.)+{_TLD}$")
+logger = logging.getLogger(__name__)
 
 
 def _parse_deadline(val) -> datetime | None:
@@ -34,21 +24,6 @@ def _parse_deadline(val) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-def canonical_domain(raw) -> str | None:
-    """Единая канон-форма домена для ВСЕХ источников: lower, без www./точки, IDN→punycode.
-    None если не домен (мусор, e-mail, пустое, недопустимые метки)."""
-    s = (raw or "").strip().lower().rstrip(".")
-    if s.startswith("www."):
-        s = s[4:]
-    if not s or len(s) > 253 or "@" in s or " " in s:
-        return None
-    try:
-        puny = s.encode("idna").decode("ascii")
-    except (UnicodeError, ValueError):
-        return None                       # пустая метка, >63, недопустимый символ
-    return puny if _DOMAIN_RE.match(puny) else None
 
 
 def normalize_row(row: dict) -> dict | None:
