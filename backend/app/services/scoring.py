@@ -427,6 +427,17 @@ def score_pending(limit: int = 100) -> int:
 
     st = get_settings()
     now = datetime.now(timezone.utc)
+    # Платный гейт решаем ДО выборки (I1): закрыт (нет ключа / остаток ниже пола) — не-EMD всё равно
+    # ждут следующего прогона без отметки сверки, и если бы они занимали лимит выборки, каждый свип
+    # брал бы тот же набор, а EMD (W4 им не нужна) не получал ни одного слота. Один запрос остатка
+    # units на прогон: решение уезжает в `_paid_gate` через clients["_paid_gate"]. Копия словаря —
+    # решение не должно пережить прогон в наборе, который кто-то переиспользует.
+    clients = dict(_make_clients())
+    gate = _paid_gate_closed(clients, st)
+    clients["_paid_gate"] = gate
+    notes: list[str] = []          # пояснения волн («остаток units ниже пола») — в итог задачи
+    if gate is not None:
+        notes.append(gate[1])
     with SessionLocal() as db:
         # ЯРУС СРОЧНОСТИ — первым ключом, не RD и не голая дата.
         #
@@ -449,9 +460,9 @@ def score_pending(limit: int = 100) -> int:
                        Domain.referring_domains.desc().nulls_last()))  # равных по сроку разводит RD
         # R2-10: не-EMD домен без W4 не решается (сверх капа — unresolved links_budget), а W2/W3 за
         # него уже заплачены. Берём таких не больше капа W4; остаток лимита добирают EMD (W4 у них нет).
-        cap = min(limit, int(st["max_links_per_run"]))
+        cap = 0 if gate is not None else min(limit, int(st["max_links_per_run"]))
         rows = db.execute(q.where(or_(Domain.source.is_(None), Domain.source != "emd"))
-                          .limit(cap)).all()
+                          .limit(cap)).all() if cap else []
         rows += db.execute(q.where(Domain.source == "emd").limit(limit - len(rows))).all()
         # ПОЧЕМУ пусто — теперь это ШТАТНОЕ состояние: после scorable() домены, чей дроп ещё
         # впереди, законно ждут своей даты. «Прогнано 0 доменов» без объяснения — ровно та
@@ -481,12 +492,16 @@ def score_pending(limit: int = 100) -> int:
                 if undated:
                     parts.append(f"{undated} без даты дропа — вернусь к ним в течение суток")
                 idle_msg = "оценивать нечего: " + ", ".join(parts)
+            if gate is not None:
+                # закрытый гейт: «найденных нет» было бы враньём — домены есть, их держит гейт
+                held = db.scalar(select(func.count()).select_from(Domain)
+                                 .where(Domain.status == "discovered")) or 0
+                if held:
+                    idle_msg = f"{held} доменов ждут следующего прогона"
     stages = [dict(s) for s in FUNNEL_STAGES]
-    clients = _make_clients()
     # Budget, а не [int]: волна avail конкурентная (12 потоков), голый `box[0] -= 1` под ней — гонка
     whois_budget = Budget(int(st["max_whois_per_run"]))
     links_budget = Budget(int(st["max_links_per_run"]))
-    notes: list[str] = []          # пояснения волн («остаток units ниже пола») — в итог задачи
     total = len(rows)
     states = [FunnelState(domain_id=did, domain=name, lane=lane,
                           referring_domains=rd, acquire_deadline=deadline,
@@ -495,7 +510,8 @@ def score_pending(limit: int = 100) -> int:
     done = 0
     with jobs.track("score", stages=stages) as run:
         if not states:
-            jobs.report(run, done=0, total=0, current="", message=idle_msg or "")
+            jobs.report(run, done=0, total=0, current="",
+                        message=" · ".join([*notes, *([idle_msg] if idle_msg else [])]))
         else:
             try:
                 results = _run_waves(states, clients, st, whois_budget, links_budget, run=run,
@@ -981,6 +997,20 @@ def _units_below_floor(clients: dict, st: dict) -> str | None:
     return None
 
 
+def _paid_gate_closed(clients: dict, st: dict) -> tuple | None:
+    """Закрыт ли платный гейт: `(unresolved_why, текст для сообщения задачи)` или None (открыт).
+    Ключа Ahrefs нет — без сети; иначе один запрос остатка units (`_units_below_floor`). Клиента
+    Ahrefs в наборе нет (тестовые наборы без W4; `_make_clients` кладёт его всегда) — решать
+    нечем, гейт открыт, и скажет сама W4 (`ahrefs_failed`)."""
+    ah = clients.get("ahrefs")
+    if ah is None:
+        return None
+    if getattr(ah, "api_key", None) == "":             # у фейков тестов атрибута нет
+        return "ahrefs_no_key", "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены"
+    note = _units_below_floor(clients, st)
+    return ("units_floor", note) if note is not None else None
+
+
 def _paid_gate(states: list, clients: dict, st: dict, notes: list) -> None:
     """Пойдут ли платные волны — решается ОДИН раз за прогон, сразу после бесплатной W0 (находка
     R2-10). Ключа Ahrefs нет или остаток units неизвестен/ниже пола — не-EMD домен без W4 всё равно
@@ -988,21 +1018,20 @@ def _paid_gate(states: list, clients: dict, st: dict, notes: list) -> None:
     Такие домены сразу unresolved (`ahrefs_no_key` / `units_floor`: без отметки сверки, оценятся
     следующим прогоном), причина — в `notes`. EMD идут дальше: W4 у них нет.
 
-    Клиента Ahrefs в наборе нет (тестовые наборы без W4; `_make_clients` кладёт его всегда) —
-    решать здесь нечем, тогда скажет сама W4 (`ahrefs_failed`)."""
+    `score_pending` решает это ЕЩЁ ДО выборки (закрытый гейт -> не-EMD не занимают лимит, иначе EMD
+    не получал бы слота) и кладёт решение в `clients["_paid_gate"]` — тогда остаток units тут не
+    спрашивается второй раз. Без ключа (одиночный `score_domain`, прямой вызов) — решаем сами."""
     todo = [s for s in states if s.alive and s.source != "emd"]
-    ah = clients.get("ahrefs")
-    if not todo or ah is None:
+    if not todo:
         return
-    if getattr(ah, "api_key", None) == "":             # у фейков тестов атрибута нет
-        why, note = "ahrefs_no_key", "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены"
-    else:
-        why, note = "units_floor", _units_below_floor(clients, st)
-        if note is None:
-            return
+    decision = clients["_paid_gate"] if "_paid_gate" in clients else _paid_gate_closed(clients, st)
+    if decision is None:
+        return
+    why, note = decision
     for s in todo:
         s.unresolved_why, s.alive = why, False
-    notes.append(note)
+    if note not in notes:
+        notes.append(note)
 
 
 def _wave_links(states: list, clients: dict, st: dict, budget, run, notes: list | None = None) -> None:

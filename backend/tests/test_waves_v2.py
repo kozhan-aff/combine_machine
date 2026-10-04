@@ -594,6 +594,8 @@ def test_score_pending_selects_non_emd_up_to_links_cap(monkeypatch):
         _mk(name, deadline=NOW + timedelta(days=2))
     _mk("sel-emd.com", source="emd", lane="free")
     seen = []
+    # гейт открыт (ключ+остаток): реальный клиент без ключа закрыл бы его и обнулил кап не-EMD
+    monkeypatch.setattr(scoring, "_make_clients", lambda: {"ahrefs": FakeAh()})
     monkeypatch.setattr(scoring, "_run_waves",
                         lambda states, *a, **kw: seen.extend(s.domain for s in states) or [])
     scoring.score_pending(limit=10)
@@ -687,3 +689,58 @@ def test_units_left_is_asked_once_per_run_when_floor_passes(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     scoring.score_pending(limit=10)
     assert ah.units_calls == 1 and [len(b) for b in ah.batches] == [2]
+
+
+# --- платный гейт решается ДО выборки score_pending (fix round 1) -------------------------------
+
+def _closed_gate_pool(monkeypatch, ah, rdap=None, n=25):
+    """n не-EMD + 1 EMD, лимит выборки 20: до фикса не-EMD забирали весь лимит и EMD не получал слота."""
+    ids = [_mk(f"held{i}.com", deadline=NOW + timedelta(days=2)) for i in range(n)]
+    emd = _mk("emd-slot.com", source="emd", lane="free")
+    rdap = rdap or FakeRdap()
+    clients = _full_clients(rdap, ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    return ids, emd, rdap
+
+
+def _assert_held_and_emd_scored(ids, emd):
+    with db.SessionLocal() as s:
+        assert s.get(Domain, emd).status != "discovered"            # EMD получил слот
+        held = [s.get(Domain, i) for i in ids]
+        assert all(d.status == "discovered" and d.acquirability_checked_at is None for d in held)
+
+
+def test_closed_gate_no_key_still_gives_emd_a_slot(monkeypatch):
+    """I1: ключа нет -> не-EMD всё равно ждут (W4 им не светит), и они НЕ должны съедать лимит
+    выборки: иначе каждый свип берёт тот же набор, а EMD (W4 ему не нужна) не доходит никогда."""
+    from app.integrations.ahrefs import AhrefsClient
+    from app.services import jobs
+    ids, emd, rdap = _closed_gate_pool(monkeypatch, AhrefsClient(api_key=""))
+    scoring.score_pending(limit=20)
+    _assert_held_and_emd_scored(ids, emd)
+    assert rdap.calls == 1                                          # только EMD
+    assert "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены" in jobs.last("score")["message"]
+
+
+def test_closed_gate_units_floor_still_gives_emd_a_slot_and_asks_units_once(monkeypatch):
+    from app.services import jobs
+    ah = FakeAh(units=100_000)
+    ids, emd, rdap = _closed_gate_pool(monkeypatch, ah)
+    scoring.score_pending(limit=20)
+    _assert_held_and_emd_scored(ids, emd)
+    assert ah.units_calls == 1 and ah.batches == [] and rdap.calls == 1
+    assert "Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены" in jobs.last("score")["message"]
+
+
+def test_open_gate_selection_unchanged_and_units_asked_once(monkeypatch):
+    """Гейт открыт: прежнее поведение — не-EMD в пределах капа W4, один запрос остатка за прогон."""
+    from app.services.settings import update_settings
+    update_settings(max_links_per_run=2)
+    ah = FakeAh({f"held{i}.com": ROW for i in range(3)})
+    ids, emd, rdap = _closed_gate_pool(monkeypatch, ah, rdap=FakeRdap(
+        exists=True, registered=NOW - timedelta(days=4000)), n=3)
+    scoring.score_pending(limit=20)
+    assert ah.units_calls == 1 and [len(b) for b in ah.batches] == [2]
+    with db.SessionLocal() as s:
+        left = [s.get(Domain, i).status for i in ids]
+        assert left.count("discovered") == 1 and s.get(Domain, emd).status != "discovered"
