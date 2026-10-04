@@ -126,7 +126,7 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
     from app.services import scoring
     from app.services.transitions import dirty_reason
 
-    did = _add(domain="unblocked.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+    did = _add(domain="unblocked.com", status="rejected", reject_reason="rkn", rkn_listed=True,
                lane="bid", referring_domains=300)
 
     class _WB:
@@ -141,7 +141,6 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": False, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
-        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     out = scoring.score_domain(did, clients=clients)
     assert out["reject_reason"] is None and out["status"] == "scored"
@@ -452,7 +451,6 @@ def _clients(**over):
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": True, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
-        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     return {**c, **over}
 
@@ -493,12 +491,12 @@ def test_rescore_t0_exit_does_not_erase_history_evidence():
     from app.services import scoring, transitions
     from app.services.settings import update_settings
 
-    did = _add(domain="casino-lowrd.ru", status="rejected", reject_reason="history_dirty",
+    did = _add(domain="casino-lowrd.com", status="rejected", reject_reason="history_dirty",
                prior_flags={"casino": True}, wayback_checked=True, blacklisted=True,
                lane="bid", referring_domains=5, score=0.0,
                # снимки, по которым вынесен вердикт: они тоже не должны исчезнуть — иначе
                # инбокс пишет «история грязная — смотри снимки», а смотреть нечего
-               score_breakdown={"history_evidence": [{"url": "casino-lowrd.ru", "when": "2015"}],
+               score_breakdown={"history_evidence": [{"url": "casino-lowrd.com", "when": "2015"}],
                                 "errors": []})
     update_settings(min_referring_domains=100)            # порог подняли — домен не проходит T0
 
@@ -509,7 +507,7 @@ def test_rescore_t0_exit_does_not_erase_history_evidence():
         assert d.prior_flags == {"casino": True} and d.blacklisted is True   # обе улики целы
         assert scoring.history_verdict(d) == "dirty"      # история — по-прежнему подтверждённая грязь
         assert transitions.dirty_reason(d) is not None    # (называет 'blacklist' — он проверяется раньше)
-        assert d.score_breakdown["history_evidence"] == [{"url": "casino-lowrd.ru", "when": "2015"}]
+        assert d.score_breakdown["history_evidence"] == [{"url": "casino-lowrd.com", "when": "2015"}]
 
 
 def test_rescore_that_actually_ran_the_checks_still_rehabilitates():
@@ -520,7 +518,7 @@ def test_rescore_that_actually_ran_the_checks_still_rehabilitates():
     """
     from app.services import scoring, transitions
 
-    did = _add(domain="unblocked2.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+    did = _add(domain="unblocked2.com", status="rejected", reject_reason="rkn", rkn_listed=True,
                lane="bid", referring_domains=300)
     out = scoring.score_domain(did, clients=_clients())
     assert out["reject_reason"] is None

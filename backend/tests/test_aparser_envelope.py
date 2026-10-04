@@ -243,8 +243,7 @@ def _clients(whois, wayback=None):
     class _S:
         def indexed_echo(self, dom): return True
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback or _WaybackAged(),
-            "tci": type("T", (), {"handles": lambda self, d: False})()}
+            "wayback": wayback or _WaybackAged()}
 
 
 def _add(**kw) -> int:
@@ -260,7 +259,7 @@ def test_funnel_whois_down_domain_is_not_auto_approved():
     возраст 16 лет: домен (lane='bid', RD 5000, история чиста) берёт порог по баллу. Авто-
     одобрения всё равно нет — whois не сказал, свободен ли домен вообще, и архив за него
     этого не скажет. Домен едет в инбокс к человеку, с честной пометкой."""
-    did = _add(domain="clara-c.ru",
+    did = _add(domain="clara-c.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     out = scoring.score_domain(did, _clients(RuntimeError("A-Parser oneRequest: Auth failed")))
 
@@ -281,7 +280,7 @@ def test_funnel_whois_down_domain_is_not_auto_approved():
 def test_funnel_whois_down_and_empty_archive_is_not_auto_approved():
     """Второй достижимый исход того же отказа: whois лёг И архив пуст. Возраста не знает никто,
     историю подтвердить нечем — тем более не одобряем."""
-    did = _add(domain="ghost.ru",
+    did = _add(domain="ghost.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     out = scoring.score_domain(did, _clients(RuntimeError("whois timeout"), _WaybackEmpty()))
 
@@ -298,7 +297,7 @@ def test_funnel_whois_alive_domain_is_scored_and_bulk_ok():
     «вслепую» и с местом в пакете.
     Гард не должен превращать живую воронку в вечный ручной разбор."""
     created = datetime.now(timezone.utc) - timedelta(days=int(365.25 * 16))
-    did = _add(domain="old-bid.ru",
+    did = _add(domain="old-bid.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     out = scoring.score_domain(did, _clients({"available": False, "created": created}))
 
@@ -315,20 +314,20 @@ def test_funnel_archive_age_still_gates_too_young():
     """Гейт молодости на архивном возрасте РАБОТАЕТ (потому бейдж и не смеет утверждать
     обратное). whois лежит, Wayback говорит «первый снимок год назад» — домен отбраковывается
     как слишком молодой, при том что RD 5000 дал бы ему проходной балл."""
-    did = _add(domain="young-archive.ru",
+    did = _add(domain="young-archive.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     out = scoring.score_domain(did, _clients(RuntimeError("whois down"), _WaybackAged(1.0)))
     assert out["status"] == "rejected" and out["reject_reason"] == "too_young", out
 
 
 def test_funnel_too_young_still_rejected_when_whois_answers():
-    """Гейт молодости в T1 — на дате из whois: балл его не дублирует (юный домен с большим RD
-    набирает ~0.71 и по баллу прошёл бы). Здесь whois отвечает, и домен-однолетка честно
-    отбраковывается ещё до всякого Wayback."""
+    """Гейт молодости — на СТАРШЕЙ из двух дат (Р5), в волне истории: балл его не дублирует (юный
+    домен с большим RD по баллу прошёл бы). whois отвечает «год назад», и архив помнит только
+    год — домен-однолетка честно отбраковывается, хоть и уже после Wayback."""
     young = datetime.now(timezone.utc) - timedelta(days=365)
-    did = _add(domain="young.ru",
+    did = _add(domain="young.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
-    out = scoring.score_domain(did, _clients({"available": False, "created": young}))
+    out = scoring.score_domain(did, _clients({"available": False, "created": young}, _WaybackAged(1.0)))
     assert out["status"] == "rejected" and out["reject_reason"] == "too_young", out
 
 
@@ -337,7 +336,7 @@ def test_funnel_whois_down_not_excluded_from_pool():
     (`rejected`) и не завис в `discovered` — он в инбоксе, `scored`, с живым баллом.
     Человек может одобрить его вручную; пакет — не может. Лежащий A-Parser тормозит
     автопилот, но не выбрасывает домены."""
-    did = _add(domain="pool.ru",
+    did = _add(domain="pool.com",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     scoring.score_domain(did, _clients(RuntimeError("whois timeout")))
     with db.SessionLocal() as s:

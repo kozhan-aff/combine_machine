@@ -38,7 +38,7 @@ def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
             return wb_flags or {"prior_flags": {}, "wayback_checked": True,
                                 "first_seen": None, "age_years": 10.0}
     return {"aparser": _W(), "rkn": _R(), "blacklist": _Bl(), "searxng": _S(),
-            "wayback": _Wb(), "tci": type("T", (), {"handles": lambda self, d: False})()}
+            "wayback": _Wb()}
 
 
 def test_scoring_persists_and_jsonb_roundtrips():
@@ -58,7 +58,7 @@ def test_scoring_persists_and_jsonb_roundtrips():
 
 def test_scoring_hard_reject_on_rkn():
     from app.services import scoring
-    did = _add(Domain(domain="blocked.ru", source="backorder", status="discovered", lane="bid"))
+    did = _add(Domain(domain="blocked.com", source="backorder", status="discovered", lane="bid"))
     # whois=None -> T1 пропущен без возраста; RKN=True рубит на T2, Wayback не вызывается
     out = scoring.score_domain(did, clients=_funnel_clients(None, rkn=True))
     assert out["status"] == "rejected" and out["score"] == 0.0

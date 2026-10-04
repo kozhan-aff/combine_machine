@@ -497,34 +497,34 @@ def _fake_clients() -> dict:
             return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
                     "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": _WB(), "tci": type("T", (), {"handles": lambda self, d: False})()}
+            "wayback": _WB()}
 
 
 def test_score_pending_isolates_failure(monkeypatch):
     """Task 9: score_pending больше не зовёт score_domain по одному внутри своего цикла —
     изоляция падения одного домена теперь физически реализована ВНУТРИ волны
     (_run_concurrent, см. Task 3), не в score_pending. Перехватываем на этом уровне
-    (_whois_one — тело T1 для одного домена), а не на уровне score_domain, который
+    (_avail_one — тело W2 для одного домена), а не на уровне score_domain, который
     больше не является местом, где что-либо может упасть по одному домену.
 
     RD сдвинут на +1 (было `referring_domains=i`, теперь `i + 1`), чтобы ни один из 3
     доменов не отсеялся на T0 (`min_referring_domains=1` отбраковал бы RD=0 ДО whois-волны,
-    и на нём _whois_one вообще не позвался бы — счётчик calls["n"] не досчитался бы до 3)."""
+    и на нём _avail_one вообще не позвался бы — счётчик calls["n"] не досчитался бы до 3)."""
     import app.db as db
     from app.models.domain import Domain
     from app.services import scoring
     with db.SessionLocal() as s:
-        s.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
+        s.add_all([Domain(domain=f"d{i}.com", source="backorder", status="discovered",
                           lane="bid", referring_domains=i + 1) for i in range(3)]); s.commit()
     monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
-    real = scoring._whois_one
+    real = scoring._avail_one
     def _boom(s, clients, budget, st):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
         return real(s, clients, budget, st)
-    monkeypatch.setattr(scoring, "_whois_one", _boom)
+    monkeypatch.setattr(scoring, "_avail_one", _boom)
     # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)
     assert n == 3 and calls["n"] == 3

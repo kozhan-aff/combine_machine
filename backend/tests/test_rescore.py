@@ -58,7 +58,6 @@ def _survives_to_score(whois_created) -> dict:
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "wayback": _CleanWayback(),
-        "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
 
 
@@ -74,7 +73,7 @@ def test_rescore_keeps_authority_without_a_new_dr_observation():
     никогда не проверяли.
     """
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)
-    did = _add(domain="rescore-dr.ru", status="scored", lane="bid",
+    did = _add(domain="rescore-dr.com", status="scored", lane="bid",
                referring_domains=3000, dr=30.0)
 
     # `_survives_to_score`'s aparser mock has no `ahrefs_probe` at all — если бы T3b всё же
@@ -119,8 +118,7 @@ def test_early_t0_reject_does_not_erase_saved_evidence():
 
     guard = _MustNotBeCalled()
     clients = {"aparser": guard, "rkn": guard, "blacklist": guard, "searxng": guard,
-               "wayback": guard,
-               "tci": type("T", (), {"handles": lambda self, d: False})()}
+               "wayback": guard}
 
     out = scoring.score_domain(did, clients=clients)
 

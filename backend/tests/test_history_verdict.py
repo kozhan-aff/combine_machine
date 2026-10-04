@@ -36,8 +36,7 @@ def _clients(wayback, created):
         def is_blacklisted(self, dom): return False
     class _S:
         def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
-            "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback}
 
 
 # ---- вердикт ----
@@ -167,7 +166,7 @@ def test_funnel_marks_history_unknown_without_errors(client):
         def classify_history(self, dom):
             return {"prior_flags": {}, "first_seen": None, "age_years": None,
                     "wayback_checked": False, "sampled": 0, "evidence": []}
-    did = _add(domain="ghost.ru", status="discovered", lane="bid", referring_domains=5000)
+    did = _add(domain="ghost.com", status="discovered", lane="bid", referring_domains=5000)
     old = datetime.now(timezone.utc) - timedelta(days=365 * 12)
     out = scoring.score_domain(did, clients=_clients(_WB(), old))
     assert out["status"] == "scored" and out["errors"] == []

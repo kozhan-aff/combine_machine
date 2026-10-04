@@ -67,8 +67,8 @@ def _jsonable(v):
 # та же сетевая волна, что РКН/блэклист/SafeBrowsing (см. _wave_risk), отдельного прохода
 # у него никогда не было даже в старом _funnel — просто раньше это не было видно оператору.
 FUNNEL_STAGES = [
-    {"key": "rd", "label": "RD из фида"},
-    {"key": "whois", "label": "whois-возраст"},
+    {"key": "t0", "label": "фильтры (зона/бренд)"},
+    {"key": "avail", "label": "доступность (RDAP/whois)"},
     {"key": "risk", "label": "РКН/блэклист/эхо"},
     {"key": "history", "label": "Wayback-история"},
     {"key": "ahrefs", "label": "Ahrefs (платно)"},
@@ -89,8 +89,8 @@ _BLIND_RU = {
     # сравнивать не с чем, отказа нет, и домен ехал дальше «как проверенный» (аудит F6).
     # Балл гейт возраста не дублирует — юный домен с большой ссылочной массой набирает ~0.71
     # и порог берёт. Эта формулировка — для случая, когда возраста НЕ дал никто.
-    "whois": "возраст НЕ проверен: whois не ответил — гейт «слишком молодой» не применялся, "
-             "занятость домена тоже не сверена",
+    "whois": "доступность и возраст НЕ проверены: RDAP/whois не ответил — занятость не сверена, "
+             "гейт «слишком молодой» не применялся",
     "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
     "rkn": "РКН НЕ проверен: реестр не ответил",
     "blacklist": "блэклист НЕ проверен",
@@ -297,17 +297,20 @@ def compute_score(sig: dict, weights: dict | None = None) -> dict:
 
 
 def _make_clients() -> dict:
-    """Собрать интеграционные клиенты один раз на прогон (переиспользуются между доменами)."""
+    """Собрать интеграционные клиенты один раз на прогон (переиспользуются между доменами).
+    Локи — для предохранителей под конкурентностью волн (services/whois.py): счётчики сбоев
+    живут на инстансах клиентов и меняются из 12 потоков волны."""
     from app.integrations.wayback import WaybackClient
     from app.integrations.rkn import RknClient
     from app.integrations.blacklist import BlacklistClient
     from app.integrations.searxng import SearxngClient
     from app.integrations.aparser import AParserClient
-    from app.integrations.whois_tci import TciWhoisClient
+    from app.integrations.rdap import RdapClient
     return {
         "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
-        "searxng": SearxngClient(), "aparser": AParserClient(), "tci": TciWhoisClient(),
-        "_whois_lock": threading.Lock(), "_safebrowsing_lock": threading.Lock(),
+        "searxng": SearxngClient(), "aparser": AParserClient(), "rdap": RdapClient(),
+        "_whois_lock": threading.Lock(), "_rdap_lock": threading.Lock(),
+        "_safebrowsing_lock": threading.Lock(),
     }
 
 
@@ -385,45 +388,6 @@ def scorable(now):
     )
 
 
-def _deadline_from_whois(existing, free_date, now, lane):
-    """Дедлайн выкупа из whois free-date.
-
-    `free_date` — ПРОЕКЦИЯ «освободится, если не продлят» (paid-till + запас реестра),
-    она есть у КАЖДОГО занятого .ru-домена (живой факт: у yandex.ru/mail.ru она тоже
-    есть, хотя оба продлеваются из года в год) — не путать с гарантированной датой
-    дропа. None = «не знаем».
-
-    Пустой дедлайн она заполняет всегда — КРОМЕ bid/free: у обоих «домен занят» есть СВОЙ
-    законный терминал, и класть им проекцию значит рисовать надежду там, где машина уже
-    знает, что дальше решать нечего:
-      bid  — дедлайн из фида (лейн+цена, денежный путь M2), занят = снайпнут конкурентом;
-      free — whois уже подтвердил, что домен был свободен, занят = его КУПИЛИ (см.
-             acquirability_verdict: `taken` заслуживает именно lane='free'). Возврат вердикта
-             для free не зависит от даты (occupied+free всегда taken) — но проекция всё равно
-             утекала бы в UI как «освободится X» на терминально недостижимом домене, если
-             заполнять её даже в пустое поле (находка повторного ревью, 2026-07-20: исключение
-             раньше проверялось ТОЛЬКО при обновлении уже известного дедлайна, а пустой
-             `existing is None` уходил в отдельную ветку ДО проверки лейна).
-    Целевая популяция — lane=NULL (бездедлайновый пул).
-
-    Уже известный (для НЕ bid/free) дедлайн эта проекция обновляет — только если он ПРОТУХ:
-    без этого домен из бездедлайнового пула, получивший проекцию, дождавшийся её и
-    ПРОДЛЁННЫЙ владельцем, навсегда застревал бы на мёртвой дате — следующий whois
-    честно приносит свежий free_date, а старое правило (`existing is not None`) его
-    выбрасывало, вердикт судил по трупу даты и хоронил домен в not_acquirable/rejected
-    (находка финального ревью, 2026-07-20)."""
-    from datetime import datetime, time, timezone
-    if free_date is None or lane in ("bid", "free"):
-        return existing
-    new = datetime.combine(free_date, time.min, tzinfo=timezone.utc)
-    if existing is None:
-        return new
-    ex = existing if existing.tzinfo else existing.replace(tzinfo=timezone.utc)
-    if now > ex + DROP_GRACE and new > ex:      # обновляем ТОЛЬКО просроченную и ТОЛЬКО вперёд
-        return new
-    return existing
-
-
 # После скольких сбоев ПОДРЯД safebrowsing_check (A-Parser) перестаём его звать до конца
 # прогона. Живой инцидент 2026-07-20: A-Parser упал, а BaseClient.request ретраит каждый
 # transport-сбой 3 раза с exponential backoff (~30 с) — T2, задуманный как «средний» по
@@ -454,7 +418,8 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
             return {"domain": d.domain, "status": d.status, "skipped": "status"}
         state = FunnelState(domain_id=d.id, domain=d.domain, lane=d.lane,
                             referring_domains=d.referring_domains,
-                            acquire_deadline=d.acquire_deadline, feed_flags=d.feed_flags)
+                            acquire_deadline=d.acquire_deadline, feed_flags=d.feed_flags,
+                            source=d.source)
 
     c = clients or _make_clients()
     results = _run_waves([state], c, st, whois_budget, ahrefs_budget, run)
@@ -493,7 +458,7 @@ def score_pending(limit: int = 100) -> int:
                     else_=0)                                  # окно открыто/впереди — вот они и важны
         rows = db.execute(
             select(Domain.id, Domain.domain, Domain.lane, Domain.referring_domains,
-                   Domain.acquire_deadline, Domain.feed_flags)
+                   Domain.acquire_deadline, Domain.feed_flags, Domain.source)
             .where(Domain.status == "discovered", scorable(now))
             .order_by(tier,
                       Domain.acquire_deadline.asc(),          # внутри яруса — ближайший дроп первым
@@ -537,8 +502,8 @@ def score_pending(limit: int = 100) -> int:
     total = len(rows)
     states = [FunnelState(domain_id=did, domain=name, lane=lane,
                           referring_domains=rd, acquire_deadline=deadline,
-                          feed_flags=flags)
-             for (did, name, lane, rd, deadline, flags) in rows]
+                          feed_flags=flags, source=src)
+             for (did, name, lane, rd, deadline, flags, src) in rows]
     done = 0
     with jobs.track("score", stages=stages) as run:
         if not states:
@@ -716,7 +681,7 @@ def recheck_acquirability(limit: int = 200) -> dict:
 # занят whois — скипаем в этой волне" — сами лимиты волн оператор не крутит.
 # history=4 — вежливость к archive.org (проектная ценность, не число для тюнинга).
 # ahrefs=2 — капча за штуку, дорого и хрупко к нагрузке.
-_CONCURRENCY = {"whois": 12, "risk": 12, "history": 4, "ahrefs": 2}
+_CONCURRENCY = {"avail": 12, "risk": 12, "history": 4, "ahrefs": 2}
 
 
 @dataclass
@@ -734,6 +699,7 @@ class FunnelState:
     reject_reason: str | None = None
     unresolved_why: str | None = None
     alive: bool = True
+    source: str | None = None       # v2: list/emd/… — W0 и W4/W6 ведут себя по-разному для EMD
 
 
 class Budget:
@@ -801,76 +767,84 @@ def _run_concurrent(states: list, workers: int, run: "int | None", stage: str, f
 
 
 def _wave_t0(states: list, st: dict) -> None:
-    """T0 — фид, без сети, мгновенно. Без пула: I/O нет, конкурентность не нужна."""
+    """W0 — без сети: флаги фида, белый список зон, чужие VPN-бренды. Зоны режутся здесь ещё раз,
+    хотя discovery режет их на входе: ручной список приходит без фильтра (оператор должен
+    увидеть причину), а белый список мог сузиться после того, как домен попал в пул."""
+    from app.services.domain_filters import brand_hit, tld_match
     for s in states:
         if not s.alive:
             continue
         if s.feed_flags and any(s.feed_flags.get(k) for k in ("rkn", "judicial", "block")):
-            s.reject_reason = "feed_flag"
-            s.alive = False
+            s.reject_reason, s.alive = "feed_flag", False
+        elif not tld_match(s.domain, st["tld_allowlist"]):
+            s.reject_reason, s.alive = "tld_closed", False
+        elif brand_hit(s.domain, st["brand_tokens"]):
+            s.sig["trademark_risk"] = True
+            s.reject_reason, s.alive = "trademark", False
         elif (s.referring_domains is not None
               and s.referring_domains < st["min_referring_domains"]):
-            s.reject_reason = "low_rd"
-            s.alive = False
+            s.reject_reason, s.alive = "low_rd", False     # уедет в W4 (Задача 11)
 
 
-def _whois_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
-    """Тело T1 для ОДНОГО домена — вызывается конкурентно из _wave_whois. Прямой перенос
-    сегодняшнего _funnel T1 (scoring.py, было строки 478-570), без изменения логики: budget
-    вместо мутируемого [int], state вместо ORM Domain + sig."""
-    from datetime import datetime, timezone
+def _avail_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
+    """W2 для ОДНОГО домена: доступность + дата регистрации. RDAP бесплатный и бюджета не тратит;
+    кап max_whois_per_run — только на whois:43 через A-Parser (зоны без RDAP).
+
+    Возраст здесь только ЗАПИСЫВАЕТСЯ (`whois_created`, информационно `age_years`), отказа
+    `too_young` нет (решение оператора Р5): у перехваченного и снова дропающегося домена RDAP
+    показывает дату ПОСЛЕДНЕЙ регистрации — 15 лет истории выглядели бы как 3 года. Возраст для
+    решения — старшая из даты RDAP и первого снимка Wayback, отказ — в W5 (history)."""
+    from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
 
-    if budget is not None and not budget.take():
-        s.unresolved_why = "budget"
-        s.alive = False
+    rdap = clients.get("rdap")
+    via_rdap = rdap is not None and rdap.has_rdap(s.domain)   # бутстрап не бросает (rdap._FALLBACK)
+    if not via_rdap and budget is not None and not budget.take():
+        s.unresolved_why, s.alive = "budget", False
         return
 
-    age_known = False
-    age = None
     try:
         pr = whois_router.probe(s.domain, clients)
-    except Exception as e:  # noqa: BLE001
-        s.sig["errors"].append(f"whois:{type(e).__name__}")
+        wc = pr.get("created")
+        if wc is not None and wc.tzinfo is None:
+            wc = wc.replace(tzinfo=timezone.utc)   # наивная дата whois:43 — UTC, иначе TypeError ниже
+        age = (now - wc).days / 365.25 if wc is not None else None
+    except Exception as e:  # noqa: BLE001 — и сбой канала, и битая дата: домен НЕ идёт дальше «живым без вердикта»
+        code = "circuit_open" if isinstance(e, whois_router.CircuitOpen) else type(e).__name__
+        s.sig["errors"].append(f"whois:{code}")
         if s.lane != "bid":
-            s.unresolved_why = "whois_failed"
-            s.alive = False
+            s.unresolved_why, s.alive = "whois_failed", False
             return
-        pr = {"available": None, "created": None}
+        pr, wc, age = {"available": None, "status": []}, None, None
 
     if pr.get("available") is not None:
         s.sig["acquirability_checked_at"] = now
     s.sig["whois_source"] = pr.get("whois_source")
-
-    prev_deadline = s.acquire_deadline
-    s.acquire_deadline = _deadline_from_whois(s.acquire_deadline, pr.get("free_date"), now, s.lane)
-    if s.acquire_deadline != prev_deadline:
-        s.sig["deadline_source"] = "whois_projection"
-
-    wc = pr.get("created")
     s.sig["whois_created"] = wc
-    if wc is not None:
-        age_known = True
-        age = (now - wc).days / 365.25
-        s.sig["age_years"] = round(age, 2)
-        s.sig["age_source"] = "whois"
+    if age is not None:
+        s.sig["age_years"], s.sig["age_source"] = round(age, 2), "whois"
 
+    # Ручной список без лейна, а RDAP говорит «pending delete»/«redemption period»: это дроп, а не
+    # чужой занятый домен. Без лейна он висел бы taken_undated до самого дропа (находка 1.12).
+    # Даты дропа у него нет — оценка по статусу (находка R2-11): redemption period — 30 суток выкупа
+    # + 5 удаления, pending delete — 5. Без даты bid-домен никогда не закрылся бы обычным путём
+    # acquirability_verdict (у bid без даты судить нечем). В sig, а не в state: _commit_result
+    # пишет оценку только в ПУСТУЮ колонку — реальную дату дропа она не перебивает.
+    rdap_status = set(pr.get("status") or [])
+    if s.lane is None and {"pending delete", "redemption period"} & rdap_status:
+        s.lane = "bid"
+        if s.acquire_deadline is None:
+            days = 35 if "redemption period" in rdap_status else 5
+            s.sig["acquire_deadline"] = now + timedelta(days=days)
     if s.lane == "bid":
         s.sig["lane"] = "bid"
-        if age_known and age < st["min_age_years"]:
-            s.reject_reason = "too_young"
-            s.alive = False
         return
 
     v = acquirability_verdict(pr.get("available"), s.acquire_deadline, now, lane=s.lane)
     if v == "taken":
-        s.reject_reason = "not_acquirable"
-        s.alive = False
+        s.reject_reason, s.alive = "not_acquirable", False
     elif v == "free":
         s.sig["lane"] = "free"
-        if age_known and age < st["min_age_years"]:
-            s.reject_reason = "too_young"
-            s.alive = False
     else:
         s.unresolved_why = ("waiting" if v == "waiting"
                             else "whois_unclear" if pr.get("available") is None
@@ -878,10 +852,10 @@ def _whois_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
         s.alive = False
 
 
-def _wave_whois(states: list, clients: dict, budget, st: dict, run) -> None:
-    """T1 — приобретаемость + возраст, конкурентно на весь выживший после T0 пул."""
-    _run_concurrent(states, _CONCURRENCY["whois"], run, "whois",
-                    lambda s: _whois_one(s, clients, budget, st))
+def _wave_avail(states: list, clients: dict, budget, st: dict, run) -> None:
+    """W2 — доступность (RDAP, иначе whois:43 через A-Parser), конкурентно на выживших после W0."""
+    _run_concurrent(states, _CONCURRENCY["avail"], run, "avail",
+                    lambda s: _avail_one(s, clients, budget, st))
 
 
 def _risk_one(s: FunnelState, clients: dict, sb_lock) -> None:
@@ -950,8 +924,8 @@ def _wave_risk(states: list, clients: dict, run) -> None:
 
 
 def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
-    """Тело T3 для ОДНОГО домена: Wayback-история + категорийный hard-reject + фолбэк
-    возраста (только если whois его не дал). Прямой перенос T3 (было строки 617-646)."""
+    """W5 для ОДНОГО домена: Wayback-история + категорийный hard-reject + возраст по старшей из
+    двух дат (RDAP/whois из W2 и первый снимок) и гейт `too_young` (Р5)."""
     try:
         hist = clients["wayback"].classify_history(s.domain)
         pf = hist.get("prior_flags") or {}
@@ -960,19 +934,28 @@ def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
         s.sig["history_evidence"] = hist.get("evidence") or []
         s.sig["sampled"] = hist.get("sampled")
         s.sig["first_seen"] = hist.get("first_seen")
-        if s.sig.get("whois_created") is None and hist.get("age_years") is not None:
-            s.sig["age_years"] = hist["age_years"]
-            s.sig["age_source"] = "wayback"
+        # возраст для решения — СТАРШАЯ из даты RDAP/whois (W2) и первого снимка (Р5): у
+        # перехваченного и снова дропающегося домена RDAP показывает ПОСЛЕДНЮЮ регистрацию
+        wb_age = hist.get("age_years")
+        if wb_age is not None and (s.sig.get("age_years") is None or wb_age > s.sig["age_years"]):
+            s.sig["age_years"], s.sig["age_source"] = wb_age, "wayback"
         if any(pf.get(k) for k in cfg.HARD_REJECT_FLAGS):
             s.reject_reason = "history_dirty"
             s.alive = False
             return
     except Exception as e:  # noqa: BLE001
         s.sig["errors"].append(f"wayback:{type(e).__name__}")
+        # Wayback не ответил (archive.org регулярно отдаёт 429/503) — вторая дата возраста
+        # НЕИЗВЕСТНА, а не «молода». Отказ too_young по одной дате RDAP окончателен и потерял бы
+        # перехваченный дроп (находка R2-1): гейт не судит, домен идёт дальше «вслепую» — `wayback:`
+        # в errors держит его вне пакета (blind_reason).
+        return
 
-    # непроверяемый по whois возраст всё равно проходит гейт молодости (ПОСЛЕ history_dirty)
-    if (s.sig.get("whois_created") is None
-            and s.sig.get("age_years") is not None
+    # Гейт молодости — ЗДЕСЬ, а не в W2 (решение оператора Р5), по старшей из двух дат и ПОСЛЕ
+    # history_dirty (грязь — более сильная причина). Первый снимок не раньше регистрации, так что
+    # и старшая дата — нижняя оценка возраста: молодым домен объявляется только если молоды обе.
+    # EMD — новорег: «молодость» — его суть, гейт его не судит (находка R2-14).
+    if (s.source != "emd" and s.sig.get("age_years") is not None
             and s.sig["age_years"] < st["min_age_years"]):
         s.reject_reason = "too_young"
         s.alive = False
@@ -1028,22 +1011,20 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             return {"domain": state.domain, "status": d.status if d else "gone",
                     "skipped": "status"}
 
+        # Оценка дедлайна домена, которого W2 перевела в bid по статусу RDAP (находка R2-11), —
+        # и для решённого, и для unresolved исхода. Только в ПУСТУЮ колонку: реальную дату дропа
+        # (её мог записать и параллельный discovery посреди прогона) оценка не перебивает.
+        if sig.get("acquire_deadline") is not None and d.acquire_deadline is None:
+            d.acquire_deadline = sig["acquire_deadline"]
+
         if state.unresolved_why is not None:
             if sig.get("acquirability_checked_at"):
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
-            if sig.get("deadline_source"):
-                d.score_breakdown = {**(d.score_breakdown or {}),
-                                     "deadline_source": sig["deadline_source"]}
-            if state.acquire_deadline != d.acquire_deadline:
-                d.acquire_deadline = state.acquire_deadline
             db.add(DomainScoreLog(domain_id=d.id, run_id=run, outcome="unresolved",
                                   reject_reason=None, score=None, sig=_jsonable(sig)))
             db.commit()
             return {"domain": d.domain, "status": d.status, "unresolved": True,
                     "why": state.unresolved_why, "errors": sig.get("errors", [])}
-
-        if state.acquire_deadline != d.acquire_deadline:
-            d.acquire_deadline = state.acquire_deadline
 
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
@@ -1070,7 +1051,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
-                    "indexed_echo", "dr", "referring_domains"):
+                    "indexed_echo", "dr", "referring_domains", "trademark_risk"):
             v = sig.get(col)
             if v is not None:
                 setattr(d, col, v)
@@ -1092,8 +1073,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "history_evidence": _kept("history_evidence") or [],
                              "sampled": _kept("sampled"),
                              "age_source": _kept("age_source"),
-                             "whois_source": _kept("whois_source"),
-                             "deadline_source": _kept("deadline_source")}
+                             "whois_source": _kept("whois_source")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку ДО РЕШЕНИЯ — unresolved-возврат
@@ -1139,8 +1119,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     # (ключ чипа, подпись в водопаде, волна). Порядок = порядок FUNNEL_STAGES — один источник
     # правды: новая волна добавляется ОДНОЙ строкой здесь и одной в FUNNEL_STAGES.
     waves = [
-        ("rd", "RD", lambda alive: _wave_t0(alive, st)),
-        ("whois", "whois", lambda alive: _wave_whois(alive, clients, whois_b, st, run)),
+        ("t0", "фильтры", lambda alive: _wave_t0(alive, st)),
+        ("avail", "доступность", lambda alive: _wave_avail(alive, clients, whois_b, st, run)),
         ("risk", "risk", lambda alive: _wave_risk(alive, clients, run)),
         ("history", "history", lambda alive: _wave_history(alive, clients, st, run)),
         ("ahrefs", "ahrefs", lambda alive: _wave_ahrefs(alive, clients, ahrefs_b, run)),

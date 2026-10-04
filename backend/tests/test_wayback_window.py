@@ -373,8 +373,7 @@ def _clients(wayback):
         def is_blacklisted(self, dom): return False
     class _S:
         def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
-            "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback}
 
 
 def _mk(name):
@@ -393,14 +392,14 @@ def _breakdown(did):
 
 
 def test_score_breakdown_carries_history_evidence():
-    did = _mk("ev-clean.ru")
+    did = _mk("ev-clean.com")
     scoring.score_domain(did, clients=_clients(_WB()))
     assert _breakdown(did)["history_evidence"], "куратору нечем проверить вердикт истории"
 
 
 def test_rejected_domain_also_keeps_its_evidence():
     """Отказ по истории — тоже вердикт, и он тоже ошибается: показывать, ЧТО его вызвало."""
-    did = _mk("ev-dirty.ru")
+    did = _mk("ev-dirty.com")
     out = scoring.score_domain(did, clients=_clients(_WB(casino=True)))
     assert out["reject_reason"] == "history_dirty"
     ev = _breakdown(did)["history_evidence"]
