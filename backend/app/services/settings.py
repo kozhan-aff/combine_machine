@@ -3,10 +3,14 @@
 get_settings() возвращает effective-словарь (сидит дефолтами из scoring_config при
 отсутствии строки). Пороги валидируются по диапазонам, чтобы UI не записал мусор.
 """
+import json
+import re
+
 from app.services import scoring_config as cfg
 
 _KEYS_NUM = ("min_referring_domains", "min_age_years", "approve_at", "manual_review_at",
-             "max_whois_per_run", "max_ahrefs_per_run")
+             "max_whois_per_run", "max_ahrefs_per_run",
+             "min_dr", "max_links_per_run", "max_deep_per_run", "spam_anchor_max", "units_floor")
 _BOUNDS = {                       # (min, max) для валидации ползунков
     "min_referring_domains": (0, 100000),
     "min_age_years": (0.0, 30.0),
@@ -14,7 +18,13 @@ _BOUNDS = {                       # (min, max) для валидации пол�
     "manual_review_at": (0.0, 1.0),
     "max_whois_per_run": (1, 5000),
     "max_ahrefs_per_run": (0, 1000),
+    "min_dr": (0.0, 100.0),
+    "max_links_per_run": (1, 5000),
+    "max_deep_per_run": (0, 500),        # 0 = W6 выключен: анкоры не проверены, в пакет домен не попадёт
+    "spam_anchor_max": (0.0, 1.0),
+    "units_floor": (0, 2_000_000),       # 0 = пола нет; 2 млн — месячный лимит units
 }
+_LIST_MAX = 200
 
 
 def _defaults() -> dict:
@@ -27,6 +37,14 @@ def _defaults() -> dict:
         "max_ahrefs_per_run": cfg.MAX_AHREFS_PER_RUN,
         "sources_enabled": dict(cfg.SOURCES_ENABLED),
         "weights": dict(cfg.WEIGHTS),
+        "min_dr": cfg.MIN_DR,
+        "tld_allowlist": list(cfg.TLD_ALLOWLIST),
+        "brand_tokens": list(cfg.BRAND_TOKENS),
+        "emd_sets": [],
+        "max_links_per_run": cfg.MAX_LINKS_PER_RUN,
+        "max_deep_per_run": cfg.MAX_DEEP_PER_RUN,
+        "spam_anchor_max": cfg.SPAM_ANCHOR_MAX,
+        "units_floor": cfg.UNITS_FLOOR,
     }
 
 
@@ -50,6 +68,45 @@ def _clean_weights(raw, base: dict | None = None) -> dict:
         except (TypeError, ValueError):
             out[k] = b[k]
     return out if sum(out.values()) > 0 else dict(cfg.WEIGHTS)
+
+
+def _clean_list(raw) -> list[str]:
+    """Список с UI (textarea: строки/запятые/пробелы) или готовый список -> нижний регистр, без
+    точек по краям, без пустых и дублей. Порядок оператора сохраняется."""
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,;]+", raw)
+    out = []
+    for x in raw or ():
+        t = str(x).strip().strip(".").lower()
+        if t and t not in out:
+            out.append(t)
+    return out[:_LIST_MAX]
+
+
+def _clean_emd_sets(raw) -> list[dict]:
+    """Наборы EMD (JSON-текст с UI или список) -> валидный список. Невалидный JSON — ValueError:
+    панель покажет ошибку, а сохранённые наборы НЕ затрутся пустотой.
+
+    Строка вместо списка в `keywords` — это ОДИН ключ: перебор строки дал бы буквы
+    (`"mejor vpn"` -> m.com, e.com, j.com…). `tlds` строкой разбирает `_clean_list`, как textarea."""
+    if isinstance(raw, str):
+        raw = json.loads(raw) if raw.strip() else []       # JSONDecodeError — подкласс ValueError
+    if not isinstance(raw, list):
+        raise ValueError("наборы EMD: ожидается JSON-список")
+    out = []
+    for s in raw[:50]:
+        if not isinstance(s, dict):
+            continue
+        kw_raw = s.get("keywords") or []
+        if isinstance(kw_raw, str):
+            kw_raw = [kw_raw]
+        kws = [str(k).strip()[:60] for k in kw_raw if str(k).strip()][:50]
+        tlds = _clean_list(s.get("tlds") or [])[:20]
+        if kws and tlds:
+            out.append({"market": str(s.get("market") or "")[:16],
+                        "lang": str(s.get("lang") or "")[:8].lower(),
+                        "keywords": kws, "tlds": tlds})
+    return out
 
 
 def _row(db):
@@ -79,6 +136,14 @@ def get_settings() -> dict:
             "sources_enabled": dict(r.sources_enabled or cfg.SOURCES_ENABLED),
             # пусто (миграция 0009 засеяла {}) -> дефолты из кода, а не нулевая шкала
             "weights": _clean_weights(r.weights or cfg.WEIGHTS),
+            "min_dr": float(r.min_dr),
+            "tld_allowlist": list(r.tld_allowlist or cfg.TLD_ALLOWLIST),   # пусто -> дефолт: пустой список убил бы всё
+            "brand_tokens": list(r.brand_tokens or cfg.BRAND_TOKENS),
+            "emd_sets": list(r.emd_sets or []),
+            "max_links_per_run": int(r.max_links_per_run),
+            "max_deep_per_run": int(r.max_deep_per_run),
+            "spam_anchor_max": float(r.spam_anchor_max),
+            "units_floor": int(r.units_floor),
         }
 
 
@@ -92,6 +157,11 @@ def update_settings(**kw) -> dict:
                 lo, hi = _BOUNDS[k]
                 v = max(lo, min(hi, type(lo)(kw[k])))
                 setattr(r, k, v)
+        for k in ("tld_allowlist", "brand_tokens"):
+            if kw.get(k) is not None:
+                setattr(r, k, _clean_list(kw[k]))
+        if kw.get("emd_sets") is not None:
+            r.emd_sets = _clean_emd_sets(kw["emd_sets"])   # ValueError -> выходим ДО commit
         if "sources_enabled" in kw and isinstance(kw["sources_enabled"], dict):
             r.sources_enabled = {s: bool(kw["sources_enabled"].get(s, False))
                                  for s in cfg.SOURCES_ENABLED}

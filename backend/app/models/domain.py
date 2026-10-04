@@ -61,6 +61,10 @@ class Domain(Base):
     wayback_checked: Mapped[bool] = mapped_column(Boolean, default=False)
     prior_flags: Mapped[dict | None] = mapped_column(JSONB)          # {adult, pharma, casino, spam, gambling}
     indexed_echo: Mapped[bool | None] = mapped_column(Boolean)       # old content still indexed
+    # v2: язык и тема прошлого сайта — W5 (LLM по видимому тексту снимков Wayback); у EMD язык
+    # берётся из набора ключей. Мягкий сигнал для оператора и рынка, не гейт.
+    market_lang: Mapped[str | None] = mapped_column(String(8))
+    topic: Mapped[str | None] = mapped_column(String(120))
 
     # risk (Stage E)
     rkn_listed: Mapped[bool | None] = mapped_column(Boolean)
@@ -141,3 +145,18 @@ class AcquisitionOrder(Base):
               postgresql_where=text(_OPEN_ORDER_SQL),
               sqlite_where=text(_OPEN_ORDER_SQL)),
     )
+
+
+class DrSeen(Base):
+    """Память бесплатного DR Ahrefs (решение оператора Р4, миграция 0025).
+
+    Без неё DR одних и тех же не вставленных доменов (ниже порога) спрашивался бы заново на каждом
+    прогоне discovery — живьём 123 запроса на 122 тыс. доменов при повторе в тот же день, а лицензия
+    Ahrefs запрещает систематический сбор: DR один раз на домен. discovery (Задача 6) перед запросом
+    отсекает домены со свежей записью (4 суток), после успешного ответа пишет ВСЕ спрошенные домены
+    (`dr` None — Ahrefs DR не вернул), в начале прогона удаляет записи старше 4 суток."""
+    __tablename__ = "dr_seen"
+
+    domain: Mapped[str] = mapped_column(String(253), primary_key=True)
+    dr: Mapped[float | None] = mapped_column(Numeric)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

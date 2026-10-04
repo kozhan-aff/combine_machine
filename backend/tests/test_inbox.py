@@ -48,10 +48,10 @@ def test_blind_domain_is_flagged_in_inbox(client):
 def test_bulk_approve_skips_blind_domains(client):
     """Пакет — решение человека, но НЕ обход гейта: непроверенное в него не попадает.
 
-    `clean.ru` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
+    `clean.com` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
     прочитанной истории — это и был баг F2 (пустой Wayback ошибки не бросает), и фикстура,
     молчавшая об этом поле, ровно его и покрывала собой."""
-    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
+    _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True,
          prior_flags={}, score_breakdown={"errors": []})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
@@ -61,7 +61,7 @@ def test_bulk_approve_skips_blind_domains(client):
     assert r.status_code == 303
     with SessionLocal() as db:
         st = {d.domain: d.status for d in db.query(Domain).all()}
-    assert st == {"clean.ru": "approved", "blind.ru": "scored", "weak.ru": "scored"}
+    assert st == {"clean.com": "approved", "blind.ru": "scored", "weak.ru": "scored"}
 
 
 def test_bulk_preview_counts(client):

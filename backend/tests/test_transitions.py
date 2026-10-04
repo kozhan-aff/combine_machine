@@ -68,7 +68,7 @@ def test_manual_transition_checks_source_status_not_only_target():
     from app.services.transitions import TransitionDenied, check
 
     def d(status, **kw):
-        return NS(**{"domain": "x.ru", "status": status, "reject_reason": None,
+        return NS(**{"domain": "x.com", "status": status, "reject_reason": None,
                      "rkn_listed": None, "blacklisted": None, "prior_flags": {},
                      "wayback_checked": True, **kw})
 
@@ -108,9 +108,10 @@ def test_threshold_reject_is_still_returnable(client):
 
     Домен, отсеянный ПОРОГОМ (низкий скор), — не грязь: порог крутится на /settings, и вернуть
     такой домен в оборот руками оператор вправе. Запрет, который заодно запер бы и его, был бы
-    не фиксом, а новой поломкой.
+    не фиксом, а новой поломкой. v2: домен — в зоне белого списка; .ru с тем же порогом не
+    вернуть (находка R2-19, test_migration_0025).
     """
-    did = _add(domain="weak.ru", status="rejected", reject_reason="low_score", score=0.35)
+    did = _add(domain="weak.com", status="rejected", reject_reason="low_score", score=0.35)
     client.post(f"/domains/{did}/set-status", data={"status": "approved"}, follow_redirects=False)
     assert _status(did) == "approved"
 

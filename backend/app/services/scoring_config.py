@@ -58,3 +58,15 @@ MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт
 SOURCES_ENABLED = {"backorder": True, "cctld": False, "reg_ru": False, "sweb": False}  # сырые витрины выключены до выверки живой разметки (аудит 2026-07-07)
 MAX_WHOIS_PER_RUN = 200        # кап whois-пробоев за один прогон проверки (защита от сырого cctld)
 MAX_AHREFS_PER_RUN = 50         # кап платных Ahrefs-вызовов (капча за штуку) за прогон; 0 = выключить
+
+# ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
+MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом
+TLD_ALLOWLIST = ["com", "net", "org", "online", "xyz", "site", "co.uk", "mx", "co", "si", "nl", "in"]
+BRAND_TOKENS = ["nordvpn", "expressvpn", "surfshark", "protonvpn", "cyberghost", "ipvanish",
+                "privateinternetaccess", "mullvad", "windscribe", "hotspotshield", "tunnelbear",
+                "purevpn", "vyprvpn", "hidemyass", "atlasvpn", "privadovpn", "hideme", "strongvpn",
+                "zenmate", "avast", "kaspersky", "norton"]
+MAX_LINKS_PER_RUN = 500      # W4 Ahrefs batch-analysis: 25 units/домен
+MAX_DEEP_PER_RUN = 20        # W6 анкоры + история трафика: ~1,1 тыс. units/домен; 0 = выключить
+SPAM_ANCHOR_MAX = 0.2        # доля спам-анкоров (по refdomains), выше — отказ spam_anchors
+UNITS_FLOOR = 300_000        # пол остатка units Ahrefs в месяце: ниже — W4/W6 не тратят (автопилот — раз в час)

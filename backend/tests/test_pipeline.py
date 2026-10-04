@@ -85,7 +85,7 @@ def test_scoring_hard_reject_on_rkn():
 
 
 def test_panel_actions(client, monkeypatch):
-    did = _add(Domain(domain="curate-me.ru", source="backorder", status="scored"))
+    did = _add(Domain(domain="curate-me.com", source="backorder", status="scored"))
     # manual curation: valid transition sticks (303 -> redirect back to /)
     r = client.post(f"/domains/{did}/set-status", data={"status": "approved"},
                     follow_redirects=False)

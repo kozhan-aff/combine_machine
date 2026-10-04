@@ -44,13 +44,19 @@
 
 # Причины отказа, за которыми стоит ФАКТ О ДОМЕНЕ, а не наш порог. Порог («мало доноров»,
 # «молодой», «низкий скор») крутится на /settings, и вернуть такой домен в оборот руками —
-# законное решение оператора. Эти четыре не крутятся ничем: РКН — реестр государства, блэклист —
+# законное решение оператора. Эти не крутятся ничем: РКН — реестр государства, блэклист —
 # внешний вердикт, грязная история и флаг фида — прошлое домена. Для портфеля, который держится
 # на ЧИСТОЙ ИСТОРИИ (CLAUDE.md), они значат «никогда».
 #
+# v2 (миграция 0025): `legacy_ru` — архив РФ-пула (РФ из v2 исключена), `tld_closed` — зона вне
+# белого списка. Без них «↩ вернуть в approved» открывала бы ручной путь к кассе домену, которого
+# машина больше не судит (в 0025 `legacy_ru` перезаписывает и «отмытые» v1-домены с `rkn`). Зону
+# добавили в белый список — путь назад тот же, что у грязи: перескор, а не кнопка.
+#
 # `not_acquirable` здесь НЕТ намеренно: «домен занят» — это не грязь, а чужая покупка. Оператор,
 # знающий, что домен всё-таки дропнулся, вправе вернуть его руками.
-DIRTY_REASONS = frozenset({"rkn", "blacklist", "history_dirty", "feed_flag", "safebrowsing"})
+DIRTY_REASONS = frozenset({"rkn", "blacklist", "history_dirty", "feed_flag", "safebrowsing",
+                           "legacy_ru", "tld_closed"})
 
 # Куда домен вправе двинуть ЧЕЛОВЕК. Ключ — ИСХОДНЫЙ статус (именно его и не смотрели).
 # Пустое множество = «отсюда руками не двигают»:
@@ -126,14 +132,38 @@ def refuse_dirty(d) -> None:
         raise TransitionDenied(_dirty_ru(reason, d.domain))
 
 
-def check(d, target: str) -> None:
-    """Разрешён ли РУЧНОЙ перевод домена `d` в `target`. Бросает TransitionDenied."""
+def refuse_closed_zone(d, allowlist=None) -> None:
+    """Зона вне белого списка — в `approved` домен не вернуть даже руками. Бросает TransitionDenied.
+
+    v2 судит и выкупает только зоны белого списка (/settings). Отказ `legacy_ru`/`tld_closed` —
+    в DIRTY_REASONS, но v1-домен .ru, отклонённый ПОРОГОМ (`low_score`, `too_young`), грязным не
+    считается, а миграция 0025 архивирует только ещё не решённые домены. Без этого гарда «↩ вернуть
+    в approved» вела бы такой домен в очередь backorder, который .ru всё ещё покупает (находка
+    R2-19). Зону добавили в белый список — домен возвращается той же кнопкой.
+    `allowlist=None` — список из /settings; самопроверка без БД передаёт его явно.
+    """
+    from app.services.domain_filters import tld_match
+    if allowlist is None:
+        from app.services.settings import get_settings
+        allowlist = get_settings()["tld_allowlist"]
+    if not tld_match(d.domain, allowlist):
+        raise TransitionDenied(
+            f"домен «{d.domain}»: его зоны нет в белом списке зон (/settings) — v2 не судит и не "
+            "выкупает такие домены, в approved его не вернуть")
+
+
+def check(d, target: str, *, allowlist=None) -> None:
+    """Разрешён ли РУЧНОЙ перевод домена `d` в `target`. Бросает TransitionDenied.
+
+    Грязь проверяется раньше зоны: у грязного домена вне списка оператор увидит причину-грязь."""
     src = d.status
     if target not in MANUAL_TRANSITIONS.get(src, frozenset()):
         raise TransitionDenied(
             f"домен «{d.domain}» в статусе {src!r}: ручной перевод в {target!r} не разрешён")
     if target in TOWARD_MONEY:
         refuse_dirty(d)
+    if target == "approved":
+        refuse_closed_zone(d, allowlist)
 
 
 def set_status(d, target: str) -> None:
@@ -147,15 +177,20 @@ if __name__ == "__main__":  # self-check без БД: политика чист�
 
     rkn = NS(domain="bad.ru", status="rejected", reject_reason="rkn",
              rkn_listed=True, blacklisted=None, prior_flags={}, wayback_checked=True)
-    weak = NS(domain="weak.ru", status="rejected", reject_reason="low_score",
+    weak = NS(domain="weak.com", status="rejected", reject_reason="low_score",
               rkn_listed=False, blacklisted=None, prior_flags={}, wayback_checked=True)
     assert dirty_reason(rkn) == "rkn" and dirty_reason(weak) is None
     try:
-        check(rkn, "approved")
+        check(rkn, "approved", allowlist=["com"])
         raise AssertionError("грязь обязана быть отвергнута")
     except TransitionDenied:
         pass
-    check(weak, "approved")                       # отсеянный ПОРОГОМ домен возвращается руками
+    check(weak, "approved", allowlist=["com"])    # отсеянный ПОРОГОМ домен возвращается руками
+    try:
+        check(NS(**{**vars(weak), "domain": "weak.ru"}), "approved", allowlist=["com"])
+        raise AssertionError("зона вне белого списка обязана быть отвергнута")
+    except TransitionDenied:
+        pass
     try:
         check(NS(domain="raw.ru", status="discovered", reject_reason=None, rkn_listed=None,
                  blacklisted=None, prior_flags={}, wayback_checked=True), "purchased")

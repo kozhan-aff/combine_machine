@@ -87,14 +87,14 @@ def test_unchecked_history_stays_out_of_bulk(client):
     """РЕПРО АУДИТА: score 0.825, errors пуст, снимков не было — домен уходил в пакет как чистый."""
     _add(domain="ghost.ru", status="scored", score=0.825, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
-    _add(domain="ok.ru", status="scored", score=0.825, wayback_checked=True,
+    _add(domain="ok.com", status="scored", score=0.825, wayback_checked=True,
          prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": []})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 1}
     r = client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
     assert r.status_code == 303
     with db.SessionLocal() as s:
         st = {d.domain: d.status for d in s.query(Domain).all()}
-    assert st == {"ghost.ru": "scored", "ok.ru": "approved"}   # непроверенный НЕ одобрен пакетом
+    assert st == {"ghost.ru": "scored", "ok.com": "approved"}   # непроверенный НЕ одобрен пакетом
 
 
 def test_inbox_warns_instead_of_claiming_clean(client):
