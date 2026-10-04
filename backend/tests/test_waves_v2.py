@@ -1,6 +1,8 @@
 """Волны v2 (t0 / avail / risk / links / history / deep) — юнит-тесты на фейках, без сети."""
 from datetime import datetime, timedelta, timezone
 
+import app.db as db
+from app.models.domain import Domain
 from app.services import scoring
 from app.services.settings import get_settings
 
@@ -189,7 +191,9 @@ def test_history_wayback_down_does_not_judge_age_by_rdap_alone():
                   "age_source": "whois"})
     scoring._history_one(s, {"wayback": DownWB()}, _st(min_age_years=3.0))
     assert s.alive and s.reject_reason is None
-    assert s.sig["errors"] == ["wayback:RuntimeError"] and s.sig["age_source"] == "whois"
+    # age:unverified — этот домен при ручном перескоре иначе вернулся бы в пакет без улик
+    assert s.sig["errors"] == ["wayback:RuntimeError", "age:unverified"]
+    assert s.sig["age_source"] == "whois"
 
 
 def test_history_emd_is_never_too_young():
@@ -218,3 +222,49 @@ def test_avail_listed_domain_turned_bid_gets_estimated_deadline():
     assert turned(("pending delete",), acquire_deadline=NOW + timedelta(days=2)) is None
     assert scoring.acquirability_verdict(False, NOW + timedelta(days=5), NOW + timedelta(days=8),
                                          lane="bid") == "taken"    # дедлайн прошёл — цикл закрыт
+
+
+class _CleanAp(FakeAp):
+    def safebrowsing_check(self, d):
+        return False
+
+
+class _DownWB:
+    def classify_history(self, d):
+        raise RuntimeError("archive.org 503")
+
+
+def test_history_down_young_rdap_marks_age_unverified_and_keeps_domain_out_of_bulk():
+    """Фикс ревью: ручной перескор домена, ранее отклонённого too_young (колонка wayback_checked
+    осталась True), при упавшем Wayback не получает гейта молодости; без метки history_verdict =
+    clean, blind_reason = None и молодой домен вернулся бы в пакет по ОТСУТСТВИЮ улик."""
+    with db.SessionLocal() as ses:
+        d = Domain(domain="rescored-young.com", source="nominet", status="rejected",
+                   reject_reason="too_young", lane="bid", referring_domains=3000,
+                   wayback_checked=True, prior_flags={}, score=0.0,
+                   acquire_deadline=NOW + timedelta(days=2))
+        ses.add(d); ses.commit(); did = d.id
+    rdap = FakeRdap(exists=True, registered=NOW - timedelta(days=200))
+    clients = {"rdap": rdap, "aparser": _CleanAp(), "wayback": _DownWB(),
+               "rkn": type("R", (), {"is_listed": lambda self, x: False})(),
+               "blacklist": type("B", (), {"is_blacklisted": lambda self, x: False})(),
+               "searxng": type("S", (), {"indexed_echo": lambda self, x: True})()}
+    out = scoring.score_domain(did, clients=clients)
+    assert rdap.calls == 1                                  # RDAP реально звали, не NoRdap-путь
+    assert out["reject_reason"] != "too_young" and "age:unverified" in out["errors"]
+    with db.SessionLocal() as ses:
+        d = ses.get(Domain, did)
+        assert d.status == "scored" and d.wayback_checked is True
+        assert "архив не ответил, а по RDAP домен моложе порога" in scoring.blind_reason(d)
+        assert scoring.bulk_ok(d) is False
+
+
+def test_history_down_emd_or_old_rdap_age_does_not_mark_age_unverified():
+    emd = _state("mejorvpn.com", source="emd", lane="free")
+    emd.sig.update({"whois_created": NOW - timedelta(days=100), "age_years": 0.3, "age_source": "whois"})
+    scoring._history_one(emd, {"wayback": _DownWB()}, _st(min_age_years=5.0))
+    old = _state("old.com")
+    old.sig.update({"whois_created": NOW - timedelta(days=3650), "age_years": 10.0, "age_source": "whois"})
+    scoring._history_one(old, {"wayback": _DownWB()}, _st(min_age_years=5.0))
+    assert emd.sig["errors"] == ["wayback:RuntimeError"]
+    assert old.sig["errors"] == ["wayback:RuntimeError"]
