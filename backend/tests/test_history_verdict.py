@@ -25,19 +25,15 @@ def _add(**kw) -> int:
 
 def _clients(wayback, created):
     """Воронка целиком на фейках: whois «занят + дата регистрации» (домен создаётся с lane='bid',
-    поэтому T1 короткозамкнут лейном и «занят» — норма), РКН/блэклист чисты, эхо есть."""
+    поэтому W2 короткозамкнут лейном и «занят» — норма), Web Risk и блэклист чисты."""
     class _W:
         def whois_probe(self, dom): return {"available": False, "created": created}
-        def safebrowsing_check(self, dom): return False
-        def archive_probe(self, dom): return {"times": None, "first": None, "last": None}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
-            "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "blacklist": _B(), "wayback": wayback,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 # ---- вердикт ----
@@ -51,8 +47,8 @@ def test_verdict_unknown_when_wayback_saw_nothing():
 
 
 def test_verdict_clean_only_when_wayback_really_checked():
-    d = Domain(domain="ok.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS,
-               score_breakdown={"errors": []})
+    d = Domain(domain="ok.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS, age_years=10.0,
+               score_breakdown={"errors": [], "deep_checked": True})
     assert scoring.history_verdict(d) == "clean"
     assert scoring.blind_reason(d) is None
 
@@ -75,26 +71,26 @@ def test_verdict_dirty_beats_missing_check():
 
 
 def test_blind_reason_still_names_dead_checks():
-    """РКН/блэклист/эхо остались «вслепую» по errors — история их не поглотила."""
-    d = Domain(domain="r.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS,
-               score_breakdown={"errors": ["rkn:ConnectError"]})
-    assert "РКН" in scoring.blind_reason(d)
+    """Web Risk/блэклист остались «вслепую» по errors — история их не поглотила."""
+    d = Domain(domain="r.com", wayback_checked=True, prior_flags=_CLEAN_FLAGS, age_years=10.0,
+               score_breakdown={"errors": ["webrisk:ConnectError"]})
+    assert "Web Risk" in scoring.blind_reason(d)
 
 
 # ---- пакетное одобрение ----
 
 def test_unchecked_history_stays_out_of_bulk(client):
     """РЕПРО АУДИТА: score 0.825, errors пуст, снимков не было — домен уходил в пакет как чистый."""
-    _add(domain="ghost.ru", status="scored", score=0.825, wayback_checked=False,
+    _add(domain="ghost.com", status="scored", score=0.825, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
-    _add(domain="ok.ru", status="scored", score=0.825, wayback_checked=True,
-         prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": []})
+    _add(domain="ok.com", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
+         prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": [], "deep_checked": True})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 1}
     r = client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
     assert r.status_code == 303
     with db.SessionLocal() as s:
         st = {d.domain: d.status for d in s.query(Domain).all()}
-    assert st == {"ghost.ru": "scored", "ok.ru": "approved"}   # непроверенный НЕ одобрен пакетом
+    assert st == {"ghost.com": "scored", "ok.com": "approved"}   # непроверенный НЕ одобрен пакетом
 
 
 def test_inbox_warns_instead_of_claiming_clean(client):
@@ -119,7 +115,7 @@ def test_row_and_bulk_share_one_predicate(client, monkeypatch):
     `bulk_ok` обязан остаться False (он сверяет ЕЩЁ И history_verdict, не только blind_reason),
     и строка не имеет права нести «история чистая» для домена, которого пакет не берёт.
     """
-    _add(domain="ghost2.ru", status="scored", score=0.9, wayback_checked=False,
+    _add(domain="ghost2.com", status="scored", score=0.9, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
     monkeypatch.setattr(scoring, "blind_reason", lambda d: None)
     # решающая проверка: строка инбокса и пакет обязаны совпасть — ни то ни другое не
@@ -167,7 +163,7 @@ def test_funnel_marks_history_unknown_without_errors(client):
         def classify_history(self, dom):
             return {"prior_flags": {}, "first_seen": None, "age_years": None,
                     "wayback_checked": False, "sampled": 0, "evidence": []}
-    did = _add(domain="ghost.ru", status="discovered", lane="bid", referring_domains=5000)
+    did = _add(domain="ghost.com", status="discovered", lane="bid", referring_domains=5000)
     old = datetime.now(timezone.utc) - timedelta(days=365 * 12)
     out = scoring.score_domain(did, clients=_clients(_WB(), old))
     assert out["status"] == "scored" and out["errors"] == []
@@ -189,12 +185,13 @@ def test_stale_verdict_is_named_but_not_locked(client):
     РАНЬШЕ, а сегодня Wayback не ответил, с вердиктом `clean` — и про сегодняшний отказ архива
     не говорил НИКТО (ошибка живёт в score_breakdown.errors, куда куратор не смотрит).
 
-    Пакет его берёт — и это осознанно: вердикт держится на реальных прошлых уликах, авто-approve
-    гардится по sig ТЕКУЩЕГО прогона, а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
+    Пакет его берёт — и это осознанно: вердикт держится на реальных прошлых уликах, машина сама
+    не одобряет ничего (Р2), а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
     завести ту самую тихую ловушку, от которой ветка избавлялась. Но сказать правду в строке —
     обязан."""
-    _add(domain="stale.ru", status="scored", score=0.825, wayback_checked=True,
-         prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": ["wayback:RuntimeError"]})
+    _add(domain="stale.com", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
+         prior_flags=_CLEAN_FLAGS,
+         score_breakdown={"errors": ["wayback:RuntimeError"], "deep_checked": True})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 0}
     html = client.get("/domains").text
     assert "сегодня Wayback не ответил" in html, "строка молчит о том, что архив сегодня лежал"

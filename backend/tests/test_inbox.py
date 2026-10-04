@@ -48,12 +48,12 @@ def test_blind_domain_is_flagged_in_inbox(client):
 def test_bulk_approve_skips_blind_domains(client):
     """Пакет — решение человека, но НЕ обход гейта: непроверенное в него не попадает.
 
-    `clean.ru` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
+    `clean.com` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
     прочитанной истории — это и был баг F2 (пустой Wayback ошибки не бросает), и фикстура,
     молчавшая об этом поле, ровно его и покрывала собой."""
-    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
-         prior_flags={}, score_breakdown={"errors": []})
-    _add(domain="blind.ru", status="scored", score=0.9,
+    _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
+         prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
+    _add(domain="blind.com", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     _add(domain="weak.ru", status="scored", score=0.5, wayback_checked=True,
          prior_flags={}, score_breakdown={"errors": []})
@@ -61,13 +61,13 @@ def test_bulk_approve_skips_blind_domains(client):
     assert r.status_code == 303
     with SessionLocal() as db:
         st = {d.domain: d.status for d in db.query(Domain).all()}
-    assert st == {"clean.ru": "approved", "blind.ru": "scored", "weak.ru": "scored"}
+    assert st == {"clean.com": "approved", "blind.com": "scored", "weak.ru": "scored"}
 
 
 def test_bulk_preview_counts(client):
-    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
-         prior_flags={}, score_breakdown={"errors": []})
-    _add(domain="blind.ru", status="scored", score=0.9,
+    _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
+         prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
+    _add(domain="blind.com", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     body = client.get("/domains/bulk-preview?min_score=0.8").json()
     assert body == {"n": 1, "skipped": 1}
@@ -163,19 +163,6 @@ def test_expired_domain_is_marked_in_inbox_and_in_ready(client):
     assert html.count("окно закрыто") == 2      # и в инбоксе, и в «готовы к выкупу»
 
 
-def test_projection_deadline_is_labelled_honestly(client):
-    """Дата из whois free-date — ПРОЕКЦИЯ «освободится, если не продлят» (она есть даже
-    у yandex.ru, живая проба 2026-07-20), а дата из фида — подтверждённый дроп. Панель
-    обязана подписывать их по-разному: иначе оператор видит «СРОК ДРОПА» на домене,
-    который просто продлевают из года в год, и идёт его выкупать."""
-    soon = datetime.now(timezone.utc) + timedelta(days=5)
-    _add(domain="projected.ru", status="scored", score=0.7, acquire_deadline=soon,
-         score_breakdown={"deadline_source": "whois_projection"})
-    html = client.get("/domains").text
-    assert "ОСВОБОДИТСЯ*" in html
-    assert "СРОК ДРОПА" not in html
-
-
 def test_feed_deadline_keeps_drop_label(client):
     """Обратная сторона: дедлайн из фида (backorder/cctld) остаётся «СРОК ДРОПА» —
     подпись не должна размыться до бессмысленной для ВСЕХ доменов."""
@@ -186,20 +173,6 @@ def test_feed_deadline_keeps_drop_label(client):
     assert "ОСВОБОДИТСЯ*" not in html
 
 
-def test_projection_never_shows_window_closed(client):
-    """«окно закрыто — домен занят» — утверждение о ФАКТЕ, и над проекцией оно ложно.
-    Домен, дождавшийся своей free-date и реально дропнувшийся, приходит в инбокс с
-    прошедшей датой (при available=True свежего free-date нет, обновлять нечем). Если
-    прогон Score отстал больше чем на DROP_GRACE, свободный домен носил бы красную
-    метку «занят» на экране, с которого идут покупать (ревью 2026-07-20)."""
-    past = datetime.now(timezone.utc) - timedelta(days=10)
-    _add(domain="dropped.ru", status="scored", score=0.7, acquire_deadline=past,
-         score_breakdown={"deadline_source": "whois_projection"})
-    html = client.get("/domains").text
-    assert "dropped.ru" in html
-    assert "окно закрыто" not in html
-
-
 def test_expired_feed_deadline_still_shows_window_closed(client):
     """Обратная сторона: для подтверждённой даты из фида метка остаётся — без неё
     оператор одобряет покойника и идёт его выкупать."""
@@ -207,20 +180,6 @@ def test_expired_feed_deadline_still_shows_window_closed(client):
     _add(domain="sniped.ru", status="scored", score=0.7, acquire_deadline=past)
     html = client.get("/domains").text
     assert "окно закрыто" in html
-
-
-def test_pool_labels_projection_deadline_too(client):
-    """Ревью 2026-07-20 (аудит серии TCI-whois): /domains/pool — ОТДЕЛЬНЫЙ шаблон
-    (pool.html) от /domains (domains.html), и метка «проекция, не подтверждённый дроп»
-    туда не доехала — тултип показывал голое «дедлайн DD.MM» на любой дате, включая
-    whois-проекцию. Это экран для расследований, но именно там оператор ищет причину,
-    почему домен занят — врать честной датой нельзя и там."""
-    soon = datetime.now(timezone.utc) + timedelta(days=5)
-    _add(domain="poolprojected.ru", status="scored", score=0.7, acquire_deadline=soon,
-         score_breakdown={"deadline_source": "whois_projection"})
-    html = client.get("/domains/pool").text
-    assert "прогноз whois" in html
-    assert "не подтверждённый дроп" in html
 
 
 def test_pool_keeps_plain_deadline_label_for_feed_date(client):

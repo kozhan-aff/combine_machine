@@ -19,43 +19,24 @@ def _add(obj):
         return obj.id
 
 
-def test_discovery_upsert_idempotent(monkeypatch):
-    from app.services import discovery
-    from app.services.settings import update_settings
-    # мультиисточник (Task 4): офлайн-тест бьёт только backorder, остальные — реальные
-    # HTTP/A-Parser клиенты, их нужно выключить, иначе _collect уйдёт в сеть.
-    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
-    rows = [
-        {"domainname": "Clean-Drop.com", "links": "12"},
-        {"domainname": "second.ru", "links": 3},
-        {"domainname": "bad_underscore.ru", "links": 5},  # junk char -> skipped
-    ]
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: rows)
-    assert discovery.run_discovery() == 2   # 2 valid, 1 junk dropped
-    assert discovery.run_discovery() == 0   # re-run inserts nothing (idempotent)
-
-
-def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
-    """Мок-клиенты в форме, которую ждёт scoring._funnel (см. test_funnel.py::_clients).
-    _gather_signals больше нет — воронка теперь ступенчатая, поэтому мокаем клиенты, а
-    не внутреннюю функцию сбора сигналов. whois_probe отдаёт «занят, но с датой» —
-    домен-заглушка получает lane="bid" (см. вызовы ниже), чтобы приобретаемость
-    (Task 4) не блокировала гейт T1 до RKN/Wayback."""
+def _funnel_clients(whois_dt, threats=(), wb_flags=None):
+    """Мок-клиенты воронки (см. test_funnel.py::_clients). whois_probe отдаёт «занят, но с датой» —
+    домен-заглушка получает lane="bid" (см. вызовы ниже), чтобы приобретаемость не блокировала
+    W2 до Web Risk/Wayback. threats — ответ Web Risk."""
     class _W:  # aparser
         def whois_probe(self, dom): return {"available": False, "created": whois_dt}
-    class _R:
-        def is_listed(self, dom): return rkn
+    class _WR:
+        configured = True
+        def threats(self, dom): return list(threats)
     class _Bl:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
     class _Wb:
         def classify_history(self, dom):
             return wb_flags or {"prior_flags": {}, "wayback_checked": True,
                                 "first_seen": None, "age_years": 10.0}
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _Bl(), "searxng": _S(),
-            "wayback": _Wb(), "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "webrisk": _WR(), "blacklist": _Bl(), "wayback": _Wb(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 def test_scoring_persists_and_jsonb_roundtrips():
@@ -65,7 +46,7 @@ def test_scoring_persists_and_jsonb_roundtrips():
     from datetime import datetime, timezone, timedelta
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)   # старше min_age_years -> проходит T1
     out = scoring.score_domain(did, clients=_funnel_clients(old))
-    assert out["status"] in ("approved", "scored")
+    assert out["status"] == "scored"
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.score is not None and d.status == out["status"]
@@ -73,19 +54,24 @@ def test_scoring_persists_and_jsonb_roundtrips():
         assert d.prior_flags == {}
 
 
-def test_scoring_hard_reject_on_rkn():
+def test_scoring_hard_reject_on_webrisk_threat():
     from app.services import scoring
-    did = _add(Domain(domain="blocked.ru", source="backorder", status="discovered", lane="bid"))
-    # whois=None -> T1 пропущен без возраста; RKN=True рубит на T2, Wayback не вызывается
-    out = scoring.score_domain(did, clients=_funnel_clients(None, rkn=True))
+    from app.services.transitions import dirty_reason
+    did = _add(Domain(domain="blocked.com", source="backorder", status="discovered", lane="bid"))
+    # whois=None -> W2 без даты; угроза Web Risk рубит на W3, Wayback не вызывается
+    out = scoring.score_domain(did, clients=_funnel_clients(None, threats=["MALWARE"]))
     assert out["status"] == "rejected" and out["score"] == 0.0
-    assert out["reject_reason"] == "rkn"
+    assert out["reject_reason"] == "blacklist"
     with db.SessionLocal() as s:
-        assert s.get(Domain, did).clean is False
+        d = s.get(Domain, did)
+        assert d.clean is False and d.blacklisted is None          # 1.5: колонку Spamhaus не трогаем
+        assert d.score_breakdown["webrisk_threats"] == ["MALWARE"]
+        # грязь здесь видна по reject_reason; ветку улики webrisk_threats отдельно держит test_transitions
+        assert dirty_reason(d) == "blacklist"
 
 
 def test_panel_actions(client, monkeypatch):
-    did = _add(Domain(domain="curate-me.ru", source="backorder", status="scored"))
+    did = _add(Domain(domain="curate-me.com", source="backorder", status="scored"))
     # manual curation: valid transition sticks (303 -> redirect back to /)
     r = client.post(f"/domains/{did}/set-status", data={"status": "approved"},
                     follow_redirects=False)

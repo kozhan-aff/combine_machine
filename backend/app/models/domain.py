@@ -61,6 +61,10 @@ class Domain(Base):
     wayback_checked: Mapped[bool] = mapped_column(Boolean, default=False)
     prior_flags: Mapped[dict | None] = mapped_column(JSONB)          # {adult, pharma, casino, spam, gambling}
     indexed_echo: Mapped[bool | None] = mapped_column(Boolean)       # old content still indexed
+    # v2: язык и тема прошлого сайта — W5 (LLM по видимому тексту снимков Wayback); у EMD язык
+    # берётся из набора ключей. Мягкий сигнал для оператора и рынка, не гейт.
+    market_lang: Mapped[str | None] = mapped_column(String(8))
+    topic: Mapped[str | None] = mapped_column(String(120))
 
     # risk (Stage E)
     rkn_listed: Mapped[bool | None] = mapped_column(Boolean)
@@ -82,17 +86,17 @@ class Domain(Base):
     scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # funnel bookkeeping
-    reject_reason: Mapped[str | None] = mapped_column(String(32))    # low_rd|feed_flag|too_young|rkn|blacklist|history_dirty|low_score|not_acquirable
+    reject_reason: Mapped[str | None] = mapped_column(String(32))    # v2: tld_closed|trademark|feed_flag|not_acquirable|blacklist|low_rd|history_dirty|too_young|spam_anchors|low_score; легаси v1: rkn|safebrowsing|legacy_ru
     whois_created: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дата регистрации (первичный возраст)
     feed_flags: Mapped[dict | None] = mapped_column(JSONB)           # сырые флаги источника: {rkn, judicial, block}
 
     # приобретаемость (Мозг M1)
     lane: Mapped[str | None] = mapped_column(String(8))              # bid | free | null
-    acquire_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дедлайн ловли (backorder delete_date)
+    acquire_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # дедлайн ловли (дата дропа источника или оценка по статусу RDAP)
     acquire_price: Mapped[float | None] = mapped_column(Numeric)     # базовая цена выкупа (backorder тариф)
     price_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # когда в последний раз whois'ом сверяли, что домен ВСЁ ЕЩЁ можно купить. Скоринг решает
-    # приобретаемость один раз (T1) и больше не возвращается — а список доноров протухает:
+    # приобретаемость один раз (W2) и больше не возвращается — а список доноров протухает:
     # одобренный вчера домен сегодня может быть уже зарегистрирован кем-то другим. NULL = ни
     # разу не перепроверяли после скоринга.
     acquirability_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -141,3 +145,18 @@ class AcquisitionOrder(Base):
               postgresql_where=text(_OPEN_ORDER_SQL),
               sqlite_where=text(_OPEN_ORDER_SQL)),
     )
+
+
+class DrSeen(Base):
+    """Память бесплатного DR Ahrefs (решение оператора Р4, миграция 0025).
+
+    Без неё DR одних и тех же не вставленных доменов (ниже порога) спрашивался бы заново на каждом
+    прогоне discovery — живьём 123 запроса на 122 тыс. доменов при повторе в тот же день, а лицензия
+    Ahrefs запрещает систематический сбор: DR один раз на домен. discovery (Задача 6) перед запросом
+    отсекает домены со свежей записью (4 суток), после успешного ответа пишет ВСЕ спрошенные домены
+    (`dr` None — Ahrefs DR не вернул), в начале прогона удаляет записи старше 4 суток."""
+    __tablename__ = "dr_seen"
+
+    domain: Mapped[str] = mapped_column(String(253), primary_key=True)
+    dr: Mapped[float | None] = mapped_column(Numeric)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

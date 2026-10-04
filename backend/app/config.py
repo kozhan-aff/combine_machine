@@ -8,10 +8,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://portfolio:portfolio@db:5432/portfolio"
     APP_ENV: str = "dev"
 
-    # metrics
-    METRICS_PROVIDER: str = "ahrefs"
+    # Ahrefs API v3 (integrations/ahrefs.py): DR-free, batch-analysis, анкоры, история трафика
     AHREFS_API_KEY: str = ""
-    CHECKTRUST_API_KEY: str = ""
 
     # serp + keywords
     SEO_DATA_PROVIDER: str = "dataforseo"
@@ -54,6 +52,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://192.168.1.77:4000"   # ponytail: dev-box default, override via .env
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "mistral"                        # mistral(=mistral-large) | mistral-small | ollama/<m>
+    LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
 
     # searxng — free SERP (локальный бокс)
     SEARXNG_URL: str = "http://192.168.1.77:8080"    # ponytail: dev-box default, override via .env
@@ -63,12 +62,10 @@ class Settings(BaseSettings):
     APARSER_API_KEY: str = ""
     APARSER_PROXY_CHECKER: str = "ipv6_free"  # имя прокси-чекера в A-Parser UI, box-specific
 
-    # rkn — источник реестра (antizapret primary; z-i заморожен 2025-10)
-    RKN_SOURCE_URL: str = "https://antizapret.prostovpn.org/domains-export.txt"
-
     # spamhaus/surbl — нужен свой резолвер (публичные 8.8.8.8/1.1.1.1 блокируются)
     DNS_RESOLVER: str = ""
     SPAMHAUS_DQS_KEY: str = ""
+    WEBRISK_API_KEY: str = ""          # Google Web Risk (замена Safe Browsing); пусто -> W3 «не настроено»
 
     # опц. локальные сервисы (тот же бокс)
     BROWSERLESS_URL: str = ""

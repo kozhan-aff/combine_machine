@@ -37,21 +37,23 @@ def test_list_budget_adapts_legacy_list_in_place():
     assert b.take() is False and box == [0]
 
 
-def test_wave_t0_rejects_feed_flag_and_low_rd_without_touching_alive_ones():
-    st = {"min_referring_domains": 5}
-    flagged = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None,
+def test_wave_t0_rejects_feed_flag_and_leaves_rd_to_links_wave():
+    """W0 не судит RD: в v2 его даёт Ahrefs в W4 «ссылки» (RD из строки домена — не наблюдение
+    этого прогона). Домен с низким RD из строки проходит W0 живым."""
+    st = {"min_referring_domains": 5, "tld_allowlist": ["com"], "brand_tokens": []}
+    flagged = scoring.FunnelState(domain_id=1, domain="a.com", lane=None,
                                   referring_domains=10, acquire_deadline=None,
                                   feed_flags={"rkn": True})
-    low_rd = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None,
+    low_rd = scoring.FunnelState(domain_id=2, domain="b.com", lane=None,
                                  referring_domains=1, acquire_deadline=None,
                                  feed_flags=None)
-    ok = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None,
+    ok = scoring.FunnelState(domain_id=3, domain="c.com", lane=None,
                              referring_domains=50, acquire_deadline=None,
                              feed_flags=None)
     states = [flagged, low_rd, ok]
     scoring._wave_t0(states, st)
     assert flagged.alive is False and flagged.reject_reason == "feed_flag"
-    assert low_rd.alive is False and low_rd.reject_reason == "low_rd"
+    assert low_rd.alive is True and low_rd.reject_reason is None
     assert ok.alive is True and ok.reject_reason is None
 
 
@@ -119,45 +121,42 @@ class _FakeAparserWhois:
             raise RuntimeError("timeout")
         return {"available": self.available, "created": self.created}
 
-    def safebrowsing_check(self, domain):
-        return False
+
+def _clients_aparser_only(**kw):
+    return {"aparser": _FakeAparserWhois(**kw), "_whois_lock": threading.Lock()}
 
 
-def _clients_no_tci(**kw):
-    return {"aparser": _FakeAparserWhois(**kw),
-            "tci": type("T", (), {"handles": lambda self, d: False})(),
-            "_whois_lock": threading.Lock()}
-
-
-def test_wave_whois_rejects_too_young_bid_domain():
+def test_wave_avail_records_young_age_but_does_not_reject_bid_domain():
+    """Р5: W2 возраст только записывает. Молодая дата регистрации у bid-домена — не отказ: у
+    перехваченного домена это дата ПОСЛЕДНЕЙ регистрации; судит волна истории по старшей дате."""
     st = {"min_age_years": 3.0}
     young = datetime.now(timezone.utc) - timedelta(days=200)
-    s = scoring.FunnelState(domain_id=1, domain="young.ru", lane="bid",
+    s = scoring.FunnelState(domain_id=1, domain="young.com", lane="bid",
                             referring_domains=5, acquire_deadline=None, feed_flags=None)
-    clients = _clients_no_tci(available=False, created=young)
-    scoring._wave_whois([s], clients, budget=None, st=st, run=None)
-    assert s.alive is False and s.reject_reason == "too_young"
+    clients = _clients_aparser_only(available=False, created=young)
+    scoring._wave_avail([s], clients, budget=None, st=st, run=None)
+    assert s.alive is True and s.reject_reason is None
+    assert s.sig["whois_created"] == young and s.sig["age_years"] < 1
 
 
-def test_wave_whois_marks_free_lane_and_survives():
+def test_wave_avail_marks_free_lane_and_survives():
     st = {"min_age_years": 3.0}
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)
-    s = scoring.FunnelState(domain_id=2, domain="free.ru", lane=None,
+    s = scoring.FunnelState(domain_id=2, domain="free.com", lane=None,
                             referring_domains=5, acquire_deadline=None, feed_flags=None)
-    clients = _clients_no_tci(available=True, created=old)
-    scoring._wave_whois([s], clients, budget=None, st=st, run=None)
+    clients = _clients_aparser_only(available=True, created=old)
+    scoring._wave_avail([s], clients, budget=None, st=st, run=None)
     assert s.alive is True and s.sig["lane"] == "free"
 
 
-def test_wave_whois_budget_exhausted_marks_unresolved_without_network_call():
+def test_wave_avail_budget_exhausted_marks_unresolved_without_network_call():
     st = {"min_age_years": 3.0}
-    s = scoring.FunnelState(domain_id=3, domain="over.ru", lane=None,
+    s = scoring.FunnelState(domain_id=3, domain="over.com", lane=None,
                             referring_domains=5, acquire_deadline=None, feed_flags=None)
     aparser = _FakeAparserWhois(available=True)
-    clients = {"aparser": aparser, "tci": type("T", (), {"handles": lambda self, d: False})(),
-               "_whois_lock": threading.Lock()}
+    clients = {"aparser": aparser, "_whois_lock": threading.Lock()}
     budget = scoring.Budget(0)
-    scoring._wave_whois([s], clients, budget=budget, st=st, run=None)
+    scoring._wave_avail([s], clients, budget=budget, st=st, run=None)
     assert s.alive is False and s.unresolved_why == "budget"
     assert aparser.calls == 0          # бюджет исчерпан ДО сети — вызова не было
 
@@ -181,7 +180,7 @@ class _SlowAlwaysFailAparser:
         raise RuntimeError("timeout")
 
 
-def test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap():
+def test_wave_avail_breaker_lock_has_no_lost_increments_under_real_overlap():
     """20 доменов, конкурентность 12, whois всегда падает С ЗАДЕРЖКОЙ (форсирует настоящее
     перекрытие потоков, не последовательный проход) — интеграционный смоук-тест волны под
     реальной нагрузкой, а НЕ ловец гонки на счётчике (честно, по итогам повторной проверки
@@ -194,13 +193,13 @@ def test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap():
     полезным как регрессия на бухгалтерию волны (breaker реально трипает и реально
     останавливает часть вызовов под конкурентной нагрузкой, домены помечаются корректно)."""
     st = {"min_age_years": 3.0}
-    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.ru", lane=None,
+    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.com", lane=None,
                                   referring_domains=5, acquire_deadline=None,
                                   feed_flags=None) for i in range(20)]
     aparser = _SlowAlwaysFailAparser()
-    clients = {"aparser": aparser, "tci": type("T", (), {"handles": lambda self, d: False})(),
+    clients = {"aparser": aparser,
               "_whois_lock": threading.Lock()}
-    scoring._wave_whois(states, clients, budget=None, st=st, run=None)
+    scoring._wave_avail(states, clients, budget=None, st=st, run=None)
     assert all(not s.alive and s.unresolved_why == "whois_failed" for s in states)
     assert aparser.whois_failures == aparser.calls    # держится и без гонки — см. докстринг
     assert 3 <= aparser.whois_failures < 20           # предохранитель реально сработал и что-то остановил
@@ -246,133 +245,34 @@ def test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment():
     assert ap.whois_failures == 3
 
 
-def test_wave_whois_actually_runs_concurrently_not_serially():
-    """Сеть в тесте эмулирована time.sleep(0.05) на 24 домена. Последовательно это было бы
-    >=1.2с; при конкурентности 12 — не больше ~0.15с (2 партии по 12). Пороговое значение
-    щедрое (0.5с), чтобы не флапать на медленном CI, но 10x-разница гарантирует, что пул
-    реально работает, а не притворяется."""
-    st = {"min_age_years": 3.0}
-    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.ru", lane=None,
-                                  referring_domains=5, acquire_deadline=None,
-                                  feed_flags=None) for i in range(24)]
+def test_wave_avail_actually_runs_concurrently_not_serially():
+    """Конкурентность волны — подсчётом одновременных входов, а не таймингом (находка 5.17:
+    прежний порог 0.5 с флапал под нагрузкой). Барьер на _CONCURRENCY["avail"] участников
+    пропускает, только если столько вызовов РЕАЛЬНО стоят в whois одновременно; последовательный
+    обход упёрся бы в таймаут барьера, и домены упали бы. Пик выше пула — тоже провал."""
+    n = scoring._CONCURRENCY["avail"]
+    barrier = threading.Barrier(n, timeout=10)
+    lock, active, peak = threading.Lock(), [0], [0]
 
-    class _SlowAparser:
+    class _MeetingAparser:
         def whois_probe(self, d):
-            time.sleep(0.05)
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                barrier.wait()
+            finally:
+                with lock:
+                    active[0] -= 1
             return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
 
-    clients = {"aparser": _SlowAparser(),
-              "tci": type("T", (), {"handles": lambda self, d: False})(),
-              "_whois_lock": threading.Lock()}
-    start = time.monotonic()
-    scoring._wave_whois(states, clients, budget=None, st=st, run=None)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.5, f"волна заняла {elapsed:.2f}с — похоже на последовательный обход"
-    assert all(s.alive for s in states)
-
-
-class _FakeRiskClients:
-    def __init__(self, rkn=False, bl=False, sb=False, echo=True, sb_fail_times=0):
-        self.rkn, self.bl, self.sb, self.echo = rkn, bl, sb, echo
-        self.sb_fail_times = sb_fail_times
-        self.sb_calls = 0
-        self.safebrowsing_failures = 0
-
-    def is_listed(self, d): return self.rkn
-    def is_blacklisted(self, d): return self.bl
-    def indexed_echo(self, d): return self.echo
-    def safebrowsing_check(self, d):
-        self.sb_calls += 1
-        if self.sb_calls <= self.sb_fail_times:
-            raise RuntimeError("timeout")
-        return self.sb
-
-
-def _risk_clients(**kw):
-    ap = _FakeRiskClients(**kw)
-    return {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap,
-           "_safebrowsing_lock": threading.Lock()}
-
-
-def test_wave_risk_rejects_rkn():
-    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=5,
-                            acquire_deadline=None, feed_flags=None)
-    scoring._wave_risk([s], _risk_clients(rkn=True), run=None)
-    assert s.alive is False and s.reject_reason == "rkn"
-
-
-def test_wave_risk_fills_echo_without_rejecting():
-    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=5,
-                            acquire_deadline=None, feed_flags=None)
-    scoring._wave_risk([s], _risk_clients(echo=True), run=None)
-    assert s.alive is True and s.sig["indexed_echo"] is True
-
-
-class _SlowFakeRiskClients(_FakeRiskClients):
-    """SafeBrowsing с задержкой — форсирует РЕАЛЬНОЕ перекрытие потоков на предохранителе.
-    Без задержки первый воркер успевал бы отработать (гейт-чек + инкремент) до того, как
-    остальные вообще стартовали бы, и "safebrowsing_failures <= LIMIT" прошёл бы ОДИНАКОВО
-    что с рабочим локом, что без него (тот же баг теста, что нашло ревью Task 2 для
-    whois-предохранителя — см. test_wave_whois_breaker_lock_has_no_lost_increments_under_real_overlap;
-    сломанный лок ТЕРЯЕТ инкременты => счётчик МЕНЬШЕ => тоже <= LIMIT => ложный зелёный)."""
-    def safebrowsing_check(self, d):
-        self.sb_calls += 1
-        time.sleep(0.02)
-        raise RuntimeError("timeout")
-
-
-def test_wave_risk_safebrowsing_breaker_lock_has_no_lost_increments_under_real_overlap():
-    """Интеграционный смоук-тест волны под реальной нагрузкой, а НЕ ловец гонки на
-    счётчике (честно, по итогам повторной проверки ревью, 2026-07-21: read-modify-write
-    внутри `with cm:` — пара строк без I/O между ними, 30-60 прогонов подряд БЕЗ лока
-    (`nullcontext`) давали тот же результат "инкременты не потеряны" — таймингом эту
-    гонку не форсировать за разумное число прогонов). Настоящую гарантию, что
-    _risk_one берёт лок вокруг ОБЕИХ операций, даёт детерминированный
-    test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment ниже (спай-лок,
-    считает реальные входы). Этот тест остаётся полезным как регрессия на бухгалтерию
-    волны под конкурентной нагрузкой."""
-    states = [scoring.FunnelState(domain_id=i, domain=f"d{i}.ru", lane=None,
+    states = [scoring.FunnelState(domain_id=i, domain=f"slow{i}.com", lane=None,
                                   referring_domains=5, acquire_deadline=None,
-                                  feed_flags=None) for i in range(20)]
-    ap = _SlowFakeRiskClients()
-    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap,
-              "_safebrowsing_lock": threading.Lock()}
-    scoring._wave_risk(states, clients, run=None)
-    assert all(s.alive for s in states)   # SafeBrowsing-сбой не отбраковывает, только errors
-    assert any("safebrowsing:" in e for s in states for e in s.sig["errors"])
-    assert ap.safebrowsing_failures == ap.sb_calls    # держится и без гонки — см. докстринг
-    assert 3 <= ap.safebrowsing_failures < 20         # предохранитель реально сработал
-
-
-def test_wave_risk_safebrowsing_lock_covers_gate_check_and_increment():
-    """Детерминированная проверка структуры блокировки (не таймингом) — тот же паттерн,
-    что test_aparser_whois_breaker_locks_both_the_gate_check_and_the_increment для
-    whois-предохранителя: спай-лок считает входы, а не полагается на редкую гонку GIL."""
-    class _SpyLockRisk:
-        def __init__(self):
-            self._real = threading.Lock()
-            self.enters = 0
-        def __enter__(self):
-            self._real.acquire()
-            self.enters += 1
-        def __exit__(self, *a):
-            self._real.release()
-
-    class _AlwaysFailsSb:
-        def is_listed(self, d): return False
-        def is_blacklisted(self, d): return False
-        def indexed_echo(self, d): return True
-        def safebrowsing_check(self, d): raise RuntimeError("timeout")
-
-    lock = _SpyLockRisk()
-    ap = _AlwaysFailsSb()
-    clients = {"rkn": ap, "blacklist": ap, "aparser": ap, "searxng": ap}
-    for i in range(3):        # ровно до порога (_APARSER_SAFEBROWSING_LIMIT=3)
-        s = scoring.FunnelState(domain_id=i, domain=f"x{i}.ru", lane=None,
-                                referring_domains=5, acquire_deadline=None, feed_flags=None)
-        scoring._risk_one(s, clients, lock)
-    assert lock.enters == 6     # 3 попытки x (гейт-чек + инкремент)
-    assert ap.safebrowsing_failures == 3
+                                  feed_flags=None) for i in range(2 * n)]
+    clients = {"aparser": _MeetingAparser(), "_whois_lock": threading.Lock()}
+    scoring._wave_avail(states, clients, budget=None, st={"min_age_years": 3.0}, run=None)
+    assert peak[0] == n                     # ровно пул: и не последовательно, и не шире
+    assert all(s.alive for s in states)
 
 
 class _FakeWayback:
@@ -409,80 +309,23 @@ def test_wave_history_age_fallback_rejects_too_young_when_whois_had_no_age():
     assert s.sig["age_source"] == "wayback"
 
 
-def test_wave_history_keeps_whois_age_over_wayback_fallback():
-    s = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None, referring_domains=5,
-                            acquire_deadline=None, feed_flags=None)
-    s.sig["whois_created"] = "2010-01-01"      # whois УЖЕ дал возраст — Wayback не должен его затирать
+def test_wave_history_takes_older_of_whois_and_wayback_age():
+    """Р5: возраст для решения — старшая из даты RDAP/whois и первого снимка. Архивный возраст
+    больше whois-ного — побеждает архив; меньше — остаётся whois-ный. Раньше whois всегда
+    перебивал архив, и перехваченный домен с долгой историей выглядел молодым."""
     st = {"min_age_years": 3.0}
-    scoring._wave_history([s], {"wayback": _FakeWayback(age_years=1.0)}, st, run=None)
-    assert s.alive is True
-    assert "age_source" not in s.sig or s.sig.get("age_source") != "wayback"
-
-
-class _FakeAhrefs:
-    def __init__(self, dr=5.0, backlinks=100, rd=50, raises=False):
-        self.dr, self.backlinks, self.rd, self.raises = dr, backlinks, rd, raises
-        self.calls = 0
-
-    def ahrefs_probe(self, domain):
-        self.calls += 1
-        if self.raises:
-            raise RuntimeError("captcha failed")
-        return {"dr": self.dr, "backlinks": self.backlinks, "referring_domains": self.rd}
-
-
-def test_wave_ahrefs_skips_domain_with_feed_rd():
-    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=500,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 0 and "dr" not in s.sig
-
-
-def test_wave_ahrefs_probes_when_feed_has_no_rd_and_budget_available():
-    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(dr=7.0)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 1 and s.sig["dr"] == 7.0
-
-
-def test_wave_ahrefs_none_budget_means_disabled():
-    s = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, budget=None, run=None)
-    assert ap.calls == 0
-
-
-def test_wave_ahrefs_failure_does_not_reject():
-    s = scoring.FunnelState(domain_id=4, domain="d.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(raises=True)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert s.alive is True
-    assert any("ahrefs:" in e for e in s.sig["errors"])
-
-
-def test_wave_ahrefs_exhausted_budget_skips_without_call():
-    """Находка ревью Task 5: пробел покрытия — исчерпанный (не None) бюджет не был
-    отдельно проверен на реальный отказ от сети."""
-    s = scoring.FunnelState(domain_id=5, domain="e.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(0), run=None)
-    assert ap.calls == 0 and "dr" not in s.sig
-
-
-def test_wave_ahrefs_does_not_overwrite_referring_domains_with_none():
-    """Находка ревью Task 5: sig["referring_domains"] обязан обновляться ТОЛЬКО когда
-    Ahrefs реально вернул значение — None от Ahrefs не должен затирать ключ пустотой."""
-    s = scoring.FunnelState(domain_id=6, domain="f.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(rd=None)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 1
-    assert "referring_domains" not in s.sig
+    recaught = scoring.FunnelState(domain_id=3, domain="c.com", lane=None, referring_domains=5,
+                                   acquire_deadline=None, feed_flags=None)
+    recaught.sig.update({"whois_created": datetime(2023, 1, 1, tzinfo=timezone.utc),
+                         "age_years": 3.5, "age_source": "whois"})
+    old = scoring.FunnelState(domain_id=4, domain="d.com", lane=None, referring_domains=5,
+                              acquire_deadline=None, feed_flags=None)
+    old.sig.update({"whois_created": datetime(2010, 1, 1, tzinfo=timezone.utc),
+                    "age_years": 16.0, "age_source": "whois"})
+    scoring._wave_history([recaught, old], {"wayback": _FakeWayback(age_years=9.0)}, st, run=None)
+    assert recaught.alive and recaught.sig["age_years"] == 9.0
+    assert recaught.sig["age_source"] == "wayback"
+    assert old.alive and old.sig["age_years"] == 16.0 and old.sig["age_source"] == "whois"
 
 
 # ============================================================================
@@ -538,9 +381,9 @@ def test_commit_result_computes_score_for_survivor():
                             referring_domains=5000, acquire_deadline=None,
                             feed_flags=None)
     s.sig.update({"wayback_checked": True, "prior_flags": {}, "age_years": 10,
-                 "indexed_echo": True, "dr": None})
+                 "dr": None})
     out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
-    assert out["status"] in ("approved", "scored") and out["score"] > 0
+    assert out["status"] == "scored" and out["score"] > 0
     with db.SessionLocal() as sess:
         d = sess.get(Domain, did)
         assert float(d.score) == out["score"] and d.status == out["status"]
@@ -551,16 +394,14 @@ def test_commit_result_computes_score_for_survivor():
 # ============================================================================
 
 def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
-    """100 -> 40 после whois (RKN не проверяем — часть отвалится раньше) -> итог: waterfall
-    в job_run.message показывает уменьшение пула по волнам."""
+    """10 доменов -> половина выпадает на W2 (занят, лейна и даты нет -> не решить) -> итог:
+    waterfall в job_run.message показывает уменьшение пула по волнам."""
     from app.services import jobs
 
-    ids = [_mk_domain(domain=f"pool{i}.ru", referring_domains=5) for i in range(10)]
-    states = [scoring.FunnelState(domain_id=did, domain=f"pool{i}.ru", lane=None,
+    ids = [_mk_domain(domain=f"pool{i}.com", referring_domains=5) for i in range(10)]
+    states = [scoring.FunnelState(domain_id=did, domain=f"pool{i}.com", lane=None,
                                   referring_domains=5, acquire_deadline=None, feed_flags=None)
              for i, did in enumerate(ids)]
-    # чётные домены "слишком молоды" на whois — отвалятся на первой сетевой волне
-    young = datetime.now(timezone.utc) - timedelta(days=100)
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)
 
     class _Ap:
@@ -568,33 +409,31 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
             self.n = 0
         def whois_probe(self, d):
             self.n += 1
-            age = young if self.n % 2 == 0 else old
-            return {"available": True, "created": age}
-        def safebrowsing_check(self, d): return False
-        def ahrefs_probe(self, d): return {"dr": 1.0, "backlinks": 0, "referring_domains": None}
-    clients = {"aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
-              "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+            # чётные — заняты без даты дропа и без лейна: W2 их не решает (taken_undated)
+            return {"available": self.n % 2 != 0, "created": old}
+    clients = {"aparser": _Ap(),
+              "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                        "batch": lambda self, ds: {d: {} for d in ds}})(),
               "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-              "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
               "wayback": _FakeWayback(dirty=False, age_years=9.0),
-              "_whois_lock": threading.Lock(), "_safebrowsing_lock": threading.Lock()}
+              "_whois_lock": threading.Lock()}
     st = {"min_age_years": 3.0, "approve_at": 0.7, "manual_review_at": 0.4,
-         "min_referring_domains": 1}
+         "min_referring_domains": 1, "tld_allowlist": ["com"], "brand_tokens": []}
 
     with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
         out = scoring._run_waves(states, clients, st, whois_budget=None,
-                                 ahrefs_budget=None, run=run)
+                                 links_budget=None, run=run)
     assert len(out) == 10
     survived = [s for s in states if s.alive]
     assert 0 < len(survived) < 10          # реально сжалось, не всё выжило и не всё умерло
     last = jobs.last("score")
-    assert "whois" in last["message"] and ("->" in last["message"] or "→" in last["message"])
+    assert "доступность" in last["message"] and ("->" in last["message"] or "→" in last["message"])
     # мини-полоски на чипах (2026-07-21): before/after написаны на КАЖДУЮ стадию, не только
     # в текстовый waterfall — jobCard() их и рисует.
     by_key = {s["key"]: s for s in last["stages"]}
-    assert by_key["rd"]["before"] == 10 and by_key["rd"]["after"] == 10
-    assert by_key["whois"]["before"] == 10 and by_key["whois"]["after"] == len(survived)
-    assert by_key["ahrefs"]["before"] == by_key["ahrefs"]["after"] == len(survived)
+    assert by_key["t0"]["before"] == 10 and by_key["t0"]["after"] == 10
+    assert by_key["avail"]["before"] == 10 and by_key["avail"]["after"] == len(survived)
+    assert by_key["history"]["before"] == by_key["history"]["after"] == len(survived)
 
 
 def test_run_waves_cancellation_between_waves_preserves_partial_progress():
@@ -605,21 +444,20 @@ def test_run_waves_cancellation_between_waves_preserves_partial_progress():
     паттерн уже сломал сходный тест в test_scoring_waves.py при первом написании)."""
     from app.services import jobs
 
-    ids = [_mk_domain(domain=f"cancel{i}.ru", referring_domains=5) for i in range(5)]
-    states = [scoring.FunnelState(domain_id=did, domain=f"cancel{i}.ru", lane=None,
+    ids = [_mk_domain(domain=f"cancel{i}.com", referring_domains=5) for i in range(5)]
+    states = [scoring.FunnelState(domain_id=did, domain=f"cancel{i}.com", lane=None,
                                   referring_domains=5, acquire_deadline=None, feed_flags=None)
              for i, did in enumerate(ids)]
     clients = {"aparser": type("Ap", (), {
                   "whois_probe": lambda self, d: {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}})(),
-              "tci": type("T", (), {"handles": lambda self, d: False})(),
               "_whois_lock": threading.Lock()}
     st = {"min_age_years": 3.0, "approve_at": 0.7, "manual_review_at": 0.4,
-         "min_referring_domains": 1}
+         "min_referring_domains": 1, "tld_allowlist": ["com"], "brand_tokens": []}
 
     with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
         jobs.request_cancel("score")
         scoring._run_waves(states, clients, st, whois_budget=None,
-                           ahrefs_budget=None, run=run)
+                           links_budget=None, run=run)
     last = jobs.last("score")
     assert last["status"] == "cancelled"
 
@@ -632,7 +470,7 @@ def test_score_pending_builds_states_with_lane_and_rd_from_one_query(monkeypatch
     """score_pending больше не должен грузить lane/referring_domains/acquire_deadline
     доменом по домену внутри волны — они обязаны прийти из ИСХОДНОГО SELECT (см. Task 9),
     иначе каждая волна платила бы отдельным SELECT на КАЖДЫЙ домен пачки."""
-    did = _mk_domain(domain="batch1.ru", referring_domains=5, lane="bid")
+    did = _mk_domain(domain="batch1.com", referring_domains=5, lane="bid")
 
     captured = {}
     calls = {"n": 0}
@@ -647,14 +485,10 @@ def test_score_pending_builds_states_with_lane_and_rd_from_one_query(monkeypatch
     class _Ap:
         def whois_probe(self, d):
             return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
-        def safebrowsing_check(self, d): return False
     monkeypatch.setattr(scoring, "_make_clients", lambda: {
-        "aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
+        "aparser": _Ap(),
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": _FakeWayback(), "_whois_lock": threading.Lock(),
-        "_safebrowsing_lock": threading.Lock()})
+        "wayback": _FakeWayback(), "_whois_lock": threading.Lock()})
 
     scoring.score_pending(limit=10)
     assert calls["n"] == 1              # ОДИН вызов на весь батч, не по домену
@@ -666,22 +500,20 @@ def test_score_pending_builds_states_with_lane_and_rd_from_one_query(monkeypatch
 
 def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits(monkeypatch):
     """Task 9 self-review (c). `_run_waves()` на отмене делает `raise jobs.Cancelled()` ДО
-    своего `return results` (см. его тело, между КАЖДОЙ парой волн) — локальный список
-    результатов теряется вместе со стеком развёртывания, ХОТЯ `_checkpoint()` внутри уже мог
-    реально закоммитить в БД домены волной(ами) РАНЬШЕ той, где прилетела отмена (T0/whois
-    пишут в БД сразу по завершении своей волны, до общего возврата `_run_waves`). Если считать
-    `done=len(results)` голым — при отмене он ВСЕГДА 0, даже если реально отброшено N доменов:
-    контракт docstring'а («частичное число, не len(rows)») соврёт. Проверено эмпирически
-    (see task-9-report.md) — 2 домена low_rd (T0) + 3 too_young (whois) реально осели в БД
-    как rejected, а голый `len(results)` показал бы 0."""
-    ids = [_mk_domain(domain=f"lowrd{i}.ru", referring_domains=0, lane="bid") for i in range(2)]
-    ids += [_mk_domain(domain=f"young{i}.ru", referring_domains=5, lane="bid") for i in range(3)]
+    своего `return results` — локальный список результатов теряется вместе со стеком
+    развёртывания, ХОТЯ `_checkpoint()` внутри уже мог реально закоммитить в БД домены
+    волной(ами) РАНЬШЕ той, где прилетела отмена. Если считать `done=len(results)` голым — при
+    отмене он ВСЕГДА 0, даже если реально отброшено N доменов: контракт docstring'а («частичное
+    число, не len(rows)») соврёт. Здесь 2 домена feed_flag (W0) + 3 not_acquirable (W2: лейн free,
+    а домен занят) реально оседают в БД как rejected до отмены на волне risk."""
+    ids = [_mk_domain(domain=f"flag{i}.com", feed_flags={"block": True}, lane="bid") for i in range(2)]
+    ids += [_mk_domain(domain=f"taken{i}.com", referring_domains=5, lane="free") for i in range(3)]
 
     from app.services import jobs as jobs_mod
     real_wave_risk = scoring._wave_risk
 
     def spy_risk(states, clients, run):
-        # к этому моменту T0 и whois УЖЕ закоммитили все 5 (alive пуст) — отмена здесь
+        # к этому моменту W0 и W2 УЖЕ закоммитили все 5 (alive пуст) — отмена здесь
         # проверяет именно то, что происходит МЕЖДУ волнами, после реальных чекпоинтов.
         jobs_mod.request_cancel("score")
         return real_wave_risk(states, clients, run)
@@ -689,10 +521,9 @@ def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits
 
     class _Ap:
         def whois_probe(self, d):
-            return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=10)}
+            return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
     monkeypatch.setattr(scoring, "_make_clients", lambda: {
-        "aparser": _Ap(), "tci": type("T", (), {"handles": lambda self, d: False})(),
-        "_whois_lock": threading.Lock()})
+        "aparser": _Ap(), "_whois_lock": threading.Lock()})
 
     n = scoring.score_pending(limit=10)
     assert n == 5                        # все 5 реально осели в БД, не 0
@@ -700,3 +531,35 @@ def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits
     with db.SessionLocal() as s:
         statuses = {s.get(Domain, i).status for i in ids}
     assert statuses == {"rejected"}
+
+
+def test_run_waves_reports_every_funnel_stage_in_order(monkeypatch):
+    """Порядок чипов (FUNNEL_STAGES) и порядок волн — одно и то же: стадия, о которой волна не
+    отчиталась, висела бы на панели «ожидает» вечно. Порядок проверяется по последовательности
+    stage_key в jobs.report. Волны и финализация подменены пустышками — тест про конвейер, а не
+    про сигналы, поэтому переживает смену набора волн (Задачи 9–13)."""
+    from collections import defaultdict
+    from app.services import jobs
+    from app.services.settings import get_settings
+
+    class _Quiet:
+        """Клиент-пустышка: любой метод отвечает None (волны подменены, сеть не нужна)."""
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    for name in [n for n in dir(scoring) if n.startswith("_wave_")]:
+        monkeypatch.setattr(scoring, name, lambda alive, *a, **k: None)
+    monkeypatch.setattr(scoring, "_commit_result", lambda s, run, st: {"domain": s.domain})
+    real, keys = jobs.report, []
+
+    def spy(run_id, **kw):
+        if kw.get("stage_key"):
+            keys.append(kw["stage_key"])
+        return real(run_id, **kw)
+    monkeypatch.setattr(jobs, "report", spy)
+    states = [scoring.FunnelState(domain_id=i, domain=f"ord{i}.com", lane="bid", referring_domains=5,
+                                  acquire_deadline=None, feed_flags=None) for i in range(2)]
+    st = {**get_settings(), "units_floor": 0}
+    out = scoring._run_waves(states, defaultdict(_Quiet), st, None, None, None)
+    assert keys == [s["key"] for s in scoring.FUNNEL_STAGES]
+    assert [r["domain"] for r in out] == ["ord0.com", "ord1.com"]

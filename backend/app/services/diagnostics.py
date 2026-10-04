@@ -1,6 +1,6 @@
 """Диагностика интеграций для панели — пингует всё, что нужно конвейеру, и
 возвращает статус (ok/fail/skip + latency + ошибка). Параллельно, с таймаутом,
-чтобы страница не висела на медленном пинге (Wayback/RKN).
+чтобы страница не висела на медленном пинге (Wayback).
 
 Чисто транспортная проверка: каждый клиент уже умеет ping(). Здесь только оркестрация.
 """
@@ -17,10 +17,11 @@ PING_TIMEOUT = 20.0  # сек на один пинг; Wayback стабильно
 # ключа любому, кто откроет/залогирует страницу (в отличие от GITHUB_TOKEN, который
 # deploy.py уже скрабит везде). Список — все credential-поля Settings.
 _SECRET_FIELDS = (
-    "AHREFS_API_KEY", "CHECKTRUST_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
+    "AHREFS_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
     "SERPAPI_KEY", "YANDEX_WORDSTAT_TOKEN", "BACKORDER_LOGIN", "BACKORDER_PASSWORD",
     "OPTIMIZATOR_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
     "LLM_API_KEY", "APARSER_API_KEY", "GITHUB_TOKEN", "PANEL_PASS", "SPAMHAUS_DQS_KEY",
+    "WEBRISK_API_KEY",
 )
 
 
@@ -40,6 +41,21 @@ def _db_ping() -> bool:
         return db.execute(text("SELECT 1")).scalar() == 1
 
 
+def _dropcatch_on() -> str:
+    """DropCatch пингуется, только пока источник включён: ToS не прочитан (инвариант 6 — никаких
+    автоматических обращений), а фон обновляет /diag каждые 5 минут — 288 вызовов в сутки."""
+    try:
+        from app.services.settings import get_settings
+        return "1" if get_settings()["sources_enabled"].get("dropcatch") else ""
+    except Exception:  # noqa: BLE001 — БД недоступна: не пингуем, причину покажет строка «db»
+        return ""
+
+
+# Причина skip, если она не «нет ключа».
+_SKIP_WHY = {"dropcatch": "источник выключен в /settings (ToS не прочитан) — не пингуем",
+             "webrisk": "WEBRISK_API_KEY не задан — не настроено (опц.), риск в воронке не проверяется"}
+
+
 def _spec():
     """Список проверок: (key, label, role, need_cred, module, critical, factory→ping).
 
@@ -56,22 +72,34 @@ def _spec():
          lambda: __import__("app.integrations.llm", fromlist=["x"]).LlmClient().ping()),
         ("searxng", "SearXNG", "M1/M5 · SERP/индекс", settings.SEARXNG_URL, "M5", False,
          lambda: __import__("app.integrations.searxng", fromlist=["x"]).SearxngClient().ping()),
-        ("backorder", "Backorder", "M1 · discovery", "1", "M1", True,  # публичный фид, кред не нужен
-         lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
-        ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M1", False,
+        ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M2", False,
          lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
         ("wayback", "Wayback", "M1 · история", "1", "M1", True,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
-        ("rkn", "РКН (antizapret)", "M1 · блок-лист", settings.RKN_SOURCE_URL, "M1", True,
-         lambda: __import__("app.integrations.rkn", fromlist=["x"]).RknClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
-        # Не critical: TCI — оптимизация (37мс вместо секунд A-Parser) для .ru/.рф/.su, не
-        # единственный путь к whois — сбой молча фолбэчит на A-Parser (services/whois.py),
-        # воронка не встаёт. Публичный сервис координатора зон, кред не нужен.
-        ("tci", "TCI whois", "M1 · whois .ru/.рф/.su (мимо A-Parser)", "1", "M1", False,
-         lambda: __import__("app.integrations.whois_tci", fromlist=["x"]).TciWhoisClient().ping()),
-        ("blacklist", "Spamhaus/SURBL", "M1 · спам-лист", "1", "M1", False,
+        # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть.
+        # Не критичен (финальное ревью): остаток 0 — это «fail» до месячного сброса, и баннер «Нет
+        # связи» горел бы на всех экранах неделями. Остаток виден на /settings и в сообщении задачи
+        # (`_paid_gate`), сбой W4 — там же с HTTP-кодом. Цена: настоящая недоступность Ahrefs баннером
+        # не видна — только строкой здесь и в сообщении задачи скоринга.
+        ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", False,
+         lambda: __import__("app.integrations.ahrefs", fromlist=["x"]).AhrefsClient().units_left()),
+        # не критичен (R2-18): ping() проверяет только бутстрап IANA, при его падении W2 живёт на
+        # встроенном _FALLBACK — красный баннер на всех экранах был бы ложной тревогой
+        ("rdap", "RDAP (IANA)", "M1 · доступность и возраст", "1", "M1", False,
+         lambda: __import__("app.integrations.rdap", fromlist=["x"]).RdapClient().ping()),
+        # только наличие ключа: настоящий lookup каждые 5 минут съедал бы ~8,6 тыс. из 100 тыс.
+        # бесплатных вызовов в месяц. Сбой самого Web Risk видно по `webrisk:` в воронке.
+        ("webrisk", "Google Web Risk", "M1 · риск (замена Safe Browsing)", settings.WEBRISK_API_KEY, "M1", False,
+         lambda: __import__("app.integrations.webrisk", fromlist=["x"]).WebRiskClient().configured),
+        ("dropcatch", "DropCatch", "M1 · дропы .com/.net/.org", _dropcatch_on(), "M1", False,
+         lambda: __import__("app.integrations.dropcatch", fromlist=["x"]).DropCatchClient().ping()),
+        ("nominet", "Nominet", "M1 · дропы .uk", "1", "M1", False,
+         lambda: __import__("app.integrations.nominet", fromlist=["x"]).NominetClient().ping()),
+        ("registry_mx", "registry.mx", "M1 · удалённые .mx", "1", "M1", False,
+         lambda: __import__("app.integrations.registry_mx", fromlist=["x"]).RegistryMxClient().ping()),
+        ("blacklist", "Spamhaus DBL (только с DQS)", "M1 · спам-лист", settings.SPAMHAUS_DQS_KEY, "M1", False,
          lambda: __import__("app.integrations.blacklist", fromlist=["x"]).BlacklistClient().ping()),
         ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
     ]
@@ -80,12 +108,17 @@ def _spec():
 def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
     base = {"key": key, "label": label, "role": role, "module": module, "critical": critical}
     if not need_cred:
-        return {**base, "status": "skip", "ms": None, "error": "нет кредов в .env"}
+        return {**base, "status": "skip", "ms": None, "error": _SKIP_WHY.get(key, "нет кредов в .env")}
     t0 = time.monotonic()
     try:
-        ok = bool(fn())
-        return {**base, "status": "ok" if ok else "fail",
-                "ms": int((time.monotonic() - t0) * 1000), "error": None}
+        v = fn()
+        num = isinstance(v, int) and not isinstance(v, bool)
+        # 0 и отрицательный остаток (перерасход) — «fail»: без units платные волны стоят
+        out = {**base, "status": "ok" if (v > 0 if num else v) else "fail",
+               "ms": int((time.monotonic() - t0) * 1000), "error": None}
+        if num:
+            out["value"] = v            # число (остаток units Ahrefs) — для экранов без сети
+        return out
     except Exception as e:  # noqa: BLE001 — любой сбой интеграции = красный, не 500
         return {**base, "status": "fail",
                 "ms": int((time.monotonic() - t0) * 1000),

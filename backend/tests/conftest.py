@@ -29,6 +29,11 @@ _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.mo
                     app.models.settings, app.models.autonomy, app.models.job,
                     app.models.domain_score_log)
 
+from app.integrations.rdap import RdapClient
+
+# настоящий бутстрап — для фикстуры real_rdap_bootstrap (autouse _no_paid_keys его подменяет)
+_REAL_RDAP_BOOTSTRAP = RdapClient._bootstrap
+
 
 @compiles(JSONB, "sqlite")
 def _jsonb_as_json(element, compiler, **kw):  # DDL only; bind/result still json.dumps/loads
@@ -125,19 +130,18 @@ def _drain_background_jobs(sqlite_db):
 
 
 @pytest.fixture(autouse=True)
-def _default_sources_backorder_only(sqlite_db, monkeypatch):
-    """Структурный офлайн-гвард (финальное ревью, Finding 4): по умолчанию сид настроек
-    воронки видит только backorder включённым — многоисточниковые cctld/reg_ru/sweb (httpx)
-    выключены, чтобы будущий тест run_discovery() не мог тихо уйти в живую сеть. Достигается
+def _default_sources_offline(sqlite_db, monkeypatch):
+    """Структурный офлайн-гвард (финальное ревью v1, Finding 4): по умолчанию сид настроек видит
+    ВСЕ источники v2 выключенными — все они сетевые (DropCatch, Nominet, registry.mx), а EMD без
+    наборов пуст, — чтобы тест run_discovery() не мог тихо уйти в живую сеть. Достигается
     монки-патчем самого дефолта в scoring_config (не отдельным update_settings-вызовом), поэтому
     test_settings.py::test_get_settings_seeds_defaults (сверяет seed с cfg.SOURCES_ENABLED)
-    остаётся верным — обе стороны сравнения видят один и тот же патченный дефолт. Тесты,
-    которым нужны другие источники, сами зовут update_settings(sources_enabled=...) и
-    переопределяют это явно (несколько уже так делают — их вызов становится избыточным, но
-    безвредным). Зависимость от sqlite_db — только порядок фикстур, самого патча она не требует."""
+    остаётся верным — обе стороны сравнения видят один и тот же патченный дефолт. Тесты, которым
+    нужны источники, сами зовут update_settings(sources_enabled=...) и подменяют
+    discovery._clients. Зависимость от sqlite_db — только порядок фикстур."""
     from app.services import scoring_config as cfg
     monkeypatch.setattr(cfg, "SOURCES_ENABLED",
-                        {"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
+                        {"dropcatch": False, "nominet": False, "mx": False, "emd": False})
     yield
 
 
@@ -151,6 +155,34 @@ def _no_panel_auth():
     settings.PANEL_USER = settings.PANEL_PASS = ""
     yield
     settings.PANEL_USER, settings.PANEL_PASS = saved
+
+
+@pytest.fixture(autouse=True)
+def _no_paid_keys(monkeypatch):
+    """Тесты герметичны к .env оператора и к сети реестров.
+
+    Ключи: на боксе тесты гоняются в контейнере, где заданы БОЕВЫЕ AHREFS_API_KEY/WEBRISK_API_KEY/
+    SPAMHAUS_DQS_KEY, а config.py читает .env относительно cwd — из корня репо ключ виден, из
+    backend/ нет, и тест зеленел бы или краснел в зависимости от каталога. Клиент с ключом сам
+    идёт в сеть, а рубильник _no_live_network роняет такой тест BaseException'ом. Ключи пусты на
+    время теста; тест, которому ключ нужен, ставит его сам через monkeypatch.setattr(settings, …).
+
+    RDAP: по умолчанию НИ ОДНА зона не имеет RDAP (`_bootstrap` -> {}), в IANA никто не ходит —
+    иначе настоящий RdapClient из _make_clients()/recheck_acquirability() полез бы в IANA из
+    фонового потока. Тест, которому нужен RDAP в воронке, передаёт фейк через clients["rdap"];
+    юнит-тесты самого клиента берут фикстуру real_rdap_bootstrap."""
+    from app.config import settings
+    for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY"):
+        monkeypatch.setattr(settings, key, "")
+    monkeypatch.setattr(RdapClient, "_bootstrap", lambda self: {})
+    yield
+
+
+@pytest.fixture
+def real_rdap_bootstrap(_no_paid_keys, monkeypatch):
+    """Настоящий RdapClient._bootstrap — для юнит-тестов клиента (HTTP они подменяют на инстансе:
+    monkeypatch.setattr(c, "request", …)). Зависит от _no_paid_keys, чтобы встать ПОСЛЕ его подмены."""
+    monkeypatch.setattr(RdapClient, "_bootstrap", _REAL_RDAP_BOOTSTRAP)
 
 
 @pytest.fixture(autouse=True)

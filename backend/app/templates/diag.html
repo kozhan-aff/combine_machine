@@ -31,8 +31,8 @@
   <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
 </div>
 
-{% set mod_titles = {'M1':'M1 — поиск и скоринг','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
-{% for mod in ['M1','M3','M4','M5','инфра'] %}
+{% set mod_titles = {'M1':'M1 — поиск и скоринг','M2':'M2 — выкуп','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
+{% for mod in ['M1','M2','M3','M4','M5','инфра'] %}
   {% set group = checks|selectattr('module','equalto',mod)|list %}
   {% if group %}
   <h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">{{ mod_titles[mod] }}</h2>
@@ -48,7 +48,7 @@
         <td class="hint">{{ c.role }}</td>
         <td>
           {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
-          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="в .env нет кредов — пинг бессмысленен">пропущен</span>
+          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="пинг не выполнялся — причина в колонке справа (нет кредов в .env или источник выключен)">пропущен</span>
           {% elif c.critical %}<span class="led led-bad"></span><b style="color:var(--bad)">FAIL</b>
           {% else %}<span class="led led-bad"></span><span class="hint" title="опциональная зависимость — деградируемо">FAIL (опц.)</span>{% endif %}
         </td>

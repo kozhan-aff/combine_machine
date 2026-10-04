@@ -1,51 +1,40 @@
 """Tunable thresholds and weights for donor scoring. See docs/DONORS.md.
 
-v1 runs on the FREE stack (Wayback/RKN/Spamhaus/SearXNG) + Ahrefs DR/backlinks/
-referring-domains via A-Parser (RuCapcha Turnstile-solver — live-verified 2026-07-08,
-see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md). Every component lands in
-Domain.score_breakdown for transparency.
-
-Ahrefs is called ONLY for T3 survivors the discovery feed didn't already give a
-referring-domains count for (cctld/reg_ru/sweb — backorder domains keep trusting the
-feed's own RD, no duplicate paid call), and only under the runtime `max_ahrefs_per_run`
-budget (services/settings.py) — it costs real money per captcha-solve.
+v2 (docs/v2/02-m1-discovery-scoring-spec.md): RDAP/whois, Google Web Risk, Ahrefs API v3
+(batch-analysis в W4, анкоры и история трафика в W6 — под капами /settings и полом остатка
+units), Wayback + LLM. Every component lands in Domain.score_breakdown for transparency.
 """
 
-# Stage B — light pre-filter (drop obvious garbage before the heavy Wayback pass).
-# Lenient on RD: the backorder feed already gives >=1 donor, and the project takes
-# domains for clean history, NOT for link juice.
+# W4 — порог доноров (refdomains из Ahrefs batch). Мягкий: проект берёт домены за чистую
+# историю, а не за «сок»; DR режет спам-дропы ещё на входе discovery (MIN_DR ниже).
 PREFILTER = {
-    "min_referring_domains": 1,   # from feed `links`
-    "min_dr_proxy": 0.0,          # Ahrefs DR 0..100; 0 = don't gate on it
+    "min_referring_domains": 1,
 }
 
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
 # spam included: project invariant — ANY dirty-history flag rejects (see CLAUDE.md).
 HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling", "spam")  # prior_flags categories
-# also hard-reject on: rkn_listed, blacklisted is True.
-# Здесь БЫЛИ ещё `prior_flags.topic_switch` и `trademark_risk` — оба удалены (аудит 2026-07-14):
-# первый не мог добавить ни одного отказа (подмножество категорий выше), у второго не было ни
-# одного производителя. Проверка, которой нет, не должна выглядеть работающей — см. compute_score.
+# also hard-reject on: blacklisted is True, webrisk_threats (Google Web Risk), trademark_risk
+# (бренд-токен в имени — его ставит W0 по domain_filters.brand_hit). В v1 `trademark_risk` был
+# призраком (ни одного производителя, аудит 2026-07-14), в v2 производитель есть. `topic_switch`
+# удалён насовсем: подмножество категорий выше, не мог добавить ни одного отказа.
 
-# Stage F — composite weights (positives; sum = 1.0). Free-stack + Ahrefs (live-verified
-# 2026-07-08, see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).
-# `authority` (DR) now carries real weight — Ahrefs replaces the old free DR-proxy path
-# (see docs/api/openpagerank.md, deprecated).
+# Stage F v2 — сумма 1.0 (docs/v2/02-m1-discovery-scoring-spec.md §3.2). Нет сигнала у
+# topical_fit/anchor_quality/traffic_history -> 0.5 (нейтрально), см. compute_score.
 WEIGHTS = {
-    "history_cleanliness": 0.35,  # from Wayback prior_flags (spam etc.)
-    "age": 0.18,                  # Wayback first_seen, normalized by AGE_FULL
-    "rd_proxy": 0.27,             # referring_domains (feed `links` or Ahrefs `domains`), log-normalized
-    "indexed_echo": 0.08,         # still in the index (SearXNG site:)
-    "authority": 0.12,            # Ahrefs DR, normalized by DR_FULL
+    "history_cleanliness": 0.25,  # Wayback: проверена и чиста
+    "topical_fit": 0.15,          # W5 LLM: близость прошлой темы к VPN/приватности/софту (expired domain abuse)
+    "age": 0.12,
+    "rd": 0.18,                   # W4 refdomains, лог-шкала, ×0.5 при подозрении на PBN
+    "authority": 0.10,            # DR — главный честный сигнал на спам-дропах
+    "anchor_quality": 0.12,       # W6: 1 − доля спам-анкоров
+    "traffic_history": 0.08,      # W6: пик органического трафика за 5 лет
 }
-
-# Normalization anchors ("full credit" points) for the 0..1 components
-NORM = {
-    "DR_FULL": 30.0,     # Ahrefs DR (0-100 scale) — 30+ is already strong for a drop-candidate,
-                         # NOT calibrated to sites like Wikipedia (DR 97, off the scale on purpose)
-    "AGE_FULL": 8.0,     # years
-    "RD_FULL": 3000.0,   # referring domains (log scale) — spreads real drop RD, was 100 (clamped all)
-}
+NORM = {"DR_FULL": 30.0, "AGE_FULL": 8.0, "RD_FULL": 3000.0, "TRAFFIC_FULL": 5000.0}
+# PBN/спам-сетка: живые спам-дропы дают refips_subnets/refdomains ≈ 0.27 (2026-10-01).
+# ponytail: порог стартовый — калибровать по водопаду первого живого прогона.
+PBN_SUBNET_RATIO = 0.3
+PBN_MIN_RD = 20
 
 # Decision thresholds on final score (0..1). Between review and approve -> manual review.
 DECISION = {
@@ -54,7 +43,19 @@ DECISION = {
 }
 
 # Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
-MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт: моложе — reject too_young
-SOURCES_ENABLED = {"backorder": True, "cctld": False, "reg_ru": False, "sweb": False}  # сырые витрины выключены до выверки живой разметки (аудит 2026-07-07)
-MAX_WHOIS_PER_RUN = 200        # кап whois-пробоев за один прогон проверки (защита от сырого cctld)
-MAX_AHREFS_PER_RUN = 50         # кап платных Ahrefs-вызовов (капча за штуку) за прогон; 0 = выключить
+MIN_AGE_YEARS = 3.0                                          # W5: возраст по старшей дате; моложе — too_young
+SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True}  # dropcatch — после проверки ToS оператором
+MAX_WHOIS_PER_RUN = 200        # кап whois:43 через A-Parser за прогон (зоны без RDAP; RDAP не капается)
+
+# ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
+MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом
+TLD_ALLOWLIST = ["com", "net", "org", "online", "xyz", "site", "co.uk", "mx", "co", "si", "nl", "in"]
+BRAND_TOKENS = ["nordvpn", "expressvpn", "surfshark", "protonvpn", "cyberghost", "ipvanish",
+                "privateinternetaccess", "mullvad", "windscribe", "hotspotshield", "tunnelbear",
+                "purevpn", "vyprvpn", "hidemyass", "atlasvpn", "privadovpn", "hideme", "strongvpn",
+                "zenmate", "avast", "kaspersky", "norton"]
+MAX_LINKS_PER_RUN = 500      # W4 Ahrefs batch-analysis: 25 units/домен
+MAX_DEEP_PER_RUN = 20        # W6 анкоры + история трафика: ~1,1 тыс. units/домен; 0 = выключить
+SPAM_ANCHOR_MAX = 0.2        # доля спам-анкоров (по refdomains), выше — отказ spam_anchors
+TOPIC_FAR_BELOW = 0.3        # близость прошлой темы к VPN ниже — пакет не берёт (инвариант 4, Р2)
+UNITS_FLOOR = 300_000        # пол остатка units Ahrefs в месяце: ниже — W4/W6 не тратят (автопилот — раз в час)

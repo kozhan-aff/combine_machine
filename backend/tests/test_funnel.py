@@ -7,7 +7,7 @@ from app.services import scoring
 
 def _mk(**kw):
     with db.SessionLocal() as s:
-        d = Domain(domain=kw.pop("domain", "x.ru"), source=kw.pop("source", "cctld"),
+        d = Domain(domain=kw.pop("domain", "x.com"), source=kw.pop("source", "cctld"),
                    status="discovered", **kw)
         s.add(d); s.commit(); s.refresh(d)
         return d.id
@@ -23,51 +23,41 @@ class _Wayback:
                 "first_seen": None, "age_years": self.age_years, "wayback_checked": True, "sampled": 5}
 
 
-def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True,
-             whois=None, whois_raises=False, safebrowsing=False):
+def _clients(whois_dt=None, wayback=None, bl=False, whois=None, whois_raises=False):
     """whois: dict {"available":..., "created":...} (новый формат, приобретаемость известна
     явно). whois_dt: старый позиционный аргумент (только дата) — оборачивается в
     {"available": False, "created": whois_dt} (занят, но с датой регистрации — для тестов,
-    доходящих до T2/T3 через lane="bid" на тестовом Domain). whois_raises=True — whois_probe
-    бросает (недоступен). safebrowsing: True = зафлагован, False = чист, None = падает
-    (исключение)."""
+    доходящих до W3+ через lane="bid" на тестовом Domain). whois_raises=True — whois_probe
+    бросает (недоступен). bl — ответ Spamhaus (в воронке зовётся только с DQS-ключом)."""
     pr = whois if whois is not None else {"available": False, "created": whois_dt}
     class _W:  # aparser
         def whois_probe(self, dom):
             if whois_raises:
                 raise RuntimeError("whois timeout")
             return pr
-        def safebrowsing_check(self, dom):
-            if safebrowsing is None:
-                raise RuntimeError("safebrowsing timeout")
-            return safebrowsing
-    class _R:
-        def is_listed(self, dom): return rkn
     class _B:
         def is_blacklisted(self, dom): return bl
-    class _S:
-        def indexed_echo(self, dom): return indexed_echo
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback, "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "blacklist": _B(),
+            "wayback": wayback,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds},
+                                      "anchors": lambda self, d, limit=50: [
+                                          {"anchor": d, "refdomains": 10, "is_spam": False}],
+                                      "metrics_history": lambda self, d, years=5, today=None: []})()}
 
 
-def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
-                          safebrowsing=False):
+def _clients_whois_raises(wb, bl=False):
     """Как _clients, но whois_probe падает (недоступен) — для Finding-1 фолбэка."""
     class _W:  # aparser
         def whois_probe(self, dom): raise RuntimeError("whois timeout")
-        def safebrowsing_check(self, dom):
-            if safebrowsing is None:
-                raise RuntimeError("safebrowsing timeout")
-            return safebrowsing
-    class _R:
-        def is_listed(self, dom): return rkn
     class _B:
         def is_blacklisted(self, dom): return bl
-    class _S:
-        def indexed_echo(self, dom): return indexed_echo
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wb, "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "blacklist": _B(),
+            "wayback": wb,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 def _id_of(domain: str):
@@ -110,85 +100,101 @@ class _WaybackYoung:
                 "first_seen": None, "age_years": 1.0, "wayback_checked": True, "sampled": 5}
 
 
-def test_too_young_rejects_before_wayback():
-    did = _mk(domain="young.ru", referring_domains=5, lane="bid")
-    wb = _Wayback()
+def test_too_young_rejects_in_history_wave_by_the_older_date():
+    """Р5: W2 возраст только записывает — Wayback зовётся и для молодого по RDAP/whois домена:
+    у перехваченного домена это дата ПОСЛЕДНЕЙ регистрации. Отказ too_young — в волне истории и
+    только если молоды ОБЕ даты; молодая регистрация при старом архиве — не отказ."""
     young = datetime.now(timezone.utc) - timedelta(days=365)   # 1 год
+    did = _mk(domain="young.com", referring_domains=5, lane="bid")
+    wb = _Wayback(age_years=1.0)
     out = scoring.score_domain(did, clients=_clients(young, wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "too_young"
-    assert wb.calls == 0            # ЯДРО: дорогой Wayback НЕ вызван для молодого домена
+    assert wb.calls == 1
+    did = _mk(domain="recaught.com", referring_domains=5, lane="bid")
+    out = scoring.score_domain(did, clients=_clients(young, _Wayback(age_years=9.0)))
+    assert out["reject_reason"] is None and out["status"] == "scored"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+    assert float(d.age_years) == 9.0 and d.score_breakdown["age_source"] == "wayback"
 
 
 def test_feed_flag_rejects_first():
-    did = _mk(domain="blocked.ru", referring_domains=50, feed_flags={"rkn": True})
+    did = _mk(domain="blocked.com", referring_domains=50, feed_flags={"rkn": True})
     wb = _Wayback()
     out = scoring.score_domain(did, clients=_clients(None, wb))
     assert out["reject_reason"] == "feed_flag" and wb.calls == 0
 
 
 def test_low_rd_rejects():
-    did = _mk(domain="thin.ru", referring_domains=0)
+    """RD судит W4 по ответу Ahrefs (v2), до дорогой истории. Лейн bid: без лейна домен ушёл
+    в unresolved ещё на W2 (whois «занят», даты дропа нет)."""
+    did = _mk(domain="thin.com", referring_domains=0, lane="bid")
     wb = _Wayback()
     from app.services import settings as st
     st.update_settings(min_referring_domains=1)
-    out = scoring.score_domain(did, clients=_clients(None, wb))
+    thin = type("Ah", (), {"units_left": lambda self: 2_000_000,
+                           "batch": lambda self, ds: {d: {"refdomains": 0} for d in ds}})()
+    out = scoring.score_domain(did, clients={**_clients(None, wb), "ahrefs": thin})
     assert out["reject_reason"] == "low_rd" and wb.calls == 0
 
 
-def test_rkn_rejects_before_wayback():
-    did = _mk(domain="rkn.ru", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
-    out = scoring.score_domain(did, clients=_clients(old, wb, rkn=True))
-    assert out["reject_reason"] == "rkn" and wb.calls == 0
-
-
 def test_whois_none_falls_through_to_wayback_age():
-    did = _mk(domain="nowhois.ru", referring_domains=3000, lane="bid")
+    did = _mk(domain="nowhois.com", referring_domains=3000, lane="bid")
     wb = _Wayback()
     out = scoring.score_domain(did, clients=_clients(None, wb))   # whois не отдал дату
     assert wb.calls == 1                                          # дошли до T3
-    assert out["status"] in ("approved", "scored")               # чистый сильный домен
+    assert out["status"] == "scored"                             # чистый сильный домен
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
     assert float(d.age_years) == 9.0                             # возраст — фолбэком из Wayback
 
 
-def test_clean_strong_domain_approved():
-    did = _mk(domain="good.ru", referring_domains=3000, lane="bid")
+def test_clean_strong_domain_is_scored_and_bulk_ok():
+    """Чистый сильный домен: скоринг ставит максимум `scored` (одобряет только человек, Р2), а
+    без единой дыры в проверках пакет его берёт."""
+    did = _mk(domain="good.com", referring_domains=3000, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
     out = scoring.score_domain(did, clients=_clients(old, wb))
-    assert wb.calls == 1 and out["status"] == "approved" and out["reject_reason"] is None
+    assert wb.calls == 1 and out["status"] == "scored" and out["reject_reason"] is None
+    with db.SessionLocal() as s:
+        assert scoring.bulk_ok(s.get(Domain, did)) is True
 
 
-def test_blacklist_rejects_before_wayback():
-    did = _mk(domain="blacklisted.ru", referring_domains=50, lane="bid")
+def test_blacklist_rejects_before_wayback(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")       # Spamhaus в воронке — только с DQS
+    did = _mk(domain="blacklisted.com", referring_domains=50, lane="bid")
     wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T1 пройден
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
     out = scoring.score_domain(did, clients=_clients(old, wb, bl=True))
     assert out["status"] == "rejected" and out["reject_reason"] == "blacklist"
-    assert wb.calls == 0            # blacklist — T2, Wayback (T3) до неё не доходит
+    assert wb.calls == 0            # blacklist — W3, Wayback до неё не доходит
 
 
-def test_blacklist_none_downgrades_via_funnel():
-    """Ревью C2 (Important gap): строка `blacklisted is None -> errors.append("blacklist:unavailable")`
-    в _funnel была покрыта только юнитом на _decide напрямую (test_m1_fixes.py), а не реальной
-    проводкой через score_domain/_funnel. Прогоняем полную воронку с blacklist-клиентом,
-    отдающим None (транзиент), на иначе-сильном домене (тот же профиль, что и в
-    test_clean_strong_domain_approved) — без строки-фикса errors остался бы пуст и статус
-    остался бы approved, тест бы упал."""
-    did = _mk(domain="bl-none.ru", referring_domains=3000, lane="bid")
+def test_blacklist_none_downgrades_via_funnel(monkeypatch):
+    """Ревью C2: строка `blacklisted is None -> errors.append("blacklist:unavailable")` прогнана
+    полной воронкой на иначе-сильном домене (профиль test_clean_strong_domain_is_scored_and_bulk_ok).
+    Авто-одобрения нет (Р2), поэтому «понижение» теперь значит: домен `scored`, с пометкой
+    «вслепую» и ВНЕ пакета. Spamhaus в воронке — только с DQS-ключом (v2), поэтому ключ задан."""
+    from app.config import settings
+    from app.services import scoring_config as cfg
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")
+    did = _mk(domain="bl-none.com", referring_domains=3000, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
     out = scoring.score_domain(did, clients=_clients(old, wb, bl=None))
     assert "blacklist:unavailable" in out["errors"]
-    assert out["status"] == "scored"        # downgrade from approved (не rejected — не hard-reject)
-    assert wb.calls == 1                    # blacklist:unavailable не блокирует T3
+    assert out["score"] >= cfg.DECISION["approve_at"]      # сильный — исключает правило, а не балл
+    assert out["status"] == "scored"                        # не rejected — не hard-reject
+    assert wb.calls == 1                                    # blacklist:unavailable не блокирует T3
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
 
 
 def test_history_dirty_rejects_after_wayback():
-    did = _mk(domain="dirtyhist.ru", referring_domains=50, lane="bid")
+    did = _mk(domain="dirtyhist.com", referring_domains=50, lane="bid")
     wb = _WaybackDirty()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T0-T2 пройдены
     out = scoring.score_domain(did, clients=_clients(old, wb))
@@ -197,24 +203,25 @@ def test_history_dirty_rejects_after_wayback():
 
 
 def test_low_score_reject():
-    did = _mk(domain="weak.ru", referring_domains=1, lane="bid")
+    did = _mk(domain="weak.com", referring_domains=1, lane="bid")
     wb = _WaybackWeak()
     old_enough = datetime.now(timezone.utc) - timedelta(days=1150)   # ~3.15 года, чуть старше порога
-    out = scoring.score_domain(did, clients=_clients(old_enough, wb, indexed_echo=False))
+    out = scoring.score_domain(did, clients=_clients(old_enough, wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "low_score"
     assert wb.calls == 1            # дошли до compute_score — отклонил composite score, не воронка
 
 
-def test_runtime_approve_at_downgrades_high_scorer_to_scored():
-    """Finding 1 (2026-07 review): рантайм /settings approve_at (не только cfg.DECISION)
-    должен реально управлять статусом, а не только превью-счётчиками на /settings."""
+def test_runtime_approve_at_never_makes_scoring_approve():
+    """Р2: `approve_at` больше не участвует в решении скоринга — это «порог сильного кандидата»
+    для превью и пакета. Даже порог на самом дне (клампится к manual_review_at) не даёт машине
+    поставить `approved`: одобряет только человек."""
     from app.services import settings as st
-    did = _mk(domain="runtime-approve.ru", referring_domains=100, lane="bid")
+    did = _mk(domain="runtime-approve.com", referring_domains=100, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    st.update_settings(approve_at=0.99)
+    st.update_settings(approve_at=0.0)
     out = scoring.score_domain(did, clients=_clients(old, wb))
-    assert 0.40 < out["score"] < 0.99             # ~0.87 — сильный, но не «approve по-новому»
+    assert out["score"] > st.get_settings()["approve_at"]
     assert out["status"] == "scored" and out["reject_reason"] is None
 
 
@@ -222,7 +229,7 @@ def test_runtime_thresholds_can_reject_previously_approved_score():
     """Тот же сильный домен: подняв ОБА порога выше его score, получаем rejected/low_score —
     не «застрявший approved» из статических cfg.DECISION."""
     from app.services import settings as st
-    did = _mk(domain="runtime-reject.ru", referring_domains=100, lane="bid")
+    did = _mk(domain="runtime-reject.com", referring_domains=100, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
     st.update_settings(manual_review_at=0.9, approve_at=0.95)
@@ -231,22 +238,22 @@ def test_runtime_thresholds_can_reject_previously_approved_score():
 
 
 def test_runtime_min_age_years_rejects_too_young():
-    """Spec §G (был пропущен): рантайм min_age_years из /settings уже используется в _funnel
-    (T1) — 4-летний домен отклоняется too_young при поднятом пороге в 5 лет."""
+    """Spec §G: рантайм min_age_years из /settings — 4-летний (и по whois, и по архиву) домен
+    отклоняется too_young при поднятом пороге в 5 лет. Гейт — в волне истории (Р5)."""
     from app.services import settings as st
-    did = _mk(domain="four-years.ru", referring_domains=50, lane="bid")
-    wb = _Wayback()
+    did = _mk(domain="four-years.com", referring_domains=50, lane="bid")
+    wb = _Wayback(age_years=4.0)
     st.update_settings(min_age_years=5.0)
     four_years = datetime.now(timezone.utc) - timedelta(days=365 * 4)
     out = scoring.score_domain(did, clients=_clients(four_years, wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "too_young"
-    assert wb.calls == 0                          # too_young — T1, дешёвый Wayback не вызван
+    assert wb.calls == 1                          # Р5: возраст судит волна истории по старшей дате
 
 
 def test_too_young_fallback_from_wayback_when_whois_fails():
     """Finding 1: whois упал (T1 без даты) -> возраст добираем из Wayback (T3); если
     фолбэк-возраст < порога — reject too_young, а не тихий проскок в compute_score."""
-    did = _mk(domain="whoisdown.ru", referring_domains=50, lane="bid")
+    did = _mk(domain="whoisdown.com", referring_domains=50, lane="bid")
     wb = _WaybackYoung()
     out = scoring.score_domain(did, clients=_clients_whois_raises(wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "too_young"
@@ -268,9 +275,9 @@ def test_raw_registered_without_deadline_waits_instead_of_rejecting(monkeypatch,
     wb = _Wayback()   # счётчик .calls (как в других тестах файла)
     clients = _clients(whois={"available": False, "created": None}, wayback=wb)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="taken.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="taken.com", source="cctld", status="discovered", lane=None,
                      referring_domains=None)); s.commit()
-        did = s.execute(_id_of("taken.ru")).scalar_one()
+        did = s.execute(_id_of("taken.com")).scalar_one()
     out = scoring.score_domain(did, clients)
     assert out["status"] == "discovered" and out.get("unresolved") is True
     assert wb.calls == 0                      # дорогой Wayback по-прежнему не тронут
@@ -284,8 +291,8 @@ def test_raw_free_gets_free_lane(monkeypatch, sqlite_db):
     wb = _Wayback(age_years=10.0)
     clients = _clients(whois={"available": True, "created": None}, wayback=wb)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="free.ru", source="reg_ru", status="discovered", lane=None)); s.commit()
-        did = s.execute(_id_of("free.ru")).scalar_one()
+        s.add(Domain(domain="free.com", source="reg_ru", status="discovered", lane=None)); s.commit()
+        did = s.execute(_id_of("free.com")).scalar_one()
     scoring.score_domain(did, clients)
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
@@ -300,8 +307,8 @@ def test_whois_fail_stays_discovered(sqlite_db):
     wb = _Wayback()
     clients = _clients(whois_raises=True, wayback=wb)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="oops.ru", source="cctld", status="discovered", lane=None)); s.commit()
-        did = s.execute(_id_of("oops.ru")).scalar_one()
+        s.add(Domain(domain="oops.com", source="cctld", status="discovered", lane=None)); s.commit()
+        did = s.execute(_id_of("oops.com")).scalar_one()
     out = scoring.score_domain(did, clients)
     assert out.get("unresolved") is True and wb.calls == 0
     with db.SessionLocal() as s:
@@ -311,7 +318,7 @@ def test_whois_fail_stays_discovered(sqlite_db):
 def test_raw_source_future_deadline_stays_discovered():
     # сырой домен, whois «занят», но дедлайн дропа в будущем -> ждём дропа, не reject
     future = datetime.now(timezone.utc) + timedelta(days=5)
-    did = _mk(domain="dropping.ru", lane=None, source="cctld",
+    did = _mk(domain="dropping.com", lane=None, source="cctld",
               referring_domains=10, acquire_deadline=future)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
@@ -323,7 +330,7 @@ def test_raw_source_future_deadline_stays_discovered():
 def test_raw_source_no_deadline_is_not_rejected():
     """Парная регрессия к тесту выше: без дедлайна и без лейна домен НЕ выбрасывается.
     Занятость сырого домена до дропа — норма, а не приговор (дебаг 2026-07-13)."""
-    did = _mk(domain="taken.ru", lane=None, source="cctld", referring_domains=10)
+    did = _mk(domain="taken.com", lane=None, source="cctld", referring_domains=10)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
     assert out["status"] == "discovered" and out.get("unresolved") is True
@@ -336,7 +343,7 @@ def test_raw_source_past_deadline_is_not_acquirable():
     # времени (00:00 дня дропа), поэтому сутки после дедлайна ещё НЕ значат «домен потерян»
     # (реестр освобождает его в течение дня). Запас — scoring.DROP_GRACE, см. соседний тест.
     past = datetime.now(timezone.utc) - timedelta(days=5)
-    did = _mk(domain="expired.ru", lane=None, source="cctld",
+    did = _mk(domain="expired.com", lane=None, source="cctld",
               referring_domains=10, acquire_deadline=past)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
@@ -356,7 +363,7 @@ def test_raw_source_sniped_after_drop_is_not_acquirable_not_too_young():
     раньше возраста; taken -> not_acquirable сразу, возраст для этого случая не смотрим."""
     past_deadline = datetime.now(timezone.utc) - timedelta(days=5)
     recent_created = datetime.now(timezone.utc) - timedelta(days=2)   # снайпер зарегистрировал только что
-    did = _mk(domain="sniped.ru", lane=None, source="cctld",
+    did = _mk(domain="sniped.com", lane=None, source="cctld",
               referring_domains=10, acquire_deadline=past_deadline)
     wb = _Wayback()
     out = scoring.score_domain(
@@ -370,7 +377,7 @@ def test_drop_day_deadline_is_not_rejected():
     времени), домен ещё занят: реестр освободит его в течение дня. Отбраковать здесь =
     выбросить дроп ровно в тот день, когда его можно ловить."""
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    did = _mk(domain="dropping-today.ru", lane=None, source="cctld",
+    did = _mk(domain="dropping-today.com", lane=None, source="cctld",
               referring_domains=10, acquire_deadline=today)
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}))
     assert out.get("unresolved") is True
@@ -390,225 +397,12 @@ def test_whois_budget_caps_run(monkeypatch, sqlite_db):
     # поэтому подменяем сам _make_clients, чтобы прогон был офлайн (без реального A-Parser/Wayback).
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     with db.SessionLocal() as s:
-        s.add_all([Domain(domain=f"r{i}.ru", source="cctld", status="discovered", lane=None,
+        s.add_all([Domain(domain=f"r{i}.com", source="cctld", status="discovered", lane=None,
                           referring_domains=None) for i in range(2)]); s.commit()
     scoring.score_pending(limit=10)
     with db.SessionLocal() as s:
         still = s.execute(_count_discovered()).scalar()
     assert still == 1                                          # один не обработан (бюджет исчерпан)
-
-
-class _AhrefsMock:
-    def __init__(self, dr=42, backlinks=500, referring_domains=300, raises=False):
-        self.calls = 0
-        self.dr, self.backlinks, self.referring_domains = dr, backlinks, referring_domains
-        self.raises = raises
-    def ahrefs_probe(self, domain):
-        self.calls += 1
-        if self.raises:
-            raise RuntimeError("captcha service down")
-        return {"dr": self.dr, "backlinks": self.backlinks, "referring_domains": self.referring_domains}
-
-
-def test_ahrefs_skipped_when_feed_has_referring_domains():
-    """Домен уже с RD из фида (backorder-like) -> Ahrefs НЕ вызывается, даже с живым
-    бюджетом — не дублируем платный вызов там, где фид уже дал число."""
-    did = _mk(domain="hasrd.ru", referring_domains=500, source="backorder", lane="bid")
-    wb = _Wayback()
-    ah = _AhrefsMock()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    clients = _clients(old, wb)
-    clients["aparser"].ahrefs_probe = ah.ahrefs_probe   # прикрутить мок Ahrefs к тому же aparser-дублёру
-    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
-    assert ah.calls == 0
-    assert out["status"] in ("approved", "scored")
-
-
-def test_ahrefs_called_when_feed_has_no_referring_domains_and_budget_positive():
-    """Домен без RD из фида (cctld/reg_ru/sweb-like), T3-выживший, живой бюджет ->
-    Ahrefs вызывается, DR/RD из него попадают в sig и в итоге в Domain."""
-    did = _mk(domain="nord.ru", referring_domains=None, source="cctld", lane="bid")
-    wb = _Wayback()
-    ah = _AhrefsMock(dr=55, backlinks=1000, referring_domains=200)
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    clients = _clients(old, wb)
-    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
-    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
-    assert ah.calls == 1
-    assert out["breakdown"]["components"]["authority"] > 0.0
-    with db.SessionLocal() as s:
-        d = s.get(Domain, did)
-    assert d.referring_domains == 200          # Ahrefs domains-count перезаписал None из фида
-    assert d.score_breakdown["ahrefs_backlinks"] == 1000   # informational (out["breakdown"] — только
-                                                           # result["breakdown"] из compute_score,
-                                                           # ahrefs_backlinks живёт в d.score_breakdown)
-
-
-def test_ahrefs_not_called_when_budget_is_none():
-    """ahrefs_budget=None (не передан явно) -> Ahrefs НЕ вызывается (opt-in, платный)."""
-    did = _mk(domain="nobudget.ru", referring_domains=None, source="cctld", lane="bid")
-    wb = _Wayback()
-    ah = _AhrefsMock()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    clients = _clients(old, wb)
-    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
-    scoring.score_domain(did, clients=clients)     # без ahrefs_budget
-    assert ah.calls == 0
-
-
-def test_ahrefs_not_called_when_budget_exhausted():
-    did = _mk(domain="exhausted.ru", referring_domains=None, source="cctld", lane="bid")
-    wb = _Wayback()
-    ah = _AhrefsMock()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    clients = _clients(old, wb)
-    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
-    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[0])
-    assert ah.calls == 0
-    assert out["status"] in ("approved", "scored", "rejected")   # не unresolved — не гейт приобретаемости
-
-
-def test_ahrefs_failure_does_not_crash_funnel():
-    did = _mk(domain="ahrefsdown.ru", referring_domains=None, source="cctld", lane="bid")
-    wb = _Wayback()
-    ah = _AhrefsMock(raises=True)
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    clients = _clients(old, wb)
-    clients["aparser"].ahrefs_probe = ah.ahrefs_probe
-    out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
-    assert ah.calls == 1
-    assert any(e.startswith("ahrefs:") for e in out["errors"])
-    assert out["breakdown"]["components"]["authority"] == 0.0   # сбой -> dr=None -> 0, не крэш
-
-
-# --- SafeBrowsing hard-reject + Archive pre-gate (Тред D, Задача 2) ---------------
-#
-# Примечание: иллюстративные тесты в брифе вызывали `scoring._funnel(...)` напрямую с
-# сигнатурой `(d, clients, db, settings_dict, sig)`. В ЭТОМ файле НЕТ ни одного прямого
-# вызова `_funnel` — все ~31 существующих теста гоняют воронку через публичный
-# `scoring.score_domain(did, clients=...)` (см. test_rkn_rejects_before_wayback,
-# test_blacklist_rejects_before_wayback и т.д. выше). Тесты ниже следуют РЕАЛЬНОМУ
-# паттерну этого файла, а не иллюстративному из брифа.
-
-def test_safebrowsing_flagged_hard_rejects():
-    did = _mk(domain="badsb.ru", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T0-T1 пройдены
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=True))
-    assert out["status"] == "rejected" and out["reject_reason"] == "safebrowsing"
-    assert wb.calls == 0            # отсеян ДО Wayback — как rkn/blacklist
-
-
-def test_safebrowsing_clean_proceeds_to_wayback():
-    did = _mk(domain="cleansb.ru", referring_domains=3000, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=False))
-    assert out["reject_reason"] is None
-    assert wb.calls == 1
-
-
-def test_safebrowsing_error_does_not_reject_and_is_logged():
-    did = _mk(domain="unknownsb.ru", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=None))
-    assert out["reject_reason"] is None
-    assert any(e.startswith("safebrowsing:") for e in out["errors"])
-
-
-class _AparserAlwaysFailsSB:
-    """whois_probe отвечает нормально, а safebrowsing_check падает КАЖДЫЙ раз — живой
-    инцидент 2026-07-20 (A-Parser упал целиком, а не только по одному домену)."""
-    def __init__(self):
-        self.sb_calls = 0
-
-    def whois_probe(self, dom):
-        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
-
-    def safebrowsing_check(self, dom):
-        self.sb_calls += 1
-        raise RuntimeError("connect error")
-
-
-def test_safebrowsing_circuit_breaker_skips_after_three_consecutive_failures():
-    """A-Parser упал -> BaseClient.request ретраит transport-сбой 3 раза с backoff (~30 с)
-    НА КАЖДЫЙ вызов -> T2 (задуманный «средним» по цене) платил бы полный ретрай-шторм
-    на КАЖДЫЙ домен, доживший до risk-стадии (whois уже летал через TCI за 30 мс) — снаружи
-    это и есть «воронка снова ходит по кругу всеми инструментами разом» из живого отчёта.
-    После 3 сбоёв ПОДРЯД safebrowsing_check для остальных доменов ЭТОГО прогона не зовётся —
-    один и тот же `clients` дели́тся между вызовами `score_domain`, как в реальном
-    `score_pending` (см. scoring.py:878, `clients = _make_clients()` один раз на прогон)."""
-    ap = _AparserAlwaysFailsSB()
-    wb = _Wayback()
-    clients = {
-        "aparser": ap,
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
-        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": wb,
-        "tci": type("T", (), {"handles": lambda self, d: False})(),
-    }
-
-    for i in range(3):
-        did = _mk(domain=f"sbfail{i}.ru", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.sb_calls == 3
-
-    did = _mk(domain="sbfourth.ru", referring_domains=50, lane="bid")
-    out = scoring.score_domain(did, clients=clients)
-    assert "safebrowsing:circuit_open" in out["errors"]
-    assert ap.sb_calls == 3   # предохранитель сработал — 4-й вызов safebrowsing_check не звали
-
-
-class _AparserFlakySB:
-    """whois_probe стабилен; safebrowsing_check выдаёт исход из заранее заданного списка,
-    по одному на вызов — нужен тесту чередования "сбой/успех", где один и тот же
-    `clients` дели́тся между вызовами `score_domain` (как в реальном `score_pending`)."""
-    def __init__(self, outcomes):
-        self._outcomes = list(outcomes)
-
-    def whois_probe(self, dom):
-        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
-
-    def safebrowsing_check(self, dom):
-        outcome = self._outcomes.pop(0)
-        if outcome == "boom":
-            raise RuntimeError("connect error")
-        return outcome
-
-
-def test_safebrowsing_circuit_breaker_resets_on_success_between_failures():
-    """Успешный ответ между сбоями сбрасывает счётчик — предохранитель не должен срабатывать
-    раньше времени на череде "2 сбоя / успех / 2 сбоя" (всего 4 сбоя, но НИ РАЗУ подряд 3)."""
-    ap = _AparserFlakySB(["boom", "boom", False, "boom", "boom"])
-    wb = _Wayback()
-    clients = {
-        "aparser": ap,
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
-        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": wb,
-        "tci": type("T", (), {"handles": lambda self, d: False})(),
-    }
-
-    for i in range(2):                                  # сбой 1, сбой 2
-        did = _mk(domain=f"sbmix-fail{i}.ru", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.safebrowsing_failures == 2
-
-    did_ok = _mk(domain="sbmix-ok.ru", referring_domains=50, lane="bid")
-    out = scoring.score_domain(did_ok, clients=clients)  # успех — сброс счётчика
-    assert out["reject_reason"] is None
-    assert ap.safebrowsing_failures == 0
-
-    for i in range(2):                                  # сбой 3, сбой 4 — НИ РАЗУ подряд 3
-        did = _mk(domain=f"sbmix-again{i}.ru", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.safebrowsing_failures == 2                # предохранитель НЕ сработал
 
 
 # --- квота: воронка не платит whois'ом дважды за детерминированный ответ ---------
@@ -626,11 +420,11 @@ def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkey
 
     future = datetime.now(timezone.utc) + timedelta(days=10)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="waits.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="waits.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=future))                      # дроп впереди -> не берём
-        s.add(Domain(domain="today.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="today.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=datetime.now(timezone.utc)))  # дроп настал -> берём
-        s.add(Domain(domain="bid.ru", source="backorder", status="discovered", lane="bid",
+        s.add(Domain(domain="bid.com", source="backorder", status="discovered", lane="bid",
                      referring_domains=50, acquire_deadline=future))  # bid -> берём всегда
         s.commit()
 
@@ -642,7 +436,7 @@ def test_score_pending_skips_domains_whose_drop_is_still_ahead(sqlite_db, monkey
 
     with db.SessionLocal() as s:
         picked = {s.get(Domain, i).domain for i in seen}
-    assert picked == {"today.ru", "bid.ru"}, f"взяли лишнее/потеряли нужное: {picked}"
+    assert picked == {"today.com", "bid.com"}, f"взяли лишнее/потеряли нужное: {picked}"
 
 
 def test_scorable_excludes_domain_whose_drop_is_tomorrow(sqlite_db, monkeypatch):
@@ -659,7 +453,7 @@ def test_scorable_excludes_domain_whose_drop_is_tomorrow(sqlite_db, monkeypatch)
 
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="tomorrow.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="tomorrow.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=now + timedelta(days=1)))    # дроп ЗАВТРА — ещё занят
         s.commit()
 
@@ -685,7 +479,7 @@ def test_scorable_includes_domain_whose_drop_already_happened(sqlite_db, monkeyp
 
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="just-dropped.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="just-dropped.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=now - timedelta(hours=3)))   # дроп уже случился
         s.commit()
 
@@ -697,7 +491,7 @@ def test_scorable_includes_domain_whose_drop_already_happened(sqlite_db, monkeyp
 
     with db.SessionLocal() as s:
         picked = {s.get(Domain, i).domain for i in seen}
-    assert picked == {"just-dropped.ru"}, f"созревший дроп должен уйти в скоринг: {picked}"
+    assert picked == {"just-dropped.com"}, f"созревший дроп должен уйти в скоринг: {picked}"
 
 
 def test_unresolved_domain_remembers_it_was_checked(sqlite_db):
@@ -709,7 +503,7 @@ def test_unresolved_domain_remembers_it_was_checked(sqlite_db):
     from app.models.domain import Domain
 
     future = datetime.now(timezone.utc) + timedelta(days=10)
-    did = _mk(domain="waits.ru", lane=None, source="cctld", referring_domains=10,
+    did = _mk(domain="waits.com", lane=None, source="cctld", referring_domains=10,
               acquire_deadline=future)
     wb = _Wayback()
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None}, wayback=wb))
@@ -733,12 +527,12 @@ def test_domain_without_deadline_gets_rechecked_after_cooldown(sqlite_db, monkey
 
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="fresh.ru", source="reg_ru", status="discovered", lane=None,
+        s.add(Domain(domain="fresh.com", source="reg_ru", status="discovered", lane=None,
                      acquire_deadline=None, acquirability_checked_at=None))       # ни разу
-        s.add(Domain(domain="cooled.ru", source="reg_ru", status="discovered", lane=None,
+        s.add(Domain(domain="cooled.com", source="reg_ru", status="discovered", lane=None,
                      acquire_deadline=None,
                      acquirability_checked_at=now - scoring.RECHECK_EVERY - timedelta(hours=1)))
-        s.add(Domain(domain="justnow.ru", source="sweb", status="discovered", lane=None,
+        s.add(Domain(domain="justnow.com", source="sweb", status="discovered", lane=None,
                      acquire_deadline=None,
                      acquirability_checked_at=now - timedelta(minutes=5)))        # только что
         s.commit()
@@ -751,7 +545,7 @@ def test_domain_without_deadline_gets_rechecked_after_cooldown(sqlite_db, monkey
     with db.SessionLocal() as s:
         picked = {s.get(Domain, i).domain for i in seen}
     # свежий и остывший — берём (вдруг дроп уже случился); только что спрошенный — нет
-    assert picked == {"fresh.ru", "cooled.ru"}, picked
+    assert picked == {"fresh.com", "cooled.com"}, picked
 
 
 def test_empty_score_run_explains_why(sqlite_db, monkeypatch):
@@ -764,7 +558,7 @@ def test_empty_score_run_explains_why(sqlite_db, monkeypatch):
 
     future = datetime.now(timezone.utc) + timedelta(days=9)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="waits.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="waits.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=future))
         s.commit()
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
@@ -786,10 +580,10 @@ def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
         for i in range(6):                      # кулдаун-пул: без даты, давно не сверялись
-            s.add(Domain(domain=f"pool{i}.ru", source="reg_ru", status="discovered", lane=None,
+            s.add(Domain(domain=f"pool{i}.com", source="reg_ru", status="discovered", lane=None,
                          acquire_deadline=None,
                          acquirability_checked_at=now - timedelta(days=3)))
-        s.add(Domain(domain="dropstoday.ru", source="cctld", status="discovered", lane=None,
+        s.add(Domain(domain="dropstoday.com", source="cctld", status="discovered", lane=None,
                      acquire_deadline=now))     # дроп СЕГОДНЯ — его нельзя пропустить
         s.commit()
 
@@ -801,7 +595,7 @@ def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
 
     with db.SessionLocal() as s:
         picked = [s.get(Domain, i).domain for i in seen]
-    assert picked[0] == "dropstoday.ru", f"drop-day домен вытеснен кулдаун-пулом: {picked}"
+    assert picked[0] == "dropstoday.com", f"drop-day домен вытеснен кулдаун-пулом: {picked}"
 
 
 def test_expired_drop_does_not_outrank_todays_drop(sqlite_db, monkeypatch):
@@ -816,10 +610,10 @@ def test_expired_drop_does_not_outrank_todays_drop(sqlite_db, monkeypatch):
 
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="expired.ru", source="backorder", status="discovered", lane="bid",
+        s.add(Domain(domain="expired.com", source="backorder", status="discovered", lane="bid",
                      referring_domains=9999,                       # ещё и жирный — соблазн взять
                      acquire_deadline=now - timedelta(days=30)))   # дроп УПУЩЕН месяц назад
-        s.add(Domain(domain="todays.ru", source="backorder", status="discovered", lane="bid",
+        s.add(Domain(domain="todays.com", source="backorder", status="discovered", lane="bid",
                      referring_domains=10,
                      acquire_deadline=now))                        # дроп СЕГОДНЯ
         s.commit()
@@ -832,7 +626,7 @@ def test_expired_drop_does_not_outrank_todays_drop(sqlite_db, monkeypatch):
 
     with db.SessionLocal() as s:
         picked = [s.get(Domain, i).domain for i in seen]
-    assert picked == ["todays.ru"], f"упущенный дроп обогнал сегодняшний: {picked}"
+    assert picked == ["todays.com"], f"упущенный дроп обогнал сегодняшний: {picked}"
 
 
 def test_unresolved_reports_why_it_could_not_decide(sqlite_db):
@@ -841,13 +635,13 @@ def test_unresolved_reports_why_it_could_not_decide(sqlite_db):
     заявляла бы «домен занят», то есть факт, которого никто не устанавливал."""
     from app.services import scoring
 
-    did = _mk(domain="murky.ru", lane=None, source="cctld", referring_domains=10)
+    did = _mk(domain="murky.com", lane=None, source="cctld", referring_domains=10)
     out = scoring.score_domain(did, _clients(whois={"available": None, "created": None},
                                              wayback=_Wayback()))
     assert out["unresolved"] is True and out["why"] == "whois_unclear"
     assert not out["errors"]              # исключения НЕ было — errors пуст, сниффинг слеп
 
-    did2 = _mk(domain="down.ru", lane=None, source="cctld", referring_domains=10)
+    did2 = _mk(domain="down.com", lane=None, source="cctld", referring_domains=10)
     out2 = scoring.score_domain(did2, _clients(whois_raises=True, wayback=_Wayback()))
     assert out2["why"] == "whois_failed"
 
@@ -858,7 +652,7 @@ def test_taken_undated_is_not_reported_as_unparsed_whois(sqlite_db):
     «ответ не разобран (формат TLD?)» про всю массу cctld/витрин (lane=NULL) — и оператор пошёл
     бы чинить несуществующую поломку парсинга A-Parser на .ru."""
     from app.services import scoring
-    did = _mk(domain="undated.ru", lane=None, source="cctld", referring_domains=10)  # дедлайна нет
+    did = _mk(domain="undated.com", lane=None, source="cctld", referring_domains=10)  # дедлайна нет
     out = scoring.score_domain(did, _clients(whois={"available": False, "created": None},
                                              wayback=_Wayback()))
     assert out["unresolved"] is True

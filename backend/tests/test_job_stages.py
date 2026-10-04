@@ -20,15 +20,15 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
     _seed(1)
     seen = []
 
-    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
-        jobs.report(run, stage="whois")                  # так репортит _run_waves/_run_concurrent
+    def fake_run_waves(states, clients, st, whois_budget, links_budget, run=None, **kw):
+        jobs.report(run, stage="avail")                  # так репортит _run_waves/_run_concurrent
         seen.append(jobs.progress("score")["stage"])
         return [{"domain": "d0.ru"}]
 
     monkeypatch.setattr(scoring, "_run_waves", fake_run_waves)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     assert scoring.score_pending(limit=10) == 1
-    assert seen == ["whois"]
+    assert seen == ["avail"]
     p = jobs.progress("score")
     assert p["status"] == "done" and p["total"] == 1
     assert [s["key"] for s in p["stages"]] == [s["key"] for s in scoring.FUNNEL_STAGES]
@@ -37,7 +37,7 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
 def test_score_pending_stops_on_cancel(monkeypatch):
     """Стоп-кнопка: прогон завершается cancelled, реестр честно закрывается.
 
-    Task 9: волны обрабатывают домены КОНКУРЕНТНО (workers=12 в _wave_whois) — гарантия
+    Task 9: волны обрабатывают домены КОНКУРЕНТНО (workers=12 в _wave_avail) — гарантия
     дореформенного последовательного цикла «ровно один домен успел, остальные 4 даже не
     начаты» здесь физически не воспроизводима (это смена модели конкурентности, не
     регрессия — см. task-9-brief.md). Проверяем то, что осталось настоящим внешним
@@ -45,7 +45,7 @@ def test_score_pending_stops_on_cancel(monkeypatch):
     done/total, что успели отчитать до отмены."""
     _seed(5)
 
-    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
+    def fake_run_waves(states, clients, st, whois_budget, links_budget, run=None, **kw):
         jobs.report(run, done=1, total=len(states))       # как реально отчиталась бы волна
         jobs.request_cancel("score")                      # человек нажал «стоп»
         if jobs.cancelled(run):
@@ -60,16 +60,18 @@ def test_score_pending_stops_on_cancel(monkeypatch):
 
 
 def test_discovery_stages_are_sources(monkeypatch):
-    """Чипы discovery — включённые источники + дедуп + запись."""
+    """Чипы discovery — включённые источники + DR-фильтр + запись."""
     from app.services.settings import update_settings
-    update_settings(sources_enabled={"backorder": True, "cctld": False,
-                                     "reg_ru": False, "sweb": False})
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: [])
+    update_settings(sources_enabled={"dropcatch": False, "nominet": True, "mx": False, "emd": False})
+
+    class _Empty:
+        def list_dropping(self):
+            return []
+    monkeypatch.setattr(discovery, "_clients", lambda: {"nominet": _Empty})
     assert discovery.run_discovery() == 0
     p = jobs.progress("discovery")
     assert p["status"] == "done" and p["error"] is None
-    assert [s["key"] for s in p["stages"]] == ["backorder", "dedup", "save"]
+    assert [s["key"] for s in p["stages"]] == ["nominet", "dr", "save"]
     assert p["message"] == "нет кандидатов"
 
 
@@ -80,6 +82,6 @@ def test_blind_reason_flags_unverified_history():
     (аудит F2 — пустой архив ошибки не даёт). Три состояния истории — в test_history_verdict."""
     d = Domain(domain="x.ru", score_breakdown={"errors": ["wayback:ConnectError"]})
     assert "Wayback" in scoring.blind_reason(d)
-    clean = Domain(domain="y.ru", wayback_checked=True, prior_flags={},
-                   score_breakdown={"errors": []})
+    clean = Domain(domain="y.ru", wayback_checked=True, prior_flags={}, age_years=10.0,
+                   score_breakdown={"errors": [], "deep_checked": True})
     assert scoring.blind_reason(clean) is None

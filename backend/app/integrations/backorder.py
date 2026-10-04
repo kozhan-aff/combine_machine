@@ -300,33 +300,6 @@ class BackorderClient(BaseClient):
                 return r
         return None
 
-    # -- discovery (публичный фид, без auth) --------------------------------
-
-    def list_dropping(self, min_links: int = 1, limit: int = 5000) -> list[dict]:
-        """Domains freeing tomorrow with >=min_links donors (discovery source for M1).
-
-        Public feed, no auth. Fields: domainname, links, delete_date, visitors,
-        yandex_tic, x_value, rkn, judicial, block. See docs/api/backorder.md.
-        """
-        r = self.request("GET", f"{self.base_url}/json/", params={
-            "ext": "1", "disp": "1", "tomorrow": "1",
-            "links": str(min_links), "by": "links", "order": "desc",
-        })
-        data = r.json()
-        rows = data if isinstance(data, list) else []
-
-        def _links(row):    # фид отдаёт links строкой ("5") — сравнивать строку с int нельзя
-            try:
-                return int(row.get("links"))
-            except (TypeError, ValueError):
-                return 0
-        bad = [row for row in rows if isinstance(row, dict) and _links(row) < min_links]
-        if bad:
-            import logging
-            logging.getLogger(__name__).warning(
-                "backorder: %d/%d строк с links<%d — фильтр не применился?", len(bad), len(rows), min_links)
-        return rows[:limit]
-
     # -- ЗАКАЗ (деньги!) ----------------------------------------------------
 
     def order(self, domain: str, price_id: str, period_id: str) -> dict:

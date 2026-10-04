@@ -19,32 +19,32 @@ from app.services import autonomy, cf_sync, discovery, jobs, orchestrator as orc
 def test_discovery_stops_between_sources_on_cancel(monkeypatch):
     """Cancel во время первого источника -> второй источник не опрашивается, статус cancelled.
 
-    РЕГРЕССИЯ F18: до фикса `_collect` не звала `jobs.cancelled()` вовсе — cctld был бы опрошен,
-    несмотря на нажатую кнопку, а прогон закрылся бы как `done`.
+    РЕГРЕССИЯ F18: до фикса `_collect` не звала `jobs.cancelled()` вовсе — второй источник был бы
+    опрошен, несмотря на нажатую кнопку, а прогон закрылся бы как `done`.
     """
     from app.services.settings import update_settings
-    update_settings(sources_enabled={"backorder": True, "cctld": True,
-                                     "reg_ru": False, "sweb": False})
+    update_settings(sources_enabled={"dropcatch": True, "nominet": True, "mx": False, "emd": False})
 
-    cctld_calls = []
+    nominet_calls = []
 
-    def fake_backorder(self, min_links=1, limit=5000):
-        jobs.request_cancel("discovery")           # человек нажал «стоп» во время backorder
-        return []
+    class _First:
+        def list_dropping(self):
+            jobs.request_cancel("discovery")       # человек нажал «стоп» во время первого источника
+            return []
 
-    def fake_cctld(self):
-        cctld_calls.append(True)                   # не должно случиться
-        return []
+    class _Second:
+        def list_dropping(self):
+            nominet_calls.append(True)             # не должно случиться
+            return []
 
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping", fake_backorder)
-    monkeypatch.setattr("app.integrations.cctld.CctldClient.list_dropping", fake_cctld)
+    monkeypatch.setattr(discovery, "_clients", lambda: {"dropcatch": _First, "nominet": _Second})
 
     discovery.run_discovery()
 
-    assert cctld_calls == []                        # второй источник даже не начали
+    assert nominet_calls == []                      # второй источник даже не начали
     p = jobs.progress("discovery")
     assert p["status"] == "cancelled"
-    assert p["stage"] == "backorder"                 # застыли на источнике, где нажали «стоп»
+    assert p["stage"] == "dropcatch"                 # застыли на источнике, где нажали «стоп»
 
 
 def test_sweep_stops_between_stages_on_cancel(monkeypatch):

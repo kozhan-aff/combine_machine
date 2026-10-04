@@ -140,8 +140,8 @@ def test_js_redirect_to_casino_is_not_approved_as_clean():
     h = _client({f"http://x.ru/{i}": BLANK["js-redirect"] for i in range(1, 4)}).classify_history(
         "x.ru", polite=0)
     out = compute_score({"wayback_checked": h["wayback_checked"], "prior_flags": h["prior_flags"],
-                         "age_years": 16, "referring_domains": 2219, "indexed_echo": True})
-    assert out["status"] != "approved", "домен-редирект на казино авто-одобрен как чистый"
+                         "age_years": 16, "referring_domains": 2219})
+    assert out["status"] == "scored", "одобряет только человек (Р2)"
 
     d = SimpleNamespace(prior_flags=h["prior_flags"], wayback_checked=h["wayback_checked"],
                         score_breakdown={"errors": [], "sampled": h["sampled"],
@@ -282,20 +282,20 @@ def test_topic_switch_could_never_add_a_single_reject():
     assert pf["casino"] is True                       # смена темы поймана СВОЕЙ категорией
     assert "topic_switch" not in pf
     out = compute_score({"prior_flags": pf, "wayback_checked": True,
-                         "age_years": 15, "referring_domains": 2000, "indexed_echo": True})
+                         "age_years": 15, "referring_domains": 2000})
     assert out["status"] == "rejected" and out["score"] == 0.0
     assert out["breakdown"]["hard_reject"] == ["prior_casino"]
 
 
 # ---- F5: trademark_risk — гейт без производителя ----
 
-def test_trademark_risk_is_not_a_hard_reject_anymore():
-    """Ветка отказа была, а расчёта — не было: значение всегда NULL, гейт лишь ПРИТВОРЯЛСЯ
-    проверкой. Колонка в БД оставлена (данные не рушим), ветка в скоринге удалена."""
+def test_trademark_risk_is_a_hard_reject_again():
+    """В v1 ветка отказа была, а расчёта — не было (значение всегда NULL), и её сняли как
+    призрак. В v2 у неё есть производитель: W0 ставит `trademark_risk=True` по бренд-токену в
+    имени (domain_filters.brand_hit, Задача 9) — и отказ снова жёсткий."""
     out = compute_score({"wayback_checked": True, "prior_flags": {}, "trademark_risk": True,
-                         "age_years": 10, "referring_domains": 300, "indexed_echo": True})
-    assert "hard_reject" not in out["breakdown"]
-    assert out["status"] != "rejected"
+                         "age_years": 10, "referring_domains": 300})
+    assert out["status"] == "rejected" and "trademark" in out["breakdown"]["hard_reject"]
 
 
 # ---- веса: в живой БД (миграция 0009) лежит СОХРАНЁННЫЙ JSON ----
@@ -316,3 +316,18 @@ def test_settings_drop_unknown_weight_keys():
     from app.services import scoring_config as cfg
     w = _clean_weights({"history_cleanliness": 0.4, "topic_switch": 1.0, "trademark_risk": 1.0})
     assert set(w) == set(cfg.WEIGHTS)
+
+
+def test_classify_history_returns_texts_of_read_snapshots(monkeypatch):
+    """W5: тексты УЖЕ прочитанных снимков уходят в LLM-тему — лишних запросов к archive.org нет."""
+    from app.integrations.wayback import WaybackClient
+    wb = WaybackClient()
+    snaps = [{"timestamp": f"20{10 + i}0101000000", "original": "http://x.com/"} for i in range(5)]
+    monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: snaps)
+    monkeypatch.setattr(wb, "_fetch_raw", lambda ts, orig: "<html><title>VPN blog</title><body>"
+                        + "secure tunnel " * 300 + "</body></html>")
+    out = wb.classify_history("x.com", sample=5, polite=0)
+    assert out["wayback_checked"] is True and len(out["texts"]) == 5
+    assert all(len(t["text"]) <= 2000 for t in out["texts"])
+    monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: [])
+    assert wb.classify_history("x.com", sample=5, polite=0)["texts"] == []

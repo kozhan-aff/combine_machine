@@ -1,4 +1,4 @@
-"""A-Parser client — whois / SERP / keywords / coarse-DR. Transport only.
+"""A-Parser client — whois / SERP / keywords. Transport only.
 
 See docs/api/aparser.md. Local box :9091. Request: POST /API {password, action, data}.
 Useful parsers: Net::Whois (M2 free-check), SE::Google/Yandex (M1/M4), WordStat (M4).
@@ -16,65 +16,6 @@ _RE_GTLD = re.compile(r"creation date:\s*(\d{4})-(\d{2})-(\d{2})", re.I)
 #   '<domain> - registered: 0|1, expire: ..., creation: DD.MM.YYYY|none'
 _RE_SVERTKA_REG = re.compile(r"registered:\s*([01])\b", re.I)
 _RE_SVERTKA_CREATION = re.compile(r"creation:\s*(\d{2})\.(\d{2})\.(\d{4})", re.I)
-
-# Rank::Ahrefs resultString (Result format "$query: $rating, $bl, $domains\n"), живьём
-# проверено 2026-07-08: 'wikipedia.org: 97, 3421649284, 4000871' / 'lev777.casino: none, 476, 268'
-# rating может быть буквально строкой 'none' — Ahrefs не всем доменам присваивает DR,
-# даже когда backlinks/referring-domains у них реальные (не 0) — отдельный null-check.
-_RE_AHREFS = re.compile(
-    r"^\s*\S+:\s*(?P<rating>none|\d+)\s*,\s*(?P<bl>\d+)\s*,\s*(?P<domains>\d+)\s*$",
-    re.I | re.M,
-)
-
-# SE::Google::SafeBrowsing resultString: '<domain>: 0|1\n' (1 = Google-флаг вредонос/фишинг),
-# живьём проверено 2026-07-16 на обоих тестовых доменах (оба вернули 0).
-_RE_SAFEBROWSING = re.compile(r":\s*([01])\s*$")
-
-# Rank::Archive resultString (preset no_proxy — default сломан через прокси, см. дизайн-документ):
-# '<domain>: <first|none> - <last|none> (<times|none> times)\n', даты dd.mm.yyyy.
-# Живьём проверено 2026-07-16: google.com (19936104), wikipedia.org (393880),
-# yandex.ru (506844), zudpopo.ru (19, 2023-2026).
-_RE_ARCHIVE = re.compile(
-    r":\s*(?P<first>none|\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<last>none|\d{2}\.\d{2}\.\d{4})"
-    r"\s*\((?P<times>none|\d+)\s*times\)",
-    re.I,
-)
-
-
-def _parse_safebrowsing(text: str) -> bool | None:
-    """True = зафлагован Google, False = чист, None = формат не распознан (вызывающий
-    код трактует как «не проверено», НЕ как «чисто» — см. scoring._funnel)."""
-    m = _RE_SAFEBROWSING.search(text or "")
-    return None if not m else m.group(1) == "1"
-
-
-def _parse_archive(text: str) -> dict:
-    """times=0 -> вызывающий код вправе пропустить дорогой Wayback-фетч; times=None ->
-    формат не распознан/сбой, фолбэк на реальный Wayback как раньше."""
-    m = _RE_ARCHIVE.search(text or "")
-    if not m:
-        return {"times": None, "first": None, "last": None}
-    times = m.group("times")
-    return {
-        "times": None if times.lower() == "none" else int(times),
-        "first": None if m.group("first").lower() == "none" else m.group("first"),
-        "last": None if m.group("last").lower() == "none" else m.group("last"),
-    }
-
-
-def _parse_ahrefs(text: str) -> dict:
-    """resultString '<domain>: <rating|none>, <bl>, <domains>' -> dr/backlinks/
-    referring_domains. Немэтч (разметка A-Parser/Ahrefs изменилась) -> все None, не
-    исключение — вызывающий код (scoring._funnel) уже привык к None-сигналам."""
-    m = _RE_AHREFS.search(text or "")
-    if not m:
-        return {"dr": None, "backlinks": None, "referring_domains": None}
-    rating = m.group("rating")
-    return {
-        "dr": None if rating.lower() == "none" else int(rating),
-        "backlinks": int(m.group("bl")),
-        "referring_domains": int(m.group("domains")),
-    }
 
 
 def _parse_whois_created(text: str) -> datetime | None:
@@ -206,7 +147,7 @@ class AParserClient(BaseClient):
         """Один Net::Whois-вызов -> доступность + дата регистрации.
         available: True свободен / False занят / None не определить. created: дата или None.
         Сетевой сбой И отказ A-Parser (конверт success:0, см. _call) пробрасываются — ловит
-        вызывающий код (_funnel -> sig["errors"] -> метка «вслепую» + запрет авто-approve).
+        вызывающий код (W2: whois.probe -> sig["errors"] -> метка «вслепую», домен вне пакета).
         None-ы здесь означают ТОЛЬКО «A-Parser ответил, но разобрать нечего», а не «не спросили»."""
         res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
                                         "configPreset": "default", "preset": "default"})
@@ -216,49 +157,6 @@ class AParserClient(BaseClient):
     def whois_created(self, domain: str) -> datetime | None:
         """Дата регистрации (обёртка над whois_probe для обратной совместимости)."""
         return self.whois_probe(domain)["created"]
-
-    def ahrefs_probe(self, domain: str) -> dict:
-        """Rank::Ahrefs через капча-решатель (пресет RuCapcha, живьём проверено
-        2026-07-08 — см. docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).
-        Дорогой вызов (платная капча) — вызывающий код решает, КОГДА его делать
-        (scoring.py _funnel: только для доменов без RD из фида, T3-выжившие, под
-        runtime-бюджетом max_ahrefs_per_run). Сетевой сбой И отказ A-Parser (конверт success:0,
-        напр. не решилась капча) пробрасываются — ловит вызывающий код (как whois_probe).
-        Ретрая здесь нет: _call поднимает RuntimeError УЖЕ ПОСЛЕ request(), вне его ретрай-обёртки,
-        иначе один отказ конверта стоил бы трёх платных решений капчи."""
-        res = self._call("oneRequest", {
-            "query": domain,
-            "parser": "Rank::Ahrefs",
-            "preset": "default",
-            "configPreset": "default",
-            "options": [
-                {"name": "Use proxy", "value": True},
-                {"name": "Proxy Checker", "value": settings.APARSER_PROXY_CHECKER},
-                {"name": "Result format", "value": "$query: $rating, $bl, $domains\n"},
-                {"name": "Util::Turnstile preset", "value": "RuCapcha"},
-            ],
-        })
-        return _parse_ahrefs(self._result_string(res))
-
-    def safebrowsing_check(self, domain: str) -> bool | None:
-        """SE::Google::SafeBrowsing — не SERP-скрейпинг, прямой lookup, recaptcha не
-        задевает (в отличие от TrustCheck/Compromised, живьём проверено 2026-07-16)."""
-        res = self._call("oneRequest", {
-            "query": domain, "parser": "SE::Google::SafeBrowsing",
-            "configPreset": "default", "preset": "default",
-        })
-        return _parse_safebrowsing(self._result_string(res))
-
-    def archive_probe(self, domain: str) -> dict:
-        """Rank::Archive, ОБЯЗАТЕЛЬНО preset=no_proxy — default бьётся в archive.org
-        через прокси-пул и получает 502 на каждую попытку (живьём подтверждено
-        2026-07-16: getParserPreset показал useproxy=1 у default, логи oneRequest —
-        502 Bad Gateway на всех прокси). no_proxy живьём подтверждён рабочим."""
-        res = self._call("oneRequest", {
-            "query": domain, "parser": "Rank::Archive",
-            "configPreset": "default", "preset": "no_proxy",
-        })
-        return _parse_archive(self._result_string(res))
 
 
 if __name__ == "__main__":  # pure whois-parse self-check (no network)

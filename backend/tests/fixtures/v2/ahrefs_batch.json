@@ -1,0 +1,8 @@
+{"targets": [
+  {"index": 0, "url": "pharmaindustrie.com/", "domain_rating": 0.0, "refdomains": 719, "refdomains_dofollow": 358,
+   "refips_subnets": 197, "backlinks": 803, "org_traffic": 0},
+  {"index": 1, "url": "nordvpn.com/", "domain_rating": 88.0, "refdomains": 52520, "refdomains_dofollow": 40675,
+   "refips_subnets": 12145, "backlinks": 9977459, "org_traffic": 7619254},
+  {"index": 2, "url": "пример.рф/", "domain_rating": 10.0, "refdomains": 575, "refdomains_dofollow": 66,
+   "refips_subnets": 205, "backlinks": 657, "org_traffic": 0}
+]}

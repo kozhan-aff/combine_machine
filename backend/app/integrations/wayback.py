@@ -338,13 +338,14 @@ class WaybackClient(BaseClient):
         if not snaps:
             # домен не архивировался — историю подтвердить нечем, НЕ выдаём «проверено»
             return {"prior_flags": {}, "first_seen": None, "age_years": None,
-                    "wayback_checked": False, "sampled": 0, "evidence": []}
+                    "wayback_checked": False, "sampled": 0, "evidence": [], "texts": []}
 
         first_seen = _ts(snaps[0]["timestamp"])
         age_years = round((datetime.now(timezone.utc) - first_seen).days / 365.25, 2)
 
         cats_by_time: list[set[str]] = []
         evidence: list[dict] = []      # ЧТО именно смотрели — куратор обязан мочь перепроверить
+        texts: list[dict] = []         # тексты прочитанных снимков — для темы W5 (history_llm)
         ok = 0  # реально ПРОЧИТАННЫЕ снапшоты (скачался И было что классифицировать)
         for s in _pick(snaps, sample):
             try:
@@ -364,6 +365,7 @@ class WaybackClient(BaseClient):
                              "cats": sorted(cats), "chars": len(text)})
             if read:
                 ok += 1
+                texts.append({"timestamp": s["timestamp"], "text": text[:2000]})
             time.sleep(polite)
 
         checked = ok >= (sample // 2 + 1)      # «проверено» только при покрытии большинства
@@ -371,19 +373,21 @@ class WaybackClient(BaseClient):
             # мало данных (систематический троттлинг archive.org) — нельзя выдавать чистый
             # вердикт по паре снапшотов; sig-гард в scoring уведёт в manual
             return {"prior_flags": {}, "first_seen": first_seen, "age_years": age_years,
-                    "wayback_checked": False, "sampled": ok, "evidence": evidence}
+                    "wayback_checked": False, "sampled": ok, "evidence": evidence,
+                    "texts": texts}
 
         # `topic_switch` здесь БЫЛ и удалён (аудит 2026-07-14, F4). Он считал
         # `(later − early) ∩ {adult,pharma,casino,gambling}` — но `later ⊆ all_cats`, а любая из
         # этих четырёх категорий в all_cats уже поднимает СВОЙ флаг, и все четыре входят в
         # HARD_REJECT_FLAGS. Строгое подмножество уже сработавшего отказа: ни одного нового
         # отказа флаг добавить не мог. Смену темы «мебель → казино» ловит `casino`, а не он.
-        # Тематическая ПРЕЕМСТВЕННОСТЬ донора инвариантом проекта не является (CLAUDE.md требует
-        # чистой истории), поэтому чинить его как настоящую проверку было нечего — только удалить.
+        # Тематическую ПРЕЕМСТВЕННОСТЬ (инвариант 4 v2) судит не флаг категорий, а мягкий сигнал
+        # темы W5 — LLM по `texts` ниже (services/history_llm.py).
         all_cats = set().union(*cats_by_time) if cats_by_time else set()
         flags = {c: (c in all_cats) for c in STOPWORDS}
         return {"prior_flags": flags, "first_seen": first_seen, "age_years": age_years,
-                "wayback_checked": True, "sampled": ok, "evidence": evidence}
+                "wayback_checked": True, "sampled": ok, "evidence": evidence,
+                "texts": texts}
 
     def ping(self) -> bool:
         r = self.request("GET", f"{self.base_url}/cdx/search/cdx",

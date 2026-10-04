@@ -1,12 +1,11 @@
 """Регрессии на подтверждённые баги M1 (см. брифинг ревью). Оффлайн, без сети.
 
 C1 spam-история -> hard-reject; C2 Wayback не «проверено» без реально скачанных снапшотов;
-I1 ошибка RKN/blacklist не даёт auto-approve; I2 DNS_RESOLVER + sentinel-raise;
-I3 обрезанный дамп РКН не кэшируется молча; I4 гонка discovery не теряет батч;
+I1 ошибка blacklist не даёт auto-approve (v1: ещё и RKN); I2 DNS_RESOLVER + sentinel-raise;
+I3 (v1, РКН-дамп удалён из M1); I4 гонка discovery не теряет батч;
 M-2 retry не ретраит 4xx и отдаёт исходное исключение.
 """
 import socket
-import time as _time
 
 import httpx
 import pytest
@@ -17,7 +16,7 @@ import pytest
 def test_spam_history_hard_rejected():
     from app.services.scoring import compute_score
     out = compute_score({"wayback_checked": True, "prior_flags": {"spam": True},
-                         "age_years": 12, "referring_domains": 500, "indexed_echo": True})
+                         "age_years": 12, "referring_domains": 500})
     assert out["status"] == "rejected" and out["score"] == 0.0
     assert "prior_spam" in out["breakdown"]["hard_reject"]
 
@@ -97,19 +96,25 @@ def test_wayback_brands_no_false_positive():
     assert "casino" in _classify_text("вулкан казино играть, азино777 бонус")
 
 
-# ---------- I1: ошибка RKN/blacklist не даёт auto-approve ----------
+# ---------- I1: ошибка Web Risk/blacklist не пускает в пакетное одобрение ----------
 
-def test_rkn_or_blacklist_error_caps_at_scored():
-    from app.services.scoring import compute_score
+def test_webrisk_or_blacklist_error_caps_at_scored():
+    """Авто-одобрения нет (Р2): скоринг даёт максимум `scored` и при чистом прогоне. Упавшая
+    проверка Web Risk/блэклиста держит домен вне ПАКЕТА — туда переехал гард из _decide."""
+    from app.models.domain import Domain
+    from app.services.scoring import bulk_ok, compute_score
     strong = {"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-              "referring_domains": 3000, "indexed_echo": True}
-    # чистый прогон без ошибок -> approved (базовая линия)
-    assert compute_score({**strong, "rkn_listed": False, "blacklisted": False,
-                          "errors": []})["status"] == "approved"
-    # проверка RKN упала (ключ сигнала отсутствует, ошибка в errors) -> не выше scored
-    assert compute_score({**strong, "errors": ["rkn:ConnectError"]})["status"] == "scored"
-    # проверка blacklist упала -> тоже scored
-    assert compute_score({**strong, "errors": ["blacklist:RuntimeError"]})["status"] == "scored"
+              "referring_domains": 3000}
+    clean = compute_score({**strong, "blacklisted": False, "errors": []})
+    assert clean["status"] == "scored" and clean["score"] >= 0.70      # сильный, но одобряет человек
+
+    def _dom(errors):
+        return Domain(domain="i1.com", wayback_checked=True, prior_flags={}, age_years=8, score=0.8,
+                      score_breakdown={"errors": errors, "history_evidence": [], "deep_checked": True})
+    assert bulk_ok(_dom([])) is True                                   # базовая линия: пакет берёт
+    for err in ("webrisk:ConnectError", "webrisk:not_configured", "blacklist:RuntimeError"):
+        assert compute_score({**strong, "errors": [err]})["status"] == "scored"
+        assert bulk_ok(_dom([err])) is False                           # проверка упала — вне пакета
 
 
 # ---------- Ahrefs: authority (DR) получает реальный вес ----------
@@ -117,7 +122,7 @@ def test_rkn_or_blacklist_error_caps_at_scored():
 def test_authority_none_dr_contributes_zero():
     from app.services.scoring import compute_score
     out = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                         "referring_domains": 3000, "indexed_echo": True, "dr": None})
+                         "referring_domains": 3000, "dr": None})
     assert out["breakdown"]["components"]["authority"] == 0.0
 
 
@@ -125,9 +130,9 @@ def test_authority_real_dr_contributes_nonzero():
     from app.services.scoring import compute_score
     from app.services import scoring_config as cfg
     without_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                                "referring_domains": 3000, "indexed_echo": True, "dr": None})
+                                "referring_domains": 3000, "dr": None})
     with_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                             "referring_domains": 3000, "indexed_echo": True, "dr": 30})
+                             "referring_domains": 3000, "dr": 30})
     assert with_dr["breakdown"]["components"]["authority"] > 0.0
     assert with_dr["score"] > without_dr["score"]
     assert "authority" in cfg.WEIGHTS and cfg.WEIGHTS["authority"] > 0
@@ -273,66 +278,6 @@ def test_blacklist_ping_uses_dqs_zone_when_key_set(monkeypatch):
     assert seen == ["test.abcd1234efgh5678ijkl9012mn.dbl.dq.spamhaus.net"]
 
 
-# ---------- I3: обрезанный дамп РКН не кэшируется молча ----------
-
-class _FakeResp:
-    def __init__(self, text):
-        self.text = text
-
-
-def test_rkn_small_dump_raises_when_no_cache(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_loaded_at", None)
-    monkeypatch.setattr(RknClient, "_blocked", set())
-    c = RknClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp("a.ru\nb.ru\n"))  # 2 строки
-    with pytest.raises(RuntimeError):
-        c.is_listed("test.ru")
-
-
-def test_rkn_small_dump_keeps_old_cache(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_blocked", {"old-blocked.ru"})
-    monkeypatch.setattr(RknClient, "_loaded_at", _time.monotonic() - 10 ** 9)  # устарел, но не None
-    c = RknClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp("only.ru\n"))   # мал -> не применять
-    assert c.is_listed("old-blocked.ru") is True    # прежний валидный кэш сохранён
-    assert c.is_listed("only.ru") is False          # обрезанный дамп НЕ затёр кэш
-
-
-# ---------- волновая конкурентность (найдено при перепроверке 2026-07-21): _ensure_loaded
-# сериализован локом — иначе 12 потоков _wave_risk видят "кэш холодный" разом и синхронно
-# бьют antizapret по разу каждый. Таймингового теста тут недостаточно (см. сессионный урок
-# про голый += 1 под sleep — не ловит гонку надёжнее угадывания): доказываем детерминированно
-# спай-локом, считающим реальные входы в `with`. ----------
-
-class _SpyLock:
-    def __init__(self, real):
-        self._real = real
-        self.enters = 0
-
-    def __enter__(self):
-        self.enters += 1
-        return self._real.__enter__()
-
-    def __exit__(self, *a):
-        return self._real.__exit__(*a)
-
-
-def test_rkn_ensure_loaded_serialized_by_class_lock(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_loaded_at", None)
-    monkeypatch.setattr(RknClient, "_blocked", set())
-    spy = _SpyLock(RknClient._load_lock)
-    monkeypatch.setattr(RknClient, "_load_lock", spy)
-    c = RknClient()
-    dump = "\n".join(f"a{i}.ru" for i in range(1200))
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp(dump))
-    c._ensure_loaded()
-    assert spy.enters == 1          # проверка условия и сама загрузка — под ОДНИМ входом в лок
-    assert RknClient._loaded_at is not None
-
-
 # ---------- I4: гонка двух discovery не теряет батч ----------
 
 def test_discovery_survives_insert_race(monkeypatch):
@@ -343,31 +288,41 @@ def test_discovery_survives_insert_race(monkeypatch):
     import app.db as db
     from app.models.domain import Domain
 
-    # мультиисточник (Task 4): офлайн-тест бьёт только backorder — остальные источники
-    # выключаем, иначе _collect уйдёт в реальную сеть (cctld/reg.ru/sweb через A-Parser).
-    # Прогреваем settings ДО патча Session.execute, чтобы get_settings() внутри
+    # офлайн-тест бьёт только nominet — остальные источники выключаем, иначе _collect уйдёт в
+    # реальную сеть. Прогреваем settings ДО патча Session.execute, чтобы get_settings() внутри
     # run_discovery() не занял "первый" перехваченный вызов случайной строкой настроек.
-    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
+    update_settings(sources_enabled={"dropcatch": False, "nominet": True, "mx": False, "emd": False})
 
-    # как будто параллельный запуск уже вставил race.ru (до нашего COMMIT)
+    # как будто параллельный запуск уже вставил race.co.uk (до нашего COMMIT)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="race.ru", source="backorder", referring_domains=1))
+        s.add(Domain(domain="race.co.uk", source="nominet", referring_domains=1))
         s.commit()
 
-    rows = [{"domainname": "race.ru", "links": "5"},
-            {"domainname": "fresh.ru", "links": "7"}]
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: rows)
+    rows = [{"domain": "race.co.uk", "source": "nominet", "lane": "bid", "acquire_deadline": None},
+            {"domain": "fresh.co.uk", "source": "nominet", "lane": "bid", "acquire_deadline": None}]
 
-    # ПЕРВЫЙ SELECT именно по domains (existing) отдаём пустым (устаревшее чтение) ->
-    # код попробует вставить дубль race.ru -> IntegrityError; остальные (включая
-    # get_settings() внутри run_discovery и повторное чтение existing) — настоящие.
+    class _Src:
+        def list_dropping(self):
+            return list(rows)
+
+    class _Ahrefs:
+        def dr_free(self, domains):
+            return {d: 10.0 for d in domains}
+    monkeypatch.setattr(discovery, "_clients", lambda: {"nominet": _Src})
+    monkeypatch.setattr("app.integrations.ahrefs.AhrefsClient", _Ahrefs)
+
+    # ПЕРВЫЙ SELECT именно по domains (known) отдаём пустым (устаревшее чтение) ->
+    # код попробует вставить дубль race.co.uk -> IntegrityError; остальные (включая
+    # get_settings() внутри run_discovery, dr_seen и повторное чтение known) — настоящие.
     real_execute = Session.execute
     state = {"fired": False}
 
     class _EmptyResult:
         def scalars(self):
             return self
+
+        def __iter__(self):
+            return iter(())
 
         def all(self):
             return []
@@ -383,13 +338,10 @@ def test_discovery_survives_insert_race(monkeypatch):
     inserted = discovery.run_discovery()
     monkeypatch.undo()   # снять патчи перед проверками
 
-    assert inserted == 1   # досыпан только fresh.ru — батч не потерян
+    assert inserted == 1   # досыпан только fresh.co.uk — батч не потерян
     with db.SessionLocal() as s:
         names = set(s.execute(select(Domain.domain)).scalars().all())
-    assert names == {"race.ru", "fresh.ru"}
-
-
-# ---------- M-2: retry не ретраит 4xx и отдаёт исходное исключение ----------
+    assert names == {"race.co.uk", "fresh.co.uk"}
 
 def _status_err(code):
     req = httpx.Request("GET", "http://x")
@@ -437,11 +389,15 @@ def test_blacklist_raises_when_resolver_cannot_reach_spamhaus(monkeypatch):
 
 
 def test_blacklist_none_goes_to_errors_and_downgrades(monkeypatch):
-    # is_blacklisted вернул None (транзиент) -> в sig.errors -> risk-guard -> manual scored
+    # is_blacklisted вернул None (транзиент) -> в sig.errors -> домен «вслепую», вне пакета.
+    # Авто-одобрения нет (Р2): _decide даёт максимум scored даже на 0.9 с этой ошибкой.
+    from app.models.domain import Domain
     from app.services import scoring
-    # прямой юнит на _decide: approved + blacklist-ошибка -> scored
     sig_err = {"errors": ["blacklist:unavailable"]}
-    assert scoring._decide(0.9, sig_err, 0.7, 0.4) == "scored"
+    assert scoring._decide(0.9, sig_err, 0.4) == "scored"
+    d = Domain(domain="bl.ru", wayback_checked=True, prior_flags={}, age_years=8,
+               score_breakdown={"errors": sig_err["errors"], "history_evidence": []})
+    assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
 
 
 # ---------- M9: status-gate — рескорится только discovered/scored/rejected ----------
@@ -464,50 +420,45 @@ def test_score_only_discovered_status(monkeypatch):
 def _fake_clients() -> dict:
     """Оффлайн-заглушки под ключи _make_clients() (см. test_funnel.py:_clients) — score_pending
     строит клиентов сама через _make_clients(), поэтому патчим саму фабрику, иначе реальный
-    боевой прогон (whois на 192.168.1.77, РКН antizapret, DNS к dbl.spamhaus.org, archive.org)
-    дёргается для доменов #2,#3 (Finding-1, ревью Task 7)."""
+    боевой прогон (whois на 192.168.1.77, DNS к dbl.spamhaus.org, archive.org) дёргается для
+    доменов #2,#3 (Finding-1, ревью Task 7)."""
     class _W:  # aparser
         def whois_probe(self, dom):
             return {"available": False, "created": None}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return False
     class _WB:
         def classify_history(self, dom, **k):
             return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
                     "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": _WB(), "tci": type("T", (), {"handles": lambda self, d: False})()}
+    return {"aparser": _W(), "blacklist": _B(), "wayback": _WB()}
 
 
 def test_score_pending_isolates_failure(monkeypatch):
     """Task 9: score_pending больше не зовёт score_domain по одному внутри своего цикла —
     изоляция падения одного домена теперь физически реализована ВНУТРИ волны
     (_run_concurrent, см. Task 3), не в score_pending. Перехватываем на этом уровне
-    (_whois_one — тело T1 для одного домена), а не на уровне score_domain, который
+    (_avail_one — тело W2 для одного домена), а не на уровне score_domain, который
     больше не является местом, где что-либо может упасть по одному домену.
 
     RD сдвинут на +1 (было `referring_domains=i`, теперь `i + 1`), чтобы ни один из 3
     доменов не отсеялся на T0 (`min_referring_domains=1` отбраковал бы RD=0 ДО whois-волны,
-    и на нём _whois_one вообще не позвался бы — счётчик calls["n"] не досчитался бы до 3)."""
+    и на нём _avail_one вообще не позвался бы — счётчик calls["n"] не досчитался бы до 3)."""
     import app.db as db
     from app.models.domain import Domain
     from app.services import scoring
     with db.SessionLocal() as s:
-        s.add_all([Domain(domain=f"d{i}.ru", source="backorder", status="discovered",
+        s.add_all([Domain(domain=f"d{i}.com", source="backorder", status="discovered",
                           lane="bid", referring_domains=i + 1) for i in range(3)]); s.commit()
     monkeypatch.setattr(scoring, "_make_clients", _fake_clients)
     calls = {"n": 0}
-    real = scoring._whois_one
+    real = scoring._avail_one
     def _boom(s, clients, budget, st):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
         return real(s, clients, budget, st)
-    monkeypatch.setattr(scoring, "_whois_one", _boom)
+    monkeypatch.setattr(scoring, "_avail_one", _boom)
     # не должно упасть, остальные 2 обработаны; клиенты — фейки (см. _fake_clients), НЕ реальная сеть
     n = scoring.score_pending(limit=10)
     assert n == 3 and calls["n"] == 3

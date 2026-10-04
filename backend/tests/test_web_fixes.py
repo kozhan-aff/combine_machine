@@ -128,11 +128,12 @@ def test_settings_render_and_save(client):
     assert client.get("/settings").status_code == 200
     r = client.post("/settings/save", data={
         "min_referring_domains": 2, "min_age_years": 4, "approve_at": 0.75,
-        "manual_review_at": 0.4, "cctld": "on"}, follow_redirects=False)
+        "manual_review_at": 0.4, "mx": "on"}, follow_redirects=False)
     assert r.status_code == 303
     from app.services import settings as st
     s = st.get_settings()
-    assert s["min_age_years"] == 4.0 and s["sources_enabled"]["backorder"] is False
+    assert s["min_age_years"] == 4.0
+    assert s["sources_enabled"]["mx"] is True and s["sources_enabled"]["dropcatch"] is False
 
 
 def test_settings_preview_json(client):
@@ -152,7 +153,7 @@ def test_diag_spec_has_module_and_critical():
     for row in _spec():
         assert len(row) == 7                      # key,label,role,need_cred,module,critical,fn
         key, label, role, need_cred, module, critical, fn = row
-        assert module in ("M1", "M3", "M4", "M5", "инфра")
+        assert module in ("M1", "M2", "M3", "M4", "M5", "инфра")
         assert isinstance(critical, bool)
 
 
@@ -212,15 +213,6 @@ def test_settings_save_accepts_max_whois(client, sqlite_db):
         "min_referring_domains": 1, "min_age_years": 3, "approve_at": 0.7,
         "manual_review_at": 0.4, "max_whois_per_run": 77, "backorder": "on"})
     assert get_settings()["max_whois_per_run"] == 77
-
-
-def test_settings_save_accepts_max_ahrefs(client, sqlite_db):
-    from app.services.settings import get_settings
-    client.post("/settings/save", data={
-        "min_referring_domains": 1, "min_age_years": 3, "approve_at": 0.7,
-        "manual_review_at": 0.4, "max_whois_per_run": 200, "max_ahrefs_per_run": 5,
-        "backorder": "on"})
-    assert get_settings()["max_ahrefs_per_run"] == 5
 
 
 # --- Task 2 (спек 2 лицо): локализация статусов/лейнов/reject через фильтры -------

@@ -1,6 +1,6 @@
 """SearXNG client — free SERP (self-hosted meta-search). Transport only.
 
-See docs/api/searxng.md. Used for M1 indexed_echo (site:) and M4 competitor SERP.
+See docs/api/searxng.md. Used for M5 index checks (site:) and M4 competitor SERP.
 """
 from urllib.parse import urlparse
 
@@ -50,17 +50,6 @@ class SearxngClient(BaseClient):
 
     def search(self, query: str, language: str | None = None, pageno: int = 1) -> list[dict]:
         return self.search_full(query, language=language, pageno=pageno).get("results", [])
-
-    def indexed_echo(self, domain: str) -> bool:
-        """M1 indexed_echo: is old content of this domain still in the index?
-
-        # ponytail: degrades to False (no bonus, never a wrong approve) when the box's
-        # SearXNG engines are CAPTCHA-blocked. For this .ru/RU project the box MUST have
-        # Yandex enabled (settings.yml) — Google/Brave/DDG/Startpage rate-limit the box
-        # IP and don't answer `site:`; Yandex indexes .ru best and doesn't block RU.
-        """
-        results = self.search(f"site:{domain}")
-        return any(host_matches(r.get("url"), domain) for r in results)
 
     def unresponsive_engines(self, probe: str = "test") -> list:
         """Which engines are currently blocked/erroring (e.g. [['duckduckgo','CAPTCHA']]).

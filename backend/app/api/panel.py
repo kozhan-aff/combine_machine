@@ -33,8 +33,11 @@ from app.services import cf_sync, diag_cache
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
-                                 lane_ru as _lane_ru, index_ru as _index_ru)
+                                 lane_ru as _lane_ru, index_ru as _index_ru,
+                                 source_ru as _source_ru, source_badge as _source_badge)
 templates.env.filters["status_ru"] = _status_ru
+templates.env.filters["source_ru"] = _source_ru
+templates.env.filters["source_badge"] = _source_badge
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
 templates.env.filters["index_ru"] = _index_ru
@@ -133,22 +136,24 @@ def _next_steps(db: Session) -> list[dict]:
 def _pool_counts(db: Session, s: dict) -> dict:
     """Сколько доменов пула проходит каждый гейт при текущих порогах (превью эффекта).
 
-    Правила счёта зеркалят воронку (scoring._funnel), иначе превью врёт:
-    T0 режет только ИЗВЕСТНЫЙ RD < порога — NULL (сырой список без RD) проходит.
+    Правила счёта зеркалят волны (scoring._run_waves), иначе превью врёт: RD судит W4 и режет только
+    ИЗВЕСТНЫЙ RD < порога — NULL (ещё не спрошен) проходит; возраст — W5, по старшей из даты
+    RDAP/whois и первого снимка (Р5). Архив РФ-пула v1 (`legacy_ru`, миграция 0025) машина больше не
+    судит — в превью его нет (находка R2-16): тысячи старых .ru раздували бы каждый счётчик.
     """
     from datetime import datetime, timezone, timedelta
-    total = db.scalar(select(func.count()).select_from(Domain)) or 0
-    rd = db.scalar(select(func.count()).select_from(Domain).where(
-        or_(Domain.referring_domains.is_(None),
-            Domain.referring_domains >= s["min_referring_domains"]))) or 0
+    live = or_(Domain.reject_reason.is_(None), Domain.reject_reason != "legacy_ru")
+
+    def n(*where) -> int:
+        return db.scalar(select(func.count()).select_from(Domain).where(live, *where)) or 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=365.25 * s["min_age_years"])
-    age = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.whois_created.is_not(None), Domain.whois_created <= cutoff)) or 0
-    approve = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.score >= s["approve_at"])) or 0
-    manual = db.scalar(select(func.count()).select_from(Domain).where(
-        Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])) or 0
-    return {"total": total, "rd": rd, "age": age, "approve": approve, "manual": manual}
+    return {"total": n(),
+            "rd": n(or_(Domain.referring_domains.is_(None),
+                        Domain.referring_domains >= s["min_referring_domains"])),
+            # возраст — старшая из даты RDAP/whois и первого снимка (Р5): age_years хранит решающий
+            "age": n(or_(Domain.whois_created <= cutoff, Domain.age_years >= s["min_age_years"])),
+            "approve": n(Domain.score >= s["approve_at"]),
+            "manual": n(Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])}
 
 
 def _gates(db: Session) -> dict:
@@ -199,19 +204,12 @@ def _deadline_utc(d):
 def _expired(d, now) -> bool:
     """Окно дропа ЗАКРЫТО — домен уже упущен (его продлили или перехватили).
 
-    Такой домен доезжает до инбокса и живёт там до перепроверки: для lane='bid' воронка T1
+    Такой домен доезжает до инбокса и живёт там до перепроверки: для lane='bid' воронка W2
     короткозамыкает лейном и приобретаемость на скоринге не судит вовсе. Держать его наверху
     как «срочный» — значит звать оператора решать судьбу покойника (ревью 2026-07-13).
-
-    Проекция whois (free-date, `deadline_source == 'whois_projection'`) сюда НЕ годится:
-    она значит «освободится, если не продлят», а не «окно ловли». Домен, дождавшийся своей
-    проекции и реально дропнувшийся, приходит в инбокс с ПРОШЕДШЕЙ датой (при available=True
-    свежего free-date нет, обновлять нечем) — и если прогон Score отстал больше чем на
-    DROP_GRACE, свободный домен носил бы красное «окно закрыто, домен занят» на экране, с
-    которого ИДУТ ПОКУПАТЬ. Та же ложь, против которой сделана подпись «ОСВОБОДИТСЯ*»."""
+    Дедлайн в v2 — только дата дропа из источника (DropCatch/Nominet): проекции whois больше нет
+    (её давал TCI, удалён вместе с РФ)."""
     from app.services.scoring import DROP_GRACE
-    if (d.score_breakdown or {}).get("deadline_source") == "whois_projection":
-        return False
     dl = _deadline_utc(d)
     return dl is not None and dl < now - DROP_GRACE
 
@@ -227,14 +225,22 @@ def _urgent(d, soon, now) -> bool:
 
 
 @router.get("/domains", response_class=HTMLResponse)
-def domains_view(request: Request, db: Session = Depends(get_session)):
-    """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool."""
+def domains_view(request: Request, lang: str | None = None, db: Session = Depends(get_session)):
+    """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool.
+
+    `?lang=xx` — фильтр по языку прошлого сайта. Счётчик «на решении» и список языков — ДО
+    фильтра; при выбранном языке форма пакета скрыта: пакет взял бы и невидимые домены других
+    языков (находка 1.6)."""
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import case
     from app.services import jobs
-    from app.services.scoring import (blind_reason, bulk_ok, history_evidence, history_note,
-                                      history_verdict, stale_donors, DROP_GRACE)
-    from app.services.transitions import dirty_reason
+    from app.services.scoring import (blind_reason, emd_newreg, history_evidence,
+                                      history_note, history_verdict, stale_donors, topic_far,
+                                      DROP_GRACE)
+    from app.services.settings import get_settings
+    from app.services.transitions import dirty_reason, zone_closed
+    settings = get_settings()                        # одно чтение настроек на страницу
+    allow = settings["tld_allowlist"]
 
     now = datetime.now(timezone.utc)
     # Срочность важнее score: домен, дропающийся завтра, теряется, пока мы любуемся красивым.
@@ -254,6 +260,11 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
     order = (tier, Domain.acquire_deadline.asc(), Domain.score.desc().nulls_last())
     inbox = db.execute(select(Domain).where(Domain.status == "scored").order_by(*order)).scalars().all()
     ready = db.execute(select(Domain).where(Domain.status == "approved").order_by(*order)).scalars().all()
+    inbox_total = len(inbox)
+    langs = sorted({d.market_lang for d in inbox + ready if d.market_lang})
+    if lang:
+        inbox = [d for d in inbox if d.market_lang == lang]
+        ready = [d for d in ready if d.market_lang == lang]
     counts = _domain_counts(db)
     soon = now + timedelta(days=_URGENT_DAYS)
     urgent = sum(1 for d in inbox + ready if _urgent(d, soon, now))
@@ -271,12 +282,22 @@ def domains_view(request: Request, db: Session = Depends(get_session)):
         # вещи, а подпись «история чистая» не имеет права стоять ни под тем, ни под другим.
         # Улики (снимки Wayback, по которым машина судила) едут всегда, когда они есть: вердикт
         # ошибается — куратор должен мочь перепроверить и «грязно», и «чисто».
-        # `ok` — РЕЗУЛЬТАТ bulk_ok(d), ТОТ ЖЕ предикат, что решает пакетное одобрение
-        # (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
+        # `ok` — РЕЗУЛЬТАТ _bulk_eligible(d, allow) (зона + bulk_ok), ТОТ ЖЕ предикат, что решает
+        # пакетное одобрение (_bulk_candidates ниже). Шаблон обязан подписывать «история чистая» ПО ЭТОМУ ФЛАГУ,
         # а не реконструировать условие из blind/hist на месте — иначе два места молча
         # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
-                   history_evidence(d), bulk_ok(d), history_note(d)) for d in inbox],
+                   history_evidence(d), _bulk_eligible(d, allow), history_note(d)) for d in inbox],
+        "inbox_total": inbox_total, "langs": langs, "f_lang": lang or "",
+        # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
+        "far_ids": {d.id for d in inbox + ready if topic_far(d)},
+        # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
+        "newreg_ids": {d.id for d in inbox if emd_newreg(d)},
+        # Р2: «пакет от скора» по умолчанию = «порог сильного кандидата» из /settings
+        "bulk_default": settings["approve_at"],
+        # зона вне белого списка: «✓ одобрить» политика отвергнет (R2-19) — строка рисует «зона не в
+        # белом списке» вместо кнопки и не пишет «история чистая» (тот же zone_closed, что у политики)
+        "closed_ids": {d.id for d in inbox + ready if zone_closed(d, allow)},
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
         # обычным кандидатом: без метки его можно одобрить (в т.ч. пакетом) и пойти покупать
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
@@ -321,7 +342,9 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
                               Domain.reject_reason != "not_acquirable"))
     if min_score is not None:
         stmt = stmt.where(Domain.score >= min_score)
-    from app.services.transitions import dirty_reason
+    from app.services.settings import get_settings
+    from app.services.transitions import dirty_reason, zone_closed
+    allow = get_settings()["tld_allowlist"]          # одно чтение настроек на страницу
     rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
                                     Domain.referring_domains.desc().nulls_last())
                       .limit(limit)).scalars().all()
@@ -333,9 +356,22 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
         # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.
         # Jinja не имеет права переизобретать этот предикат — разъедется молча.
         "dirty_by_id": {d.id: _reject_ru(r) for d in rows if (r := dirty_reason(d)) is not None},
+        # зона вне белого списка (R2-19): тот же предикат, что у политики, — кнопку «↩ вернуть в
+        # approved» шаблон не рисует (она вела в гарантированный отказ)
+        "closed_ids": {d.id for d in rows if d.status in ("rejected", "scored") and zone_closed(d, allow)},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
     })
+
+
+def _bulk_eligible(d, allow) -> bool:
+    """Годен ли scored-домен к пакетному одобрению: зона в белом списке И `bulk_ok`. ОДИН предикат
+    для пакета (_bulk_candidates) и для строки инбокса (domains_view): строка подписывает «история
+    чистая» и рисует «✓ одобрить» именно по нему, иначе домен вне белого списка (оператор сузил
+    allowlist после скоринга) получал бы кнопку, которую политика гарантированно отвергнет."""
+    from app.services.scoring import bulk_ok
+    from app.services.transitions import zone_closed
+    return not zone_closed(d, allow) and bulk_ok(d)
 
 
 def _bulk_candidates(db: Session, min_score: float):
@@ -352,22 +388,39 @@ def _bulk_candidates(db: Session, min_score: float):
     отсеянный за казино в истории, объявлялся оператору «оценённым вслепую». Считаем то, что
     считаем: сколько строк пакет НЕ ТРОНУЛ.
     """
-    from app.services.scoring import bulk_ok
+    from app.services.settings import get_settings
+    allow = get_settings()["tld_allowlist"]          # одно чтение настроек на пакет
     rows = db.execute(select(Domain).where(Domain.status == "scored",
                                            Domain.score >= min_score)).scalars().all()
-    ok = [d for d in rows if bulk_ok(d)]
+    # Зона вне белого списка (R2-19): политика не пустит такой домен в approved — пакет его не
+    # берёт (иначе падал бы отказом политики) и считает в «пропущено».
+    ok = [d for d in rows if _bulk_eligible(d, allow)]
     return ok, len(rows) - len(ok)
 
 
+def _bulk_threshold(raw: str | None) -> float:
+    """Порог пакета из поля инбокса: число -> в [0, 1]; пусто или мусор -> approve_at из /settings
+    («порог сильного кандидата»), а не зашитые 0.8 (иначе при approve_at=0.9 пакет брал бы НИЖЕ
+    видимого оператору порога). ОДИН разбор для превью-счётчика и самого пакета: очищенное поле
+    шлёт `?min_score=`, и float-параметр превью отвечал 422 — счётчик показывал «undefined», хотя
+    POST то же поле принимал (финальное ревью, minor «г»)."""
+    from app.services.settings import get_settings
+    try:
+        threshold = float(raw)
+    except (TypeError, ValueError):
+        threshold = get_settings()["approve_at"]
+    return max(0.0, min(1.0, threshold))
+
+
 @router.get("/domains/bulk-preview")
-def bulk_preview(min_score: float = 0.8, db: Session = Depends(get_session)):
+def bulk_preview(min_score: str = "", db: Session = Depends(get_session)):
     from fastapi.responses import JSONResponse
-    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    ok, skipped = _bulk_candidates(db, _bulk_threshold(min_score))
     return JSONResponse({"n": len(ok), "skipped": skipped})
 
 
 @router.post("/domains/bulk-approve")
-def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_session)):
+def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_session)):
     """Пакетное одобрение — это КЛИК ЧЕЛОВЕКА, гейт курации на месте (деньги не тратятся:
     approved != куплен). Домены, чью историю не подтвердили (Wayback лежал) или подтвердили как
     грязную, в пакет НЕ попадают — иначе пакет стал бы обходом того самого гейта, ради которого
@@ -379,7 +432,8 @@ def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_
     ВИДЕН оператору, а не проглочен молча.
     """
     from app.services import transitions
-    ok, skipped = _bulk_candidates(db, max(0.0, min(1.0, min_score)))
+    # Очищенное поле формы приходит пустой строкой — порог по умолчанию approve_at (_bulk_threshold)
+    ok, skipped = _bulk_candidates(db, _bulk_threshold(min_score))
     approved, denied = 0, []
     for d in ok:
         try:
@@ -390,7 +444,8 @@ def bulk_approve_action(min_score: float = Form(0.8), db: Session = Depends(get_
     db.commit()
     msg = f"Одобрено пакетом: {approved}"
     if skipped:
-        msg += f" · пропущено (историю не подтвердить или она грязная): {skipped} — их реши руками"
+        msg += (f" · пропущено (не все проверки пройдены, тема далека от VPN, EMD или зона вне "
+                f"белого списка): {skipped} — их реши руками в строке")
     if denied:
         return _back("/domains", err=f"{msg} · политика отвергла {len(denied)}: {denied[0]}")
     return _back("/domains", msg=msg)
@@ -437,12 +492,39 @@ def _require_cf_write(request: Request) -> None:
                             detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
 
 
-@router.get("/settings", response_class=HTMLResponse)
-def settings_view(request: Request, db: Session = Depends(get_session)):
+def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
+                   form_err: str | None = None, status_code: int = 200,
+                   draft: dict | None = None):
+    """Экран /settings. Остаток units Ahrefs — из кэша диагностики, без сети (находка 3.4).
+    Наборы EMD — json.dumps без \\u-экранирования (|tojson прятал «grátis»); `emd_draft` —
+    непринятый ввод оператора после ошибки JSON (находка 6.1).
+
+    `draft` — ВСЁ остальное, что оператор отправил (числа, веса, тумблеры, тексты зон и брендов):
+    при ошибке форма возвращается с его значениями поверх сохранённых, иначе он чинит JSON, жмёт
+    «Сохранить» — и прочие правки молча теряются. В БД draft не пишется, только рисуется."""
+    import json
     from app.services import settings as st
     s = st.get_settings()
+    draft = draft or {}
+    s.update({k: v for k, v in draft.get("nums", {}).items() if v is not None})
+    s["weights"] = {**s["weights"], **draft.get("weights", {})}
+    if "sources" in draft:
+        s["sources_enabled"] = draft["sources"]
+    emd_text = emd_draft if emd_draft is not None else json.dumps(s["emd_sets"], ensure_ascii=False,
+                                                                  indent=1)
+    tld_text = draft.get("tld_allowlist")
+    brand_text = draft.get("brand_tokens")
     return templates.TemplateResponse(request, "settings.html", {
-        "active": "settings", "s": s, "counts": _pool_counts(db, s)})
+        "active": "settings", "s": s, "counts": _pool_counts(db, s),
+        "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
+        "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
+        "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
+        status_code=status_code)
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_view(request: Request, db: Session = Depends(get_session)):
+    return _settings_page(request, db)
 
 
 @router.get("/settings/cloudflare", response_class=HTMLResponse)
@@ -625,6 +707,15 @@ def run_discovery_action(request: Request):
     return _back_here(request, err=None if ok else "Поиск дропов уже идёт")
 
 
+@router.post("/domains/add-list")
+def domains_add_list(domains: str = Form("")):
+    from app.services import discovery
+    r = discovery.add_list(domains)
+    cut = f", сверх {discovery._LIST_MAX} за раз отброшено {r['cut']}" if r["cut"] else ""
+    return _back("/domains/pool", msg=f"Добавлено {r['added']}, уже были {r['known']}, "
+                                      f"не домены {r['bad']}{cut} — новые оценятся при «Оценить домены»")
+
+
 @router.post("/run/score")
 def run_score_action(request: Request, n: int = Form(5)):
     from app.services import jobs, scoring
@@ -668,20 +759,20 @@ def run_cancel_action(request: Request, job: str):
     return _back_here(request)
 
 
-# Джобы, что прогоняют scoring.score_domain() по одному домену за раз (T0-T3b) — им и
+# Джобы, что гонят домены через волны скоринга (W0–W6) — им и
 # нужна живая раскладка исхода, у discovery/sweep/cf_sync domain_score_log вообще не пишется.
 _FUNNEL_JOBS = ("score", "recheck")
 
 
 def _funnel_tally(db: Session, run_id: int) -> dict | None:
     """Живая раскладка исходов ЭТОГО прогона по domain_score_log — сколько уже отсеяно
-    ДО дорогого Wayback (T0-T2: RD/whois/РКН-блэклист/safebrowsing) и сколько реально дошло
+    ДО дорогого Wayback (W0–W4: зоны/бренды, доступность, риск, ссылки) и сколько реально дошло
     до него (scored — Wayback пройден по определению; rejected/history_dirty — дошёл и там
     отклонён историей; rejected/low_score — дошёл, история чистая, но не дотянул итоговый
-    балл, см. scoring.py:799). Чипы стадий в jobCard() показывают только ТЕКУЩИЙ домен (и
-    правильно — каждый начинает с RD, см. jobs._advance) — без этого счётчика оператор не
-    видел ничего, что подтверждает: дешёвые стадии реально отсеивают быстро, а не «все домены
-    идут по кругу». None, если для этого прогона ещё нет ни одной строки (свежий старт) —
+    балл, см. scoring._commit_result). Чипы волн в jobCard() показывают только ТЕКУЩУЮ волну —
+    без этого счётчика оператор не видел ничего, что подтверждает: дешёвые волны реально
+    отсеивают быстро, а не «все домены идут по кругу». None, если для этого прогона ещё нет ни
+    одной строки (свежий старт) —
     карточка ничего не покажет, а не нарисует нулевую раскладку как будто уже что-то
     посчитано."""
     from app.models.domain_score_log import DomainScoreLog
@@ -700,20 +791,22 @@ def _funnel_tally(db: Session, run_id: int) -> dict | None:
         total += n
         if outcome == "scored":
             scored += n
-            reached_wayback += n           # scored всегда прошёл T3 — таков порядок _funnel
+            reached_wayback += n           # scored всегда прошёл W5 (Wayback) — таков порядок волн
         elif outcome == "unresolved":
             unresolved += n
         elif outcome == "rejected":
             label = _reject_ru(reason) if reason else "?"
             by_reason[label] = by_reason.get(label, 0) + n
-            # history_dirty и low_score рождаются ТОЛЬКО когда _funnel() прошёл ДО КОНЦА
-            # (вернул None) — history_dirty на самом T3, low_score позже, на самом _decide()
-            # по уже посчитанному score (scoring.py:799: `reject_reason = reject or
+            # v2: too_young решает W5 (история, Р5), spam_anchors — W6 (после истории): оба уже
+            # сожгли Wayback, как и history_dirty/low_score.
+            # history_dirty и low_score рождаются ТОЛЬКО когда домен дошёл до истории (W5) —
+            # history_dirty на самой W5, low_score позже, на самом _decide()
+            # по уже посчитанному score (scoring._commit_result: `reject_reason = reject or
             # ("low_score" if rejected)`, т.е. low_score — это "остальное всё прошли, score
             # не дотянул"). Без low_score здесь счётчик "решено дёшево" завышался бы —
             # ровно те домены, что реально сожгли Wayback, попадали в "дёшево" и рисовали
             # оператору успокаивающую (и неверную) картину (находка ревью 2026-07-20).
-            if reason in ("history_dirty", "low_score"):
+            if reason in ("history_dirty", "too_young", "low_score", "spam_anchors"):
                 reached_wayback += n
     return {"total": total, "scored": scored, "unresolved": unresolved,
             "reached_wayback": reached_wayback, "before_wayback": total - reached_wayback,
@@ -779,6 +872,14 @@ def score_one_action(domain_id: int):
                                  "по расписанию (раз в сутки), вдруг освободится",
                 "budget": "исчерпан бюджет whois на прогон (см. max_whois_per_run в /settings) — "
                           "домен остался в поиске",
+                "ahrefs_failed": "Ahrefs не ответил (ссылочный профиль) — домен остался в поиске, "
+                                 "оценится следующим прогоном",
+                "units_floor": "остаток units Ahrefs неизвестен или ниже пола (см. /settings) — "
+                               "платные волны пропущены, домен остался в поиске",
+                "ahrefs_missing": "Ahrefs не вернул данных по домену — домен остался в поиске, "
+                                  "оценится следующим прогоном",
+                "ahrefs_no_key": "ключ Ahrefs (AHREFS_API_KEY в .env) не задан — платные волны "
+                                 "пропущены, домен остался в поиске",
             }.get(out.get("why"), "приобретаемость не определена — домен остался в поиске"))
         return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
                                      f"{out.get('status')} ({out.get('score')})")
@@ -1177,28 +1278,61 @@ def check_updates_action():
 
 
 @router.post("/settings/save")
-def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
+def settings_save(request: Request, db: Session = Depends(get_session),
+                  min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
-                  max_whois_per_run: int = Form(200), max_ahrefs_per_run: int = Form(50),
-                  backorder: str = Form(""), cctld: str = Form(""),
-                  reg_ru: str = Form(""), sweb: str = Form(""),
+                  max_whois_per_run: int | None = Form(None),
+                  min_dr: float | None = Form(None), max_links_per_run: int | None = Form(None),
+                  max_deep_per_run: int | None = Form(None), units_floor: int | None = Form(None),
+                  spam_anchor_max: float | None = Form(None),
+                  tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
+                  emd_sets: str | None = Form(None), v2_lists: str = Form(""),
+                  dropcatch: str = Form(""), nominet: str = Form(""),
+                  mx: str = Form(""), emd: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
-                  w_rd_proxy: float | None = Form(None), w_age: float | None = Form(None),
-                  w_indexed_echo: float | None = Form(None),
-                  w_authority: float | None = Form(None)):
+                  w_topical_fit: float | None = Form(None), w_age: float | None = Form(None),
+                  w_rd: float | None = Form(None), w_authority: float | None = Form(None),
+                  w_anchor_quality: float | None = Form(None),
+                  w_traffic_history: float | None = Form(None)):
     from app.services import settings as st
     # веса — опциональны: форма без них (старый шаблон, curl из скрипта) не должна ОБНУЛЯТЬ
     # шкалу оценки. None -> ключ не передаём, update_settings оставит прежние.
     weights = {k: v for k, v in (("history_cleanliness", w_history_cleanliness),
-                                 ("rd_proxy", w_rd_proxy), ("age", w_age),
-                                 ("indexed_echo", w_indexed_echo),
-                                 ("authority", w_authority)) if v is not None}
-    st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
-                       approve_at=approve_at, manual_review_at=manual_review_at,
-                       max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,
-                       sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
-                                        "reg_ru": bool(reg_ru), "sweb": bool(sweb)},
-                       weights=weights or None)
+                                 ("topical_fit", w_topical_fit), ("age", w_age), ("rd", w_rd),
+                                 ("authority", w_authority), ("anchor_quality", w_anchor_quality),
+                                 ("traffic_history", w_traffic_history)) if v is not None}
+    # Пустую textarea FastAPI отдаёт как «поля нет» (None). Форма v2 несёт маркер `v2_lists`: значит
+    # эти поля в ней БЫЛИ, и пустое — это «очистить», а не «не трогать» (находка 6.1). Форма без
+    # маркера (старый шаблон, curl) списки не трогает.
+    if v2_lists:
+        tld_allowlist, brand_tokens, emd_sets = tld_allowlist or "", brand_tokens or "", emd_sets or ""
+    try:
+        st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
+                           approve_at=approve_at, manual_review_at=manual_review_at,
+                           max_whois_per_run=max_whois_per_run,
+                           min_dr=min_dr, max_links_per_run=max_links_per_run,
+                           max_deep_per_run=max_deep_per_run, units_floor=units_floor,
+                           spam_anchor_max=spam_anchor_max, tld_allowlist=tld_allowlist,
+                           brand_tokens=brand_tokens, emd_sets=emd_sets,
+                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
+                           weights=weights or None)
+    except ValueError as e:
+        # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
+        # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
+        draft = {"nums": {"min_referring_domains": min_referring_domains, "min_age_years": min_age_years,
+                          "approve_at": approve_at, "manual_review_at": manual_review_at,
+                          "max_whois_per_run": max_whois_per_run, "min_dr": min_dr,
+                          "max_links_per_run": max_links_per_run, "max_deep_per_run": max_deep_per_run,
+                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max},
+                 "weights": weights,
+                 "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
+                             "mx": bool(mx), "emd": bool(emd)},
+                 # без маркера v2_lists этих полей в форме не было — не подменяем их пустотой
+                 "tld_allowlist": tld_allowlist if v2_lists else None,
+                 "brand_tokens": brand_tokens if v2_lists else None}
+        return _settings_page(request, db, emd_draft=emd_sets, status_code=400, draft=draft,
+                              form_err=f"Не сохранено ничего: {e}. Наборы EMD — JSON-список, "
+                                       "пример — в «зачем это» у станции EMD.")
     return _back("/settings", msg="Настройки сохранены")
 
 

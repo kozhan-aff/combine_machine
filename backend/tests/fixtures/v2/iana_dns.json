@@ -1,0 +1,6 @@
+{"version": "1.0", "publication": "2026-09-30T23:00:03Z", "services": [
+  [["com"], ["https://rdap.verisign.com/com/v1/"]],
+  [["net"], ["https://rdap.verisign.com/net/v1/"]],
+  [["uk"], ["https://rdap.nominet.uk/uk/"]],
+  [["online", "site"], ["https://rdap.radix.host/rdap/"]]
+]}

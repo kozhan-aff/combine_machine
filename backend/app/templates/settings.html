@@ -10,12 +10,15 @@
      title="read-only правда Cloudflare: подключения, аккаунты, зоны, DNS, сертификаты">Cloudflare</a>
 </div>
 
+{% if form_err %}<div class="flash err"><span class="tag">Ошибка</span><span>{{ form_err }}</span></div>{% endif %}
 <form method="post" action="/settings/save" style="max-width:760px; display:grid; gap:14px">
+  <input type="hidden" name="v2_lists" value="1">
   <div class="station">
-    <div class="plate">T0 · min доноров (RD) — <b>отсекает пустышки</b></div>
+    <div class="plate">W4 · min доноров (RD) — <b>отсекает пустышки</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Домены с RD ниже порога отбраковываются на входе (0 = не резать по RD).
-      Сырые списки без RD проходят на T1.</div></details>
+      <div class="what-body">RD (refdomains) даёт Ahrefs в волне «ссылки» (W4), до дорогой истории.
+      Ниже порога — отказ «мало доноров» (0 = не резать по RD). На дропах RD раздут спамом — честнее
+      DR, его порог — ниже.</div></details>
     <div class="go">
       <input type="range" name="min_referring_domains" min="0" max="50" step="1"
              value="{{ s.min_referring_domains }}" oninput="pv()" style="flex:1 1 200px">
@@ -25,9 +28,11 @@
     </div>
   </div>
   <div class="station">
-    <div class="plate">T1 · min возраст, лет — <b>отсекает молодые до дорогой истории</b></div>
+    <div class="plate">W5 · min возраст, лет — <b>по старшей из дат RDAP и архива</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Возраст из whois (дата регистрации). Моложе порога → reject, не доходя до Wayback.</div></details>
+      <div class="what-body">Возраст — старшая из даты регистрации (RDAP/whois) и первого снимка
+      Wayback: у перехваченного и снова дропающегося домена RDAP показывает ПОСЛЕДНЮЮ регистрацию.
+      Моложе порога — отказ «моложе порога» в волне истории.</div></details>
     <div class="go">
       <input type="range" name="min_age_years" min="0" max="15" step="0.5"
              value="{{ s.min_age_years }}" oninput="pv()" style="flex:1 1 200px">
@@ -36,32 +41,36 @@
     </div>
   </div>
   <div class="station">
-    <div class="plate">Финальный скор · порог approve — <b>выше = авто-одобрение</b></div>
+    <div class="plate">Порог сильного кандидата — <b>с него начинается пакет в инбоксе</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Итоговый скор ≥ порога → домен одобряется автоматически.</div></details>
+      <div class="what-body">Машина сама не одобряет ничего: скоринг ставит максимум «на решении».
+      Одобряешь ты — кнопкой в строке или пакетом. Этот порог — значение по умолчанию для «пакет от
+      скора» в инбоксе и счётчик сильных кандидатов.</div></details>
     <div class="go">
       <input type="range" name="approve_at" min="0" max="1" step="0.05"
              value="{{ s.approve_at }}" oninput="pv()" style="flex:1 1 200px">
       <b id="v_approve">{{ s.approve_at }}</b>
-      <span class="hint">уже approved: <b id="c_approve">{{ counts.approve }}</b></span>
+      <span class="hint">сильных (скор ≥ порога): <b id="c_approve">{{ counts.approve }}</b></span>
     </div>
   </div>
   <div class="station">
-    <div class="plate">Финальный скор · порог manual — <b>ниже = reject</b></div>
+    <div class="plate">Порог «на решение» — <b>ниже = отказ «низкий скор»</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Скор между manual и approve → ручной разбор (scored); ниже manual → reject.</div></details>
+      <div class="what-body">Скор ≥ порога — домен приходит в инбокс «на решении», ниже — отказ.
+      Этим же порогом отбираются кандидаты дорогой проверки анкоров (W6).</div></details>
     <div class="go">
       <input type="range" name="manual_review_at" min="0" max="1" step="0.05"
              value="{{ s.manual_review_at }}" oninput="pv()" style="flex:1 1 200px">
       <b id="v_manual">{{ s.manual_review_at }}</b>
-      <span class="hint">в вилке ручного разбора: <b id="c_manual">{{ counts.manual }}</b></span>
+      <span class="hint">на решении, но ниже сильных: <b id="c_manual">{{ counts.manual }}</b></span>
     </div>
   </div>
   <div class="station">
-    <div class="plate">Кап whois за прогон — <b>защита от сырого cctld</b></div>
+    <div class="plate">Кап whois:43 за прогон — <b>только зоны без RDAP</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">За один запуск проверки пробьём whois не более этого числа доменов
-      (лучшие по RD — первыми). Остальные подождут следующего прогона.</div></details>
+      <div class="what-body">RDAP (.com/.net/.org/.uk …) бесплатен и не капается. Кап — на whois:43
+      через A-Parser для зон без RDAP (.mx/.co/.nz …): за один запуск не больше этого числа доменов,
+      остальные подождут следующего прогона.</div></details>
     <div class="go">
       <input type="range" name="max_whois_per_run" min="0" max="2000" step="50"
              value="{{ s.max_whois_per_run }}"
@@ -71,35 +80,104 @@
     </div>
   </div>
   <div class="station">
-    <div class="plate">Кап Ahrefs-проверок за прогон — <b>платная капча за штуку</b></div>
+    <div class="plate">Порог DR на входе — <b>отсев спам-дропов ещё до базы</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">За один запуск проверки сделаем не более этого числа платных
-      Ahrefs-запросов (DR/backlinks) — только для доменов без RD из фида (cctld/reg_ru/
-      sweb), только для приобретаемых выживших. 0 — полностью выключить Ahrefs-
-      обогащение (authority-балл останется 0, остальной скоринг идёт как обычно).</div></details>
+      <div class="what-body">Почти каждый дропающийся домен засыпан автоматическим SEO-спамом: RD в
+      сотни, а DR 0. Автоматические источники (DropCatch, Nominet, registry.mx) проходят бесплатный
+      DR ещё на входе — ниже порога в базу не попадают. Ручной список и EMD этот фильтр не проходят.</div></details>
     <div class="go">
-      <input type="range" name="max_ahrefs_per_run" min="0" max="500" step="10"
-             value="{{ s.max_ahrefs_per_run }}"
-             oninput="document.getElementById('v_ahrefs').textContent=this.value" style="flex:1 1 200px">
-      <b id="v_ahrefs">{{ s.max_ahrefs_per_run }}</b>
-      <span class="hint">платных Ahrefs-запросов за прогон максимум (0 = выключено)</span>
+      <input type="range" name="min_dr" min="0" max="60" step="1" value="{{ s.min_dr|int }}"
+             oninput="document.getElementById('v_min_dr').textContent=this.value" style="flex:1 1 200px">
+      <b id="v_min_dr">{{ s.min_dr|int }}</b>
+      <a class="hint" href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a>
+    </div>
+  </div>
+  <div class="station">
+    <div class="plate">Белый список зон — <b>какие TLD вообще берём</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">По одной зоне в строке (com, co.uk, mx …). Только зоны, где ты сам можешь
+      быть владельцем и которые продаёт наш регистратор — см. docs/v2/research/cctld-markets.md.
+      .com.mx и .com.co — отдельные зоны, NameSilo их не продаёт. Пустое поле — вернуть стартовый
+      список (пустой белый список остановил бы всю машину).</div></details>
+    <div class="go"><textarea name="tld_allowlist" rows="4" style="flex:1 1 320px">{{ tld_text }}</textarea></div>
+  </div>
+  <div class="station">
+    <div class="plate">Чужие VPN-бренды — <b>в имени домена = отказ</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Домен с чужой торговой маркой (nordvpn-deals.com) — юридический риск, такой
+      не покупаем. Токен с «vpn» или от 7 букв ищется подстрокой, короче — только отдельным словом
+      между дефисами (иначе javastudio.com отклонялся бы по avast). Пустое поле — стартовый список.</div></details>
+    <div class="go"><textarea name="brand_tokens" rows="4" style="flex:1 1 320px">{{ brand_text }}</textarea>
+      <span class="hint" title="пробел, запятая и перенос строки разделяют токены">один бренд — один токен, слитно
+        (например <code>privateinternetaccess</code>); между токенами — пробел, запятая или перенос строки.
+        «private internet access» через пробелы стал бы тремя токенами.</span></div>
+  </div>
+  <div class="station">
+    <div class="plate">Наборы EMD — <b>ключи × язык × зоны</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">JSON-список наборов. Пример:
+      <code>[{"market":"es-MX","lang":"es","keywords":["mejor vpn","vpn gratis"],"tlds":["com","mx"]}]</code>.
+      Машина соберёт имена склейкой и через дефис, проверит доступность; EMD всегда приходит к тебе
+      на решение без балла. Пустое поле — наборов нет.</div></details>
+    <div class="go"><textarea name="emd_sets" rows="5" style="flex:1 1 320px">{{ emd_text }}</textarea></div>
+  </div>
+  <div class="station">
+    <div class="plate">Ahrefs: капы за прогон и пол остатка — <b>units в месяце ограничены</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">W4 «ссылки» — 25 units за домен; W6 «анкоры» ≈ 1,1 тыс. units за домен
+      (только финалисты, лучшие первыми). Сверх капа W4 домен ждёт следующего прогона; без W6 домен не
+      попадёт в пакетное одобрение («анкоры не проверены»). Пол остатка: если units в месяце меньше,
+      платные волны не идут вовсе — автопилот гоняет оценку раз в час, и капы «на прогон» месяц не
+      держат. 0 — пола нет.</div></details>
+    <div class="go">
+      <span class="f">W4 ссылки</span>
+      <input type="range" name="max_links_per_run" min="1" max="2000" step="1" value="{{ s.max_links_per_run }}"
+             oninput="document.getElementById('v_links').textContent=this.value" style="flex:1 1 160px">
+      <b id="v_links">{{ s.max_links_per_run }}</b>
+    </div>
+    <div class="go">
+      <span class="f">W6 анкоры</span>
+      <input type="range" name="max_deep_per_run" min="0" max="200" step="1" value="{{ s.max_deep_per_run }}"
+             oninput="document.getElementById('v_deep').textContent=this.value" style="flex:1 1 160px">
+      <b id="v_deep">{{ s.max_deep_per_run }}</b>
+    </div>
+    <div class="go">
+      <span class="f">пол остатка</span>
+      <input type="range" name="units_floor" min="0" max="2000000" step="50000" value="{{ s.units_floor }}"
+             oninput="document.getElementById('v_floor').textContent=this.value" style="flex:1 1 160px">
+      <b id="v_floor">{{ s.units_floor }}</b>
+      <span class="hint" title="по последней проверке /diag (обновляется раз в 5 минут)">осталось units в месяце: <b>{{ '{:,}'.format(units_left).replace(',', ' ') if units_left is not none else '—' }}</b></span>
+    </div>
+  </div>
+  <div class="station">
+    <div class="plate">Порог спам-анкоров — <b>доля по донорам</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Доля доноров, чьи анкоры — спам (флаг Ahrefs, казино/фарма/SEO-реклама,
+      чужая письменность — кроме языка прошлого сайта). Выше порога — отказ «спам-анкоры», это грязь:
+      в оборот домен не вернётся.</div></details>
+    <div class="go">
+      <input type="range" name="spam_anchor_max" min="0" max="1" step="0.05" value="{{ s.spam_anchor_max }}"
+             oninput="document.getElementById('v_spam').textContent=this.value" style="flex:1 1 200px">
+      <b id="v_spam">{{ s.spam_anchor_max }}</b>
     </div>
   </div>
   <div class="station">
     <div class="plate">Веса критериев — <b>по чему машина судит донора</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Итоговый скор — взвешенная сумма пяти сигналов. Здесь задаётся,
+      <div class="what-body">Итоговый скор — взвешенная сумма семи сигналов. Здесь задаётся,
       что важнее. Сумма весов может быть любой: доля каждого считается от суммы (справа), так
-      что шкала 0..1 и пороги approve/manual не «плывут» от сдвига одного ползунка.
+      что шкала 0..1 и пороги скора не «плывут» от сдвига одного ползунка.
       Действует со следующего прогона; уже оценённые домены не пересчитываются — поэтому
       счётчики у порогов выше на сдвиг весов НЕ реагируют (они считают по сохранённым score).
       Чтобы веса применились, домен надо оценить заново.</div></details>
     {% for key, ru, note in [
-        ('history_cleanliness', 'чистота истории', 'Wayback: адалт/фарма/казино/спам в прошлом'),
-        ('rd_proxy',            'доноры (RD)',      'ссылающиеся домены, лог-шкала'),
-        ('age',                 'возраст домена',   'из whois, полный балл к 8 годам'),
-        ('indexed_echo',        'эхо в индексе',    'домен ещё находится в поиске'),
-        ('authority',           'DR (Ahrefs)',      'ПЛАТНО и только для доменов БЕЗ RD из фида — у backorder DR не запрашивается, балл = 0')] %}
+        ('history_cleanliness', 'чистота истории',     'Wayback: адалт/фарма/казино/спам в прошлом'),
+        ('topical_fit',         'тема прошлого сайта', 'LLM: близость к VPN/приватности/софту — против «expired domain abuse»'),
+        ('age',                 'возраст домена',      'RDAP или первый снимок Wayback, полный балл к 8 годам'),
+        ('rd',                  'доноры (RD)',         'Ahrefs refdomains, лог-шкала; ×0.5 при подозрении на спам-сетку'),
+        ('authority',           'DR (Ahrefs)',         'Domain Rating by Ahrefs — главный честный сигнал на спам-дропах'),
+        ('anchor_quality',      'чистота анкоров',     'доля спам-анкоров (проверяется только у финалистов)'),
+        ('traffic_history',     'был трафик',          'пик органического трафика за 5 лет (только у финалистов)')] %}
     <div class="go">
       <span class="f" style="min-width:150px">{{ ru }}</span>
       <input type="range" name="w_{{ key }}" min="0" max="1" step="0.01"
@@ -111,22 +189,24 @@
     {% endfor %}
   </div>
   <div class="station">
-    <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
+    <div class="plate">Источники доменов — <b>что собирает Discovery</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Выключенный источник просто не опрашивается при ↻ Discovery;
-      уже найденные с него домены остаются в пуле.</div></details>
+      <div class="what-body">Автоматические источники (DropCatch, Nominet, registry.mx) проходят
+      фильтр зон и бесплатный DR Ahrefs ещё на входе: домен с DR ниже порога в базу не попадает.
+      EMD генерируется из твоих наборов ключей и DR-фильтр не проходит. Выключенный источник не
+      опрашивается; уже найденные с него домены остаются.</div></details>
     <div class="go">
-      <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
-      <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
-      <label><input type="checkbox" name="reg_ru" {{ 'checked' if s.sources_enabled.reg_ru }}> reg.ru</label>
-      <label><input type="checkbox" name="sweb" {{ 'checked' if s.sources_enabled.sweb }}> sweb</label>
+      <label title="pending delete .com/.net/.org — ~134 тыс. строк в день"><input type="checkbox" name="dropcatch" {{ 'checked' if s.sources_enabled.dropcatch }}> DropCatch <span class="hint">(включать после проверки ToS)</span></label>
+      <label title="официальный список дропов .uk/.co.uk"><input type="checkbox" name="nominet" {{ 'checked' if s.sources_enabled.nominet }}> Nominet</label>
+      <label title="удалённые .mx — свободны к регистрации"><input type="checkbox" name="mx" {{ 'checked' if s.sources_enabled.mx }}> registry.mx</label>
+      <label title="генератор EMD по наборам ключей ниже"><input type="checkbox" name="emd" {{ 'checked' if s.sources_enabled.emd }}> EMD</label>
     </div>
   </div>
   <div class="station">
     <div class="plate">Применить — <b>записать пороги в конвейер</b></div>
     <details class="what"><summary>зачем это</summary>
       <div class="what-body">«Сохранить» записывает пороги и источники в настройки — действовать начнут
-      со следующего запуска ▶ Score / ↻ Discovery (уже отскоренные домены не пересчитываются).
+      со следующего запуска «Оценить домены» / «Найти дропы» (уже оценённые домены не пересчитываются).
       «Сбросить» возвращает стартовые значения из scoring_config.</div></details>
     <div class="go">
       <button class="btn-acc" title="сохранить пороги и включённые источники">Сохранить</button>
@@ -139,7 +219,7 @@
       onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
 
 <script>
-const W_KEYS = ['history_cleanliness','rd_proxy','age','indexed_echo','authority'];
+const W_KEYS = ['history_cleanliness','topical_fit','age','rd','authority','anchor_quality','traffic_history'];
 function wv() {
   // доля = вес / сумма весов: ровно так же нормирует compute_score, поэтому оператор видит
   // РЕАЛЬНЫЙ вклад критерия, а не сырое число ползунка
