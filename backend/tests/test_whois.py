@@ -169,7 +169,9 @@ def _funnel_clients(rdap, ap):
             "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
             "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
             "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-            "wayback": _FunnelWayback()}
+            "wayback": _FunnelWayback(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 def test_funnel_routes_whois_through_rdap_without_touching_aparser():

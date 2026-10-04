@@ -304,6 +304,8 @@ def test_scoring_stamps_acquirability_so_recheck_does_not_redo_it(sqlite_db, mon
         "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
         "blacklist": type("B", (), {"is_listed": lambda self, d: False})(),
         "searxng": type("S", (), {"indexed_echo": lambda self, d: False})(),
+        "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                  "batch": lambda self, ds: {d: {} for d in ds}})(),
     }
     scoring.score_domain(did, clients)
     with db.SessionLocal() as s:

@@ -56,13 +56,11 @@ def test_max_whois_min_one():
     assert settings.update_settings(max_whois_per_run=0)["max_whois_per_run"] >= 1
 
 
-def test_max_ahrefs_per_run_default_and_zero_is_legal():
-    """В отличие от max_whois_per_run (нижний кламп >=1), max_ahrefs_per_run — платный
-    капча-вызов, 0 должен быть легальным значением (полностью выключает Ahrefs-
-    обогащение), а не клампиться вверх до 1."""
+def test_max_deep_per_run_zero_is_legal():
+    """В отличие от max_whois_per_run (нижний кламп >=1), кап платной W6 может быть 0 — «анкоры не
+    проверяем» (такие домены не попадут в пакет), а не опечатка, которую надо поднять до 1.
+    Кап капчи A-Parser v1 (`max_ahrefs_per_run`) — легаси-колонка, настройки его не отдают."""
     from app.services.settings import get_settings, update_settings
-    assert get_settings()["max_ahrefs_per_run"] == 50           # дефолт
-    assert update_settings(max_ahrefs_per_run=0)["max_ahrefs_per_run"] == 0
-    assert update_settings(max_ahrefs_per_run=10)["max_ahrefs_per_run"] == 10
-    assert update_settings(max_ahrefs_per_run=999999)["max_ahrefs_per_run"] == 1000  # верхний кламп
-    assert update_settings(max_ahrefs_per_run=-5)["max_ahrefs_per_run"] == 0         # клампится к 0, НЕ к 1
+    assert update_settings(max_deep_per_run=0)["max_deep_per_run"] == 0
+    assert update_settings(max_deep_per_run=-5)["max_deep_per_run"] == 0      # клампится к 0, НЕ к 1
+    assert "max_ahrefs_per_run" not in get_settings()

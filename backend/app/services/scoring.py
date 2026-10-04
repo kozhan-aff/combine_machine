@@ -1,7 +1,7 @@
 """M1b — Domain/donor scoring. Implements the funnel in docs/DONORS.md on the FREE stack.
 
-Order: t0 (зоны/бренды) -> avail (RDAP/whois) -> risk (Web Risk, Spamhaus с DQS) -> history (Wayback)
--> composite score + breakdown -> status scored | rejected (`approved` ставит только человек).
+Order: t0 (зоны/бренды) -> avail (RDAP/whois) -> risk (Web Risk, Spamhaus с DQS) -> links (Ahrefs
+batch) -> history (Wayback) -> composite score + breakdown -> status scored | rejected (`approved` ставит только человек).
 `compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
 """
 import logging
@@ -66,8 +66,8 @@ FUNNEL_STAGES = [
     {"key": "t0", "label": "фильтры (зона/бренд)"},
     {"key": "avail", "label": "доступность (RDAP/whois)"},
     {"key": "risk", "label": "риск (Web Risk)"},
+    {"key": "links", "label": "ссылки (Ahrefs)"},
     {"key": "history", "label": "Wayback-история"},
-    {"key": "ahrefs", "label": "Ahrefs (платно)"},
 ]
 
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Авто-одобрения нет (Р2): любой домен
@@ -301,9 +301,10 @@ def _make_clients() -> dict:
     from app.integrations.aparser import AParserClient
     from app.integrations.rdap import RdapClient
     from app.integrations.webrisk import WebRiskClient
+    from app.integrations.ahrefs import AhrefsClient
     return {
         "wayback": WaybackClient(), "blacklist": BlacklistClient(), "webrisk": WebRiskClient(),
-        "aparser": AParserClient(), "rdap": RdapClient(),
+        "aparser": AParserClient(), "rdap": RdapClient(), "ahrefs": AhrefsClient(),
         "_whois_lock": threading.Lock(), "_rdap_lock": threading.Lock(),
         "_webrisk_lock": threading.Lock(),
     }
@@ -384,7 +385,7 @@ def scorable(now):
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
-                 ahrefs_budget=None, run: int | None = None) -> dict:
+                 links_budget=None, run: int | None = None) -> dict:
     """Полная воронка для ОДНОГО домена — внешний контракт идентичен дореформенному:
     та же сигнатура, та же форма ответа. Внутри строит батч из ОДНОГО FunnelState и
     прогоняет его через тот же волновой конвейер, что и score_pending (Task 9) —
@@ -406,7 +407,7 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                             source=d.source)
 
     c = clients or _make_clients()
-    results = _run_waves([state], c, st, whois_budget, ahrefs_budget, run)
+    results = _run_waves([state], c, st, whois_budget, links_budget, run)
     return results[0]
 
 
@@ -418,7 +419,7 @@ def score_pending(limit: int = 100) -> int:
     Возвращает СКОЛЬКО РЕАЛЬНО ПРОШЛО воронку: при отмене — частичное число, не len(rows).
     Оркестратор пишет это в counts свипа — врать ему нельзя."""
     from datetime import datetime, timezone
-    from sqlalchemy import select, func, case, and_
+    from sqlalchemy import select, func, case, and_, or_
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services import jobs
@@ -440,15 +441,18 @@ def score_pending(limit: int = 100) -> int:
         tier = case((Domain.acquire_deadline.is_(None), 2),   # дата неизвестна — кулдаун-пул
                     (expired, 1),                             # окно дропа закрыто — уже упустили
                     else_=0)                                  # окно открыто/впереди — вот они и важны
-        rows = db.execute(
-            select(Domain.id, Domain.domain, Domain.lane, Domain.referring_domains,
-                   Domain.acquire_deadline, Domain.feed_flags, Domain.source)
-            .where(Domain.status == "discovered", scorable(now))
-            .order_by(tier,
-                      Domain.acquire_deadline.asc(),          # внутри яруса — ближайший дроп первым
-                      Domain.referring_domains.desc().nulls_last())   # равных по сроку разводит RD
-            .limit(limit)
-        ).all()
+        q = (select(Domain.id, Domain.domain, Domain.lane, Domain.referring_domains,
+                    Domain.acquire_deadline, Domain.feed_flags, Domain.source)
+             .where(Domain.status == "discovered", scorable(now))
+             .order_by(tier,
+                       Domain.acquire_deadline.asc(),         # внутри яруса — ближайший дроп первым
+                       Domain.referring_domains.desc().nulls_last()))  # равных по сроку разводит RD
+        # R2-10: не-EMD домен без W4 не решается (сверх капа — unresolved links_budget), а W2/W3 за
+        # него уже заплачены. Берём таких не больше капа W4; остаток лимита добирают EMD (W4 у них нет).
+        cap = min(limit, int(st["max_links_per_run"]))
+        rows = db.execute(q.where(or_(Domain.source.is_(None), Domain.source != "emd"))
+                          .limit(cap)).all()
+        rows += db.execute(q.where(Domain.source == "emd").limit(limit - len(rows))).all()
         # ПОЧЕМУ пусто — теперь это ШТАТНОЕ состояние: после scorable() домены, чей дроп ещё
         # впереди, законно ждут своей даты. «Прогнано 0 доменов» без объяснения — ровно та
         # немота, из-за которой оператор решил, что перепроверка сломана. Считаем причину
@@ -478,11 +482,11 @@ def score_pending(limit: int = 100) -> int:
                     parts.append(f"{undated} без даты дропа — вернусь к ним в течение суток")
                 idle_msg = "оценивать нечего: " + ", ".join(parts)
     stages = [dict(s) for s in FUNNEL_STAGES]
-    if int(st["max_ahrefs_per_run"]) == 0:
-        stages[-1]["state"] = "skip"           # платная стадия выключена — так и покажем
     clients = _make_clients()
-    whois_budget = [int(st["max_whois_per_run"])]
-    ahrefs_budget = [int(st["max_ahrefs_per_run"])]
+    # Budget, а не [int]: волна avail конкурентная (12 потоков), голый `box[0] -= 1` под ней — гонка
+    whois_budget = Budget(int(st["max_whois_per_run"]))
+    links_budget = Budget(int(st["max_links_per_run"]))
+    notes: list[str] = []          # пояснения волн («остаток units ниже пола») — в итог задачи
     total = len(rows)
     states = [FunnelState(domain_id=did, domain=name, lane=lane,
                           referring_domains=rd, acquire_deadline=deadline,
@@ -494,7 +498,8 @@ def score_pending(limit: int = 100) -> int:
             jobs.report(run, done=0, total=0, current="", message=idle_msg or "")
         else:
             try:
-                results = _run_waves(states, clients, st, whois_budget, ahrefs_budget, run=run)
+                results = _run_waves(states, clients, st, whois_budget, links_budget, run=run,
+                                     notes=notes)
             except jobs.Cancelled:
                 # _run_waves() на отмене RAISE'ит ДО своего `return results` (см. его тело) —
                 # локальный список результатов теряется вместе со стеком, ХОТЯ _checkpoint()
@@ -514,7 +519,7 @@ def score_pending(limit: int = 100) -> int:
                 raise
             done = len(results)
             jobs.report(run, done=total, total=total, current="",
-                        message=idle_msg or f"прогнано {total} доменов через воронку")
+                        message=" · ".join([f"прогнано {total} доменов через воронку", *notes]))
     return done
 
 
@@ -664,8 +669,8 @@ def recheck_acquirability(limit: int = 200) -> dict:
 # Границы конкурентности — ХАРДКОД, не /settings (решение пользователя): "если домен
 # занят whois — скипаем в этой волне" — сами лимиты волн оператор не крутит.
 # history=4 — вежливость к archive.org (проектная ценность, не число для тюнинга).
-# ahrefs=2 — капча за штуку, дорого и хрупко к нагрузке.
-_CONCURRENCY = {"avail": 12, "risk": 12, "history": 4, "ahrefs": 2}
+# W4 «ссылки» здесь нет: она идёт пачками ПОСЛЕДОВАТЕЛЬНО (лимит Ahrefs 60 запросов/мин).
+_CONCURRENCY = {"avail": 12, "risk": 12, "history": 4}
 
 
 @dataclass
@@ -765,9 +770,6 @@ def _wave_t0(states: list, st: dict) -> None:
         elif brand_hit(s.domain, st["brand_tokens"]):
             s.sig["trademark_risk"] = True
             s.reject_reason, s.alive = "trademark", False
-        elif (s.referring_domains is not None
-              and s.referring_domains < st["min_referring_domains"]):
-            s.reject_reason, s.alive = "low_rd", False     # уедет в W4 (Задача 11)
 
 
 def _avail_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
@@ -943,27 +945,129 @@ def _wave_history(states: list, clients: dict, st: dict, run) -> None:
                     lambda s: _history_one(s, clients, st))
 
 
-def _ahrefs_one(s: FunnelState, clients: dict, budget) -> None:
-    """Тело T3b для ОДНОГО домена: Ahrefs ТОЛЬКО если фид не дал RD и бюджет жив.
-    Прямой перенос T3b (было строки 647-661). Никогда не отбраковывает."""
-    if s.referring_domains is not None or budget is None or not budget.take():
-        return
+_LINKS_BATCH = 100          # batch-analysis: до 100 целей за запрос
+
+# W4 -> sig: поле ответа Ahrefs -> ключ сигнала (он же колонка Domain, кроме подсетей и dofollow,
+# которые живут в score_breakdown).
+_LINKS_FIELDS = (("domain_rating", "dr"), ("refdomains", "referring_domains"),
+                 ("refdomains_dofollow", "rd_dofollow"), ("refips_subnets", "ref_subnets"),
+                 ("backlinks", "backlinks"), ("org_traffic", "organic_traffic"))
+
+# Платная волна не дошла до домена (ключа Ahrefs нет, пол остатка units, кап W4, сбой Ahrefs,
+# строки домена нет в ответе). Такой домен оценится СЛЕДУЮЩИМ прогоном — поэтому _commit_result не
+# ставит ему отметку сверки занятости: `scorable` вернул бы free/NULL-лейн только через
+# RECHECK_EVERY после неё (находка 2.7).
+_PAID_UNRESOLVED = ("links_budget", "units_floor", "ahrefs_no_key", "ahrefs_failed", "ahrefs_missing")
+
+
+def _units_below_floor(clients: dict, st: dict) -> str | None:
+    """Пол остатка units Ahrefs (решение оператора Р3): автопилот гоняет свип раз в час, капы «на
+    прогон» месяц не держат. Перед платными волнами — один бесплатный запрос остатка (в начале
+    прогона — `_paid_gate`, перед W6 — ещё раз: W4 уже потратила). Остаток неизвестен (None или
+    сбой запроса) или ниже пола -> текст причины для сообщения задачи, волна units не тратит. Пол 0
+    — пола нет, остаток не спрашиваем."""
+    floor = int(st.get("units_floor") or 0)
+    if floor <= 0:
+        return None
     try:
-        ah = clients["aparser"].ahrefs_probe(s.domain)
-        s.sig["dr"] = ah["dr"]
-        s.sig["ahrefs_backlinks"] = ah["backlinks"]
-        if ah["referring_domains"] is not None:
-            s.sig["referring_domains"] = ah["referring_domains"]
-    except Exception as e:  # noqa: BLE001
-        s.sig["errors"].append(f"ahrefs:{type(e).__name__}")
+        left = clients["ahrefs"].units_left()
+    except Exception:  # noqa: BLE001 — остаток не узнать: тратить вслепую нельзя
+        left = None
+    if left is None:
+        return "Ahrefs: остаток units неизвестен — платные волны пропущены"
+    if left < floor:
+        return (f"Ahrefs: остаток {left:,} < пола {floor:,} — платные волны пропущены"
+                .replace(",", " "))
+    return None
 
 
-def _wave_ahrefs(states: list, clients: dict, budget, run) -> None:
-    """T3b — Ahrefs, конкурентно (потолок 2 — капча за штуку, дорого и хрупко к нагрузке)
-    на весь выживший после history пул. budget=None -> волна не вызывает Ahrefs вовсе
-    (отличие от whois, где None = безлимит) — Ahrefs платный, дефолт "выключено"."""
-    _run_concurrent(states, _CONCURRENCY["ahrefs"], run, "ahrefs",
-                    lambda s: _ahrefs_one(s, clients, budget))
+def _paid_gate(states: list, clients: dict, st: dict, notes: list) -> None:
+    """Пойдут ли платные волны — решается ОДИН раз за прогон, сразу после бесплатной W0 (находка
+    R2-10). Ключа Ahrefs нет или остаток units неизвестен/ниже пола — не-EMD домен без W4 всё равно
+    не решится, а RDAP/whois:43 и Web Risk за него тратились бы впустую на каждом часовом свипе.
+    Такие домены сразу unresolved (`ahrefs_no_key` / `units_floor`: без отметки сверки, оценятся
+    следующим прогоном), причина — в `notes`. EMD идут дальше: W4 у них нет.
+
+    Клиента Ahrefs в наборе нет (тестовые наборы без W4; `_make_clients` кладёт его всегда) —
+    решать здесь нечем, тогда скажет сама W4 (`ahrefs_failed`)."""
+    todo = [s for s in states if s.alive and s.source != "emd"]
+    ah = clients.get("ahrefs")
+    if not todo or ah is None:
+        return
+    if getattr(ah, "api_key", None) == "":             # у фейков тестов атрибута нет
+        why, note = "ahrefs_no_key", "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены"
+    else:
+        why, note = "units_floor", _units_below_floor(clients, st)
+        if note is None:
+            return
+    for s in todo:
+        s.unresolved_why, s.alive = why, False
+    notes.append(note)
+
+
+def _wave_links(states: list, clients: dict, st: dict, budget, run, notes: list | None = None) -> None:
+    """W4 — ссылочный профиль из Ahrefs batch-analysis. Пачками по 100 и ПОСЛЕДОВАТЕЛЬНО: лимит API
+    60 запросов/мин, одна пачка = один запрос, параллелить нечего. EMD пропускает — у новорега
+    нечего мерить. Ключ и пол остатка units здесь не проверяются: это уже решил `_paid_gate` в
+    начале прогона (R2-10).
+
+    Домен, до которого волна не дошла (кап `max_links_per_run`, сбой Ahrefs, нет строки домена в
+    ответе), НЕ судится без ссылок, а остаётся discovered (unresolved) до следующего прогона: без
+    RD скор ниже порога, и домен навсегда ушёл бы в low_score (находка 1.8). Упала пачка — следующие
+    не шлются: протухший ключ дал бы 401 на каждой. Причина с HTTP-кодом — в `notes`, то есть в
+    сообщении задачи (R2-9): в логе скора её оператор не увидит.
+
+    Пустое поле ответа ничего не затирает (находка 4.12): DR из discovery уже лежит в строке
+    домена, и `_commit_result` подставит его, только если сигнала `dr` нет.
+
+    Живой факт 2026-10-01: на дропах RD раздут автоматическим SEO-спамом (DR 0 при RD 700+), поэтому
+    рядом с RD пишем подсети — compute_score режет `rd` вдвое при подозрении на спам-сетку."""
+    from app.services import jobs
+    from app.services.domain_filters import canonical_domain
+    todo = [s for s in states if s.alive and s.source != "emd"]
+    if not todo:
+        return
+    jobs.report(run, stage="links", done=0, total=len(todo))
+    eligible = []
+    for s in todo:
+        if budget is not None and not budget.take():
+            s.unresolved_why, s.alive = "links_budget", False
+        else:
+            eligible.append(s)
+    for i in range(0, len(eligible), _LINKS_BATCH):
+        chunk = eligible[i:i + _LINKS_BATCH]
+        # ключ ответа — каноническое имя (punycode/нижний регистр), как его вернёт Ahrefs
+        keys = {s.domain: canonical_domain(s.domain) or s.domain for s in chunk}
+        try:
+            data = clients["ahrefs"].batch(list(keys.values()))
+        except Exception as e:  # noqa: BLE001 — пачка упала: она и все следующие ждут прогона
+            rest = eligible[i:]
+            for s in rest:
+                s.sig["errors"].append(f"ahrefs:{type(e).__name__}")
+                s.unresolved_why, s.alive = "ahrefs_failed", False
+            if notes is not None:
+                # 401/403 — ключ не принят, 400 — кривой запрос: код нужен оператору, не только тип
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                why = type(e).__name__ + (f" {code}" if code else "")
+                notes.append(f"Ahrefs W4: {why} — {len(rest)} доменов ждут следующего прогона")
+            return
+        for s in chunk:
+            row = data.get(keys[s.domain])
+            if row is None:
+                # Строки домена нет в ответе (аномалия: на несуществующий домен Ahrefs отдаёт нули) —
+                # как сбой: без RD скор ушёл бы в low_score навсегда. Домен ждёт следующего прогона.
+                s.sig["errors"].append("ahrefs:missing")
+                s.unresolved_why, s.alive = "ahrefs_missing", False
+                continue
+            for src, key in _LINKS_FIELDS:
+                if row.get(src) is not None:                # None — «неизвестно», не 0
+                    s.sig[key] = row[src]
+            rd = row.get("refdomains")
+            if rd is not None and rd < st["min_referring_domains"]:
+                s.reject_reason, s.alive = "low_rd", False
+        jobs.report(run, done=min(i + _LINKS_BATCH, len(eligible)), total=len(eligible))
+        if jobs.cancelled(run):
+            raise jobs.Cancelled()
 
 
 def _commit_result(state: FunnelState, run, st: dict) -> dict:
@@ -993,7 +1097,13 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             d.acquire_deadline = sig["acquire_deadline"]
 
         if state.unresolved_why is not None:
-            if sig.get("acquirability_checked_at"):
+            # Лейн, который W2 уже определила (bid по статусу RDAP), пишем и здесь: платная W4 идёт
+            # ПОСЛЕ W2 и может вернуть unresolved. Дедлайн-оценка выше без лейна оставила бы
+            # lane=NULL + будущий дедлайн — `scorable` прятал бы домен до самого дропа. Пол/ключ
+            # (`_paid_gate`) решаются ДО W2, у них sig["lane"] нет (тест пинит порядок волн).
+            if sig.get("lane") is not None:
+                d.lane = sig["lane"]
+            if sig.get("acquirability_checked_at") and state.unresolved_why not in _PAID_UNRESOLVED:
                 d.acquirability_checked_at = sig["acquirability_checked_at"]
             db.add(DomainScoreLog(domain_id=d.id, run_id=run, outcome="unresolved",
                                   reject_reason=None, score=None, sig=_jsonable(sig)))
@@ -1004,9 +1114,8 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
         else:
-            # F25: Ahrefs зовётся ТОЛЬКО когда фид не дал RD (_wave_ahrefs) — при рескоре
-            # уже приобретённого RD-домена sig["dr"] не наполняется, хотя d.dr в БД уже
-            # хранит проверенное значение с прошлого прогона. Без setdefault compute_score
+            # F25 / 4.12: W4 пишет `dr`/`referring_domains` только непустыми — DR из discovery
+            # (или с прошлого прогона) лежит в строке домена, и без setdefault compute_score
             # считал бы authority от 0.0, будто Ahrefs вообще не спрашивали. float(): `dr` —
             # Numeric, ORM отдаёт его как Decimal при чтении этой (свежей) строки — Decimal/
             # float в compute_score роняет TypeError.
@@ -1026,7 +1135,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "blacklisted",
-                    "dr", "referring_domains", "trademark_risk"):
+                    "dr", "referring_domains", "trademark_risk", "backlinks", "organic_traffic"):
             v = sig.get(col)
             if v is not None:
                 setattr(d, col, v)
@@ -1044,7 +1153,8 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             return v if v is not None else prev.get(key)
 
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),
-                             "ahrefs_backlinks": _kept("ahrefs_backlinks"),
+                             "ref_subnets": _kept("ref_subnets"),
+                             "rd_dofollow": _kept("rd_dofollow"),
                              "history_evidence": _kept("history_evidence") or [],
                              "sampled": _kept("sampled"),
                              "age_source": _kept("age_source"),
@@ -1076,30 +1186,34 @@ def _checkpoint(states: list, run, st: dict) -> list:
     return out
 
 
-def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budget,
-               run) -> list:
+def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget,
+               run, notes: list | None = None) -> list:
     """Оркестратор: волны по порядку дёшево->дорого, между каждой — checkpoint (коммит
     вышедших, отчёт волновой истории), отмена проверяется между волнами (внутри волны —
     в _run_concurrent). Волны — таблица `waves` (ключ чипа, подпись водопада, функция) в
     порядке FUNNEL_STAGES; цикл один на всех. Выжившие после ПОСЛЕДНЕЙ волны финализируются
     как решённые — см. _commit_result. Возвращает результаты в порядке завершения (порядок
     не важен вызывающим — score_pending считает только длину, score_domain — единственный
-    элемент списка)."""
+    элемент списка). `notes` — пояснения волн к водопаду («остаток units ниже пола»): сообщение
+    задачи переписывается после каждой волны, и сказанное волной иначе стёрлось бы; список
+    вызывающего (score_pending) — чтобы пояснение дожило и до итогового сообщения."""
     from app.services import jobs
 
     whois_b = whois_budget if whois_budget is None or hasattr(whois_budget, "take") \
         else _ListBudget(whois_budget)
-    ahrefs_b = ahrefs_budget if ahrefs_budget is None or hasattr(ahrefs_budget, "take") \
-        else _ListBudget(ahrefs_budget)
+    links_b = links_budget if links_budget is None or hasattr(links_budget, "take") \
+        else _ListBudget(links_budget)
+    notes = [] if notes is None else notes
 
     # (ключ чипа, подпись в водопаде, волна). Порядок = порядок FUNNEL_STAGES — один источник
     # правды: новая волна добавляется ОДНОЙ строкой здесь и одной в FUNNEL_STAGES.
     waves = [
-        ("t0", "фильтры", lambda alive: _wave_t0(alive, st)),
+        # W0 и сразу решение «пойдут ли платные волны» (R2-10) — до того, как W2/W3 потратятся
+        ("t0", "фильтры", lambda alive: (_wave_t0(alive, st), _paid_gate(alive, clients, st, notes))),
         ("avail", "доступность", lambda alive: _wave_avail(alive, clients, whois_b, st, run)),
         ("risk", "risk", lambda alive: _wave_risk(alive, clients, run)),
+        ("links", "ссылки", lambda alive: _wave_links(alive, clients, st, links_b, run, notes)),
         ("history", "history", lambda alive: _wave_history(alive, clients, st, run)),
-        ("ahrefs", "ahrefs", lambda alive: _wave_ahrefs(alive, clients, ahrefs_b, run)),
     ]
     results, waterfall, alive = [], [], list(states)
     for i, (key, label, wave) in enumerate(waves):
@@ -1118,7 +1232,7 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
             after = sum(1 for s in alive if s.alive)
         # та же подпись и у последней волны: «N решено» считало бы только выживших
         waterfall.append(f"{label}: {before} → {after}")
-        jobs.report(run, message=" · ".join(waterfall),
+        jobs.report(run, message=" · ".join(waterfall + notes),
                     stage_key=key, stage_before=before, stage_after=after)
     return results
 

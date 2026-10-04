@@ -71,21 +71,6 @@
     </div>
   </div>
   <div class="station">
-    <div class="plate">Кап Ahrefs-проверок за прогон — <b>платная капча за штуку</b></div>
-    <details class="what"><summary>зачем это</summary>
-      <div class="what-body">За один запуск проверки сделаем не более этого числа платных
-      Ahrefs-запросов (DR/backlinks) — только для доменов без RD из фида (cctld/reg_ru/
-      sweb), только для приобретаемых выживших. 0 — полностью выключить Ahrefs-
-      обогащение (authority-балл останется 0, остальной скоринг идёт как обычно).</div></details>
-    <div class="go">
-      <input type="range" name="max_ahrefs_per_run" min="0" max="500" step="10"
-             value="{{ s.max_ahrefs_per_run }}"
-             oninput="document.getElementById('v_ahrefs').textContent=this.value" style="flex:1 1 200px">
-      <b id="v_ahrefs">{{ s.max_ahrefs_per_run }}</b>
-      <span class="hint">платных Ahrefs-запросов за прогон максимум (0 = выключено)</span>
-    </div>
-  </div>
-  <div class="station">
     <div class="plate">Веса критериев — <b>по чему машина судит донора</b></div>
     <details class="what"><summary>зачем это</summary>
       <div class="what-body">Итоговый скор — взвешенная сумма семи сигналов. Здесь задаётся,

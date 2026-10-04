@@ -46,8 +46,8 @@ class _CleanWayback:
 
 def _survives_to_score(whois_created) -> dict:
     """Клиенты, под которыми домен ЖИВЫМ доезжает до compute_score: whois старый (не too_young),
-    РКН/блэклист чисты, эхо есть, история чистая. Ahrefs НЕ в словаре намеренно — тест сам решает,
-    нужен ли он (для lane='bid' + referring_domains задан T3b его и так не позовёт)."""
+    блэклист чист, история чистая. Ahrefs (W4) отвечает строкой БЕЗ полей — ни DR, ни RD этот
+    прогон не наблюдал, и сохранённые в строке домена значения обязаны дожить до скора."""
     class _Whois:
         def whois_probe(self, dom):
             return {"available": False, "created": whois_created}
@@ -58,15 +58,18 @@ def _survives_to_score(whois_created) -> dict:
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
         "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "wayback": _CleanWayback(),
+        "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                  "batch": lambda self, ds: {d: {} for d in ds}})(),
     }
 
 
 # --- (a) DR из прошлого прогона не обнуляет authority --------------------------------------
 
 def test_rescore_keeps_authority_without_a_new_dr_observation():
-    """ПРОХОДИЛО на 45654e3 (до фикса): рескор домена, у которого фид уже дал `referring_domains`
-    (Ahrefs поэтому НЕ зовётся, см. T3b), терял `authority` — `sig["dr"]` не подхватывал
-    сохранённый `d.dr`, и `compute_score` считал его от нуля.
+    """ПРОХОДИЛО на 45654e3 (до фикса): рескор домена, у которого DR уже сохранён (v2 — из
+    discovery или прошлого прогона), а Ahrefs в этом прогоне поля DR не отдал, терял `authority` —
+    `sig["dr"]` не подхватывал сохранённый `d.dr`, и `compute_score` считал его от нуля
+    (находка 4.12: W4 пустым значением сигнал не пишет).
 
     `dr=30.0` при `NORM["DR_FULL"]=30.0` даёт `authority=1.0` — полный балл, ровно как при
     живом наблюдении Ahrefs. Без фикса тот же домен получил бы `authority=0.0`, будто DR
@@ -76,10 +79,7 @@ def test_rescore_keeps_authority_without_a_new_dr_observation():
     did = _add(domain="rescore-dr.com", status="scored", lane="bid",
                referring_domains=3000, dr=30.0)
 
-    # `_survives_to_score`'s aparser mock has no `ahrefs_probe` at all — если бы T3b всё же
-    # попыталась его позвать, тест упал бы AttributeError'ом. Она не пытается: RD (3000) уже
-    # не None, T3b короткозамкнута ПО КОНСТРУКЦИИ (см. _funnel), это и воспроизводит баг.
-    out = scoring.score_domain(did, clients=_survives_to_score(old), ahrefs_budget=[5])
+    out = scoring.score_domain(did, clients=_survives_to_score(old))
 
     assert out["reject_reason"] is None
     assert out["breakdown"]["components"]["authority"] == 1.0, (

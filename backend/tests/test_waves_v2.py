@@ -249,7 +249,9 @@ def test_history_down_young_rdap_marks_age_unverified_and_keeps_domain_out_of_bu
                "rkn": type("R", (), {"is_listed": lambda self, x: False})(),
                "blacklist": type("B", (), {"is_blacklisted": lambda self, x: False})(),
                "searxng": type("S", (), {"indexed_echo": lambda self, x: True})(),
-               "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
+               "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+               "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                         "batch": lambda self, ds: {d: {} for d in ds}})()}
     out = scoring.score_domain(did, clients=clients)
     assert rdap.calls == 1                                  # RDAP реально звали, не NoRdap-путь
     assert out["reject_reason"] != "too_young" and "age:unverified" in out["errors"]
@@ -381,3 +383,307 @@ def test_webrisk_breaker_locks_both_the_gate_check_and_the_increment():
                                                "_webrisk_lock": lock})
     assert wr.calls == 3 and wr.threat_failures == 3
     assert lock.enters == 3 * 2 + 1
+
+
+# --- W4 «ссылки» (Задача 11) -------------------------------------------------------------------
+
+ROW = {"domain_rating": 0.0, "refdomains": 717, "refdomains_dofollow": 358, "refips_subnets": 198,
+       "backlinks": 801, "org_traffic": 0}
+
+
+class FakeAh:
+    """Ahrefs API: batch (W4), остаток units (пол Р3), анкоры и история трафика (W6, Задача 13).
+    `boom` роняет batch и anchors, `history_boom` — только metrics_history."""
+    def __init__(self, data=None, boom=False, anchors=None, history=None, history_boom=False,
+                 units=2_000_000):
+        self.data, self.boom, self.history_boom, self.units = data or {}, boom, history_boom, units
+        self._anchors, self._history = anchors or [], history or []
+        self.batches, self.deep_calls, self.units_calls = [], 0, 0
+
+    def units_left(self):
+        self.units_calls += 1
+        return self.units
+
+    def batch(self, domains):
+        self.batches.append(list(domains))
+        if self.boom:
+            raise RuntimeError("ahrefs down")
+        return {d: self.data[d] for d in domains if d in self.data}
+
+    def anchors(self, d, limit=50):
+        self.deep_calls += 1
+        if self.boom:
+            raise RuntimeError("ahrefs down")
+        return self._anchors
+
+    def metrics_history(self, d, years=5, today=None):
+        if self.history_boom:
+            raise RuntimeError("history down")
+        return self._history
+
+
+def _mk(domain, source="nominet", lane="bid", deadline=None, **kw):
+    with db.SessionLocal() as s:
+        d = Domain(domain=domain, source=source, lane=lane, status="discovered",
+                   acquire_deadline=deadline, **kw)
+        s.add(d)
+        s.commit()
+        return d.id
+
+
+def _full_clients(rdap, ah, wb, **extra):
+    """Клиенты всей воронки на фейках: Web Risk настроен и чист, Spamhaus без DQS не зовётся."""
+    return {"rdap": rdap, "aparser": FakeAp(), "webrisk": FakeWR(), "blacklist": FakeBL(),
+            "ahrefs": ah, "wayback": wb, **extra}
+
+
+def test_links_fills_signals_and_rejects_low_rd():
+    a, b = _state("a.com"), _state("b.com")
+    ah = FakeAh({"a.com": ROW, "b.com": {**ROW, "refdomains": 0}})
+    scoring._wave_links([a, b], {"ahrefs": ah}, _st(min_referring_domains=1), None, None)
+    assert a.alive and a.sig["referring_domains"] == 717 and a.sig["ref_subnets"] == 198
+    assert a.sig["dr"] == 0.0 and a.sig["organic_traffic"] == 0
+    assert b.reject_reason == "low_rd"
+
+
+def test_links_batches_of_100_skip_emd_and_unresolve_missing():
+    """Строки домена нет в ответе — как сбой: unresolved до следующего прогона, а не «вслепую» дальше
+    (без RD скор ушёл бы в low_score навсегда)."""
+    states = [_state(f"d{i}.com") for i in range(150)] + [_state("emd.com", source="emd", lane="free")]
+    ah = FakeAh({})
+    scoring._wave_links(states, {"ahrefs": ah}, _st(), None, None)
+    assert [len(b) for b in ah.batches] == [100, 50]
+    assert all("emd.com" not in b for b in ah.batches)
+    assert states[0].unresolved_why == "ahrefs_missing" and not states[0].alive
+    assert states[0].sig["errors"] == ["ahrefs:missing"] and states[150].alive
+
+
+def test_links_budget_overflow_is_unresolved_not_judged_blind():
+    states = [_state(f"d{i}.com") for i in range(3)]
+    scoring._wave_links(states, {"ahrefs": FakeAh({})}, _st(), scoring.Budget(2), None)
+    assert states[2].unresolved_why == "links_budget" and not states[2].alive
+
+
+def test_links_batch_error_unresolves_rest_and_stops_sending():
+    """1.8: упавшая пачка не «вслепую дальше» (без RD скор ниже порога -> low_score навсегда),
+    а unresolved до следующего прогона. Следующие пачки не шлются: протухший ключ даёт 401 на каждой."""
+    states = [_state(f"d{i}.com") for i in range(150)]
+    ah = FakeAh(boom=True)
+    scoring._wave_links(states, {"ahrefs": ah}, _st(), None, None)
+    assert len(ah.batches) == 1
+    assert all(s.unresolved_why == "ahrefs_failed" and not s.alive for s in states)
+    assert states[149].sig["errors"] == ["ahrefs:RuntimeError"]
+
+
+def test_links_empty_dr_does_not_erase_dr_from_discovery():
+    """4.12: DR пришёл из discovery (строка домена), Ahrefs в W4 поля не отдал — пустое значение
+    сохранённый DR не затирает."""
+    did = _mk("dr-kept.com", deadline=NOW + timedelta(days=2), dr=12)
+    ah = FakeAh({"dr-kept.com": {**ROW, "domain_rating": None}})
+    scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB()))
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert float(d.dr) == 12.0 and d.referring_domains == 717
+
+
+def test_links_batch_error_keeps_domain_discovered_and_unstamped():
+    """1.8 + 2.7: сбой Ahrefs — домен остаётся discovered и БЕЗ отметки сверки занятости:
+    `scorable` вернёт free-лейн только через сутки после отметки, а оценить его надо следующим
+    прогоном."""
+    did = _mk("libre.mx", source="mx", lane="free")
+    out = scoring.score_domain(did, clients=_full_clients(FakeRdap(), FakeAh(boom=True), AgedWB()))
+    assert out["unresolved"] is True and out["why"] == "ahrefs_failed"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered" and d.acquirability_checked_at is None
+
+
+def test_links_missing_row_keeps_domain_discovered_and_unstamped():
+    """Строки домена нет в ответе batch: домен остаётся discovered и без отметки сверки занятости —
+    оценится следующим прогоном (решение координатора 2026-10-02)."""
+    did = _mk("ghost-row.mx", source="mx", lane="free")
+    out = scoring.score_domain(did, clients=_full_clients(FakeRdap(), FakeAh({}), AgedWB()))
+    assert out["unresolved"] is True and out["why"] == "ahrefs_missing"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered" and d.acquirability_checked_at is None
+
+
+def test_score_pending_takes_links_cap_from_settings(monkeypatch):
+    """2.9: кап W4 — из /settings. Кап 1 и два домена -> один оценён, второй ждёт следующего прогона."""
+    from app.services.settings import update_settings
+    update_settings(max_links_per_run=1)
+    for name in ("cap-a.com", "cap-b.com"):
+        _mk(name, deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"cap-a.com": ROW, "cap-b.com": ROW})
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert [len(b) for b in ah.batches] == [1]
+    with db.SessionLocal() as s:
+        left = [d.domain for d in s.query(Domain).filter(Domain.status == "discovered")]
+    assert len(left) == 1
+
+
+def test_units_floor_skips_paid_wave_and_says_why(monkeypatch):
+    """Р3: остаток units ниже пола -> W4 не тратит ничего, домены ждут следующего прогона (без
+    отметки сверки), причина — в сообщении задачи. Остаток неизвестен (None) — то же самое.
+    R2-10: решено ОДИН раз в начале прогона — W2 (RDAP) по таким доменам даже не ходила."""
+    from app.services import jobs
+    for units in (100_000, None):
+        name = f"floor-{units}.com"
+        did = _mk(name, deadline=NOW + timedelta(days=2))
+        ah = FakeAh({name: ROW}, units=units)
+        rdap = FakeRdap(exists=True, registered=NOW - timedelta(days=4000))
+        clients = _full_clients(rdap, ah, AgedWB())
+        monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+        scoring.score_pending(limit=10)
+        assert ah.batches == [] and ah.units_calls == 1 and rdap.calls == 0, units
+        with db.SessionLocal() as s:
+            d = s.get(Domain, did)
+            assert d.status == "discovered" and d.acquirability_checked_at is None, units
+    msg = jobs.last("score")["message"]
+    assert "Ahrefs: остаток units неизвестен — платные волны пропущены" in msg, msg
+
+
+def test_units_floor_message_and_zero_floor_means_no_floor(monkeypatch):
+    from app.services import jobs
+    from app.services.settings import update_settings
+    did = _mk("low.com", deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"low.com": ROW}, units=100_000)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert "Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены" in jobs.last("score")["message"]
+    update_settings(units_floor=0)                     # 0 — пола нет: остаток даже не спрашиваем
+    ah.units_calls = 0
+    scoring.score_pending(limit=10)
+    assert ah.units_calls == 0 and ah.batches == [["low.com"]]
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).status == "scored"
+
+
+def test_links_no_key_skips_avail_and_risk_for_non_emd(monkeypatch):
+    """R2-10: платные волны не пойдут (ключа Ahrefs нет) — это известно ДО W2/W3. Не-EMD домен без
+    W4 не решается, и RDAP с Web Risk за него тратились бы впустую на каждом свипе. Решено один раз
+    после W0: домен ждёт следующего прогона без отметки сверки; EMD идёт как обычно (W4 у него нет)."""
+    from app.integrations.ahrefs import AhrefsClient
+    from app.services import jobs
+    did = _mk("nokey.com", deadline=NOW + timedelta(days=2))
+    _mk("nokey-emd.com", source="emd", lane="free")
+    rdap, wr = FakeRdap(), FakeWR()
+    clients = {**_full_clients(rdap, AhrefsClient(api_key=""), AgedWB()), "webrisk": wr}
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert rdap.calls == 1 and wr.calls == 1                # только EMD
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered" and d.acquirability_checked_at is None
+    msg = jobs.last("score")["message"]
+    assert "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены" in msg, msg
+
+
+def test_score_pending_selects_non_emd_up_to_links_cap(monkeypatch):
+    """R2-10: домен сверх капа W4 всё равно ушёл бы в links_budget, оплатив W2/W3 (RDAP/whois:43,
+    Web Risk). Выборка берёт не-EMD доменов не больше капа; остаток лимита добирают EMD — W4 у них
+    нет."""
+    from app.services.settings import update_settings
+    update_settings(max_links_per_run=1)
+    for name in ("sel-a.com", "sel-b.com"):
+        _mk(name, deadline=NOW + timedelta(days=2))
+    _mk("sel-emd.com", source="emd", lane="free")
+    seen = []
+    monkeypatch.setattr(scoring, "_run_waves",
+                        lambda states, *a, **kw: seen.extend(s.domain for s in states) or [])
+    scoring.score_pending(limit=10)
+    assert len(seen) == 2 and "sel-emd.com" in seen
+
+
+def test_links_batch_error_reason_goes_to_job_message(monkeypatch):
+    """R2-9: причина сбоя пачки W4 — в сообщении задачи, с HTTP-кодом (401/403 — ключ не принят,
+    400 — кривой запрос), а не только в логе скора: иначе оператор видит «прогнано N», а домены
+    молча висят в поиске."""
+    import httpx
+    from app.services import jobs
+
+    class Ah401(FakeAh):
+        def batch(self, domains):
+            self.batches.append(list(domains))
+            raise httpx.HTTPStatusError("401", request=httpx.Request("POST", "https://api.ahrefs.com/v3"),
+                                        response=httpx.Response(401))
+    _mk("key-gone.com", deadline=NOW + timedelta(days=2))
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), Ah401(), AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    msg = jobs.last("score")["message"]
+    assert "Ahrefs W4: HTTPStatusError 401 — 1 доменов ждут следующего прогона" in msg, msg
+
+
+def test_links_wave_cancel_between_batches():
+    from app.services import jobs
+    states = [_state(f"c{i}.com") for i in range(150)]
+    ah = FakeAh({})
+    with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
+        jobs.request_cancel("score")
+        scoring._wave_links(states, {"ahrefs": ah}, _st(), None, run)
+    assert len(ah.batches) == 1 and jobs.last("score")["status"] == "cancelled"
+
+
+def test_single_score_flash_names_paid_wave_reasons(client, monkeypatch):
+    """«▶ перепроверить» один домен: причина платной волны названа, а не «приобретаемость не
+    определена» — занятость тут ни при чём."""
+    from urllib.parse import unquote
+    did = _mk("flash.com")
+    for why, words in (("ahrefs_failed", "Ahrefs не ответил"), ("units_floor", "ниже пола"),
+                       ("ahrefs_missing", "не вернул данных"), ("ahrefs_no_key", "ключ Ahrefs")):
+        monkeypatch.setattr(scoring, "score_domain", lambda domain_id, why=why: {
+            "domain": "flash.com", "status": "discovered", "unresolved": True, "why": why})
+        loc = unquote(client.post(f"/domains/{did}/score", follow_redirects=False).headers["location"])
+        assert words in loc, loc
+
+
+def test_paid_unresolved_after_avail_persists_bid_lane_with_estimated_deadline():
+    """W2 перевела ручной домен без лейна в bid по статусу RDAP «pending delete» и оценила дедлайн,
+    затем W4 не смогла (сбой Ahrefs) -> unresolved. Порядок волн делает это достижимым (W4 идёт после
+    W2 для не-EMD). Без записи лейна в БД остались бы lane=NULL + будущий дедлайн: `scorable` не
+    пускает такой домен до самого дропа, и оценка ждала бы его вместо следующего прогона."""
+    from sqlalchemy import select
+    did = _mk("pending-del.com", source="list", lane=None)
+    rdap = FakeRdap(exists=True, registered=NOW - timedelta(days=4000))
+    out = scoring.score_domain(did, clients=_full_clients(rdap, FakeAh(boom=True), AgedWB()))
+    assert out["unresolved"] is True and out["why"] == "ahrefs_failed"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered" and d.lane == "bid" and d.acquire_deadline is not None
+        assert d.acquirability_checked_at is None
+        # следующий свип видит домен: оценка ждёт не дропа, а ближайшего прогона
+        assert s.scalar(select(Domain.id).where(Domain.id == did, scoring.scorable(NOW))) == did
+
+
+def test_paid_gate_unresolved_precedes_avail_so_no_lane_or_deadline_is_written(monkeypatch):
+    """Пинит предпосылку, на которой держится комментарий в ветке unresolved: платные причины
+    пол/ключ решаются ДО W2 (порядок волн), поэтому лейн/оценка дедлайна им недоступны и лейн не
+    пишется. Сломает тест перестановка `_paid_gate` после W2."""
+    did = _mk("gate-first.com", source="list", lane=None)
+    rdap = FakeRdap(exists=True, registered=NOW - timedelta(days=4000))
+    clients = _full_clients(rdap, FakeAh(units=1), AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert rdap.calls == 0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "discovered" and d.lane is None and d.acquire_deadline is None
+
+
+def test_units_left_is_asked_once_per_run_when_floor_passes(monkeypatch):
+    """Р3/R2-10: остаток units спрашивается ОДИН раз за прогон — в `_paid_gate` после W0, а не
+    на каждой платной волне/пачке (лишний запрос на каждом домене свипа раз в час). Гард «один раз»
+    на ПРОХОДЯЩЕМ пути: на падающем волна по таким доменам не идёт и второй вопрос не задала бы."""
+    for name in ("once-a.com", "once-b.com"):
+        _mk(name, deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"once-a.com": ROW, "once-b.com": ROW})
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert ah.units_calls == 1 and [len(b) for b in ah.batches] == [2]

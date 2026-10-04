@@ -20,7 +20,7 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
     _seed(1)
     seen = []
 
-    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
+    def fake_run_waves(states, clients, st, whois_budget, links_budget, run=None, **kw):
         jobs.report(run, stage="whois")                  # так репортит _run_waves/_run_concurrent
         seen.append(jobs.progress("score")["stage"])
         return [{"domain": "d0.ru"}]
@@ -45,7 +45,7 @@ def test_score_pending_stops_on_cancel(monkeypatch):
     done/total, что успели отчитать до отмены."""
     _seed(5)
 
-    def fake_run_waves(states, clients, st, whois_budget, ahrefs_budget, run=None):
+    def fake_run_waves(states, clients, st, whois_budget, links_budget, run=None, **kw):
         jobs.report(run, done=1, total=len(states))       # как реально отчиталась бы волна
         jobs.request_cancel("score")                      # человек нажал «стоп»
         if jobs.cancelled(run):

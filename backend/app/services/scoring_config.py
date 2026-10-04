@@ -1,14 +1,8 @@
 """Tunable thresholds and weights for donor scoring. See docs/DONORS.md.
 
-v1 runs on the FREE stack (Wayback/RKN/Spamhaus/SearXNG) + Ahrefs DR/backlinks/
-referring-domains via A-Parser (RuCapcha Turnstile-solver — live-verified 2026-07-08,
-see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md). Every component lands in
-Domain.score_breakdown for transparency.
-
-Ahrefs is called ONLY for T3 survivors the discovery feed didn't already give a
-referring-domains count for (cctld/reg_ru/sweb — backorder domains keep trusting the
-feed's own RD, no duplicate paid call), and only under the runtime `max_ahrefs_per_run`
-budget (services/settings.py) — it costs real money per captcha-solve.
+v2 (docs/v2/02-m1-discovery-scoring-spec.md): RDAP/whois, Google Web Risk, Ahrefs API v3
+(batch-analysis в W4, анкоры и история трафика в W6 — под капами /settings и полом остатка
+units), Wayback + LLM. Every component lands in Domain.score_breakdown for transparency.
 """
 
 # Stage B — light pre-filter (drop obvious garbage before the heavy Wayback pass).
@@ -54,7 +48,6 @@ DECISION = {
 MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт: моложе — reject too_young
 SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True}  # dropcatch — после проверки ToS оператором
 MAX_WHOIS_PER_RUN = 200        # кап whois-пробоев за один прогон проверки (защита от сырого cctld)
-MAX_AHREFS_PER_RUN = 50         # кап платных Ahrefs-вызовов (капча за штуку) за прогон; 0 = выключить
 
 # ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
 MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом

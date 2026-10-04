@@ -91,13 +91,6 @@ def test_whois_probe_raises_on_error_envelope():
         c.whois_probe("clara-c.ru")
 
 
-def test_ahrefs_probe_raises_on_error_envelope():
-    """Тот же конверт у платного вызова: «капча не решилась» не должна выглядеть как «DR=0»."""
-    c = _client({"success": 0, "msg": "Captcha service error"})
-    with pytest.raises(RuntimeError, match="Captcha"):
-        c.ahrefs_probe("clara-c.ru")
-
-
 def test_ping_surfaces_reason_for_diag():
     """`/diag` ловит Exception и показывает текст (diagnostics._run_one). Раньше протухший
     пароль давал тихое False — «красный без причины»; теперь причина видна оператору."""
@@ -244,7 +237,9 @@ def _clients(whois, wayback=None):
         def indexed_echo(self, dom): return True
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
             "wayback": wayback or _WaybackAged(),
-            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 def _add(**kw) -> int:

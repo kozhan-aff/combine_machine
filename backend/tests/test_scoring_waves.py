@@ -37,7 +37,9 @@ def test_list_budget_adapts_legacy_list_in_place():
     assert b.take() is False and box == [0]
 
 
-def test_wave_t0_rejects_feed_flag_and_low_rd_without_touching_alive_ones():
+def test_wave_t0_rejects_feed_flag_and_leaves_rd_to_links_wave():
+    """W0 не судит RD: в v2 его даёт Ahrefs в W4 «ссылки» (RD из строки домена — не наблюдение
+    этого прогона). Домен с низким RD из строки проходит W0 живым."""
     st = {"min_referring_domains": 5, "tld_allowlist": ["com"], "brand_tokens": []}
     flagged = scoring.FunnelState(domain_id=1, domain="a.com", lane=None,
                                   referring_domains=10, acquire_deadline=None,
@@ -51,7 +53,7 @@ def test_wave_t0_rejects_feed_flag_and_low_rd_without_touching_alive_ones():
     states = [flagged, low_rd, ok]
     scoring._wave_t0(states, st)
     assert flagged.alive is False and flagged.reject_reason == "feed_flag"
-    assert low_rd.alive is False and low_rd.reject_reason == "low_rd"
+    assert low_rd.alive is True and low_rd.reject_reason is None
     assert ok.alive is True and ok.reject_reason is None
 
 
@@ -329,72 +331,6 @@ def test_wave_history_takes_older_of_whois_and_wayback_age():
     assert old.alive and old.sig["age_years"] == 16.0 and old.sig["age_source"] == "whois"
 
 
-class _FakeAhrefs:
-    def __init__(self, dr=5.0, backlinks=100, rd=50, raises=False):
-        self.dr, self.backlinks, self.rd, self.raises = dr, backlinks, rd, raises
-        self.calls = 0
-
-    def ahrefs_probe(self, domain):
-        self.calls += 1
-        if self.raises:
-            raise RuntimeError("captcha failed")
-        return {"dr": self.dr, "backlinks": self.backlinks, "referring_domains": self.rd}
-
-
-def test_wave_ahrefs_skips_domain_with_feed_rd():
-    s = scoring.FunnelState(domain_id=1, domain="a.ru", lane=None, referring_domains=500,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 0 and "dr" not in s.sig
-
-
-def test_wave_ahrefs_probes_when_feed_has_no_rd_and_budget_available():
-    s = scoring.FunnelState(domain_id=2, domain="b.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(dr=7.0)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 1 and s.sig["dr"] == 7.0
-
-
-def test_wave_ahrefs_none_budget_means_disabled():
-    s = scoring.FunnelState(domain_id=3, domain="c.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, budget=None, run=None)
-    assert ap.calls == 0
-
-
-def test_wave_ahrefs_failure_does_not_reject():
-    s = scoring.FunnelState(domain_id=4, domain="d.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(raises=True)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert s.alive is True
-    assert any("ahrefs:" in e for e in s.sig["errors"])
-
-
-def test_wave_ahrefs_exhausted_budget_skips_without_call():
-    """Находка ревью Task 5: пробел покрытия — исчерпанный (не None) бюджет не был
-    отдельно проверен на реальный отказ от сети."""
-    s = scoring.FunnelState(domain_id=5, domain="e.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs()
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(0), run=None)
-    assert ap.calls == 0 and "dr" not in s.sig
-
-
-def test_wave_ahrefs_does_not_overwrite_referring_domains_with_none():
-    """Находка ревью Task 5: sig["referring_domains"] обязан обновляться ТОЛЬКО когда
-    Ahrefs реально вернул значение — None от Ahrefs не должен затирать ключ пустотой."""
-    s = scoring.FunnelState(domain_id=6, domain="f.ru", lane=None, referring_domains=None,
-                            acquire_deadline=None, feed_flags=None)
-    ap = _FakeAhrefs(rd=None)
-    scoring._wave_ahrefs([s], {"aparser": ap}, scoring.Budget(50), run=None)
-    assert ap.calls == 1
-    assert "referring_domains" not in s.sig
-
-
 # ============================================================================
 # _commit_result tests — БД-трогающие, используют real SessionLocal() с SQLite
 # ============================================================================
@@ -479,8 +415,9 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
             # чётные — заняты без даты дропа и без лейна: W2 их не решает (taken_undated)
             return {"available": self.n % 2 != 0, "created": old}
         def safebrowsing_check(self, d): return False
-        def ahrefs_probe(self, d): return {"dr": 1.0, "backlinks": 0, "referring_domains": None}
     clients = {"aparser": _Ap(),
+              "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                        "batch": lambda self, ds: {d: {} for d in ds}})(),
               "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
               "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
               "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
@@ -491,7 +428,7 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
 
     with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
         out = scoring._run_waves(states, clients, st, whois_budget=None,
-                                 ahrefs_budget=None, run=run)
+                                 links_budget=None, run=run)
     assert len(out) == 10
     survived = [s for s in states if s.alive]
     assert 0 < len(survived) < 10          # реально сжалось, не всё выжило и не всё умерло
@@ -502,7 +439,7 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
     by_key = {s["key"]: s for s in last["stages"]}
     assert by_key["t0"]["before"] == 10 and by_key["t0"]["after"] == 10
     assert by_key["avail"]["before"] == 10 and by_key["avail"]["after"] == len(survived)
-    assert by_key["ahrefs"]["before"] == by_key["ahrefs"]["after"] == len(survived)
+    assert by_key["history"]["before"] == by_key["history"]["after"] == len(survived)
 
 
 def test_run_waves_cancellation_between_waves_preserves_partial_progress():
@@ -526,7 +463,7 @@ def test_run_waves_cancellation_between_waves_preserves_partial_progress():
     with jobs.track("score", stages=[dict(x) for x in scoring.FUNNEL_STAGES]) as run:
         jobs.request_cancel("score")
         scoring._run_waves(states, clients, st, whois_budget=None,
-                           ahrefs_budget=None, run=run)
+                           links_budget=None, run=run)
     last = jobs.last("score")
     assert last["status"] == "cancelled"
 
@@ -577,9 +514,9 @@ def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits
     развёртывания, ХОТЯ `_checkpoint()` внутри уже мог реально закоммитить в БД домены
     волной(ами) РАНЬШЕ той, где прилетела отмена. Если считать `done=len(results)` голым — при
     отмене он ВСЕГДА 0, даже если реально отброшено N доменов: контракт docstring'а («частичное
-    число, не len(rows)») соврёт. Здесь 2 домена low_rd (W0) + 3 not_acquirable (W2: лейн free,
+    число, не len(rows)») соврёт. Здесь 2 домена feed_flag (W0) + 3 not_acquirable (W2: лейн free,
     а домен занят) реально оседают в БД как rejected до отмены на волне risk."""
-    ids = [_mk_domain(domain=f"lowrd{i}.com", referring_domains=0, lane="bid") for i in range(2)]
+    ids = [_mk_domain(domain=f"flag{i}.com", feed_flags={"block": True}, lane="bid") for i in range(2)]
     ids += [_mk_domain(domain=f"taken{i}.com", referring_domains=5, lane="free") for i in range(3)]
 
     from app.services import jobs as jobs_mod

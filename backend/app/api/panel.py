@@ -788,6 +788,14 @@ def score_one_action(domain_id: int):
                                  "по расписанию (раз в сутки), вдруг освободится",
                 "budget": "исчерпан бюджет whois на прогон (см. max_whois_per_run в /settings) — "
                           "домен остался в поиске",
+                "ahrefs_failed": "Ahrefs не ответил (ссылочный профиль) — домен остался в поиске, "
+                                 "оценится следующим прогоном",
+                "units_floor": "остаток units Ahrefs неизвестен или ниже пола (см. /settings) — "
+                               "платные волны пропущены, домен остался в поиске",
+                "ahrefs_missing": "Ahrefs не вернул данных по домену — домен остался в поиске, "
+                                  "оценится следующим прогоном",
+                "ahrefs_no_key": "ключ Ahrefs (AHREFS_API_KEY в .env) не задан — платные волны "
+                                 "пропущены, домен остался в поиске",
             }.get(out.get("why"), "приобретаемость не определена — домен остался в поиске"))
         return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
                                      f"{out.get('status')} ({out.get('score')})")
@@ -1188,7 +1196,7 @@ def check_updates_action():
 @router.post("/settings/save")
 def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
-                  max_whois_per_run: int = Form(200), max_ahrefs_per_run: int = Form(50),
+                  max_whois_per_run: int = Form(200),
                   dropcatch: str = Form(""), nominet: str = Form(""),
                   mx: str = Form(""), emd: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
@@ -1205,7 +1213,7 @@ def settings_save(min_referring_domains: int = Form(...), min_age_years: float =
                                  ("traffic_history", w_traffic_history)) if v is not None}
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
-                       max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,
+                       max_whois_per_run=max_whois_per_run,
                        sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
                        weights=weights or None)
     return _back("/settings", msg="Настройки сохранены")

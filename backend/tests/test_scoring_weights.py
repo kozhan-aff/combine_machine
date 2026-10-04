@@ -46,7 +46,7 @@ def test_saved_weights_reach_the_funnel(sqlite_db, client):
     """Сквозной путь: форма -> БД -> get_settings -> compute_score."""
     r = client.post("/settings/save", data={
         "min_referring_domains": 10, "min_age_years": 3.0, "approve_at": 0.7,
-        "manual_review_at": 0.35, "max_whois_per_run": 200, "max_ahrefs_per_run": 0,
+        "manual_review_at": 0.35, "max_whois_per_run": 200,
         "nominet": "on", "w_history_cleanliness": 0.5, "w_topical_fit": 0.2, "w_age": 0.0,
         "w_rd": 0.5, "w_authority": 0.0, "w_anchor_quality": 0.3, "w_traffic_history": 0.1,
     }, follow_redirects=False)
@@ -61,6 +61,6 @@ def test_form_without_weights_does_not_wipe_them(sqlite_db, client):
     update_settings(weights={**cfg.WEIGHTS, "history_cleanliness": 0.9})
     client.post("/settings/save", data={
         "min_referring_domains": 10, "min_age_years": 3.0, "approve_at": 0.7,
-        "manual_review_at": 0.35, "max_whois_per_run": 200, "max_ahrefs_per_run": 0,
+        "manual_review_at": 0.35, "max_whois_per_run": 200,
         "nominet": "on"}, follow_redirects=False)
     assert get_settings()["weights"]["history_cleanliness"] == 0.9

@@ -37,7 +37,9 @@ def _clients(wayback, created):
     class _S:
         def indexed_echo(self, dom): return True
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
-            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 # ---- вердикт ----

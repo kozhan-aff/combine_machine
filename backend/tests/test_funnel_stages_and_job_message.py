@@ -15,7 +15,7 @@ def test_task10_funnel_stages_has_5_not_6():
     """Task 10: FUNNEL_STAGES drops 'echo' — now 5 stages, not 6."""
     assert len(scoring.FUNNEL_STAGES) == 5
     keys = [s["key"] for s in scoring.FUNNEL_STAGES]
-    assert keys == ["t0", "avail", "risk", "history", "ahrefs"]
+    assert keys == ["t0", "avail", "risk", "links", "history"]
     assert "echo" not in keys
     # v2: риск — это Google Web Risk (РКН, Safe Browsing и эхо удалены)
     risk_stage = next(s for s in scoring.FUNNEL_STAGES if s["key"] == "risk")

@@ -9,7 +9,7 @@ import re
 from app.services import scoring_config as cfg
 
 _KEYS_NUM = ("min_referring_domains", "min_age_years", "approve_at", "manual_review_at",
-             "max_whois_per_run", "max_ahrefs_per_run",
+             "max_whois_per_run",
              "min_dr", "max_links_per_run", "max_deep_per_run", "spam_anchor_max", "units_floor")
 _BOUNDS = {                       # (min, max) для валидации ползунков
     "min_referring_domains": (0, 100000),
@@ -17,7 +17,6 @@ _BOUNDS = {                       # (min, max) для валидации пол�
     "approve_at": (0.0, 1.0),
     "manual_review_at": (0.0, 1.0),
     "max_whois_per_run": (1, 5000),
-    "max_ahrefs_per_run": (0, 1000),
     "min_dr": (0.0, 100.0),
     "max_links_per_run": (1, 5000),
     "max_deep_per_run": (0, 500),        # 0 = W6 выключен: анкоры не проверены, в пакет домен не попадёт
@@ -34,7 +33,6 @@ def _defaults() -> dict:
         "approve_at": cfg.DECISION["approve_at"],
         "manual_review_at": cfg.DECISION["manual_review_at"],
         "max_whois_per_run": cfg.MAX_WHOIS_PER_RUN,
-        "max_ahrefs_per_run": cfg.MAX_AHREFS_PER_RUN,
         "sources_enabled": dict(cfg.SOURCES_ENABLED),
         "weights": dict(cfg.WEIGHTS),
         "min_dr": cfg.MIN_DR,
@@ -153,7 +151,6 @@ def get_settings() -> dict:
             "approve_at": float(r.approve_at),
             "manual_review_at": float(r.manual_review_at),
             "max_whois_per_run": int(r.max_whois_per_run),
-            "max_ahrefs_per_run": int(r.max_ahrefs_per_run),
             # устаревшие ключи в БД (backorder/cctld/…) не выключают молча новые источники v2
             "sources_enabled": {k: bool((r.sources_enabled or {}).get(k, v))
                                 for k, v in cfg.SOURCES_ENABLED.items()},

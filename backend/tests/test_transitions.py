@@ -144,6 +144,8 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
         "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": False, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
+        "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                  "batch": lambda self, ds: {d: {} for d in ds}})(),
     }
     out = scoring.score_domain(did, clients=clients)
     assert out["reject_reason"] is None and out["status"] == "scored"
@@ -453,6 +455,8 @@ def _clients(**over):
         "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": True, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
+        "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                  "batch": lambda self, ds: {d: {} for d in ds}})(),
     }
     return {**c, **over}
 
@@ -484,11 +488,13 @@ def test_rescore_early_exit_does_not_erase_rkn_evidence():
             transitions.check(d, "approved")              # ...и в оборот не возвращается
 
 
-def test_rescore_t0_exit_does_not_erase_history_evidence():
-    """Тот же корень с другого входа: поднял min_rd в /settings -> перескор -> low_rd на T0.
+def test_rescore_links_exit_does_not_erase_history_evidence():
+    """Тот же корень с другого входа: поднял min_rd в /settings -> перескор -> low_rd на W4
+    «ссылки» (v2: RD судит Ahrefs, и W4 идёт ДО истории).
 
-    T0 не зовёт вообще ничего. Грязная ИСТОРИЯ (prior_flags) и блэклист обязаны пережить это —
-    иначе «ослабь порог обратно» возвращало бы домен уже отмытым.
+    Волна истории не исполнялась. Грязная ИСТОРИЯ (prior_flags) и блэклист (Spamhaus без DQS не
+    спрашивали) обязаны пережить это — иначе «ослабь порог обратно» возвращало бы домен уже
+    отмытым.
     """
     from app.services import scoring, transitions
     from app.services.settings import update_settings
@@ -500,9 +506,11 @@ def test_rescore_t0_exit_does_not_erase_history_evidence():
                # инбокс пишет «история грязная — смотри снимки», а смотреть нечего
                score_breakdown={"history_evidence": [{"url": "casino-lowrd.com", "when": "2015"}],
                                 "errors": []})
-    update_settings(min_referring_domains=100)            # порог подняли — домен не проходит T0
+    update_settings(min_referring_domains=100)            # порог подняли — домен не проходит W4
 
-    out = scoring.score_domain(did, clients=_clients())
+    thin = type("Ah", (), {"units_left": lambda self: 2_000_000,
+                           "batch": lambda self, ds: {d: {"refdomains": 5} for d in ds}})()
+    out = scoring.score_domain(did, clients=_clients(ahrefs=thin))
     assert out["reject_reason"] == "low_rd"
     with db.SessionLocal() as s:
         d = s.get(Domain, did)

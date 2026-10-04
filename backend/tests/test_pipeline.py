@@ -34,7 +34,9 @@ def _funnel_clients(whois_dt, threats=(), wb_flags=None):
         def classify_history(self, dom):
             return wb_flags or {"prior_flags": {}, "wayback_checked": True,
                                 "first_seen": None, "age_years": 10.0}
-    return {"aparser": _W(), "webrisk": _WR(), "blacklist": _Bl(), "wayback": _Wb()}
+    return {"aparser": _W(), "webrisk": _WR(), "blacklist": _Bl(), "wayback": _Wb(),
+            "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
+                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
 
 
 def test_scoring_persists_and_jsonb_roundtrips():
