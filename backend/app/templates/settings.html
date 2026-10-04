@@ -111,15 +111,17 @@
     {% endfor %}
   </div>
   <div class="station">
-    <div class="plate">Источники дропов — <b>какие списки собирает Discovery</b></div>
+    <div class="plate">Источники доменов — <b>что собирает Discovery</b></div>
     <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Выключенный источник просто не опрашивается при ↻ Discovery;
-      уже найденные с него домены остаются в пуле.</div></details>
+      <div class="what-body">Автоматические источники (DropCatch, Nominet, registry.mx) проходят
+      фильтр зон и бесплатный DR Ahrefs ещё на входе: домен с DR ниже порога в базу не попадает.
+      EMD генерируется из твоих наборов ключей и DR-фильтр не проходит. Выключенный источник не
+      опрашивается; уже найденные с него домены остаются.</div></details>
     <div class="go">
-      <label><input type="checkbox" name="backorder" {{ 'checked' if s.sources_enabled.backorder }}> backorder (с RD)</label>
-      <label><input type="checkbox" name="cctld" {{ 'checked' if s.sources_enabled.cctld }}> cctld (сырой .ru)</label>
-      <label><input type="checkbox" name="reg_ru" {{ 'checked' if s.sources_enabled.reg_ru }}> reg.ru</label>
-      <label><input type="checkbox" name="sweb" {{ 'checked' if s.sources_enabled.sweb }}> sweb</label>
+      <label title="pending delete .com/.net/.org — ~134 тыс. строк в день"><input type="checkbox" name="dropcatch" {{ 'checked' if s.sources_enabled.dropcatch }}> DropCatch <span class="hint">(включать после проверки ToS)</span></label>
+      <label title="официальный список дропов .uk/.co.uk"><input type="checkbox" name="nominet" {{ 'checked' if s.sources_enabled.nominet }}> Nominet</label>
+      <label title="удалённые .mx — свободны к регистрации"><input type="checkbox" name="mx" {{ 'checked' if s.sources_enabled.mx }}> registry.mx</label>
+      <label title="генератор EMD по наборам ключей ниже"><input type="checkbox" name="emd" {{ 'checked' if s.sources_enabled.emd }}> EMD</label>
     </div>
   </div>
   <div class="station">

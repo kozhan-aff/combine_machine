@@ -128,11 +128,12 @@ def test_settings_render_and_save(client):
     assert client.get("/settings").status_code == 200
     r = client.post("/settings/save", data={
         "min_referring_domains": 2, "min_age_years": 4, "approve_at": 0.75,
-        "manual_review_at": 0.4, "cctld": "on"}, follow_redirects=False)
+        "manual_review_at": 0.4, "mx": "on"}, follow_redirects=False)
     assert r.status_code == 303
     from app.services import settings as st
     s = st.get_settings()
-    assert s["min_age_years"] == 4.0 and s["sources_enabled"]["backorder"] is False
+    assert s["min_age_years"] == 4.0
+    assert s["sources_enabled"]["mx"] is True and s["sources_enabled"]["dropcatch"] is False
 
 
 def test_settings_preview_json(client):

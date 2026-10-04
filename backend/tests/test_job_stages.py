@@ -60,16 +60,18 @@ def test_score_pending_stops_on_cancel(monkeypatch):
 
 
 def test_discovery_stages_are_sources(monkeypatch):
-    """Чипы discovery — включённые источники + дедуп + запись."""
+    """Чипы discovery — включённые источники + DR-фильтр + запись."""
     from app.services.settings import update_settings
-    update_settings(sources_enabled={"backorder": True, "cctld": False,
-                                     "reg_ru": False, "sweb": False})
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: [])
+    update_settings(sources_enabled={"dropcatch": False, "nominet": True, "mx": False, "emd": False})
+
+    class _Empty:
+        def list_dropping(self):
+            return []
+    monkeypatch.setattr(discovery, "_clients", lambda: {"nominet": _Empty})
     assert discovery.run_discovery() == 0
     p = jobs.progress("discovery")
     assert p["status"] == "done" and p["error"] is None
-    assert [s["key"] for s in p["stages"]] == ["backorder", "dedup", "save"]
+    assert [s["key"] for s in p["stages"]] == ["nominet", "dr", "save"]
     assert p["message"] == "нет кандидатов"
 
 

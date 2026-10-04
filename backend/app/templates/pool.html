@@ -66,6 +66,18 @@
   </form>
 </div>
 
+<div class="station">
+  <div class="plate">Добавить домены списком — <b>то, что нашёл руками</b></div>
+  <details class="what"><summary>зачем это</summary>
+    <div class="what-body">ExpiredDomains.net и SpamZilla запрещают ботов — там ищешь сам и
+    вставляешь сюда (по одному в строке или через запятую, до 5000 за раз). Домены попадут в пул как
+    «найден» и пройдут обычную воронку: чужая зона или бренд в имени — честный отказ с причиной.</div></details>
+  <form class="go" method="post" action="/domains/add-list">
+    <textarea name="domains" rows="4" style="flex:1 1 320px" placeholder="example.com&#10;mejorvpn.mx"></textarea>
+    <button class="btn-acc" title="добавить в пул со статусом «найден»">Добавить</button>
+  </form>
+</div>
+
 <div class="wrap">
 {% if rows %}
 <table>

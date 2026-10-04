@@ -625,6 +625,15 @@ def run_discovery_action(request: Request):
     return _back_here(request, err=None if ok else "Поиск дропов уже идёт")
 
 
+@router.post("/domains/add-list")
+def domains_add_list(domains: str = Form("")):
+    from app.services import discovery
+    r = discovery.add_list(domains)
+    cut = f", сверх {discovery._LIST_MAX} за раз отброшено {r['cut']}" if r["cut"] else ""
+    return _back("/domains/pool", msg=f"Добавлено {r['added']}, уже были {r['known']}, "
+                                      f"не домены {r['bad']}{cut} — новые оценятся при «Оценить домены»")
+
+
 @router.post("/run/score")
 def run_score_action(request: Request, n: int = Form(5)):
     from app.services import jobs, scoring
@@ -1180,8 +1189,8 @@ def check_updates_action():
 def settings_save(min_referring_domains: int = Form(...), min_age_years: float = Form(...),
                   approve_at: float = Form(...), manual_review_at: float = Form(...),
                   max_whois_per_run: int = Form(200), max_ahrefs_per_run: int = Form(50),
-                  backorder: str = Form(""), cctld: str = Form(""),
-                  reg_ru: str = Form(""), sweb: str = Form(""),
+                  dropcatch: str = Form(""), nominet: str = Form(""),
+                  mx: str = Form(""), emd: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
                   w_rd_proxy: float | None = Form(None), w_age: float | None = Form(None),
                   w_indexed_echo: float | None = Form(None),
@@ -1196,8 +1205,7 @@ def settings_save(min_referring_domains: int = Form(...), min_age_years: float =
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
                        max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,
-                       sources_enabled={"backorder": bool(backorder), "cctld": bool(cctld),
-                                        "reg_ru": bool(reg_ru), "sweb": bool(sweb)},
+                       sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
                        weights=weights or None)
     return _back("/settings", msg="Настройки сохранены")
 

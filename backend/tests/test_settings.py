@@ -12,10 +12,10 @@ def test_get_settings_seeds_defaults():
 
 def test_update_and_reset():
     st.update_settings(min_age_years=5, approve_at=0.8,
-                       sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
+                       sources_enabled={"dropcatch": False, "nominet": True, "mx": False, "emd": False})
     s = st.get_settings()
     assert s["min_age_years"] == 5.0 and s["approve_at"] == 0.8
-    assert s["sources_enabled"]["cctld"] is False
+    assert s["sources_enabled"]["dropcatch"] is False and s["sources_enabled"]["nominet"] is True
     st.reset_settings()
     assert st.get_settings()["min_age_years"] == cfg.MIN_AGE_YEARS
 
@@ -26,15 +26,15 @@ def test_update_clamps_out_of_range():
     assert s["approve_at"] == 1.0 and s["min_age_years"] == 0.0
 
 
-def test_default_test_sources_are_backorder_only_offline_guard():
+def test_default_test_sources_are_off_offline_guard():
     """Finding 4 (финальное ревью, структурный офлайн-гвард в conftest): без единого явного
-    update_settings() дефолт, который видят тесты, — только backorder; cctld/reg_ru/sweb
-    (A-Parser) выключены, чтобы будущий тест discovery.run_discovery() не мог тихо уйти
-    в живую сеть. Ожидание захардкожено (не сверяется с cfg.SOURCES_ENABLED), чтобы тест
-    реально проверял конкретный безопасный дефолт, а не совпадение с самим патчем."""
+    update_settings() дефолт, который видят тесты, — ВСЕ источники v2 выключены (они сетевые),
+    чтобы тест discovery.run_discovery() не мог тихо уйти в живую сеть. Ожидание захардкожено
+    (не сверяется с cfg.SOURCES_ENABLED), чтобы тест реально проверял конкретный безопасный
+    дефолт, а не совпадение с самим патчем."""
     s = st.get_settings()
-    assert s["sources_enabled"] == {"backorder": True, "cctld": False,
-                                    "reg_ru": False, "sweb": False}
+    assert s["sources_enabled"] == {"dropcatch": False, "nominet": False,
+                                    "mx": False, "emd": False}
 
 
 def test_max_whois_per_run_default_and_clamp():

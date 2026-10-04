@@ -154,7 +154,9 @@ def get_settings() -> dict:
             "manual_review_at": float(r.manual_review_at),
             "max_whois_per_run": int(r.max_whois_per_run),
             "max_ahrefs_per_run": int(r.max_ahrefs_per_run),
-            "sources_enabled": dict(r.sources_enabled or cfg.SOURCES_ENABLED),
+            # устаревшие ключи в БД (backorder/cctld/…) не выключают молча новые источники v2
+            "sources_enabled": {k: bool((r.sources_enabled or {}).get(k, v))
+                                for k, v in cfg.SOURCES_ENABLED.items()},
             # пусто (миграция 0009 засеяла {}) -> дефолты из кода, а не нулевая шкала
             "weights": _clean_weights(r.weights or cfg.WEIGHTS),
             "min_dr": float(r.min_dr),

@@ -343,31 +343,41 @@ def test_discovery_survives_insert_race(monkeypatch):
     import app.db as db
     from app.models.domain import Domain
 
-    # мультиисточник (Task 4): офлайн-тест бьёт только backorder — остальные источники
-    # выключаем, иначе _collect уйдёт в реальную сеть (cctld/reg.ru/sweb через A-Parser).
-    # Прогреваем settings ДО патча Session.execute, чтобы get_settings() внутри
+    # офлайн-тест бьёт только nominet — остальные источники выключаем, иначе _collect уйдёт в
+    # реальную сеть. Прогреваем settings ДО патча Session.execute, чтобы get_settings() внутри
     # run_discovery() не занял "первый" перехваченный вызов случайной строкой настроек.
-    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
+    update_settings(sources_enabled={"dropcatch": False, "nominet": True, "mx": False, "emd": False})
 
-    # как будто параллельный запуск уже вставил race.ru (до нашего COMMIT)
+    # как будто параллельный запуск уже вставил race.co.uk (до нашего COMMIT)
     with db.SessionLocal() as s:
-        s.add(Domain(domain="race.ru", source="backorder", referring_domains=1))
+        s.add(Domain(domain="race.co.uk", source="nominet", referring_domains=1))
         s.commit()
 
-    rows = [{"domainname": "race.ru", "links": "5"},
-            {"domainname": "fresh.ru", "links": "7"}]
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: rows)
+    rows = [{"domain": "race.co.uk", "source": "nominet", "lane": "bid", "acquire_deadline": None},
+            {"domain": "fresh.co.uk", "source": "nominet", "lane": "bid", "acquire_deadline": None}]
 
-    # ПЕРВЫЙ SELECT именно по domains (existing) отдаём пустым (устаревшее чтение) ->
-    # код попробует вставить дубль race.ru -> IntegrityError; остальные (включая
-    # get_settings() внутри run_discovery и повторное чтение existing) — настоящие.
+    class _Src:
+        def list_dropping(self):
+            return list(rows)
+
+    class _Ahrefs:
+        def dr_free(self, domains):
+            return {d: 10.0 for d in domains}
+    monkeypatch.setattr(discovery, "_clients", lambda: {"nominet": _Src})
+    monkeypatch.setattr("app.integrations.ahrefs.AhrefsClient", _Ahrefs)
+
+    # ПЕРВЫЙ SELECT именно по domains (known) отдаём пустым (устаревшее чтение) ->
+    # код попробует вставить дубль race.co.uk -> IntegrityError; остальные (включая
+    # get_settings() внутри run_discovery, dr_seen и повторное чтение known) — настоящие.
     real_execute = Session.execute
     state = {"fired": False}
 
     class _EmptyResult:
         def scalars(self):
             return self
+
+        def __iter__(self):
+            return iter(())
 
         def all(self):
             return []
@@ -383,13 +393,10 @@ def test_discovery_survives_insert_race(monkeypatch):
     inserted = discovery.run_discovery()
     monkeypatch.undo()   # снять патчи перед проверками
 
-    assert inserted == 1   # досыпан только fresh.ru — батч не потерян
+    assert inserted == 1   # досыпан только fresh.co.uk — батч не потерян
     with db.SessionLocal() as s:
         names = set(s.execute(select(Domain.domain)).scalars().all())
-    assert names == {"race.ru", "fresh.ru"}
-
-
-# ---------- M-2: retry не ретраит 4xx и отдаёт исходное исключение ----------
+    assert names == {"race.co.uk", "fresh.co.uk"}
 
 def _status_err(code):
     req = httpx.Request("GET", "http://x")

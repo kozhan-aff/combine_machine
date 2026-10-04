@@ -153,25 +153,3 @@ def _dom(name):
     from app.models.domain import Domain
     return select(Domain).where(Domain.domain == name)
 
-
-def test_discovery_insert_uses_zone_matched_cached_price(monkeypatch, sqlite_db):
-    """S2 регресс: дозаполнение цены СВЕЖЕГО backorder-кандидата (фид не дал явную "price")
-    на insert-пути run_discovery обязано брать кэш ЕГО зоны, не всегда .RU (тот же баг, что
-    и в refresh_backorder_prices, но на другом пути кода — discovery._insert)."""
-    from sqlalchemy import select
-    from app.services import discovery, pricing
-    import app.db as db
-    from app.models.domain import Domain
-
-    pricing._TARIFF.clear()
-    pricing._TARIFF[".RU"] = 500.0
-    pricing._TARIFF[".РФ"] = 900.0
-    monkeypatch.setattr(discovery, "_collect", lambda enabled, run=None: [
-        {"domain": "xn--80asehdb.xn--p1ai", "source": "backorder", "referring_domains": 1,
-         "lane": "bid", "acquire_deadline": None, "visitors": None, "tic": None,
-         "feed_flags": {}}])          # без "price" — как настоящий фид без явной цены
-    assert discovery.run_discovery() == 1
-    with db.SessionLocal() as s:
-        d = s.execute(select(Domain).where(
-            Domain.domain == "xn--80asehdb.xn--p1ai")).scalar_one()
-    assert float(d.acquire_price) == 900.0                       # .РФ-цена, НЕ 500.0 (.RU)

@@ -19,23 +19,6 @@ def _add(obj):
         return obj.id
 
 
-def test_discovery_upsert_idempotent(monkeypatch):
-    from app.services import discovery
-    from app.services.settings import update_settings
-    # мультиисточник (Task 4): офлайн-тест бьёт только backorder, остальные — реальные
-    # HTTP/A-Parser клиенты, их нужно выключить, иначе _collect уйдёт в сеть.
-    update_settings(sources_enabled={"backorder": True, "cctld": False, "reg_ru": False, "sweb": False})
-    rows = [
-        {"domainname": "Clean-Drop.com", "links": "12"},
-        {"domainname": "second.ru", "links": 3},
-        {"domainname": "bad_underscore.ru", "links": 5},  # junk char -> skipped
-    ]
-    monkeypatch.setattr("app.integrations.backorder.BackorderClient.list_dropping",
-                        lambda self, min_links=1: rows)
-    assert discovery.run_discovery() == 2   # 2 valid, 1 junk dropped
-    assert discovery.run_discovery() == 0   # re-run inserts nothing (idempotent)
-
-
 def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
     """Мок-клиенты в форме, которую ждёт scoring._funnel (см. test_funnel.py::_clients).
     _gather_signals больше нет — воронка теперь ступенчатая, поэтому мокаем клиенты, а
