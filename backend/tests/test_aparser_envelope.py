@@ -298,7 +298,7 @@ def test_funnel_whois_alive_domain_is_scored_and_bulk_ok():
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.age_years and d.age_years > 15
-        assert d.score_breakdown["age_source"] == "whois"   # возраст взят из RDAP/whois (архив моложе)
+        assert d.score_breakdown["age_source"] == "whois"   # при равном возрасте остаётся RDAP/whois
         assert scoring.blind_reason(d) is None
         assert scoring.bulk_ok(d) is True
 

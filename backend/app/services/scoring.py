@@ -422,7 +422,8 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                  links_budget=None, run: int | None = None, deep_budget=None) -> dict:
     """Полная воронка для ОДНОГО домена (кнопка «▶ перепроверить»): батч из ОДНОГО FunnelState
     через тот же волновой конвейер, что и score_pending. Капы по умолчанию не действуют (None),
-    пол остатка units — действует."""
+    пол остатка units — действует. Исключение: при `max_deep_per_run == 0` волна W6 выключена и
+    для ручной кнопки (Budget(0))."""
     from app.db import SessionLocal
     from app.models.domain import Domain
     from app.services.settings import get_settings

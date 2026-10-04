@@ -81,7 +81,9 @@ def _spec():
         # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть
         ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", True,
          lambda: __import__("app.integrations.ahrefs", fromlist=["x"]).AhrefsClient().units_left()),
-        ("rdap", "RDAP (IANA)", "M1 · доступность и возраст", "1", "M1", True,
+        # не критичен (R2-18): ping() проверяет только бутстрап IANA, при его падении W2 живёт на
+        # встроенном _FALLBACK — красный баннер на всех экранах был бы ложной тревогой
+        ("rdap", "RDAP (IANA)", "M1 · доступность и возраст", "1", "M1", False,
          lambda: __import__("app.integrations.rdap", fromlist=["x"]).RdapClient().ping()),
         # только наличие ключа: настоящий lookup каждые 5 минут съедал бы ~8,6 тыс. из 100 тыс.
         # бесплатных вызовов в месяц. Сбой самого Web Risk видно по `webrisk:` в воронке.

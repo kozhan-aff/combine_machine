@@ -39,4 +39,6 @@ class RegistryMxClient(BaseClient):
         return parse_deleted(self.request("GET", URL).text)
 
     def ping(self) -> bool:
-        return self.request("GET", URL).status_code == 200
+        # HEAD, а не GET: /diag пингует каждые 5 минут (фон), полный CSV — ~288 скачиваний в сутки
+        # у небольшого ccTLD-реестра. Живой HEAD 2026-10-04 -> 200, Content-Length/Last-Modified.
+        return self.request("HEAD", URL).status_code == 200

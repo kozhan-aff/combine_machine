@@ -68,3 +68,45 @@ def test_red_banner_only_for_critical_checks(monkeypatch):
         {"key": "wayback", "label": "Wayback", "status": "fail", "critical": True}])
     diag_cache.refresh()
     assert diag_cache.alert()["down"] == ["Wayback"]
+
+
+def test_rdap_down_is_a_row_not_a_banner(monkeypatch):
+    """I-1: ping RDAP проверяет только бутстрап IANA, а W2 при его падении живёт на _FALLBACK —
+    строка «fail» на /diag есть, красного баннера на всех экранах нет."""
+    from app.integrations.rdap import RdapClient
+    from app.services import diag_cache
+
+    def _down(self):
+        raise RuntimeError("IANA down")
+    monkeypatch.setattr(RdapClient, "ping", _down)
+    monkeypatch.setattr(diag_cache, "_checks", None)
+    monkeypatch.setattr(diag_cache, "_checked_at", None)
+    monkeypatch.setattr(diag_cache, "run_diagnostics",
+                        lambda: diagnostics.run_diagnostics(specs=[_row("rdap")]))
+    checks = diag_cache.refresh()
+    assert checks[0]["status"] == "fail"
+    assert diag_cache.alert()["down"] == []
+
+
+def test_critical_flags_follow_the_real_spec():
+    """Minor 2: критичность — по настоящей таблице _spec(), не по синтетике. Некритичные источники
+    дропов (и RDAP, чей сбой не останавливает воронку) не зажигают баннер; воронка без критичных
+    зависимостей (Wayback, A-Parser, Ahrefs, LLM, БД) остановилась бы."""
+    crit = {s[0]: s[5] for s in diagnostics._spec()}
+    for k in ("nominet", "registry_mx", "dropcatch", "rdap", "webrisk"):
+        assert crit[k] is False, k
+    for k in ("wayback", "aparser", "ahrefs", "llm", "db"):
+        assert crit[k] is True, k
+
+
+def test_registry_mx_ping_uses_head_not_full_csv(monkeypatch):
+    """I-2: фон зовёт ping каждые 5 минут — полный GET CSV был бы ~288 скачиваний в сутки."""
+    from app.integrations.registry_mx import RegistryMxClient
+    methods = []
+
+    def _req(self, method, url, **kw):
+        methods.append(method)
+        return type("R", (), {"status_code": 200})()
+    monkeypatch.setattr(RegistryMxClient, "request", _req)
+    assert RegistryMxClient().ping() is True
+    assert methods == ["HEAD"]
