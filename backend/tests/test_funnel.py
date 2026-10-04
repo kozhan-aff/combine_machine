@@ -23,31 +23,21 @@ class _Wayback:
                 "first_seen": None, "age_years": self.age_years, "wayback_checked": True, "sampled": 5}
 
 
-def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True,
-             whois=None, whois_raises=False, safebrowsing=False):
+def _clients(whois_dt=None, wayback=None, bl=False, whois=None, whois_raises=False):
     """whois: dict {"available":..., "created":...} (новый формат, приобретаемость известна
     явно). whois_dt: старый позиционный аргумент (только дата) — оборачивается в
     {"available": False, "created": whois_dt} (занят, но с датой регистрации — для тестов,
-    доходящих до T2/T3 через lane="bid" на тестовом Domain). whois_raises=True — whois_probe
-    бросает (недоступен). safebrowsing: True = зафлагован, False = чист, None = падает
-    (исключение)."""
+    доходящих до W3+ через lane="bid" на тестовом Domain). whois_raises=True — whois_probe
+    бросает (недоступен). bl — ответ Spamhaus (в воронке зовётся только с DQS-ключом)."""
     pr = whois if whois is not None else {"available": False, "created": whois_dt}
     class _W:  # aparser
         def whois_probe(self, dom):
             if whois_raises:
                 raise RuntimeError("whois timeout")
             return pr
-        def safebrowsing_check(self, dom):
-            if safebrowsing is None:
-                raise RuntimeError("safebrowsing timeout")
-            return safebrowsing
-    class _R:
-        def is_listed(self, dom): return rkn
     class _B:
         def is_blacklisted(self, dom): return bl
-    class _S:
-        def indexed_echo(self, dom): return indexed_echo
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
+    return {"aparser": _W(), "blacklist": _B(),
             "wayback": wayback,
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
@@ -57,22 +47,13 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
                                       "metrics_history": lambda self, d, years=5, today=None: []})()}
 
 
-def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
-                          safebrowsing=False):
+def _clients_whois_raises(wb, bl=False):
     """Как _clients, но whois_probe падает (недоступен) — для Finding-1 фолбэка."""
     class _W:  # aparser
         def whois_probe(self, dom): raise RuntimeError("whois timeout")
-        def safebrowsing_check(self, dom):
-            if safebrowsing is None:
-                raise RuntimeError("safebrowsing timeout")
-            return safebrowsing
-    class _R:
-        def is_listed(self, dom): return rkn
     class _B:
         def is_blacklisted(self, dom): return bl
-    class _S:
-        def indexed_echo(self, dom): return indexed_echo
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
+    return {"aparser": _W(), "blacklist": _B(),
             "wayback": wb,
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
@@ -225,7 +206,7 @@ def test_low_score_reject():
     did = _mk(domain="weak.com", referring_domains=1, lane="bid")
     wb = _WaybackWeak()
     old_enough = datetime.now(timezone.utc) - timedelta(days=1150)   # ~3.15 года, чуть старше порога
-    out = scoring.score_domain(did, clients=_clients(old_enough, wb, indexed_echo=False))
+    out = scoring.score_domain(did, clients=_clients(old_enough, wb))
     assert out["status"] == "rejected" and out["reject_reason"] == "low_score"
     assert wb.calls == 1            # дошли до compute_score — отклонил composite score, не воронка
 

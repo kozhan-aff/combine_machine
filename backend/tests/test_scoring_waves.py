@@ -121,9 +121,6 @@ class _FakeAparserWhois:
             raise RuntimeError("timeout")
         return {"available": self.available, "created": self.created}
 
-    def safebrowsing_check(self, domain):
-        return False
-
 
 def _clients_aparser_only(**kw):
     return {"aparser": _FakeAparserWhois(**kw), "_whois_lock": threading.Lock()}
@@ -384,7 +381,7 @@ def test_commit_result_computes_score_for_survivor():
                             referring_domains=5000, acquire_deadline=None,
                             feed_flags=None)
     s.sig.update({"wayback_checked": True, "prior_flags": {}, "age_years": 10,
-                 "indexed_echo": True, "dr": None})
+                 "dr": None})
     out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
     assert out["status"] == "scored" and out["score"] > 0
     with db.SessionLocal() as sess:
@@ -414,15 +411,12 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
             self.n += 1
             # чётные — заняты без даты дропа и без лейна: W2 их не решает (taken_undated)
             return {"available": self.n % 2 != 0, "created": old}
-        def safebrowsing_check(self, d): return False
     clients = {"aparser": _Ap(),
               "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                         "batch": lambda self, ds: {d: {} for d in ds}})(),
-              "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
               "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-              "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
               "wayback": _FakeWayback(dirty=False, age_years=9.0),
-              "_whois_lock": threading.Lock(), "_safebrowsing_lock": threading.Lock()}
+              "_whois_lock": threading.Lock()}
     st = {"min_age_years": 3.0, "approve_at": 0.7, "manual_review_at": 0.4,
          "min_referring_domains": 1, "tld_allowlist": ["com"], "brand_tokens": []}
 
@@ -491,14 +485,10 @@ def test_score_pending_builds_states_with_lane_and_rd_from_one_query(monkeypatch
     class _Ap:
         def whois_probe(self, d):
             return {"available": True, "created": datetime.now(timezone.utc) - timedelta(days=3650)}
-        def safebrowsing_check(self, d): return False
     monkeypatch.setattr(scoring, "_make_clients", lambda: {
         "aparser": _Ap(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": _FakeWayback(), "_whois_lock": threading.Lock(),
-        "_safebrowsing_lock": threading.Lock()})
+        "wayback": _FakeWayback(), "_whois_lock": threading.Lock()})
 
     scoring.score_pending(limit=10)
     assert calls["n"] == 1              # ОДИН вызов на весь батч, не по домену

@@ -102,11 +102,11 @@ def test_ping_surfaces_reason_for_diag():
 # ---------- 2. скоринг: упавший whois != «домен проверен» ----------
 
 def _sig(**kw) -> dict:
-    """Домен-мечта: история проверена и чиста, ссылочная масса за потолком, эхо в индексе есть.
+    """Домен-мечта: история проверена и чиста, ссылочная масса за потолком.
     Ровно так выглядит bid-домен, чей whois не ответил (lane известен из фида — воронка едет
     дальше и добирает возраст из архива)."""
     return {"wayback_checked": True, "prior_flags": dict(_CLEAN_FLAGS),
-            "referring_domains": 5000, "indexed_echo": True, "errors": [], **kw}
+            "referring_domains": 5000, "errors": [], **kw}
 
 
 def _in_bulk(sig: dict, out: dict, **breakdown) -> bool:
@@ -227,15 +227,9 @@ def _clients(whois, wayback=None):
             if isinstance(whois, Exception):
                 raise whois
             return whois
-        def safebrowsing_check(self, dom): return False
-        def archive_probe(self, dom): return {"times": None, "first": None, "last": None}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
+    return {"aparser": _W(), "blacklist": _B(),
             "wayback": wayback or _WaybackAged(),
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
@@ -304,7 +298,7 @@ def test_funnel_whois_alive_domain_is_scored_and_bulk_ok():
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.age_years and d.age_years > 15
-        assert d.score_breakdown["age_source"] == "whois"   # whois приоритетнее архива
+        assert d.score_breakdown["age_source"] == "whois"   # возраст взят из RDAP/whois (архив моложе)
         assert scoring.blind_reason(d) is None
         assert scoring.bulk_ok(d) is True
 

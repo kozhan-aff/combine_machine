@@ -5,12 +5,10 @@ v2 (docs/v2/02-m1-discovery-scoring-spec.md): RDAP/whois, Google Web Risk, Ahref
 units), Wayback + LLM. Every component lands in Domain.score_breakdown for transparency.
 """
 
-# Stage B — light pre-filter (drop obvious garbage before the heavy Wayback pass).
-# Lenient on RD: the backorder feed already gives >=1 donor, and the project takes
-# domains for clean history, NOT for link juice.
+# W4 — порог доноров (refdomains из Ahrefs batch). Мягкий: проект берёт домены за чистую
+# историю, а не за «сок»; DR режет спам-дропы ещё на входе discovery (MIN_DR ниже).
 PREFILTER = {
-    "min_referring_domains": 1,   # from feed `links`
-    "min_dr_proxy": 0.0,          # Ahrefs DR 0..100; 0 = don't gate on it
+    "min_referring_domains": 1,
 }
 
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
@@ -45,9 +43,9 @@ DECISION = {
 }
 
 # Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
-MIN_AGE_YEARS = 3.0                                          # T1 whois-гейт: моложе — reject too_young
+MIN_AGE_YEARS = 3.0                                          # W5: возраст по старшей дате; моложе — too_young
 SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True}  # dropcatch — после проверки ToS оператором
-MAX_WHOIS_PER_RUN = 200        # кап whois-пробоев за один прогон проверки (защита от сырого cctld)
+MAX_WHOIS_PER_RUN = 200        # кап whois:43 через A-Parser за прогон (зоны без RDAP; RDAP не капается)
 
 # ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
 MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом

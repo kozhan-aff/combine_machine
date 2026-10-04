@@ -21,7 +21,7 @@ class ScoringSettings(Base):
     # ЛЕГАСИ v1 (капча A-Parser Rank::Ahrefs): в v2 W4 — Ahrefs API с капом max_links_per_run, см. 0025
     max_ahrefs_per_run: Mapped[int] = mapped_column(Integer, default=50)
     sources_enabled: Mapped[dict] = mapped_column(JSONB, default=dict)
-    # веса критериев оценки донора (history_cleanliness/age/rd_proxy/indexed_echo/authority).
+    # веса критериев оценки донора (семь компонентов v2 — scoring_config.WEIGHTS).
     # Были зашиты в scoring_config.WEIGHTS — оператор видел, ПО ЧЕМУ его судят, но не мог
     # изменить НИ ОДИН вес (жалоба 2026-07-13). Сумма не обязана быть 1.0: compute_score
     # нормирует её сам, иначе один сдвинутый ползунок ломал бы шкалу 0..1.

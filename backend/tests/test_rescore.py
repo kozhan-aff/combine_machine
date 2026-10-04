@@ -54,9 +54,7 @@ def _survives_to_score(whois_created) -> dict:
 
     return {
         "aparser": _Whois(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
         "wayback": _CleanWayback(),
         "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                   "batch": lambda self, ds: {d: {} for d in ds}})(),
@@ -94,7 +92,7 @@ def test_early_t0_reject_does_not_erase_saved_evidence():
     """Guard-тест на УЖЕ ДЕЙСТВУЮЩИЙ фикс (ревью Задачи 6, Critical 2 — scoring.py, цикл
     `for col in (...)`: пишем колонку ТОЛЬКО если `sig` реально её содержит в ЭТОМ прогоне).
     Регрессией к моменту старта Задачи 17 эта часть уже НЕ является — она была зелёной и до
-    правок этой задачи. Оставляем как страховку: T0 (feed_flag) выходит ДО whois вообще, а
+    правок этой задачи. Оставляем как страховку: W0 (feed_flag) выходит ДО whois вообще, а
     значит `sig` в этом прогоне не содержит ни `prior_flags`, ни `age_years`, ни `rkn_listed` —
     старые значения в БД обязаны выжить.
     """
@@ -104,20 +102,20 @@ def test_early_t0_reject_does_not_erase_saved_evidence():
                wayback_checked=True)
 
     class _MustNotBeCalled:
-        """Ни один из T1-T3 клиентов не имеет права позваться — T0 отклоняет раньше всех."""
+        """Ни один клиент W2–W6 не имеет права позваться — W0 отклоняет раньше всех."""
         def whois_probe(self, dom):
-            raise AssertionError("T0 обязан отклонить ДО whois (feed_flags.rkn)")
-        def is_listed(self, dom):
-            raise AssertionError("T0 обязан отклонить ДО РКН")
+            raise AssertionError("W0 обязан отклонить ДО whois (feed_flags.rkn)")
+        def threats(self, dom):
+            raise AssertionError("W0 обязан отклонить ДО Web Risk")
         def is_blacklisted(self, dom):
-            raise AssertionError("T0 обязан отклонить ДО блэклиста")
-        def indexed_echo(self, dom):
-            raise AssertionError("T0 обязан отклонить ДО эха")
+            raise AssertionError("W0 обязан отклонить ДО блэклиста")
+        def batch(self, doms):
+            raise AssertionError("W0 обязан отклонить ДО Ahrefs")
         def classify_history(self, dom):
-            raise AssertionError("T0 обязан отклонить ДО Wayback")
+            raise AssertionError("W0 обязан отклонить ДО Wayback")
 
     guard = _MustNotBeCalled()
-    clients = {"aparser": guard, "rkn": guard, "blacklist": guard, "searxng": guard,
+    clients = {"aparser": guard, "webrisk": guard, "blacklist": guard, "ahrefs": guard,
                "wayback": guard}
 
     out = scoring.score_domain(did, clients=clients)

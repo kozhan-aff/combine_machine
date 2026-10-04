@@ -147,7 +147,7 @@ class AParserClient(BaseClient):
         """Один Net::Whois-вызов -> доступность + дата регистрации.
         available: True свободен / False занят / None не определить. created: дата или None.
         Сетевой сбой И отказ A-Parser (конверт success:0, см. _call) пробрасываются — ловит
-        вызывающий код (_funnel -> sig["errors"] -> метка «вслепую» + запрет авто-approve).
+        вызывающий код (W2: whois.probe -> sig["errors"] -> метка «вслепую», домен вне пакета).
         None-ы здесь означают ТОЛЬКО «A-Parser ответил, но разобрать нечего», а не «не спросили»."""
         res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
                                         "configPreset": "default", "preset": "default"})

@@ -1,8 +1,8 @@
 """Регрессии на подтверждённые баги M1 (см. брифинг ревью). Оффлайн, без сети.
 
 C1 spam-история -> hard-reject; C2 Wayback не «проверено» без реально скачанных снапшотов;
-I1 ошибка RKN/blacklist не даёт auto-approve; I2 DNS_RESOLVER + sentinel-raise;
-I3 обрезанный дамп РКН не кэшируется молча; I4 гонка discovery не теряет батч;
+I1 ошибка blacklist не даёт auto-approve (v1: ещё и RKN); I2 DNS_RESOLVER + sentinel-raise;
+I3 (v1, РКН-дамп удалён из M1); I4 гонка discovery не теряет батч;
 M-2 retry не ретраит 4xx и отдаёт исходное исключение.
 """
 import socket
@@ -16,7 +16,7 @@ import pytest
 def test_spam_history_hard_rejected():
     from app.services.scoring import compute_score
     out = compute_score({"wayback_checked": True, "prior_flags": {"spam": True},
-                         "age_years": 12, "referring_domains": 500, "indexed_echo": True})
+                         "age_years": 12, "referring_domains": 500})
     assert out["status"] == "rejected" and out["score"] == 0.0
     assert "prior_spam" in out["breakdown"]["hard_reject"]
 
@@ -122,7 +122,7 @@ def test_webrisk_or_blacklist_error_caps_at_scored():
 def test_authority_none_dr_contributes_zero():
     from app.services.scoring import compute_score
     out = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                         "referring_domains": 3000, "indexed_echo": True, "dr": None})
+                         "referring_domains": 3000, "dr": None})
     assert out["breakdown"]["components"]["authority"] == 0.0
 
 
@@ -130,9 +130,9 @@ def test_authority_real_dr_contributes_nonzero():
     from app.services.scoring import compute_score
     from app.services import scoring_config as cfg
     without_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                                "referring_domains": 3000, "indexed_echo": True, "dr": None})
+                                "referring_domains": 3000, "dr": None})
     with_dr = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-                             "referring_domains": 3000, "indexed_echo": True, "dr": 30})
+                             "referring_domains": 3000, "dr": 30})
     assert with_dr["breakdown"]["components"]["authority"] > 0.0
     assert with_dr["score"] > without_dr["score"]
     assert "authority" in cfg.WEIGHTS and cfg.WEIGHTS["authority"] > 0
@@ -420,23 +420,18 @@ def test_score_only_discovered_status(monkeypatch):
 def _fake_clients() -> dict:
     """Оффлайн-заглушки под ключи _make_clients() (см. test_funnel.py:_clients) — score_pending
     строит клиентов сама через _make_clients(), поэтому патчим саму фабрику, иначе реальный
-    боевой прогон (whois на 192.168.1.77, РКН antizapret, DNS к dbl.spamhaus.org, archive.org)
-    дёргается для доменов #2,#3 (Finding-1, ревью Task 7)."""
+    боевой прогон (whois на 192.168.1.77, DNS к dbl.spamhaus.org, archive.org) дёргается для
+    доменов #2,#3 (Finding-1, ревью Task 7)."""
     class _W:  # aparser
         def whois_probe(self, dom):
             return {"available": False, "created": None}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return False
     class _WB:
         def classify_history(self, dom, **k):
             return {"prior_flags": {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")},
                     "first_seen": None, "age_years": 9.0, "wayback_checked": True, "sampled": 5}
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": _WB()}
+    return {"aparser": _W(), "blacklist": _B(), "wayback": _WB()}
 
 
 def test_score_pending_isolates_failure(monkeypatch):

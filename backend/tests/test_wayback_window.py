@@ -367,13 +367,9 @@ def _clients(wayback):
     class _W:
         def whois_probe(self, dom):
             return {"available": False, "created": datetime(2012, 1, 1, tzinfo=timezone.utc)}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
+    return {"aparser": _W(), "blacklist": _B(), "wayback": wayback,
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                       "batch": lambda self, ds: {d: {} for d in ds}})()}
 

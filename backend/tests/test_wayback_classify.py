@@ -140,7 +140,7 @@ def test_js_redirect_to_casino_is_not_approved_as_clean():
     h = _client({f"http://x.ru/{i}": BLANK["js-redirect"] for i in range(1, 4)}).classify_history(
         "x.ru", polite=0)
     out = compute_score({"wayback_checked": h["wayback_checked"], "prior_flags": h["prior_flags"],
-                         "age_years": 16, "referring_domains": 2219, "indexed_echo": True})
+                         "age_years": 16, "referring_domains": 2219})
     assert out["status"] == "scored", "одобряет только человек (Р2)"
 
     d = SimpleNamespace(prior_flags=h["prior_flags"], wayback_checked=h["wayback_checked"],
@@ -282,7 +282,7 @@ def test_topic_switch_could_never_add_a_single_reject():
     assert pf["casino"] is True                       # смена темы поймана СВОЕЙ категорией
     assert "topic_switch" not in pf
     out = compute_score({"prior_flags": pf, "wayback_checked": True,
-                         "age_years": 15, "referring_domains": 2000, "indexed_echo": True})
+                         "age_years": 15, "referring_domains": 2000})
     assert out["status"] == "rejected" and out["score"] == 0.0
     assert out["breakdown"]["hard_reject"] == ["prior_casino"]
 

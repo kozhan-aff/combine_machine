@@ -62,9 +62,6 @@ class Settings(BaseSettings):
     APARSER_API_KEY: str = ""
     APARSER_PROXY_CHECKER: str = "ipv6_free"  # имя прокси-чекера в A-Parser UI, box-specific
 
-    # rkn — источник реестра (antizapret primary; z-i заморожен 2025-10)
-    RKN_SOURCE_URL: str = "https://antizapret.prostovpn.org/domains-export.txt"
-
     # spamhaus/surbl — нужен свой резолвер (публичные 8.8.8.8/1.1.1.1 блокируются)
     DNS_RESOLVER: str = ""
     SPAMHAUS_DQS_KEY: str = ""

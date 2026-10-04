@@ -1,6 +1,10 @@
 """Domains router — scored shortlist for the panel (M1 output).
 
     GET /domains?status=scored&min_score=0.7  -> candidate domains, best score first.
+
+API ВНУТРЕННИЙ (скрипты оператора, LAN за Basic-auth): `dr` отдаётся без подписи. Лицензия
+Ahrefs требует «Domain Rating by Ahrefs» со ссылкой там, где DR показывают людям, — это делает
+панель; наружу этот JSON не публикуется (находка 6.6).
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy import select

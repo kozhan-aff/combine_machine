@@ -301,9 +301,7 @@ def test_scoring_stamps_acquirability_so_recheck_does_not_redo_it(sqlite_db, mon
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": True, "created": datetime(2015, 1, 1, tzinfo=timezone.utc)}})(),
         "wayback": _Wayback(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
-        "blacklist": type("B", (), {"is_listed": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: False})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
         "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                   "batch": lambda self, ds: {d: {} for d in ds}})(),
     }

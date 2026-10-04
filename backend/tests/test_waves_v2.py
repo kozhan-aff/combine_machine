@@ -226,11 +226,6 @@ def test_avail_listed_domain_turned_bid_gets_estimated_deadline():
                                          lane="bid") == "taken"    # дедлайн прошёл — цикл закрыт
 
 
-class _CleanAp(FakeAp):
-    def safebrowsing_check(self, d):
-        return False
-
-
 class _DownWB:
     def classify_history(self, d):
         raise RuntimeError("archive.org 503")
@@ -247,10 +242,8 @@ def test_history_down_young_rdap_marks_age_unverified_and_keeps_domain_out_of_bu
                    acquire_deadline=NOW + timedelta(days=2))
         ses.add(d); ses.commit(); did = d.id
     rdap = FakeRdap(exists=True, registered=NOW - timedelta(days=200))
-    clients = {"rdap": rdap, "aparser": _CleanAp(), "wayback": _DownWB(),
-               "rkn": type("R", (), {"is_listed": lambda self, x: False})(),
+    clients = {"rdap": rdap, "aparser": FakeAp(), "wayback": _DownWB(),
                "blacklist": type("B", (), {"is_blacklisted": lambda self, x: False})(),
-               "searxng": type("S", (), {"indexed_echo": lambda self, x: True})(),
                "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
                "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                          "batch": lambda self, ds: {d: {} for d in ds}})()}

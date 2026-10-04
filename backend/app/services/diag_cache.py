@@ -45,8 +45,11 @@ def alert() -> dict | None:
     with _LOCK:
         if _checks is None:
             return None
+        # Только КРИТИЧНЫЕ (R2-18): лежащий некритичный источник (Nominet, registry.mx, DropCatch,
+        # Spamhaus, Cloudflare/aaPanel до подпроекта 2) — строка на /diag, а не баннер на всех
+        # экранах: иначе он горел бы неделями, и его перестали бы читать.
         down = [c for c in _checks
-                if c["key"] not in _NON_EXTERNAL and c["status"] == "fail"]
+                if c["key"] not in _NON_EXTERNAL and c.get("critical") and c["status"] == "fail"]
         return {
             "down": [c["label"] for c in down],           # лейблы в порядке _spec()
             "sig": ",".join(sorted(c["key"] for c in down)),

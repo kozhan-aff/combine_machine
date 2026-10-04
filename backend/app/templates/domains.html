@@ -10,7 +10,7 @@
   <div class="fgroup"><div class="fg-h">M1 · Добыча</div>
     <div class="fg-cells">
       <a class="fcell" href="/offers" title="офферы — вход машины"><div class="v">{{ offers_active }}</div><div class="k">офферы</div></a>
-      <a class="fcell" href="/domains/pool?status=discovered" title="сырьё из фида, ещё не оценено"><div class="v">{{ counts.get('discovered', 0) }}</div><div class="k">найдено</div></a>
+      <a class="fcell" href="/domains/pool?status=discovered" title="найдены источниками или добавлены списком, ещё не оценены"><div class="v">{{ counts.get('discovered', 0) }}</div><div class="k">найдено</div></a>
       <span class="fcell {{ 'gate' if inbox_total }}" title="ждут твоего решения — список ниже (все языки)"><div class="v">{{ inbox_total }}</div><div class="k">на решении</div></span>
       <span class="fcell" title="одобрены — можно ставить в очередь выкупа"><div class="v">{{ ready|length }}</div><div class="k">одобрено</div></span>
       <a class="fcell" href="/domains/pool?status=purchased" title="куплены — дальше создать сайт"><div class="v">{{ counts.get('purchased', 0) }}</div><div class="k">куплено</div></a>
@@ -183,10 +183,10 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.id in dirty_by_id %}
           {# ГРЯЗЬ ГЛАВНЕЕ ВСЕГО ОСТАЛЬНОГО в этой строке: РКН-домен с чистым Wayback иначе нёс бы
              подпись «история не подтверждена» — правдивую и совершенно не о том. Причина названа
-             (реестр РКН / блэклист / история / флаг фида), а «✓ одобрить» ниже снята. #}
+             (история / спам-анкоры / Web Risk / бренд / зона; легаси — РКН), а «✓ одобрить» ниже снята. #}
           <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
             <span class="hint" style="color:var(--bad)"
-                  title="объективный признак (реестр РКН, блэклист, грязная история или флаг источника) — не наш порог, ослабить его на /settings нечем. Портфель держится на чистой истории: такой домен не одобряем и не покупаем.">выкуп запрещён — грязь</span></div>
+                  title="объективный признак (грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ; легаси v1 — реестр РКН, Safe Browsing) — не наш порог, ослабить его на /settings нечем. Портфель держится на чистой истории: такой домен не одобряем и не покупаем.">выкуп запрещён — грязь</span></div>
         {% elif blind %}
           <div class="blind" title="машина не смогла проверить этот сигнал — одобрять вслепую нельзя">
             ⚠ {{ blind }}
@@ -290,7 +290,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.id in dirty_by_id %}
           <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
             <span class="hint" style="color:var(--bad)"
-                  title="домен был отклонён воронкой по объективному признаку (реестр РКН, блэклист, грязная история или флаг источника). Портфель держится на чистой истории — такой домен не покупаем. Вернуть его в оборот может только перепроверка, если проверки скажут, что он чист.">выкуп запрещён — грязь</span></div>
+                  title="домен был отклонён воронкой по объективному признаку (грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ; легаси v1 — реестр РКН, Safe Browsing). Портфель держится на чистой истории — такой домен не покупаем. Вернуть его в оборот может только перепроверка, если проверки скажут, что он чист.">выкуп запрещён — грязь</span></div>
         {% endif %}</td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}

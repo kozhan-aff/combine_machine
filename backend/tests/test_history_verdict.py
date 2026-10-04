@@ -25,18 +25,12 @@ def _add(**kw) -> int:
 
 def _clients(wayback, created):
     """Воронка целиком на фейках: whois «занят + дата регистрации» (домен создаётся с lane='bid',
-    поэтому T1 короткозамкнут лейном и «занят» — норма), РКН/блэклист чисты, эхо есть."""
+    поэтому W2 короткозамкнут лейном и «занят» — норма), Web Risk и блэклист чисты."""
     class _W:
         def whois_probe(self, dom): return {"available": False, "created": created}
-        def safebrowsing_check(self, dom): return False
-        def archive_probe(self, dom): return {"times": None, "first": None, "last": None}
-    class _R:
-        def is_listed(self, dom): return False
     class _B:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
+    return {"aparser": _W(), "blacklist": _B(), "wayback": wayback,
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
                                       "batch": lambda self, ds: {d: {} for d in ds}})()}

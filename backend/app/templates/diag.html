@@ -48,7 +48,7 @@
         <td class="hint">{{ c.role }}</td>
         <td>
           {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
-          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="в .env нет кредов — пинг бессмысленен">пропущен</span>
+          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="пинг не выполнялся — причина в колонке справа (нет кредов в .env или источник выключен)">пропущен</span>
           {% elif c.critical %}<span class="led led-bad"></span><b style="color:var(--bad)">FAIL</b>
           {% else %}<span class="led led-bad"></span><span class="hint" title="опциональная зависимость — деградируемо">FAIL (опц.)</span>{% endif %}
         </td>

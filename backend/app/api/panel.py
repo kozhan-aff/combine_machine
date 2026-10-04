@@ -754,7 +754,7 @@ def run_cancel_action(request: Request, job: str):
     return _back_here(request)
 
 
-# Джобы, что прогоняют scoring.score_domain() по одному домену за раз (T0-T3b) — им и
+# Джобы, что гонят домены через волны скоринга (W0–W6) — им и
 # нужна живая раскладка исхода, у discovery/sweep/cf_sync domain_score_log вообще не пишется.
 _FUNNEL_JOBS = ("score", "recheck")
 
@@ -764,10 +764,10 @@ def _funnel_tally(db: Session, run_id: int) -> dict | None:
     ДО дорогого Wayback (W0–W4: зоны/бренды, доступность, риск, ссылки) и сколько реально дошло
     до него (scored — Wayback пройден по определению; rejected/history_dirty — дошёл и там
     отклонён историей; rejected/low_score — дошёл, история чистая, но не дотянул итоговый
-    балл, см. scoring.py:799). Чипы стадий в jobCard() показывают только ТЕКУЩИЙ домен (и
-    правильно — каждый начинает с RD, см. jobs._advance) — без этого счётчика оператор не
-    видел ничего, что подтверждает: дешёвые стадии реально отсеивают быстро, а не «все домены
-    идут по кругу». None, если для этого прогона ещё нет ни одной строки (свежий старт) —
+    балл, см. scoring._commit_result). Чипы волн в jobCard() показывают только ТЕКУЩУЮ волну —
+    без этого счётчика оператор не видел ничего, что подтверждает: дешёвые волны реально
+    отсеивают быстро, а не «все домены идут по кругу». None, если для этого прогона ещё нет ни
+    одной строки (свежий старт) —
     карточка ничего не покажет, а не нарисует нулевую раскладку как будто уже что-то
     посчитано."""
     from app.models.domain_score_log import DomainScoreLog
@@ -786,7 +786,7 @@ def _funnel_tally(db: Session, run_id: int) -> dict | None:
         total += n
         if outcome == "scored":
             scored += n
-            reached_wayback += n           # scored всегда прошёл T3 — таков порядок _funnel
+            reached_wayback += n           # scored всегда прошёл W5 (Wayback) — таков порядок волн
         elif outcome == "unresolved":
             unresolved += n
         elif outcome == "rejected":
@@ -794,9 +794,9 @@ def _funnel_tally(db: Session, run_id: int) -> dict | None:
             by_reason[label] = by_reason.get(label, 0) + n
             # v2: too_young решает W5 (история, Р5), spam_anchors — W6 (после истории): оба уже
             # сожгли Wayback, как и history_dirty/low_score.
-            # history_dirty и low_score рождаются ТОЛЬКО когда _funnel() прошёл ДО КОНЦА
-            # (вернул None) — history_dirty на самом T3, low_score позже, на самом _decide()
-            # по уже посчитанному score (scoring.py:799: `reject_reason = reject or
+            # history_dirty и low_score рождаются ТОЛЬКО когда домен дошёл до истории (W5) —
+            # history_dirty на самой W5, low_score позже, на самом _decide()
+            # по уже посчитанному score (scoring._commit_result: `reject_reason = reject or
             # ("low_score" if rejected)`, т.е. low_score — это "остальное всё прошли, score
             # не дотянул"). Без low_score здесь счётчик "решено дёшево" завышался бы —
             # ровно те домены, что реально сожгли Wayback, попадали в "дёшево" и рисовали

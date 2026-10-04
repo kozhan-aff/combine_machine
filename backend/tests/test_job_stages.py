@@ -21,14 +21,14 @@ def test_score_pending_reports_funnel_stages(monkeypatch):
     seen = []
 
     def fake_run_waves(states, clients, st, whois_budget, links_budget, run=None, **kw):
-        jobs.report(run, stage="whois")                  # так репортит _run_waves/_run_concurrent
+        jobs.report(run, stage="avail")                  # так репортит _run_waves/_run_concurrent
         seen.append(jobs.progress("score")["stage"])
         return [{"domain": "d0.ru"}]
 
     monkeypatch.setattr(scoring, "_run_waves", fake_run_waves)
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     assert scoring.score_pending(limit=10) == 1
-    assert seen == ["whois"]
+    assert seen == ["avail"]
     p = jobs.progress("score")
     assert p["status"] == "done" and p["total"] == 1
     assert [s["key"] for s in p["stages"]] == [s["key"] for s in scoring.FUNNEL_STAGES]
