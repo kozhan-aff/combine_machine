@@ -87,14 +87,14 @@ def test_anchors_and_metrics_history_request_shape(monkeypatch):
     assert p["target"] == "pharmaindustrie.com" and p["limit"] == 50 and p["order_by"] == "refdomains:desc"
     monkeypatch.setattr(c, "_request_once", _fake(_fx("ahrefs_metrics_history.json"), calls))
     hist = c.metrics_history("x.com", years=5, today=date(2026, 10, 1))
-    assert hist[1]["org_traffic"] == 1850
+    assert hist[1]["org_traffic"] == 842702
     assert calls[-1]["params"]["date_from"] == "2021-10-02"
     assert calls[-1]["url"].endswith("/site-explorer/metrics-history")
 
 
 def test_metrics_history_without_metrics_list_raises(monkeypatch):
-    # находка R2-21: формат metrics-history снят по документации, не живьём (живой образец —
-    # Задача 17). Ответ без списка `metrics` — незнакомая форма: исключение (W6 запишет
+    # находка R2-21: формат metrics-history снят живьём 2026-10-04 (фикстура). Ответ без
+    # списка `metrics` — незнакомая форма: исключение (W6 запишет
     # `deep_history:ValueError`), а не тихий [] — «трафика не было» по ответу, который не поняли.
     c = AhrefsClient(api_key="k")
     for payload in ({}, {"error": "unexpected"}, {"metrics": None}, [{"date": "2026-01-01"}]):

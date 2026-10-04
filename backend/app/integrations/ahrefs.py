@@ -106,7 +106,9 @@ class AhrefsClient(BaseClient):
     def metrics_history(self, domain: str, years: int = 5, today: date | None = None) -> list[dict]:
         """Помесячный органический трафик за `years` лет: [{"date", "org_traffic"}].
 
-        Формат снят по документации, НЕ живьём (живой образец — Задача 17). Поэтому ответ без
+        Формат снят живьём 2026-10-04 (MCP-коннектор Ahrefs, тот же API v3, домен ahrefs.com — 0 units;
+        фикстура `ahrefs_metrics_history.json`): `{"metrics": [{"date": "2021-11-01T00:00:00Z",
+        "org_traffic": N}, …]}`, цена ~11 units за строку (60 строк ≈ 660 units). Поэтому ответ без
         списка `metrics` — ValueError (W6 пишет `deep_history:ValueError`), а не []: тихий пустой
         список читался бы как «трафика не было» по ответу, который мы не поняли.
         """

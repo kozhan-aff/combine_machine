@@ -48,4 +48,4 @@ def test_script_of_the_past_site_language_is_not_spam():
 
 def test_peak_traffic():
     hist = json.loads((FX / "ahrefs_metrics_history.json").read_text())["metrics"]
-    assert peak_traffic(hist) == 1850 and peak_traffic([]) is None
+    assert peak_traffic(hist) == 10439698 and peak_traffic([]) is None

@@ -900,7 +900,7 @@ def test_deep_spam_rejects_and_records():
 def test_deep_clean_keeps_and_sets_peak():
     s = _strong(_state("a.com"))
     scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=CLEAN, history=HIST)}, _st(), None, None)
-    assert s.alive and s.sig["deep_checked"] is True and s.sig["peak_traffic"] == 1850
+    assert s.alive and s.sig["deep_checked"] is True and s.sig["peak_traffic"] == 10439698
     assert s.sig["spam_anchors"] is False
 
 
