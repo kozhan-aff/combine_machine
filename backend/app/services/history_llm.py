@@ -26,7 +26,31 @@ def _year(x: dict) -> int:
     return int(y) if y.isdigit() else 0
 
 
+def _clean_topic(v) -> str:
+    """Тема из ОТВЕТА МОДЕЛИ (недоверенные данные) -> строка, безопасная для PostgreSQL/JSONB.
+    Только `str` (dict/число не превращаем в "{'evil': 1}"); NUL, управляющие и одиночные
+    суррогаты (\\ud800) режем: psycopg3 на них падает, а при temperature=0 тема воспроизводится и
+    коммит всей волны падал бы на каждом прогоне."""
+    if not isinstance(v, str):
+        return ""
+    s = "".join(c for c in v if c.isprintable()).strip()[:120]
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:              # страховка: суррогат, проскочивший фильтр
+        return ""
+    return s
+
+
 def parse_answer(raw: str) -> dict | None:
+    """Тотальная обёртка над `_parse`: любой мусор в ответе — None, не исключение (иначе непригодный
+    ответ модели засчитался бы предохранителю как сбой транспорта)."""
+    try:
+        return _parse(raw)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        return None
+
+
+def _parse(raw: str) -> dict | None:
     """Строгий разбор (находка 4.2). JSON-объект, даже если LLM обернула его прозой;
     `vpn_adjacent` — только конечное число (не строка, не bool, не NaN/Infinity), клампится к 0..1;
     `topic_summary` обязателен; `snapshots` — только список, парковка — только литерал true.
@@ -44,7 +68,7 @@ def parse_answer(raw: str) -> dict | None:
     adj = data.get("vpn_adjacent")
     if isinstance(adj, bool) or not isinstance(adj, (int, float)) or not math.isfinite(adj):
         return None
-    topic = str(data.get("topic_summary") or "").strip()[:120]
+    topic = _clean_topic(data.get("topic_summary"))
     if not topic:
         return None
     raw_snaps = data.get("snapshots")

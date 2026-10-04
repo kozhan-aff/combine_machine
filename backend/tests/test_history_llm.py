@@ -76,3 +76,23 @@ def test_classify_client_one_attempt_short_timeout_and_model_fallback(monkeypatc
     assert len(calls) == 1                          # без ретраев BaseClient
     monkeypatch.setattr(settings, "LLM_CLASSIFY_MODEL", "ollama/qwen2.5")
     assert LlmClassifyClient().model == "ollama/qwen2.5"
+
+
+def test_parse_answer_topic_is_sanitized_for_postgres():
+    """I1: тема из недоверенного ответа — только строка без NUL/управляющих/суррогатов (psycopg3 и
+    JSONB на них падают); нестроковая тема — «не определена», а не str(dict)."""
+    r = history_llm.parse_answer('{"vpn_adjacent": 0.5, "topic_summary": "vp\\u0000n\\u0007 blog"}')
+    assert r["topic"] == "vpn blog"
+    r = history_llm.parse_answer('{"vpn_adjacent": 0.5, "topic_summary": "bad\\ud800topic"}')
+    assert r["topic"] == "badtopic" and r["topic"].encode("utf-8")
+    assert history_llm.parse_answer('{"vpn_adjacent": 0.5, "topic_summary": "\\u0000"}') is None
+    assert history_llm.parse_answer('{"vpn_adjacent": 0.5, "topic_summary": {"evil": 1}}') is None
+    assert history_llm.parse_answer('{"vpn_adjacent": 0.5, "topic_summary": 42}') is None
+
+
+def test_parse_answer_is_total_never_raises():
+    """Minor 1: «непригодный ответ — None, не исключение» — на любой мусор."""
+    assert history_llm.parse_answer('{"snapshots": [{"year": "\u00b2", "lang": "en"}], %s, "vpn_adjacent": 0.5}'
+                                    % TOPIC) is None
+    assert history_llm.parse_answer('{"vpn_adjacent": %s, %s}' % ("9" * 400, TOPIC)) is None
+    assert history_llm.parse_answer("{" * 100000 + "}" * 100000) is None

@@ -858,3 +858,17 @@ def test_llm_topic_reaches_the_domain_row():
         d = s.get(Domain, did)
         assert (d.market_lang, d.topic, float(d.topical_relevance)) == ("pl", "vpn blog", 0.8)
         assert d.score_breakdown["topic_unknown"] is None
+
+
+def test_llm_not_asked_for_domain_rejected_too_young():
+    """Гард «только выжившим»: молодой не-EMD отклонён too_young -> LLM не зовётся."""
+    s, llm = _state("young.com"), FakeLLM()
+    scoring._history_one(s, {"wayback": FakeWB(age=0.5), "llm": llm}, _st())
+    assert s.reject_reason == "too_young" and llm.calls == 0
+
+
+def test_llm_not_asked_when_history_not_checked():
+    """Гард «только по проверенной истории»: wayback_checked=False -> LLM не зовётся."""
+    s, llm = _state("a.com"), FakeLLM()
+    scoring._history_one(s, {"wayback": FakeWB(checked=False), "llm": llm}, _st())
+    assert llm.calls == 0 and "topic_unknown" not in s.sig
