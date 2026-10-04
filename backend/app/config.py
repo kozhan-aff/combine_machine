@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     # spamhaus/surbl — нужен свой резолвер (публичные 8.8.8.8/1.1.1.1 блокируются)
     DNS_RESOLVER: str = ""
     SPAMHAUS_DQS_KEY: str = ""
+    WEBRISK_API_KEY: str = ""          # Google Web Risk (замена Safe Browsing); пусто -> W3 «не настроено»
 
     # опц. локальные сервисы (тот же бокс)
     BROWSERLESS_URL: str = ""
