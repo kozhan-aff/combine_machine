@@ -382,9 +382,23 @@ def acquirability_verdict(available, acquire_deadline, now, *, lane) -> str:
         #          незнание за «домен свободного лейна» нельзя. Ровно так на живом боксе утекли
         #          лучшие домены базы: clara-c.ru (score 0.89, RD 2219) и ещё 28 — все lane=NULL.
         return "taken" if lane == "free" else "unknown"
-    if now <= dl + DROP_GRACE:
+    if drop_window_open(dl, now):
         return "waiting"                             # дроп ещё не наступил или идёт прямо сейчас
     return "taken"                                   # дедлайн с запасом прошёл, а домен занят
+
+
+def drop_window_open(acquire_deadline, now) -> bool:
+    """Окно дропа ещё открыто: даты нет (судить не по чему — считаем открытым) или `now` не позже
+    дедлайна с запасом DROP_GRACE. Одна граница на двоих — acquirability_verdict и короткое
+    замыкание bid в W2 (`_avail_one`): две копии сравнения разъехались бы на naive-дате из БД или
+    на запасе."""
+    from datetime import timezone
+    if acquire_deadline is None:
+        return True
+    dl = acquire_deadline
+    if dl.tzinfo is None:                            # из БД дата может прийти naive
+        dl = dl.replace(tzinfo=timezone.utc)
+    return now <= dl + DROP_GRACE
 
 
 def scorable(now):
@@ -396,7 +410,8 @@ def scorable(now):
     тех же строках с нулевым продвижением.
 
     Берём, значит, только тех, у кого есть шанс:
-      · lane='bid' — DropCatch/Nominet: W2 короткозамкнут лейном, RDAP/whois нужен ради возраста;
+      · lane='bid' — DropCatch/Nominet: пока окно дропа открыто, W2 короткозамкнут лейном
+        (RDAP/whois нужен ради возраста); окно закрыто — RDAP решает, не упущен ли дроп;
       · дроп НАСТУПИЛ (`deadline <= now`) — сегодня whois впервые может сказать «свободен».
         До дропа не переспрашиваем: ответ известен по ДАТЕ, а не по догадке. F20 (аудит
         2026-07-14): здесь стоял `<= now + DROP_GRACE` — не «наступил с запасом», а «наступит
@@ -480,9 +495,9 @@ def score_pending(limit: int = 100) -> int:
         # RD до W4 неизвестен (его даёт Ahrefs) — значит по RD домен, дропающийся СЕГОДНЯ, лёг
         # бы вперемешку с бездатным пулом, и при n=5 пул вытеснял бы его НИКОГДА не доскоренным.
         # Но и голая дата ASC неверна: «самая ранняя» — это ПРОТУХШИЙ дедлайн месячной давности,
-        # то есть дроп, который мы уже упустили. Он встал бы впереди сегодняшнего и жёг бы
-        # платный путь (Ahrefs + Wayback) на покойника — для lane='bid' воронка его даже не
-        # отбракует (W2 короткозамкнут лейном).
+        # то есть дроп, который мы уже упустили. Он встал бы впереди сегодняшнего и занимал бы
+        # слот выборки и запрос W2 раньше живых: W2 отбракует его как not_acquirable
+        # только на своей волне (I1 whole-branch ревью: bid замыкается лейном, лишь пока окно открыто).
         expired = and_(Domain.acquire_deadline.is_not(None),
                        Domain.acquire_deadline < now - DROP_GRACE)
         tier = case((Domain.acquire_deadline.is_(None), 2),   # дата неизвестна — кулдаун-пул
@@ -859,7 +874,9 @@ def _avail_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
     except Exception as e:  # noqa: BLE001 — и сбой канала, и битая дата: домен НЕ идёт дальше «живым без вердикта»
         code = "circuit_open" if isinstance(e, whois_router.CircuitOpen) else type(e).__name__
         s.sig["errors"].append(f"whois:{code}")
-        if s.lane != "bid":
+        # bid «вслепую» дальше — только пока окно дропа открыто (I1): с закрытым окном без ответа
+        # RDAP не отличить упущенный дроп от живого, а впереди платные W4/W6 — ждём прогона.
+        if s.lane != "bid" or not drop_window_open(s.acquire_deadline, now):
             s.unresolved_why, s.alive = "whois_failed", False
             return
         pr, wc, age = {"available": None, "status": []}, None, None
@@ -883,7 +900,14 @@ def _avail_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
         if s.acquire_deadline is None:
             days = 35 if "redemption period" in rdap_status else 5
             s.sig["acquire_deadline"] = now + timedelta(days=days)
-    if s.lane == "bid":
+    # Короткое замыкание bid — ТОЛЬКО пока окно дропа открыто (I1 whole-branch ревью). «Занят» у bid
+    # до дропа — норма, судить нечего. Но дедлайн с запасом прошёл, а домен занят — дроп упущен
+    # (перехватили/продлили): без вердикта он платил бы W4 (25 units) и W6 (~1,1 тыс.) и отнимал слот
+    # W6 у живых. Тогда решает acquirability_verdict: занят -> not_acquirable, свободен -> лейн free.
+    # Исключение — реестр всё ещё держит домен в удалении: дроп идёт, хоть дата фида и прошла, и
+    # отказ `not_acquirable` выбросил бы живой дроп («в сомнении — не taken», см. вердикт).
+    if s.lane == "bid" and ({"pending delete", "redemption period"} & rdap_status
+                            or drop_window_open(s.acquire_deadline, now)):
         s.sig["lane"] = "bid"
         return
 
@@ -1265,6 +1289,12 @@ def _wave_deep(states: list, clients: dict, st: dict, budget, run, notes: list |
     _run_concurrent(picked, _CONCURRENCY["deep"], run, "deep", lambda s: _deep_one(s, clients, st))
 
 
+# Вердикт истории и его улики: колонки (prior_flags, wayback_checked) и ключи score_breakdown
+# (history_evidence, sampled). Недочитанная история (wayback_checked=False) не перезаписывает их
+# поверх сохранённой грязи — см. `keep_history` в _commit_result (I2).
+_HISTORY_VERDICT_KEYS = frozenset({"prior_flags", "wayback_checked", "history_evidence", "sampled"})
+
+
 def _commit_result(state: FunnelState, run, st: dict) -> dict:
     """Записать итог ОДНОГО FunnelState в БД: волны финализируют домен в момент его выхода из
     конвейера (см. _run_waves), не в конце одной функции.
@@ -1331,11 +1361,23 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # снова становился чистым для политики — кнопка реабилитации сработала бы не «по
         # новым уликам», а по их ОТСУТСТВИЮ. Отсутствие значения — «не проверяли», оно не
         # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
+        #
+        # То же для ИСТОРИИ, прочитанной не до конца (I2 whole-branch ревью): archive.org троттлит,
+        # прочитано меньшинство снимков — classify_history отдаёт prior_flags={} и
+        # wayback_checked=False. Это «не знаем», а не «чисто», но значение не None, и цикл ниже
+        # записал бы его поверх подтверждённого казино: dirty_reason -> None, «✓ одобрить» открыта.
+        # Путь, где Wayback бросил исключение, грязь сохраняет (этих ключей в sig нет вовсе) — два
+        # входа в одну ситуацию обязаны вести себя одинаково. Поэтому при сохранённой грязи
+        # вердикт истории и его улики не трогаем; свежая ПОЛНАЯ проверка (wayback_checked=True)
+        # реабилитирует, как и раньше. Смотрим состояние строки ДО записи этого прогона.
+        keep_history = sig.get("wayback_checked") is False and history_verdict(d) == "dirty"
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "blacklisted",
                     "dr", "referring_domains", "trademark_risk", "backlinks", "organic_traffic",
                     "market_lang", "topic", "topical_relevance", "anchors", "spam_anchor_ratio"):
             v = sig.get(col)
+            if keep_history and col in _HISTORY_VERDICT_KEYS:
+                continue
             if v is not None:
                 setattr(d, col, v)
         if sig.get("topic_unknown"):
@@ -1353,8 +1395,9 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             (fallback — ИМЕННО существующий score_breakdown, снятый ДО этого прогона).
             Иначе prior_flags (только что сохранённый выше) остался бы вердиктом без
             единого подтверждения: инбокс пишет «история грязная — смотри снимки», а
-            смотреть нечего."""
-            v = sig.get(key)
+            смотреть нечего. Сохранённая грязь при недочитанной истории (I2, `keep_history`) —
+            улики прошлой полной проверки остаются при её вердикте, частичные их не подменяют."""
+            v = None if keep_history and key in _HISTORY_VERDICT_KEYS else sig.get(key)
             return v if v is not None else prev.get(key)
 
         d.score_breakdown = {**result["breakdown"], "errors": sig.get("errors", []),

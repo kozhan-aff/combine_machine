@@ -1346,3 +1346,155 @@ def test_deep_floor_is_one_fresh_query_per_run_not_per_domain(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     scoring.score_pending(limit=10)
     assert ah.deep_calls == 2 and ah.units_calls == 2
+
+
+# --- финальная фикс-волна (whole-branch ревью): I1 — просроченный bid, I2 — частичный Wayback ---
+
+class _RecordingAh(FakeAh):
+    """Ahrefs, который помнит, ЗА КАКОЙ домен платили: пачка W4, анкоры и история трафика W6."""
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.anchor_domains, self.history_domains = [], []
+
+    def anchors(self, d, limit=50):
+        self.anchor_domains.append(d)
+        return super().anchors(d, limit)
+
+    def metrics_history(self, d, years=5, today=None):
+        self.history_domains.append(d)
+        return super().metrics_history(d, years, today)
+
+
+def test_expired_bid_reregistered_is_not_acquirable_and_pays_no_ahrefs(monkeypatch):
+    """I1 (деньги): bid-домен, у которого дедлайн дропа давно прошёл (NOW−10 суток), а RDAP видит его
+    снова зарегистрированным (5 суток назад, без статуса удаления), — упущенный дроп. Раньше W2
+    замыкала bid ДО вердикта и не смотрела дедлайн: домен платил W4 (25 units) и W6 (~1,1 тыс.) и
+    занимал слот W6 у живых. Теперь решает acquirability_verdict: занят -> not_acquirable, units не
+    тратятся. Контроль: bid с дедлайном впереди проходит W4 как прежде."""
+    dead = _mk("dead-drop.com", deadline=NOW - timedelta(days=10))
+    live = _mk("live-drop.com", deadline=NOW + timedelta(days=2))
+
+    class _Rdap(FakeRdap):
+        """dead-drop: перерегистрирован 5 суток назад, статуса удаления нет; live-drop: в удалении."""
+        def lookup(self, d):
+            self.calls += 1
+            if d == "dead-drop.com":
+                return {"exists": True, "status": [], "registered_at": NOW - timedelta(days=5)}
+            return {"exists": True, "status": ["pending delete"],
+                    "registered_at": NOW - timedelta(days=4000)}
+
+    rdap = _Rdap()
+    ah = _RecordingAh({"dead-drop.com": STRONG, "live-drop.com": STRONG}, anchors=CLEAN, history=HIST)
+    clients = _full_clients(rdap, ah, FakeWB(), llm=FakeLLM())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert rdap.calls == 2                                   # RDAP реально спрошен и про мёртвый дроп
+    assert all("dead-drop.com" not in b for b in ah.batches)  # W4 за него не платили
+    assert "dead-drop.com" not in ah.anchor_domains + ah.history_domains   # и W6 тоже
+    assert ah.batches == [["live-drop.com"]]                 # контроль: живой bid прошёл W4
+    with db.SessionLocal() as s:
+        d = s.get(Domain, dead)
+        assert (d.status, d.reject_reason) == ("rejected", "not_acquirable")
+        assert s.get(Domain, live).status == "scored"
+
+
+def test_avail_bid_window_open_only_until_deadline_plus_grace():
+    """I1, юнит W2: короткое замыкание bid — пока окно дропа открыто. Дедлайна нет (фид без даты) или
+    он не прошёл с запасом DROP_GRACE — bid как раньше. Окно закрыто: занят -> not_acquirable,
+    свободен -> лейн free (домен можно регистрировать). Реестр всё ещё держит домен в удалении —
+    дроп идёт, хоть дата фида и прошла: отказ выбросил бы живой дроп. Сбой RDAP при закрытом окне —
+    не «вслепую дальше» (W4/W6 платные), а whois_failed до следующего прогона."""
+    reg = NOW - timedelta(days=5)
+    cases = (
+        ("no-date.com", None, FakeRdap(exists=True, registered=reg, status=())),
+        ("in-grace.com", NOW - timedelta(days=1), FakeRdap(exists=True, registered=reg, status=())),
+        ("still-deleting.com", NOW - timedelta(days=10), FakeRdap(exists=True, registered=reg)),
+    )
+    for name, dl, rdap in cases:
+        s = _state(name, acquire_deadline=dl)
+        scoring._avail_one(s, {"rdap": rdap, "aparser": FakeAp()}, None, _st())
+        assert s.alive and s.sig["lane"] == "bid", name
+    taken = _state("caught.com", acquire_deadline=NOW - timedelta(days=10))
+    scoring._avail_one(taken, {"rdap": FakeRdap(exists=True, registered=reg, status=()),
+                               "aparser": FakeAp()}, None, _st())
+    assert (taken.alive, taken.reject_reason) == (False, "not_acquirable")
+    # дедлайн из БД может прийти naive — тот же разбор, что в acquirability_verdict
+    naive = _state("naive-dl.com", acquire_deadline=(NOW - timedelta(days=10)).replace(tzinfo=None))
+    scoring._avail_one(naive, {"rdap": FakeRdap(exists=True, registered=reg, status=()),
+                               "aparser": FakeAp()}, None, _st())
+    assert naive.reject_reason == "not_acquirable"
+    freed = _state("freed.com", acquire_deadline=NOW - timedelta(days=10))
+    scoring._avail_one(freed, {"rdap": FakeRdap(exists=False), "aparser": FakeAp()}, None, _st())
+    assert freed.alive and freed.sig["lane"] == "free"
+    down = _state("rdap-down.com", acquire_deadline=NOW - timedelta(days=10))
+    scoring._avail_one(down, {"rdap": FakeRdap(boom=True), "aparser": FakeAp()}, None, _st())
+    assert (down.alive, down.unresolved_why) == (False, "whois_failed")
+
+
+class _PartialWB:
+    """archive.org троттлит: прочитано меньшинство снимков -> classify_history честно говорит
+    «не проверено» (prior_flags пуст, wayback_checked=False) и отдаёт частичные улики."""
+    def __init__(self):
+        self.calls = 0
+
+    def classify_history(self, d):
+        self.calls += 1
+        return {"prior_flags": {}, "wayback_checked": False, "sampled": 1, "first_seen": None,
+                "age_years": 9.0, "texts": [{"timestamp": "20240101000000", "text": "parked"}],
+                "evidence": [{"url": d, "timestamp": "20240101000000", "cats": [], "chars": 900}]}
+
+
+_CASINO_EVIDENCE = [{"url": "casino-once.com", "timestamp": "20150101000000", "cats": ["casino"],
+                     "chars": 3000}]
+
+
+def _dirty_history_domain(name):
+    """Домен, отклонённый прошлым ПОЛНЫМ прогоном за казино в истории — с уликами."""
+    with db.SessionLocal() as s:
+        d = Domain(domain=name, source="nominet", lane="bid", status="rejected",
+                   acquire_deadline=NOW + timedelta(days=2), reject_reason="history_dirty",
+                   prior_flags={"casino": True}, wayback_checked=True, score=0.0,
+                   score_breakdown={"history_evidence": _CASINO_EVIDENCE, "sampled": 5, "errors": []})
+        s.add(d)
+        s.commit()
+        return d.id
+
+
+def test_rescore_with_partial_wayback_does_not_launder_dirty_history():
+    """I2 («перескор не отмывает»): перескор домена history_dirty, на котором archive.org дал прочитать
+    лишь меньшинство снимков. Ответ «не проверено» (prior_flags={}) не вправе затереть
+    подтверждённое казино и его снимки — как и путь, где Wayback бросил исключение. Иначе
+    dirty_reason -> None и «✓ одобрить» открыта."""
+    import pytest
+    from app.services import transitions
+    did = _dirty_history_domain("casino-once.com")
+    wb = _PartialWB()
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+        FakeAh({"casino-once.com": STRONG}, anchors=CLEAN, history=HIST), wb, llm=FakeLLM()))
+    assert wb.calls == 1 and out["status"] == "scored"     # волна истории реально отработала
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.prior_flags == {"casino": True}                       # грязь не стёрта
+        assert d.score_breakdown["history_evidence"] == _CASINO_EVIDENCE  # и её снимки целы
+        assert scoring.history_verdict(d) == "dirty"
+        assert transitions.dirty_reason(d) == "history_dirty"
+        with pytest.raises(transitions.TransitionDenied, match="грязный"):
+            transitions.check(d, "approved")
+
+
+def test_rescore_with_full_clean_wayback_still_rehabilitates_dirty_history():
+    """Контроль I2: правило — «не стирай НЕпроверенным», а не «не верь проверкам». Свежая ПОЛНАЯ
+    проверка истории (wayback_checked=True, грязи нет) снимает history_dirty — реабилитация по новым
+    уликам работает как раньше."""
+    from app.services import transitions
+    did = _dirty_history_domain("casino-gone.com")
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+        FakeAh({"casino-gone.com": STRONG}, anchors=CLEAN, history=HIST), FakeWB(), llm=FakeLLM()))
+    assert out["status"] == "scored" and out["reject_reason"] is None
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.wayback_checked is True and not any((d.prior_flags or {}).values())
+        assert scoring.history_verdict(d) == "clean" and transitions.dirty_reason(d) is None
+        transitions.check(d, "approved")                    # не бросает: домен чист по новым уликам
