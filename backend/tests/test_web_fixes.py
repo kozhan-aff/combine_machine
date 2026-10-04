@@ -153,7 +153,7 @@ def test_diag_spec_has_module_and_critical():
     for row in _spec():
         assert len(row) == 7                      # key,label,role,need_cred,module,critical,fn
         key, label, role, need_cred, module, critical, fn = row
-        assert module in ("M1", "M3", "M4", "M5", "инфра")
+        assert module in ("M1", "M2", "M3", "M4", "M5", "инфра")
         assert isinstance(critical, bool)
 
 
