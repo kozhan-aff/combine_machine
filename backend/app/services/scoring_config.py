@@ -22,30 +22,27 @@ PREFILTER = {
 # Stage E — hard rejects (score -> 0, status rejected regardless of the rest)
 # spam included: project invariant — ANY dirty-history flag rejects (see CLAUDE.md).
 HARD_REJECT_FLAGS = ("adult", "pharma", "casino", "gambling", "spam")  # prior_flags categories
-# also hard-reject on: rkn_listed, blacklisted is True.
-# Здесь БЫЛИ ещё `prior_flags.topic_switch` и `trademark_risk` — оба удалены (аудит 2026-07-14):
-# первый не мог добавить ни одного отказа (подмножество категорий выше), у второго не было ни
-# одного производителя. Проверка, которой нет, не должна выглядеть работающей — см. compute_score.
+# also hard-reject on: blacklisted is True, webrisk_threats (Google Web Risk), trademark_risk
+# (бренд-токен в имени — его ставит W0 по domain_filters.brand_hit). В v1 `trademark_risk` был
+# призраком (ни одного производителя, аудит 2026-07-14), в v2 производитель есть. `topic_switch`
+# удалён насовсем: подмножество категорий выше, не мог добавить ни одного отказа.
 
-# Stage F — composite weights (positives; sum = 1.0). Free-stack + Ahrefs (live-verified
-# 2026-07-08, see docs/superpowers/specs/2026-07-08-ahrefs-dr-design.md).
-# `authority` (DR) now carries real weight — Ahrefs replaces the old free DR-proxy path
-# (see docs/api/openpagerank.md, deprecated).
+# Stage F v2 — сумма 1.0 (docs/v2/02-m1-discovery-scoring-spec.md §3.2). Нет сигнала у
+# topical_fit/anchor_quality/traffic_history -> 0.5 (нейтрально), см. compute_score.
 WEIGHTS = {
-    "history_cleanliness": 0.35,  # from Wayback prior_flags (spam etc.)
-    "age": 0.18,                  # Wayback first_seen, normalized by AGE_FULL
-    "rd_proxy": 0.27,             # referring_domains (feed `links` or Ahrefs `domains`), log-normalized
-    "indexed_echo": 0.08,         # still in the index (SearXNG site:)
-    "authority": 0.12,            # Ahrefs DR, normalized by DR_FULL
+    "history_cleanliness": 0.25,  # Wayback: проверена и чиста
+    "topical_fit": 0.15,          # W5 LLM: близость прошлой темы к VPN/приватности/софту (expired domain abuse)
+    "age": 0.12,
+    "rd": 0.18,                   # W4 refdomains, лог-шкала, ×0.5 при подозрении на PBN
+    "authority": 0.10,            # DR — главный честный сигнал на спам-дропах
+    "anchor_quality": 0.12,       # W6: 1 − доля спам-анкоров
+    "traffic_history": 0.08,      # W6: пик органического трафика за 5 лет
 }
-
-# Normalization anchors ("full credit" points) for the 0..1 components
-NORM = {
-    "DR_FULL": 30.0,     # Ahrefs DR (0-100 scale) — 30+ is already strong for a drop-candidate,
-                         # NOT calibrated to sites like Wikipedia (DR 97, off the scale on purpose)
-    "AGE_FULL": 8.0,     # years
-    "RD_FULL": 3000.0,   # referring domains (log scale) — spreads real drop RD, was 100 (clamped all)
-}
+NORM = {"DR_FULL": 30.0, "AGE_FULL": 8.0, "RD_FULL": 3000.0, "TRAFFIC_FULL": 5000.0}
+# PBN/спам-сетка: живые спам-дропы дают refips_subnets/refdomains ≈ 0.27 (2026-10-01).
+# ponytail: порог стартовый — калибровать по водопаду первого живого прогона.
+PBN_SUBNET_RATIO = 0.3
+PBN_MIN_RD = 20
 
 # Decision thresholds on final score (0..1). Between review and approve -> manual review.
 DECISION = {

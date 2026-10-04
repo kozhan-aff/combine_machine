@@ -97,19 +97,25 @@ def test_wayback_brands_no_false_positive():
     assert "casino" in _classify_text("вулкан казино играть, азино777 бонус")
 
 
-# ---------- I1: ошибка RKN/blacklist не даёт auto-approve ----------
+# ---------- I1: ошибка RKN/blacklist не пускает в пакетное одобрение ----------
 
 def test_rkn_or_blacklist_error_caps_at_scored():
-    from app.services.scoring import compute_score
+    """Авто-одобрения нет (Р2): скоринг даёт максимум `scored` и при чистом прогоне. Упавшая
+    проверка РКН/блэклиста держит домен вне ПАКЕТА — туда переехал гард из _decide."""
+    from app.models.domain import Domain
+    from app.services.scoring import bulk_ok, compute_score
     strong = {"wayback_checked": True, "prior_flags": {}, "age_years": 8,
-              "referring_domains": 3000, "indexed_echo": True}
-    # чистый прогон без ошибок -> approved (базовая линия)
-    assert compute_score({**strong, "rkn_listed": False, "blacklisted": False,
-                          "errors": []})["status"] == "approved"
-    # проверка RKN упала (ключ сигнала отсутствует, ошибка в errors) -> не выше scored
-    assert compute_score({**strong, "errors": ["rkn:ConnectError"]})["status"] == "scored"
-    # проверка blacklist упала -> тоже scored
-    assert compute_score({**strong, "errors": ["blacklist:RuntimeError"]})["status"] == "scored"
+              "referring_domains": 3000}
+    clean = compute_score({**strong, "blacklisted": False, "errors": []})
+    assert clean["status"] == "scored" and clean["score"] >= 0.70      # сильный, но одобряет человек
+
+    def _dom(errors):
+        return Domain(domain="i1.ru", wayback_checked=True, prior_flags={}, age_years=8,
+                      score_breakdown={"errors": errors, "history_evidence": []})
+    assert bulk_ok(_dom([])) is True                                   # базовая линия: пакет берёт
+    for err in ("rkn:ConnectError", "blacklist:RuntimeError"):
+        assert compute_score({**strong, "errors": [err]})["status"] == "scored"
+        assert bulk_ok(_dom([err])) is False                           # проверка упала — вне пакета
 
 
 # ---------- Ahrefs: authority (DR) получает реальный вес ----------
@@ -444,11 +450,15 @@ def test_blacklist_raises_when_resolver_cannot_reach_spamhaus(monkeypatch):
 
 
 def test_blacklist_none_goes_to_errors_and_downgrades(monkeypatch):
-    # is_blacklisted вернул None (транзиент) -> в sig.errors -> risk-guard -> manual scored
+    # is_blacklisted вернул None (транзиент) -> в sig.errors -> домен «вслепую», вне пакета.
+    # Авто-одобрения нет (Р2): _decide даёт максимум scored даже на 0.9 с этой ошибкой.
+    from app.models.domain import Domain
     from app.services import scoring
-    # прямой юнит на _decide: approved + blacklist-ошибка -> scored
     sig_err = {"errors": ["blacklist:unavailable"]}
-    assert scoring._decide(0.9, sig_err, 0.7, 0.4) == "scored"
+    assert scoring._decide(0.9, sig_err, 0.4) == "scored"
+    d = Domain(domain="bl.ru", wayback_checked=True, prior_flags={}, age_years=8,
+               score_breakdown={"errors": sig_err["errors"], "history_evidence": []})
+    assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
 
 
 # ---------- M9: status-gate — рескорится только discovered/scored/rejected ----------

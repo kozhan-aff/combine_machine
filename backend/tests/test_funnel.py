@@ -148,18 +148,22 @@ def test_whois_none_falls_through_to_wayback_age():
     wb = _Wayback()
     out = scoring.score_domain(did, clients=_clients(None, wb))   # whois не отдал дату
     assert wb.calls == 1                                          # дошли до T3
-    assert out["status"] in ("approved", "scored")               # чистый сильный домен
+    assert out["status"] == "scored"                             # чистый сильный домен
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
     assert float(d.age_years) == 9.0                             # возраст — фолбэком из Wayback
 
 
-def test_clean_strong_domain_approved():
+def test_clean_strong_domain_is_scored_and_bulk_ok():
+    """Чистый сильный домен: скоринг ставит максимум `scored` (одобряет только человек, Р2), а
+    без единой дыры в проверках пакет его берёт."""
     did = _mk(domain="good.ru", referring_domains=3000, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
     out = scoring.score_domain(did, clients=_clients(old, wb))
-    assert wb.calls == 1 and out["status"] == "approved" and out["reject_reason"] is None
+    assert wb.calls == 1 and out["status"] == "scored" and out["reject_reason"] is None
+    with db.SessionLocal() as s:
+        assert scoring.bulk_ok(s.get(Domain, did)) is True
 
 
 def test_blacklist_rejects_before_wayback():
@@ -172,19 +176,23 @@ def test_blacklist_rejects_before_wayback():
 
 
 def test_blacklist_none_downgrades_via_funnel():
-    """Ревью C2 (Important gap): строка `blacklisted is None -> errors.append("blacklist:unavailable")`
-    в _funnel была покрыта только юнитом на _decide напрямую (test_m1_fixes.py), а не реальной
-    проводкой через score_domain/_funnel. Прогоняем полную воронку с blacklist-клиентом,
-    отдающим None (транзиент), на иначе-сильном домене (тот же профиль, что и в
-    test_clean_strong_domain_approved) — без строки-фикса errors остался бы пуст и статус
-    остался бы approved, тест бы упал."""
+    """Ревью C2: строка `blacklisted is None -> errors.append("blacklist:unavailable")` прогнана
+    полной воронкой на иначе-сильном домене (профиль test_clean_strong_domain_is_scored_and_bulk_ok).
+    Авто-одобрения нет (Р2), поэтому «понижение» теперь значит: домен `scored`, с пометкой
+    «вслепую» и ВНЕ пакета. Без строки-фикса errors остался бы пуст, и пакет взял бы домен с
+    непроверенным блэклистом — тест бы упал."""
+    from app.services import scoring_config as cfg
     did = _mk(domain="bl-none.ru", referring_domains=3000, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
     out = scoring.score_domain(did, clients=_clients(old, wb, bl=None))
     assert "blacklist:unavailable" in out["errors"]
-    assert out["status"] == "scored"        # downgrade from approved (не rejected — не hard-reject)
-    assert wb.calls == 1                    # blacklist:unavailable не блокирует T3
+    assert out["score"] >= cfg.DECISION["approve_at"]      # сильный — исключает правило, а не балл
+    assert out["status"] == "scored"                        # не rejected — не hard-reject
+    assert wb.calls == 1                                    # blacklist:unavailable не блокирует T3
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
 
 
 def test_history_dirty_rejects_after_wayback():
@@ -205,16 +213,17 @@ def test_low_score_reject():
     assert wb.calls == 1            # дошли до compute_score — отклонил composite score, не воронка
 
 
-def test_runtime_approve_at_downgrades_high_scorer_to_scored():
-    """Finding 1 (2026-07 review): рантайм /settings approve_at (не только cfg.DECISION)
-    должен реально управлять статусом, а не только превью-счётчиками на /settings."""
+def test_runtime_approve_at_never_makes_scoring_approve():
+    """Р2: `approve_at` больше не участвует в решении скоринга — это «порог сильного кандидата»
+    для превью и пакета. Даже порог на самом дне (клампится к manual_review_at) не даёт машине
+    поставить `approved`: одобряет только человек."""
     from app.services import settings as st
     did = _mk(domain="runtime-approve.ru", referring_domains=100, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    st.update_settings(approve_at=0.99)
+    st.update_settings(approve_at=0.0)
     out = scoring.score_domain(did, clients=_clients(old, wb))
-    assert 0.40 < out["score"] < 0.99             # ~0.87 — сильный, но не «approve по-новому»
+    assert out["score"] > st.get_settings()["approve_at"]
     assert out["status"] == "scored" and out["reject_reason"] is None
 
 
@@ -421,7 +430,7 @@ def test_ahrefs_skipped_when_feed_has_referring_domains():
     clients["aparser"].ahrefs_probe = ah.ahrefs_probe   # прикрутить мок Ahrefs к тому же aparser-дублёру
     out = scoring.score_domain(did, clients=clients, ahrefs_budget=[50])
     assert ah.calls == 0
-    assert out["status"] in ("approved", "scored")
+    assert out["status"] == "scored"
 
 
 def test_ahrefs_called_when_feed_has_no_referring_domains_and_budget_positive():
@@ -465,7 +474,7 @@ def test_ahrefs_not_called_when_budget_exhausted():
     clients["aparser"].ahrefs_probe = ah.ahrefs_probe
     out = scoring.score_domain(did, clients=clients, ahrefs_budget=[0])
     assert ah.calls == 0
-    assert out["status"] in ("approved", "scored", "rejected")   # не unresolved — не гейт приобретаемости
+    assert out["status"] in ("scored", "rejected")   # не unresolved — не гейт приобретаемости
 
 
 def test_ahrefs_failure_does_not_crash_funnel():

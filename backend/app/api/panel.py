@@ -1192,16 +1192,17 @@ def settings_save(min_referring_domains: int = Form(...), min_age_years: float =
                   dropcatch: str = Form(""), nominet: str = Form(""),
                   mx: str = Form(""), emd: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
-                  w_rd_proxy: float | None = Form(None), w_age: float | None = Form(None),
-                  w_indexed_echo: float | None = Form(None),
-                  w_authority: float | None = Form(None)):
+                  w_topical_fit: float | None = Form(None), w_age: float | None = Form(None),
+                  w_rd: float | None = Form(None), w_authority: float | None = Form(None),
+                  w_anchor_quality: float | None = Form(None),
+                  w_traffic_history: float | None = Form(None)):
     from app.services import settings as st
     # веса — опциональны: форма без них (старый шаблон, curl из скрипта) не должна ОБНУЛЯТЬ
     # шкалу оценки. None -> ключ не передаём, update_settings оставит прежние.
     weights = {k: v for k, v in (("history_cleanliness", w_history_cleanliness),
-                                 ("rd_proxy", w_rd_proxy), ("age", w_age),
-                                 ("indexed_echo", w_indexed_echo),
-                                 ("authority", w_authority)) if v is not None}
+                                 ("topical_fit", w_topical_fit), ("age", w_age), ("rd", w_rd),
+                                 ("authority", w_authority), ("anchor_quality", w_anchor_quality),
+                                 ("traffic_history", w_traffic_history)) if v is not None}
     st.update_settings(min_referring_domains=min_referring_domains, min_age_years=min_age_years,
                        approve_at=approve_at, manual_review_at=manual_review_at,
                        max_whois_per_run=max_whois_per_run, max_ahrefs_per_run=max_ahrefs_per_run,

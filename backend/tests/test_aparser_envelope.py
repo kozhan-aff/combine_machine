@@ -116,30 +116,54 @@ def _sig(**kw) -> dict:
             "referring_domains": 5000, "indexed_echo": True, "errors": [], **kw}
 
 
+def _in_bulk(sig: dict, out: dict, **breakdown) -> bool:
+    """Положить домен с этим итогом скоринга в БД как `scored` и спросить пакет: возьмёт ли.
+    Авто-одобрения нет (Р2) — правило «whois упал / возраста нет» живёт в bulk_ok/blind_reason,
+    его и проверяем, на пороге 0.0, чтобы исключал именно гард, а не балл."""
+    from app.api.panel import _bulk_candidates
+    with db.SessionLocal() as s:
+        d = Domain(domain="bulk-probe.ru", source="backorder", status="scored", score=out["score"],
+                   wayback_checked=sig.get("wayback_checked"), prior_flags=sig.get("prior_flags"),
+                   age_years=sig.get("age_years"),
+                   score_breakdown={"errors": sig.get("errors", []), "history_evidence": [],
+                                    **breakdown})
+        s.add(d); s.commit()
+        ok, _ = _bulk_candidates(s, 0.0)
+        return d.id in {x.id for x in ok}
+
+
 def test_whois_down_never_auto_approves_even_with_archive_age():
     """РЕГРЕССИЯ (ревью Задачи 4). Живой clara-c.ru: whois лежит, но Wayback дал возраст 16 лет —
-    и до фикса домен набирал 0.87 и уезжал в `approved`. Гард по `age_years is None` его не
-    ловил: возраст-то ЕСТЬ. А занятость домена (`available`) при этом не сверял никто —
-    и её из архива не добрать."""
-    out = scoring.compute_score(_sig(errors=["whois:RuntimeError"], age_years=16.0,
-                                     referring_domains=2219))
-    assert out["score"] >= 0.70, out           # порог реально взят — гард, а не низкий балл
-    assert out["status"] == "scored", out      # но авто-одобрения нет: whois упал
+    и до фикса домен набирал 0.87 и уезжал в `approved`. Авто-одобрения теперь нет вовсе (Р2), а
+    гард переехал в пакет: занятость домена (`available`) не сверял никто — её из архива не
+    добрать, поэтому пакетное одобрение такой домен не берёт."""
+    sig = _sig(errors=["whois:RuntimeError"], age_years=16.0, referring_domains=2219)
+    out = scoring.compute_score(sig)
+    assert out["score"] >= 0.70, out           # балл сильного кандидата — исключает гард, а не балл
+    assert out["status"] == "scored", out      # одобряет только человек
+    assert _in_bulk(sig, out, age_source="wayback") is False
 
 
 def test_whois_down_without_any_age_never_auto_approves():
-    """Второй достижимый вид того же отказа: архив ПУСТ, возраста нет ни у кого. Домен всё
-    равно берёт 0.70 (0.35 история + 0.27 RD + 0.08 эхо) — и всё равно не одобряется."""
-    out = scoring.compute_score(_sig(errors=["whois:RuntimeError"]))
-    assert out["score"] >= 0.70, out
+    """Второй достижимый вид того же отказа: архив ПУСТ, возраста нет ни у кого. Сигнал нарочно
+    сильный (DR 30, тема 1.0, анкоры чистые, трафик за потолком -> 0.88), чтобы пакет исключал
+    домен ПРАВИЛОМ (whois упал, возраста нет), а не низким баллом (находка 1.11)."""
+    sig = _sig(errors=["whois:RuntimeError"], dr=30.0, topical_relevance=1.0,
+               spam_anchor_ratio=0.0, peak_traffic=5000)
+    out = scoring.compute_score(sig)
+    assert out["score"] >= 0.85, out
     assert out["status"] == "scored", out
+    assert _in_bulk(sig, out) is False
 
 
-def test_known_age_still_auto_approves():
-    """Контроль: гард бьёт ТОЛЬКО по отказу whois. Домен, чей whois ответил, одобряется как и
-    был — иначе «фикс» просто заморозил бы весь пул на ручном разборе."""
-    out = scoring.compute_score(_sig(age_years=16.0))
-    assert out["status"] == "approved", out
+def test_known_age_is_scored_and_lands_in_bulk():
+    """Контроль: гард бьёт ТОЛЬКО по отказу whois / пустому возрасту. Домен, чей whois ответил,
+    приходит `scored` (одобряет человек, Р2), и пакет его берёт — иначе «фикс» просто заморозил
+    бы весь пул на поштучном разборе."""
+    sig = _sig(age_years=16.0)
+    out = scoring.compute_score(sig)
+    assert out["status"] == "scored", out
+    assert _in_bulk(sig, out) is True
 
 
 def test_blind_reason_tells_the_truth_about_archive_age():
@@ -265,15 +289,16 @@ def test_funnel_whois_down_and_empty_archive_is_not_auto_approved():
         assert scoring.bulk_ok(d) is False
 
 
-def test_funnel_whois_alive_domain_still_auto_approves():
-    """Контроль: когда A-Parser отвечает, тот же домен проходит как раньше — до `approved`.
+def test_funnel_whois_alive_domain_is_scored_and_bulk_ok():
+    """Контроль: когда A-Parser отвечает, тот же домен проходит воронку до `scored` (одобряет человек, Р2) — без пометки
+    «вслепую» и с местом в пакете.
     Гард не должен превращать живую воронку в вечный ручной разбор."""
     created = datetime.now(timezone.utc) - timedelta(days=int(365.25 * 16))
     did = _add(domain="old-bid.ru",
                acquire_deadline=datetime.now(timezone.utc) + timedelta(days=5))
     out = scoring.score_domain(did, _clients({"available": False, "created": created}))
 
-    assert out["status"] == "approved", out
+    assert out["status"] == "scored", out
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.age_years and d.age_years > 15

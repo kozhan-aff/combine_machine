@@ -51,7 +51,7 @@ def test_bulk_approve_skips_blind_domains(client):
     `clean.com` несёт wayback_checked=True НЕ для красоты: «чистый» домен без реально
     прочитанной истории — это и был баг F2 (пустой Wayback ошибки не бросает), и фикстура,
     молчавшая об этом поле, ровно его и покрывала собой."""
-    _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True,
+    _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
          prior_flags={}, score_breakdown={"errors": []})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
@@ -65,7 +65,7 @@ def test_bulk_approve_skips_blind_domains(client):
 
 
 def test_bulk_preview_counts(client):
-    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True,
+    _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
          prior_flags={}, score_breakdown={"errors": []})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})

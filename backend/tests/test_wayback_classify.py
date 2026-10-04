@@ -141,7 +141,7 @@ def test_js_redirect_to_casino_is_not_approved_as_clean():
         "x.ru", polite=0)
     out = compute_score({"wayback_checked": h["wayback_checked"], "prior_flags": h["prior_flags"],
                          "age_years": 16, "referring_domains": 2219, "indexed_echo": True})
-    assert out["status"] != "approved", "домен-редирект на казино авто-одобрен как чистый"
+    assert out["status"] == "scored", "одобряет только человек (Р2)"
 
     d = SimpleNamespace(prior_flags=h["prior_flags"], wayback_checked=h["wayback_checked"],
                         score_breakdown={"errors": [], "sampled": h["sampled"],
@@ -289,13 +289,13 @@ def test_topic_switch_could_never_add_a_single_reject():
 
 # ---- F5: trademark_risk — гейт без производителя ----
 
-def test_trademark_risk_is_not_a_hard_reject_anymore():
-    """Ветка отказа была, а расчёта — не было: значение всегда NULL, гейт лишь ПРИТВОРЯЛСЯ
-    проверкой. Колонка в БД оставлена (данные не рушим), ветка в скоринге удалена."""
+def test_trademark_risk_is_a_hard_reject_again():
+    """В v1 ветка отказа была, а расчёта — не было (значение всегда NULL), и её сняли как
+    призрак. В v2 у неё есть производитель: W0 ставит `trademark_risk=True` по бренд-токену в
+    имени (domain_filters.brand_hit, Задача 9) — и отказ снова жёсткий."""
     out = compute_score({"wayback_checked": True, "prior_flags": {}, "trademark_risk": True,
-                         "age_years": 10, "referring_domains": 300, "indexed_echo": True})
-    assert "hard_reject" not in out["breakdown"]
-    assert out["status"] != "rejected"
+                         "age_years": 10, "referring_domains": 300})
+    assert out["status"] == "rejected" and "trademark" in out["breakdown"]["hard_reject"]
 
 
 # ---- веса: в живой БД (миграция 0009) лежит СОХРАНЁННЫЙ JSON ----

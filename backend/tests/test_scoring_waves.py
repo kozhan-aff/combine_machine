@@ -540,7 +540,7 @@ def test_commit_result_computes_score_for_survivor():
     s.sig.update({"wayback_checked": True, "prior_flags": {}, "age_years": 10,
                  "indexed_echo": True, "dr": None})
     out = scoring._commit_result(s, run=None, st={"approve_at": 0.7, "manual_review_at": 0.4})
-    assert out["status"] in ("approved", "scored") and out["score"] > 0
+    assert out["status"] == "scored" and out["score"] > 0
     with db.SessionLocal() as sess:
         d = sess.get(Domain, did)
         assert float(d.score) == out["score"] and d.status == out["status"]

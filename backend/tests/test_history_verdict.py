@@ -51,7 +51,7 @@ def test_verdict_unknown_when_wayback_saw_nothing():
 
 
 def test_verdict_clean_only_when_wayback_really_checked():
-    d = Domain(domain="ok.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS,
+    d = Domain(domain="ok.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS, age_years=10.0,
                score_breakdown={"errors": []})
     assert scoring.history_verdict(d) == "clean"
     assert scoring.blind_reason(d) is None
@@ -87,7 +87,7 @@ def test_unchecked_history_stays_out_of_bulk(client):
     """РЕПРО АУДИТА: score 0.825, errors пуст, снимков не было — домен уходил в пакет как чистый."""
     _add(domain="ghost.ru", status="scored", score=0.825, wayback_checked=False,
          prior_flags={}, score_breakdown={"errors": []})
-    _add(domain="ok.com", status="scored", score=0.825, wayback_checked=True,
+    _add(domain="ok.com", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
          prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": []})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 1}
     r = client.post("/domains/bulk-approve", data={"min_score": 0.8}, follow_redirects=False)
@@ -189,11 +189,11 @@ def test_stale_verdict_is_named_but_not_locked(client):
     РАНЬШЕ, а сегодня Wayback не ответил, с вердиктом `clean` — и про сегодняшний отказ архива
     не говорил НИКТО (ошибка живёт в score_breakdown.errors, куда куратор не смотрит).
 
-    Пакет его берёт — и это осознанно: вердикт держится на реальных прошлых уликах, авто-approve
-    гардится по sig ТЕКУЩЕГО прогона, а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
+    Пакет его берёт — и это осознанно: вердикт держится на реальных прошлых уликах, машина сама
+    не одобряет ничего (Р2), а запирать домен из-за ТРАНЗИЕНТНОГО сбоя архива значило бы
     завести ту самую тихую ловушку, от которой ветка избавлялась. Но сказать правду в строке —
     обязан."""
-    _add(domain="stale.ru", status="scored", score=0.825, wayback_checked=True,
+    _add(domain="stale.ru", status="scored", score=0.825, wayback_checked=True, age_years=10.0,
          prior_flags=_CLEAN_FLAGS, score_breakdown={"errors": ["wayback:RuntimeError"]})
     assert client.get("/domains/bulk-preview?min_score=0.8").json() == {"n": 1, "skipped": 0}
     html = client.get("/domains").text

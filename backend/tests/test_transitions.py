@@ -144,7 +144,7 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
         "tci": type("T", (), {"handles": lambda self, d: False})(),
     }
     out = scoring.score_domain(did, clients=clients)
-    assert out["reject_reason"] is None and out["status"] in ("approved", "scored")
+    assert out["reject_reason"] is None and out["status"] == "scored"
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert dirty_reason(d) is None                    # улики переписаны — домен снова чист

@@ -1,7 +1,7 @@
 """M1b — Domain/donor scoring. Implements the funnel in docs/DONORS.md on the FREE stack.
 
 Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo (SearXNG)
--> composite score + breakdown -> status approved | scored(manual) | rejected.
+-> composite score + breakdown -> status scored | rejected (`approved` ставит только человек).
 `compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
 """
 import logging
@@ -74,9 +74,10 @@ FUNNEL_STAGES = [
     {"key": "ahrefs", "label": "Ahrefs (платно)"},
 ]
 
-# Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Гарды в _decide не дают авто-approve
-# без Wayback — домен уходит в scored, то есть В ИНБОКС К ЧЕЛОВЕКУ, и там неотличим от честно
-# проверенного. Человек штампует непроверенное, думая, что машина посмотрела историю.
+# Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Авто-одобрения нет (Р2): любой домен
+# уходит в scored, то есть В ИНБОКС К ЧЕЛОВЕКУ, и без пометки там неотличим от честно
+# проверенного. Человек штампует непроверенное, думая, что машина посмотрела историю, — поэтому
+# пометка «вслепую» ещё и исключает домен из пакета (bulk_ok).
 #
 # ИСТОРИИ ЗДЕСЬ НЕТ НАМЕРЕННО: её вердикт считает history_verdict (см. ниже). Раньше она жила
 # тут ключом "wayback" — и это был баг (аудит, F2): «вслепую» выводилось из ФАКТА ОШИБКИ, а
@@ -189,6 +190,11 @@ def blind_reason(d) -> str | None:
             return _BLIND_WHOIS_ARCHIVE_AGE
         if head in _BLIND_RU:
             return _BLIND_RU[head]
+    # Возраста не дал никто: ни RDAP/whois (`whois_created`), ни архив (`first_seen`/`age_years`)
+    # — гейт «слишком молодой» не применялся ни разу. Раньше это держал гард _decide; авто-
+    # одобрения больше нет (Р2), и единственная защита — пакет такой домен не берёт.
+    if d.whois_created is None and d.first_seen is None and d.age_years is None:
+        return "возраст НЕ проверен: возраста нет ни из RDAP/whois, ни из архива"
     return None
 
 
@@ -202,8 +208,8 @@ def history_note(d) -> str | None:
 
     Почему НЕ блокирует (и почему эта пометка живёт рядом с `blind_reason`, а не внутри него):
     вердикт опирается на РЕАЛЬНЫЕ прошлые улики, они сохранены и показываются строкой ниже, а
-    авто-approve по-прежнему гардится по `sig` ТЕКУЩЕГО прогона (`_decide`) — машина такой домен
-    сама не одобрит. Запирать его от пакетного одобрения из-за ТРАНЗИЕНТНОГО сбоя архива значило
+    сама машина не одобряет ничего (Р2) — решает человек, видя эту пометку. Запирать домен от
+    пакетного одобрения из-за ТРАНЗИЕНТНОГО сбоя архива значило
     бы завести ровно ту тихую ловушку, от которой ветка избавлялась: домены, помеченные сетевым
     чихом, копятся навсегда и никем не разбираются.
     """
@@ -232,97 +238,62 @@ def bulk_ok(d) -> bool:
     return history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
 
 
-def _decide(score: float, sig: dict, approve_at: float, manual_review_at: float) -> str:
-    """Pure: score threshold -> status, plus the two invariant downgrade guards below.
-    Factored out (2026-07 review, Finding 1) so BOTH `compute_score` (static cfg.DECISION)
-    and `score_domain` (runtime /settings thresholds) decide through the same logic — the
-    live sliders used to only move preview counters, never the actual stored status."""
-    status = ("approved" if score >= approve_at
-              else "scored" if score >= manual_review_at
-              else "rejected")
-    # core invariant (CLAUDE.md): never AUTO-approve a domain whose history we could not
-    # verify — a successful Wayback pass is mandatory. If it failed/absent, downgrade to
-    # manual review. (Emergent from the weights today, but pinned so reweighting can't break it.)
-    if status == "approved" and not sig.get("wayback_checked"):
-        status = "scored"
-    # risk-guard: если проверка RKN, blacklist или SafeBrowsing упала (ключ сигнала
-    # отсутствует, ошибка осела в errors), нельзя подтверждать чистоту автоматом —
-    # уводим в ручной `scored`.
-    if status == "approved" and any(
-            e.startswith(("rkn:", "blacklist:", "safebrowsing:"))
-            for e in (sig.get("errors") or [])):
-        status = "scored"
-    # whois-guard (аудит F6, доведён ревью Задачи 4): whois УПАЛ — гардим по САМОМУ ОТКАЗУ,
-    # тем же механизмом, что кормит бейдж «оценён вслепую», а не по `age_years is None`.
-    #
-    # Почему не по возрасту. Возраст, не добытый whois'ом, ДОБИРАЕТСЯ из Wayback (_funnel:
-    # first_seen -> age_years), и это законно: первый снимок не раньше регистрации, значит для
-    # гейта «слишком молодой» архивный возраст — консервативная НИЖНЯЯ оценка, она годится.
-    # Но упавший whois означает ещё и «мы не знаем, СВОБОДЕН ли домен вообще» (`available`) —
-    # а это ВТОРОЙ, независимый гейт воронки (лейн/`not_acquirable`). Его подменить нечем.
-    # Поэтому отказ whois снимает право на авто-approve ДАЖЕ когда возраст известен иначе —
-    # ровно тот случай, что утекал живьём: clara-c.ru (RD 2219, возраст из архива 16 лет,
-    # score 0.87) авто-одобрялся с бейджем «оценён вслепую» на лбу.
-    if status == "approved" and any(
-            e.startswith("whois:") for e in (sig.get("errors") or [])):
-        status = "scored"
-    # Страховка на будущее переутяжеление весов: возраст НЕИЗВЕСТЕН вообще (whois молчит И
-    # архив пуст) — значит гейт `too_young` не применялся ни разу, сравнивать было не с чем.
-    # Балл его не подстраховывает: `age` весит 0.18, и домен без возраста, но с проверенной
-    # историей + RD за потолком + эхом набирает ровно 0.70 == approve_at. Сегодня эта ветка
-    # недостижима (пустой архив -> wayback_checked=False -> уже сработал гард выше), и это
-    # правильно: инвариант должен пережить перенастройку весов, а не зависеть от неё.
-    if status == "approved" and sig.get("age_years") is None:
-        status = "scored"
-    return status
+def _decide(score: float, sig: dict, manual_review_at: float) -> str:
+    """Pure: score -> 'scored' | 'rejected'. АВТО-ОДОБРЕНИЯ НЕТ (решение оператора Р2,
+    инвариант 9 мастер-спеки): `approved` ставит только человек — кнопкой или пакетом.
+
+    Гарды, которые раньше жили здесь (Wayback не проверен, whois/РКН/блэклист упали, возраст
+    неизвестен), переехали в bulk_ok через blind_reason: домен с такой дырой доезжает до
+    инбокса как `scored` с пометкой «оценён вслепую», и пакет его не берёт. `sig` в сигнатуре
+    оставлен: compute_score и _commit_result решают одним вызовом."""
+    return "scored" if score >= manual_review_at else "rejected"
 
 
 def compute_score(sig: dict, weights: dict | None = None) -> dict:
-    """Pure: signals -> {score, status, breakdown}. No I/O. See scoring_config for knobs.
+    """Pure: signals -> {score, status, breakdown}. No I/O. v2 — docs/v2/02-…-spec.md §3.2.
 
-    `weights` — рантайм-веса с /settings (None -> дефолты из scoring_config). Сумма НЕ обязана
-    быть 1.0: нормируем на неё, иначе оператор, подвинувший один ползунок, незаметно менял бы
-    масштаб всей шкалы 0..1 — и пороги approve/manual начали бы значить не то, что показывают.
+    `weights` — рантайм-веса с /settings (None -> scoring_config.WEIGHTS); нормируем на сумму,
+    чтобы шкала 0..1 и пороги не «плыли» от сдвига одного ползунка. Сигнал, которого нет
+    (W5/W6 не дошли или не смогли), — нейтральные 0.5, а не 0: «не знаем» не равно «плохо».
+    Статус — только `scored`/`rejected` (_decide): одобряет человек, а домен с непроверенным
+    сигналом пакет не возьмёт (bulk_ok/blind_reason).
     """
     pf = sig.get("prior_flags") or {}
-
-    # --- hard rejects (Stage E) ---
-    #
-    # Здесь БЫЛИ ещё две ветки отказа, и обе удалены как призраки (аудит 2026-07-14):
-    #   · `trademark_risk` (F5) — читался из БД, но НИ ОДИН код его не вычислял: ни расчёта, ни
-    #     формы, ни импорта. Значение всегда NULL, ветка мертва. Гейт, который выглядит рабочим
-    #     и не работает, опаснее отсутствующего: он врёт куратору, что юр-риск проверен. Считать
-    #     его вслепую по докстрингу — ровно та ошибка, что похоронила cctld-источник, поэтому
-    #     ветка снята, а колонка `Domain.trademark_risk` оставлена (данные не рушим).
-    #   · `topic_switch` (F4) — строгое подмножество категорийного отказа ниже: см. wayback.py,
-    #     флаг больше не производится.
     reasons = []
-    if sig.get("rkn_listed"):
-        reasons.append("rkn_listed")
     if sig.get("blacklisted") is True:
         reasons.append("blacklisted")
+    if sig.get("webrisk_threats"):
+        reasons.append("webrisk")
+    if sig.get("trademark_risk"):
+        reasons.append("trademark")
     reasons += [f"prior_{c}" for c in cfg.HARD_REJECT_FLAGS if pf.get(c)]
     if reasons:
         return {"score": 0.0, "status": "rejected", "breakdown": {"hard_reject": reasons}}
 
-    # --- composite (Stage F) ---
     n = cfg.NORM
+
+    def _log(v, full):
+        return _clamp(math.log10((v or 0) + 1) / math.log10(full + 1))
+
+    rd = sig.get("referring_domains") or 0
+    subnets = sig.get("ref_subnets")
+    pbn = subnets is not None and rd >= cfg.PBN_MIN_RD and subnets / rd < cfg.PBN_SUBNET_RATIO
+    tr, spam, peak = sig.get("topical_relevance"), sig.get("spam_anchor_ratio"), sig.get("peak_traffic")
     comp = {
-        # spam (как и остальная грязная история) уже отсеян hard-reject'ом выше —
-        # уцелевший домен чист: полный балл при проверенной истории, половина при непроверенной.
         "history_cleanliness": 1.0 if sig.get("wayback_checked") else 0.5,
-        "authority": _clamp((sig.get("dr") or 0.0) / n["DR_FULL"]),
+        "topical_fit": _clamp(float(tr)) if tr is not None else 0.5,
         "age": _clamp((sig.get("age_years") or 0.0) / n["AGE_FULL"]),
-        "rd_proxy": _clamp(math.log10((sig.get("referring_domains") or 0) + 1)
-                           / math.log10(n["RD_FULL"] + 1)),
-        "indexed_echo": 1.0 if sig.get("indexed_echo") else 0.0,
+        "rd": _log(rd, n["RD_FULL"]) * (0.5 if pbn else 1.0),
+        "authority": _clamp(float(sig.get("dr") or 0.0) / n["DR_FULL"]),
+        "anchor_quality": 1.0 - _clamp(float(spam)) if spam is not None else 0.5,
+        "traffic_history": _log(peak, n["TRAFFIC_FULL"]) if peak is not None else 0.5,
     }
     w = {k: float(v) for k, v in (weights or cfg.WEIGHTS).items() if k in comp}
     norm = sum(w.values()) or 1.0
     score = round(_clamp(sum(w[k] * comp[k] for k in w) / norm), 4)
-    status = _decide(score, sig, cfg.DECISION["approve_at"], cfg.DECISION["manual_review_at"])
+    status = _decide(score, sig, cfg.DECISION["manual_review_at"])
     return {"score": score, "status": status,
-            "breakdown": {"components": comp, "weights": w}}
+            "breakdown": {"components": comp, "weights": w, "pbn_suspect": pbn}}
 
 
 def _make_clients() -> dict:
@@ -1087,8 +1058,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
             result = compute_score(sig, st.get("weights"))
             if "hard_reject" not in result["breakdown"]:
-                result = {**result, "status": _decide(result["score"], sig,
-                                                      st["approve_at"], st["manual_review_at"])}
+                result = {**result, "status": _decide(result["score"], sig, st["manual_review_at"])}
 
         # СИГНАЛЫ ПИШЕМ ТОЛЬКО ИЗ ПРОВЕРОК, КОТОРЫЕ В ЭТОМ ПРОГОНЕ РЕАЛЬНО ОТРАБОТАЛИ —
         # НЕ blind overwrite. Воронка выходит рано на разных волнах (T0 не зовёт вообще
@@ -1198,26 +1168,25 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
 
 
 if __name__ == "__main__":  # pure-function self-check (no I/O)
-    # clean old domain -> manual review at least
-    clean = compute_score({"wayback_checked": True, "prior_flags": {},
-                           "dr": 4.0, "age_years": 10, "referring_domains": 30,
-                           "indexed_echo": True})
-    assert clean["status"] in ("approved", "scored"), clean
-    # casino history -> hard reject
+    # чистый старый домен с хорошими ссылками -> scored (одобряет только человек, Р2)
+    clean = compute_score({"wayback_checked": True, "prior_flags": {}, "dr": 20.0,
+                           "age_years": 10, "referring_domains": 800, "ref_subnets": 600})
+    assert clean["status"] == "scored", clean
+    # казино в истории -> жёсткий отказ
     dirty = compute_score({"wayback_checked": True, "prior_flags": {"casino": True},
                            "dr": 9.0, "age_years": 15, "referring_domains": 500})
     assert dirty["status"] == "rejected" and dirty["score"] == 0.0, dirty
-    # RKN -> hard reject regardless of quality
-    rkn = compute_score({"rkn_listed": True, "dr": 6, "age_years": 12,
-                         "referring_domains": 200, "wayback_checked": True, "prior_flags": {}})
-    assert rkn["status"] == "rejected", rkn
-    # empty/unknown -> low score, rejected
+    # угроза Web Risk -> жёсткий отказ при любом качестве
+    risky = compute_score({"webrisk_threats": ["MALWARE"], "dr": 40.0, "age_years": 12,
+                           "referring_domains": 2000, "wayback_checked": True, "prior_flags": {}})
+    assert risky["status"] == "rejected", risky
+    # пусто/неизвестно -> низкий балл, отказ
     empty = compute_score({})
     assert empty["status"] == "rejected", empty
-    # INVARIANT: unverified history never auto-approves, even with huge RD
+    # ИНВАРИАНТ (Р2): никакой сигнал не даёт `approved` — даже непроверенная история с огромным RD
     unverified = compute_score({"referring_domains": 5000, "wayback_checked": False,
                                 "prior_flags": {}})
     assert unverified["status"] != "approved", unverified
-    # weights sum to 1.0
+    # веса в сумме 1.0
     assert abs(sum(cfg.WEIGHTS.values()) - 1.0) < 1e-9
-    print("scoring compute_score ok:", clean["score"], dirty["score"], rkn["score"], empty["score"])
+    print("scoring compute_score ok:", clean["score"], dirty["score"], risky["score"], empty["score"])

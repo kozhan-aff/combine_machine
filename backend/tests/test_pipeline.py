@@ -48,7 +48,7 @@ def test_scoring_persists_and_jsonb_roundtrips():
     from datetime import datetime, timezone, timedelta
     old = datetime.now(timezone.utc) - timedelta(days=365 * 10)   # старше min_age_years -> проходит T1
     out = scoring.score_domain(did, clients=_funnel_clients(old))
-    assert out["status"] in ("approved", "scored")
+    assert out["status"] == "scored"
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.score is not None and d.status == out["status"]
