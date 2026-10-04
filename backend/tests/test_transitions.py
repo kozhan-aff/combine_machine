@@ -46,7 +46,7 @@ def test_dirty_reason_sees_verdict_and_raw_signals():
     def d(**kw):
         return NS(**{"domain": "x.ru", "status": "rejected", "reject_reason": None,
                      "rkn_listed": None, "blacklisted": None, "prior_flags": {},
-                     "wayback_checked": True, **kw})
+                     "wayback_checked": True, "score_breakdown": None, **kw})
 
     assert dirty_reason(d(reject_reason="rkn")) == "rkn"
     assert dirty_reason(d(reject_reason="history_dirty")) == "history_dirty"
@@ -54,6 +54,7 @@ def test_dirty_reason_sees_verdict_and_raw_signals():
     assert dirty_reason(d(reject_reason="safebrowsing")) == "safebrowsing"
     assert dirty_reason(d(rkn_listed=True)) == "rkn"              # вердикт стёрли, сигнал остался
     assert dirty_reason(d(blacklisted=True)) == "blacklist"
+    assert dirty_reason(d(score_breakdown={"webrisk_threats": ["MALWARE"]})) == "blacklist"   # 1.5
     assert dirty_reason(d(prior_flags={"casino": True})) == "history_dirty"
     # НЕ грязь: порог крутится на /settings, «занят» — чужая покупка, «не проверяли» — не факт
     assert dirty_reason(d(reject_reason="low_score")) is None
@@ -70,7 +71,7 @@ def test_manual_transition_checks_source_status_not_only_target():
     def d(status, **kw):
         return NS(**{"domain": "x.com", "status": status, "reject_reason": None,
                      "rkn_listed": None, "blacklisted": None, "prior_flags": {},
-                     "wayback_checked": True, **kw})
+                     "wayback_checked": True, "score_breakdown": None, **kw})
 
     check(d("scored"), "approved")                     # гейт курации — законный переход
     check(d("approved"), "purchased")                    # «купил руками» — денежный гейт человека
@@ -121,12 +122,15 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
 
     Единственный путь обратно в оборот — перескор: воронка берёт домены из `rejected`, и если
     проверки сегодня говорят «чист», она сама чистит `reject_reason` и сигналы. Реабилитацию
-    даёт машина по новым уликам, а не человек по настроению.
+    даёт машина по новым уликам, а не человек по настроению. (v2: РКН-проверки больше нет, путь
+    назад показан на Spamhaus — он в воронке только с DQS-ключом.)
     """
+    from app.config import settings
     from app.services import scoring
     from app.services.transitions import dirty_reason
 
-    did = _add(domain="unblocked.com", status="rejected", reject_reason="rkn", rkn_listed=True,
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")
+    did = _add(domain="unblocked.com", status="rejected", reject_reason="blacklist", blacklisted=True,
                lane="bid", referring_domains=300)
 
     class _WB:
@@ -136,9 +140,8 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
                     "first_seen": None, "age_years": None}
     clients = {
         "wayback": _WB(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),        # РКН разблокировал
-        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),   # из списка вышел
+        "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": False, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
     }
@@ -147,7 +150,7 @@ def test_rescoring_is_the_honest_way_back(monkeypatch):
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert dirty_reason(d) is None                    # улики переписаны — домен снова чист
-        assert d.rkn_listed is False
+        assert d.blacklisted is False
 
 
 # --- РЕГРЕССИЯ 2: грязный домен в очереди выкупа --------------------------------
@@ -446,9 +449,8 @@ def _clients(**over):
         "wayback": type("W", (), {"classify_history": lambda self, d: {
             "prior_flags": {}, "wayback_checked": True, "sampled": 3, "evidence": [],
             "first_seen": None, "age_years": None}})(),
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
         "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
+        "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
         "aparser": type("A", (), {"whois_probe": lambda self, d: {
             "available": True, "created": datetime(2008, 1, 1, tzinfo=timezone.utc)}})(),
     }
@@ -510,18 +512,45 @@ def test_rescore_t0_exit_does_not_erase_history_evidence():
         assert d.score_breakdown["history_evidence"] == [{"url": "casino-lowrd.com", "when": "2015"}]
 
 
-def test_rescore_that_actually_ran_the_checks_still_rehabilitates():
+def test_rescore_that_actually_ran_the_checks_still_rehabilitates(monkeypatch):
     """ЧТО ЛОМАЕТСЯ от запрета стирать улики: НИЧЕГО у настоящей реабилитации.
 
     Проверка, которая ОТРАБОТАЛА и сказала «чист», кладёт False — и домен выходит из грязи.
     Правило звучит «не стирай непроверенное», а не «не верь проверкам».
     """
+    from app.config import settings
     from app.services import scoring, transitions
 
-    did = _add(domain="unblocked2.com", status="rejected", reject_reason="rkn", rkn_listed=True,
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")     # Spamhaus в воронке — только с DQS
+    did = _add(domain="unblocked2.com", status="rejected", reject_reason="blacklist", blacklisted=True,
                lane="bid", referring_domains=300)
     out = scoring.score_domain(did, clients=_clients())
     assert out["reject_reason"] is None
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
-        assert d.rkn_listed is False and transitions.dirty_reason(d) is None
+        assert d.blacklisted is False and transitions.dirty_reason(d) is None
+
+
+def test_rescore_with_webrisk_failure_does_not_launder_the_threat():
+    """1.5: угроза Web Risk живёт в score_breakdown.webrisk_threats. Перескор, на котором Web Risk
+    УПАЛ, её не проверял — и стереть не вправе: домен доезжает до `scored`, но остаётся грязным и
+    кнопкой в оборот не возвращается."""
+    from app.services import scoring, transitions
+
+    class _WRDown:
+        configured = True
+
+        def threats(self, d):
+            raise RuntimeError("webrisk down")
+
+    did = _add(domain="malware-once.com", status="rejected", reject_reason="blacklist",
+               lane="bid", referring_domains=300, score=0.0,
+               score_breakdown={"webrisk_threats": ["MALWARE"], "errors": []})
+    out = scoring.score_domain(did, clients=_clients(webrisk=_WRDown()))
+    assert out["reject_reason"] is None and "webrisk:RuntimeError" in out["errors"]
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.score_breakdown["webrisk_threats"] == ["MALWARE"]     # улику не стёрли
+        assert transitions.dirty_reason(d) == "blacklist"
+        with pytest.raises(transitions.TransitionDenied):
+            transitions.check(d, "approved")

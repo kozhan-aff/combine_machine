@@ -1,6 +1,6 @@
 """M1b — Domain/donor scoring. Implements the funnel in docs/DONORS.md on the FREE stack.
 
-Order: pre-filter -> history (Wayback) -> risk (RKN, blacklist) -> indexed_echo (SearXNG)
+Order: t0 (зоны/бренды) -> avail (RDAP/whois) -> risk (Web Risk, Spamhaus с DQS) -> history (Wayback)
 -> composite score + breakdown -> status scored | rejected (`approved` ставит только человек).
 `compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
 """
@@ -8,7 +8,6 @@ import logging
 import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -62,14 +61,11 @@ def _jsonable(v):
     return v
 
 
-# Чипы волн в панели: ключ -> подпись. Порядок = порядок волн в _run_waves. "эхо" сюда
-# больше не входит отдельным чипом (2026-07-20, волновая архитектура): indexed_echo —
-# та же сетевая волна, что РКН/блэклист/SafeBrowsing (см. _wave_risk), отдельного прохода
-# у него никогда не было даже в старом _funnel — просто раньше это не было видно оператору.
+# Чипы волн в панели: ключ -> подпись. Порядок = порядок волн в _run_waves (таблица `waves`).
 FUNNEL_STAGES = [
     {"key": "t0", "label": "фильтры (зона/бренд)"},
     {"key": "avail", "label": "доступность (RDAP/whois)"},
-    {"key": "risk", "label": "РКН/блэклист/эхо"},
+    {"key": "risk", "label": "риск (Web Risk)"},
     {"key": "history", "label": "Wayback-история"},
     {"key": "ahrefs", "label": "Ahrefs (платно)"},
 ]
@@ -94,10 +90,8 @@ _BLIND_RU = {
     # префикс `age:unverified` (_history_one): Wayback не ответил, а по RDAP/whois домен моложе порога
     "age": "возраст НЕ проверен: архив не ответил, а по RDAP домен моложе порога",
     "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
-    "rkn": "РКН НЕ проверен: реестр не ответил",
+    "webrisk": "риск НЕ проверен: Web Risk не настроен или не ответил",
     "blacklist": "блэклист НЕ проверен",
-    "safebrowsing": "Google Safe Browsing НЕ проверен: сервис не ответил",
-    "searxng": "эхо в индексе НЕ проверено",
 }
 
 # whois упал, но возраст всё-таки известен — из Wayback (`age_source='wayback'`, фолбэк в
@@ -303,16 +297,15 @@ def _make_clients() -> dict:
     Локи — для предохранителей под конкурентностью волн (services/whois.py): счётчики сбоев
     живут на инстансах клиентов и меняются из 12 потоков волны."""
     from app.integrations.wayback import WaybackClient
-    from app.integrations.rkn import RknClient
     from app.integrations.blacklist import BlacklistClient
-    from app.integrations.searxng import SearxngClient
     from app.integrations.aparser import AParserClient
     from app.integrations.rdap import RdapClient
+    from app.integrations.webrisk import WebRiskClient
     return {
-        "wayback": WaybackClient(), "rkn": RknClient(), "blacklist": BlacklistClient(),
-        "searxng": SearxngClient(), "aparser": AParserClient(), "rdap": RdapClient(),
+        "wayback": WaybackClient(), "blacklist": BlacklistClient(), "webrisk": WebRiskClient(),
+        "aparser": AParserClient(), "rdap": RdapClient(),
         "_whois_lock": threading.Lock(), "_rdap_lock": threading.Lock(),
-        "_safebrowsing_lock": threading.Lock(),
+        "_webrisk_lock": threading.Lock(),
     }
 
 
@@ -388,17 +381,6 @@ def scorable(now):
              or_(Domain.acquirability_checked_at.is_(None),
                  Domain.acquirability_checked_at < now - RECHECK_EVERY)),
     )
-
-
-# После скольких сбоев ПОДРЯД safebrowsing_check (A-Parser) перестаём его звать до конца
-# прогона. Живой инцидент 2026-07-20: A-Parser упал, а BaseClient.request ретраит каждый
-# transport-сбой 3 раза с exponential backoff (~30 с) — T2, задуманный как «средний» по
-# цене, платил полный ретрай-шторм НА КАЖДЫЙ домен, доживший до risk-стадии (whois уже
-# летал через TCI за 30 мс). Снаружи это выглядело как «воронка снова ходит по кругу всеми
-# инструментами разом» — на самом деле один сломанный T2-вызов маскировался под нормальную
-# стоимость этапа. Счётчик живёт на самом клиенте (как TciWhoisClient.consecutive_failures),
-# клиент создаётся заново на каждый прогон (_make_clients()) — предохранитель не переживает свип.
-_APARSER_SAFEBROWSING_LIMIT = 3
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
@@ -860,69 +842,51 @@ def _wave_avail(states: list, clients: dict, budget, st: dict, run) -> None:
                     lambda s: _avail_one(s, clients, budget, st))
 
 
-def _risk_one(s: FunnelState, clients: dict, sb_lock) -> None:
-    """Тело T2 для ОДНОГО домена: РКН -> блэклист -> SafeBrowsing (с предохранителем,
-    та же схема, что _APARSER_SAFEBROWSING_LIMIT в _funnel) -> indexed_echo. Прямой
-    перенос scoring.py T2 (было строки 572-616): rkn/blacklist отбраковывают, echo — нет."""
-    cm = sb_lock if sb_lock is not None else nullcontext()
-    try:
-        s.sig["rkn_listed"] = clients["rkn"].is_listed(s.domain)
-        if s.sig["rkn_listed"]:
-            s.reject_reason = "rkn"
-            s.alive = False
-            return
-    except Exception as e:  # noqa: BLE001
-        s.sig["errors"].append(f"rkn:{type(e).__name__}")
-    try:
-        s.sig["blacklisted"] = clients["blacklist"].is_blacklisted(s.domain)
-        if s.sig["blacklisted"] is True:
-            s.reject_reason = "blacklist"
-            s.alive = False
-            return
-    except Exception as e:  # noqa: BLE001
-        s.sig["errors"].append(f"blacklist:{type(e).__name__}")
-    if s.sig.get("blacklisted") is None and "blacklisted" in s.sig:
-        s.sig["errors"].append("blacklist:unavailable")
+def _risk_one(s: FunnelState, clients: dict) -> None:
+    """W3 для ОДНОГО домена. Web Risk — коммерчески легальная замена Safe Browsing (тот «for
+    non-commercial use only»). Без ключа проверку НЕ делаем и честно пишем «не настроено»: домен
+    едет дальше, но «вслепую» — пакет его не возьмёт. Spamhaus DBL — только с платным DQS-ключом:
+    бесплатное зеркало для коммерции запрещено (docs/v2/research/metrics-history.md).
 
-    ap = clients["aparser"]
-    with cm:
-        breaker_open = getattr(ap, "safebrowsing_failures", 0) >= _APARSER_SAFEBROWSING_LIMIT
-    if breaker_open:
-        s.sig["errors"].append("safebrowsing:circuit_open")
+    Угроза Web Risk НЕ пишется в колонку `blacklisted` (находка 1.5): та — сигнал Spamhaus, и без
+    DQS её никто бы не перепроверил и не снял. Улика живёт в `score_breakdown.webrisk_threats`
+    (_commit_result хранит её через _kept) — по ней transitions.dirty_reason держит домен грязным,
+    и перескор, на котором Web Risk упал, угрозу не отмывает. Лежащий Web Risk — предохранитель
+    «3 сбоя подряд» (whois.guarded): дальше `webrisk:circuit_open` без сети до конца прогона."""
+    from app.config import settings
+    wr = clients.get("webrisk")
+    if wr is None or not wr.configured:
+        s.sig["errors"].append("webrisk:not_configured")
     else:
         try:
-            s.sig["safebrowsing_flagged"] = ap.safebrowsing_check(s.domain)
-            with cm:
-                ap.safebrowsing_failures = 0
-            if s.sig["safebrowsing_flagged"] is True:
-                s.reject_reason = "safebrowsing"
-                s.alive = False
+            threats = whois_router.guarded(wr, "threat_failures", lambda: wr.threats(s.domain),
+                                           "Google Web Risk", clients.get("_webrisk_lock"))
+        except Exception as e:  # noqa: BLE001 — сбой проверки не приговор домену, но «вслепую»
+            code = "circuit_open" if isinstance(e, whois_router.CircuitOpen) else type(e).__name__
+            s.sig["errors"].append(f"webrisk:{code}")
+        else:
+            s.sig["webrisk_threats"] = threats
+            if threats:
+                s.reject_reason, s.alive = "blacklist", False
                 return
+    bl = clients.get("blacklist")
+    if bl is not None and settings.SPAMHAUS_DQS_KEY:
+        try:
+            listed = bl.is_blacklisted(s.domain)
         except Exception as e:  # noqa: BLE001
-            s.sig["errors"].append(f"safebrowsing:{type(e).__name__}")
-            with cm:
-                ap.safebrowsing_failures = getattr(ap, "safebrowsing_failures", 0) + 1
-                tripped = ap.safebrowsing_failures >= _APARSER_SAFEBROWSING_LIMIT
-            if tripped:
-                logging.getLogger(__name__).warning(
-                    "A-Parser SafeBrowsing: %d сбоев подряд — предохранитель сработал, "
-                    "до конца прогона пропускается", _APARSER_SAFEBROWSING_LIMIT)
-        if s.sig.get("safebrowsing_flagged") is None and "safebrowsing_flagged" in s.sig:
-            s.sig["errors"].append("safebrowsing:unavailable")
-
-    try:
-        s.sig["indexed_echo"] = clients["searxng"].indexed_echo(s.domain)
-    except Exception as e:  # noqa: BLE001
-        s.sig["errors"].append(f"searxng:{type(e).__name__}")
+            s.sig["errors"].append(f"blacklist:{type(e).__name__}")
+        else:
+            if listed is None:
+                s.sig["errors"].append("blacklist:unavailable")
+            else:
+                s.sig["blacklisted"] = listed
+                if listed:
+                    s.reject_reason, s.alive = "blacklist", False
 
 
 def _wave_risk(states: list, clients: dict, run) -> None:
-    """T2 — РКН/блэклист/SafeBrowsing/эхо, конкурентно на весь выживший после whois пул.
-    Эхо не отбраковывает (сигнал score, не гейт), но живёт в этой же волне — тот же
-    сетевой поход, отдельный пул был бы лишней сложностью без причины."""
-    lock = clients.get("_safebrowsing_lock")
-    _run_concurrent(states, _CONCURRENCY["risk"], run, "risk",
-                    lambda s: _risk_one(s, clients, lock))
+    """W3 — Web Risk (+ Spamhaus при DQS), конкурентно на весь выживший после avail пул."""
+    _run_concurrent(states, _CONCURRENCY["risk"], run, "risk", lambda s: _risk_one(s, clients))
 
 
 def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
@@ -1061,8 +1025,8 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # новым уликам», а по их ОТСУТСТВИЮ. Отсутствие значения — «не проверяли», оно не
         # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
-                    "wayback_checked", "first_seen", "age_years", "rkn_listed", "blacklisted",
-                    "indexed_echo", "dr", "referring_domains", "trademark_risk"):
+                    "wayback_checked", "first_seen", "age_years", "blacklisted",
+                    "dr", "referring_domains", "trademark_risk"):
             v = sig.get(col)
             if v is not None:
                 setattr(d, col, v)
@@ -1084,7 +1048,8 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "history_evidence": _kept("history_evidence") or [],
                              "sampled": _kept("sampled"),
                              "age_source": _kept("age_source"),
-                             "whois_source": _kept("whois_source")}
+                             "whois_source": _kept("whois_source"),
+                             "webrisk_threats": _kept("webrisk_threats")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку ДО РЕШЕНИЯ — unresolved-возврат

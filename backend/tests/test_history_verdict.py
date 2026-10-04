@@ -36,7 +36,8 @@ def _clients(wayback, created):
         def is_blacklisted(self, dom): return False
     class _S:
         def indexed_echo(self, dom): return True
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback}
+    return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(), "wayback": wayback,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
 
 
 # ---- вердикт ----
@@ -74,10 +75,10 @@ def test_verdict_dirty_beats_missing_check():
 
 
 def test_blind_reason_still_names_dead_checks():
-    """РКН/блэклист/эхо остались «вслепую» по errors — история их не поглотила."""
-    d = Domain(domain="r.ru", wayback_checked=True, prior_flags=_CLEAN_FLAGS,
-               score_breakdown={"errors": ["rkn:ConnectError"]})
-    assert "РКН" in scoring.blind_reason(d)
+    """Web Risk/блэклист остались «вслепую» по errors — история их не поглотила."""
+    d = Domain(domain="r.com", wayback_checked=True, prior_flags=_CLEAN_FLAGS, age_years=10.0,
+               score_breakdown={"errors": ["webrisk:ConnectError"]})
+    assert "Web Risk" in scoring.blind_reason(d)
 
 
 # ---- пакетное одобрение ----

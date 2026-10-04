@@ -108,6 +108,10 @@ def dirty_reason(d) -> str | None:
         return "rkn"
     if d.blacklisted is True:                            # None = «не проверяли», это не грязь
         return "blacklist"
+    # Угроза Web Risk — улика из score_breakdown, а не из колонки `blacklisted` (её Web Risk не
+    # пишет, находка 1.5): перескор, на котором Web Risk упал, её не стирает (_kept).
+    if (d.score_breakdown or {}).get("webrisk_threats"):
+        return "blacklist"
     if history_verdict(d) == "dirty":
         return "history_dirty"
     return None
@@ -175,17 +179,20 @@ def set_status(d, target: str) -> None:
 if __name__ == "__main__":  # self-check без БД: политика чистая, ORM ей не нужен
     from types import SimpleNamespace as NS
 
-    rkn = NS(domain="bad.ru", status="rejected", reject_reason="rkn",
-             rkn_listed=True, blacklisted=None, prior_flags={}, wayback_checked=True)
-    weak = NS(domain="weak.com", status="rejected", reject_reason="low_score",
-              rkn_listed=False, blacklisted=None, prior_flags={}, wayback_checked=True)
+    rkn = NS(domain="bad.ru", status="rejected", reject_reason="rkn", rkn_listed=True,
+             blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown={})
+    weak = NS(domain="weak.com", status="rejected", reject_reason="low_score", rkn_listed=False,
+              blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown={})
     assert dirty_reason(rkn) == "rkn" and dirty_reason(weak) is None
+    # угроза Web Risk — грязь по улике в score_breakdown (находка 1.5)
+    assert dirty_reason(NS(**{**vars(weak), "score_breakdown": {"webrisk_threats": ["MALWARE"]}})) \
+        == "blacklist"
     try:
-        check(rkn, "approved", allowlist=["com", "ru"])   # зона разрешена: отказ именно по грязи
+        check(rkn, "approved", allowlist=["com"])
         raise AssertionError("грязь обязана быть отвергнута")
     except TransitionDenied:
         pass
-    check(weak, "approved", allowlist=["com", "ru"])    # отсеянный ПОРОГОМ домен возвращается руками
+    check(weak, "approved", allowlist=["com"])    # отсеянный ПОРОГОМ домен возвращается руками
     try:
         check(NS(**{**vars(weak), "domain": "weak.ru"}), "approved", allowlist=["com"])
         raise AssertionError("зона вне белого списка обязана быть отвергнута")
@@ -193,7 +200,8 @@ if __name__ == "__main__":  # self-check без БД: политика чист�
         pass
     try:
         check(NS(domain="raw.ru", status="discovered", reject_reason=None, rkn_listed=None,
-                 blacklisted=None, prior_flags={}, wayback_checked=True), "purchased")
+                 blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown={}),
+              "purchased")
         raise AssertionError("покупка сырья мимо воронки обязана быть отвергнута")
     except TransitionDenied:
         pass

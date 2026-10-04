@@ -243,7 +243,8 @@ def _clients(whois, wayback=None):
     class _S:
         def indexed_echo(self, dom): return True
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback or _WaybackAged()}
+            "wayback": wayback or _WaybackAged(),
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
 
 
 def _add(**kw) -> int:

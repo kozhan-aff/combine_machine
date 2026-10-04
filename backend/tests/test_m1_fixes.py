@@ -6,7 +6,6 @@ I3 обрезанный дамп РКН не кэшируется молча; I4
 M-2 retry не ретраит 4xx и отдаёт исходное исключение.
 """
 import socket
-import time as _time
 
 import httpx
 import pytest
@@ -97,11 +96,11 @@ def test_wayback_brands_no_false_positive():
     assert "casino" in _classify_text("вулкан казино играть, азино777 бонус")
 
 
-# ---------- I1: ошибка RKN/blacklist не пускает в пакетное одобрение ----------
+# ---------- I1: ошибка Web Risk/blacklist не пускает в пакетное одобрение ----------
 
-def test_rkn_or_blacklist_error_caps_at_scored():
+def test_webrisk_or_blacklist_error_caps_at_scored():
     """Авто-одобрения нет (Р2): скоринг даёт максимум `scored` и при чистом прогоне. Упавшая
-    проверка РКН/блэклиста держит домен вне ПАКЕТА — туда переехал гард из _decide."""
+    проверка Web Risk/блэклиста держит домен вне ПАКЕТА — туда переехал гард из _decide."""
     from app.models.domain import Domain
     from app.services.scoring import bulk_ok, compute_score
     strong = {"wayback_checked": True, "prior_flags": {}, "age_years": 8,
@@ -110,10 +109,10 @@ def test_rkn_or_blacklist_error_caps_at_scored():
     assert clean["status"] == "scored" and clean["score"] >= 0.70      # сильный, но одобряет человек
 
     def _dom(errors):
-        return Domain(domain="i1.ru", wayback_checked=True, prior_flags={}, age_years=8,
+        return Domain(domain="i1.com", wayback_checked=True, prior_flags={}, age_years=8,
                       score_breakdown={"errors": errors, "history_evidence": []})
     assert bulk_ok(_dom([])) is True                                   # базовая линия: пакет берёт
-    for err in ("rkn:ConnectError", "blacklist:RuntimeError"):
+    for err in ("webrisk:ConnectError", "webrisk:not_configured", "blacklist:RuntimeError"):
         assert compute_score({**strong, "errors": [err]})["status"] == "scored"
         assert bulk_ok(_dom([err])) is False                           # проверка упала — вне пакета
 
@@ -277,66 +276,6 @@ def test_blacklist_ping_uses_dqs_zone_when_key_set(monkeypatch):
     monkeypatch.setattr(socket, "gethostbyname", fake_gethostbyname)
     assert BlacklistClient().ping() is True
     assert seen == ["test.abcd1234efgh5678ijkl9012mn.dbl.dq.spamhaus.net"]
-
-
-# ---------- I3: обрезанный дамп РКН не кэшируется молча ----------
-
-class _FakeResp:
-    def __init__(self, text):
-        self.text = text
-
-
-def test_rkn_small_dump_raises_when_no_cache(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_loaded_at", None)
-    monkeypatch.setattr(RknClient, "_blocked", set())
-    c = RknClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp("a.ru\nb.ru\n"))  # 2 строки
-    with pytest.raises(RuntimeError):
-        c.is_listed("test.ru")
-
-
-def test_rkn_small_dump_keeps_old_cache(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_blocked", {"old-blocked.ru"})
-    monkeypatch.setattr(RknClient, "_loaded_at", _time.monotonic() - 10 ** 9)  # устарел, но не None
-    c = RknClient()
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp("only.ru\n"))   # мал -> не применять
-    assert c.is_listed("old-blocked.ru") is True    # прежний валидный кэш сохранён
-    assert c.is_listed("only.ru") is False          # обрезанный дамп НЕ затёр кэш
-
-
-# ---------- волновая конкурентность (найдено при перепроверке 2026-07-21): _ensure_loaded
-# сериализован локом — иначе 12 потоков _wave_risk видят "кэш холодный" разом и синхронно
-# бьют antizapret по разу каждый. Таймингового теста тут недостаточно (см. сессионный урок
-# про голый += 1 под sleep — не ловит гонку надёжнее угадывания): доказываем детерминированно
-# спай-локом, считающим реальные входы в `with`. ----------
-
-class _SpyLock:
-    def __init__(self, real):
-        self._real = real
-        self.enters = 0
-
-    def __enter__(self):
-        self.enters += 1
-        return self._real.__enter__()
-
-    def __exit__(self, *a):
-        return self._real.__exit__(*a)
-
-
-def test_rkn_ensure_loaded_serialized_by_class_lock(monkeypatch):
-    from app.integrations.rkn import RknClient
-    monkeypatch.setattr(RknClient, "_loaded_at", None)
-    monkeypatch.setattr(RknClient, "_blocked", set())
-    spy = _SpyLock(RknClient._load_lock)
-    monkeypatch.setattr(RknClient, "_load_lock", spy)
-    c = RknClient()
-    dump = "\n".join(f"a{i}.ru" for i in range(1200))
-    monkeypatch.setattr(c, "request", lambda *a, **k: _FakeResp(dump))
-    c._ensure_loaded()
-    assert spy.enters == 1          # проверка условия и сама загрузка — под ОДНИМ входом в лок
-    assert RknClient._loaded_at is not None
 
 
 # ---------- I4: гонка двух discovery не теряет батч ----------

@@ -17,9 +17,9 @@ def test_task10_funnel_stages_has_5_not_6():
     keys = [s["key"] for s in scoring.FUNNEL_STAGES]
     assert keys == ["t0", "avail", "risk", "history", "ahrefs"]
     assert "echo" not in keys
-    # Verify risk label now includes echo
+    # v2: риск — это Google Web Risk (РКН, Safe Browsing и эхо удалены)
     risk_stage = next(s for s in scoring.FUNNEL_STAGES if s["key"] == "risk")
-    assert "эхо" in risk_stage["label"]
+    assert "Web Risk" in risk_stage["label"]
 
 
 def test_task10_job_card_shows_waterfall_for_running_score():

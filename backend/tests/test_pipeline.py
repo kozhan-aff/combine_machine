@@ -19,26 +19,22 @@ def _add(obj):
         return obj.id
 
 
-def _funnel_clients(whois_dt, rkn=False, wb_flags=None):
-    """Мок-клиенты в форме, которую ждёт scoring._funnel (см. test_funnel.py::_clients).
-    _gather_signals больше нет — воронка теперь ступенчатая, поэтому мокаем клиенты, а
-    не внутреннюю функцию сбора сигналов. whois_probe отдаёт «занят, но с датой» —
-    домен-заглушка получает lane="bid" (см. вызовы ниже), чтобы приобретаемость
-    (Task 4) не блокировала гейт T1 до RKN/Wayback."""
+def _funnel_clients(whois_dt, threats=(), wb_flags=None):
+    """Мок-клиенты воронки (см. test_funnel.py::_clients). whois_probe отдаёт «занят, но с датой» —
+    домен-заглушка получает lane="bid" (см. вызовы ниже), чтобы приобретаемость не блокировала
+    W2 до Web Risk/Wayback. threats — ответ Web Risk."""
     class _W:  # aparser
         def whois_probe(self, dom): return {"available": False, "created": whois_dt}
-    class _R:
-        def is_listed(self, dom): return rkn
+    class _WR:
+        configured = True
+        def threats(self, dom): return list(threats)
     class _Bl:
         def is_blacklisted(self, dom): return False
-    class _S:
-        def indexed_echo(self, dom): return True
     class _Wb:
         def classify_history(self, dom):
             return wb_flags or {"prior_flags": {}, "wayback_checked": True,
                                 "first_seen": None, "age_years": 10.0}
-    return {"aparser": _W(), "rkn": _R(), "blacklist": _Bl(), "searxng": _S(),
-            "wayback": _Wb()}
+    return {"aparser": _W(), "webrisk": _WR(), "blacklist": _Bl(), "wayback": _Wb()}
 
 
 def test_scoring_persists_and_jsonb_roundtrips():
@@ -56,15 +52,19 @@ def test_scoring_persists_and_jsonb_roundtrips():
         assert d.prior_flags == {}
 
 
-def test_scoring_hard_reject_on_rkn():
+def test_scoring_hard_reject_on_webrisk_threat():
     from app.services import scoring
+    from app.services.transitions import dirty_reason
     did = _add(Domain(domain="blocked.com", source="backorder", status="discovered", lane="bid"))
-    # whois=None -> T1 пропущен без возраста; RKN=True рубит на T2, Wayback не вызывается
-    out = scoring.score_domain(did, clients=_funnel_clients(None, rkn=True))
+    # whois=None -> W2 без даты; угроза Web Risk рубит на W3, Wayback не вызывается
+    out = scoring.score_domain(did, clients=_funnel_clients(None, threats=["MALWARE"]))
     assert out["status"] == "rejected" and out["score"] == 0.0
-    assert out["reject_reason"] == "rkn"
+    assert out["reject_reason"] == "blacklist"
     with db.SessionLocal() as s:
-        assert s.get(Domain, did).clean is False
+        d = s.get(Domain, did)
+        assert d.clean is False and d.blacklisted is None          # 1.5: колонку Spamhaus не трогаем
+        assert d.score_breakdown["webrisk_threats"] == ["MALWARE"]
+        assert dirty_reason(d) == "blacklist"                      # грязь видна по улике Web Risk
 
 
 def test_panel_actions(client, monkeypatch):

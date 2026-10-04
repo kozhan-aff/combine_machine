@@ -48,7 +48,8 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wayback}
+            "wayback": wayback,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
 
 
 def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
@@ -67,7 +68,8 @@ def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
     class _S:
         def indexed_echo(self, dom): return indexed_echo
     return {"aparser": _W(), "rkn": _R(), "blacklist": _B(), "searxng": _S(),
-            "wayback": wb}
+            "wayback": wb,
+            "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
 
 
 def _id_of(domain: str):
@@ -144,14 +146,6 @@ def test_low_rd_rejects():
     assert out["reject_reason"] == "low_rd" and wb.calls == 0
 
 
-def test_rkn_rejects_before_wayback():
-    did = _mk(domain="rkn.com", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
-    out = scoring.score_domain(did, clients=_clients(old, wb, rkn=True))
-    assert out["reject_reason"] == "rkn" and wb.calls == 0
-
-
 def test_whois_none_falls_through_to_wayback_age():
     did = _mk(domain="nowhois.com", referring_domains=3000, lane="bid")
     wb = _Wayback()
@@ -175,22 +169,25 @@ def test_clean_strong_domain_is_scored_and_bulk_ok():
         assert scoring.bulk_ok(s.get(Domain, did)) is True
 
 
-def test_blacklist_rejects_before_wayback():
+def test_blacklist_rejects_before_wayback(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")       # Spamhaus в воронке — только с DQS
     did = _mk(domain="blacklisted.com", referring_domains=50, lane="bid")
     wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T1 пройден
+    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
     out = scoring.score_domain(did, clients=_clients(old, wb, bl=True))
     assert out["status"] == "rejected" and out["reject_reason"] == "blacklist"
-    assert wb.calls == 0            # blacklist — T2, Wayback (T3) до неё не доходит
+    assert wb.calls == 0            # blacklist — W3, Wayback до неё не доходит
 
 
-def test_blacklist_none_downgrades_via_funnel():
+def test_blacklist_none_downgrades_via_funnel(monkeypatch):
     """Ревью C2: строка `blacklisted is None -> errors.append("blacklist:unavailable")` прогнана
     полной воронкой на иначе-сильном домене (профиль test_clean_strong_domain_is_scored_and_bulk_ok).
     Авто-одобрения нет (Р2), поэтому «понижение» теперь значит: домен `scored`, с пометкой
-    «вслепую» и ВНЕ пакета. Без строки-фикса errors остался бы пуст, и пакет взял бы домен с
-    непроверенным блэклистом — тест бы упал."""
+    «вслепую» и ВНЕ пакета. Spamhaus в воронке — только с DQS-ключом (v2), поэтому ключ задан."""
+    from app.config import settings
     from app.services import scoring_config as cfg
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")
     did = _mk(domain="bl-none.com", referring_domains=3000, lane="bid")
     wb = _Wayback()
     old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
@@ -497,134 +494,6 @@ def test_ahrefs_failure_does_not_crash_funnel():
     assert ah.calls == 1
     assert any(e.startswith("ahrefs:") for e in out["errors"])
     assert out["breakdown"]["components"]["authority"] == 0.0   # сбой -> dr=None -> 0, не крэш
-
-
-# --- SafeBrowsing hard-reject + Archive pre-gate (Тред D, Задача 2) ---------------
-#
-# Примечание: иллюстративные тесты в брифе вызывали `scoring._funnel(...)` напрямую с
-# сигнатурой `(d, clients, db, settings_dict, sig)`. В ЭТОМ файле НЕТ ни одного прямого
-# вызова `_funnel` — все ~31 существующих теста гоняют воронку через публичный
-# `scoring.score_domain(did, clients=...)` (см. test_rkn_rejects_before_wayback,
-# test_blacklist_rejects_before_wayback и т.д. выше). Тесты ниже следуют РЕАЛЬНОМУ
-# паттерну этого файла, а не иллюстративному из брифа.
-
-def test_safebrowsing_flagged_hard_rejects():
-    did = _mk(domain="badsb.com", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)   # T0-T1 пройдены
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=True))
-    assert out["status"] == "rejected" and out["reject_reason"] == "safebrowsing"
-    assert wb.calls == 0            # отсеян ДО Wayback — как rkn/blacklist
-
-
-def test_safebrowsing_clean_proceeds_to_wayback():
-    did = _mk(domain="cleansb.com", referring_domains=3000, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 9)
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=False))
-    assert out["reject_reason"] is None
-    assert wb.calls == 1
-
-
-def test_safebrowsing_error_does_not_reject_and_is_logged():
-    did = _mk(domain="unknownsb.com", referring_domains=50, lane="bid")
-    wb = _Wayback()
-    old = datetime.now(timezone.utc) - timedelta(days=365 * 8)
-    out = scoring.score_domain(did, clients=_clients(old, wb, safebrowsing=None))
-    assert out["reject_reason"] is None
-    assert any(e.startswith("safebrowsing:") for e in out["errors"])
-
-
-class _AparserAlwaysFailsSB:
-    """whois_probe отвечает нормально, а safebrowsing_check падает КАЖДЫЙ раз — живой
-    инцидент 2026-07-20 (A-Parser упал целиком, а не только по одному домену)."""
-    def __init__(self):
-        self.sb_calls = 0
-
-    def whois_probe(self, dom):
-        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
-
-    def safebrowsing_check(self, dom):
-        self.sb_calls += 1
-        raise RuntimeError("connect error")
-
-
-def test_safebrowsing_circuit_breaker_skips_after_three_consecutive_failures():
-    """A-Parser упал -> BaseClient.request ретраит transport-сбой 3 раза с backoff (~30 с)
-    НА КАЖДЫЙ вызов -> T2 (задуманный «средним» по цене) платил бы полный ретрай-шторм
-    на КАЖДЫЙ домен, доживший до risk-стадии (whois уже летал через TCI за 30 мс) — снаружи
-    это и есть «воронка снова ходит по кругу всеми инструментами разом» из живого отчёта.
-    После 3 сбоёв ПОДРЯД safebrowsing_check для остальных доменов ЭТОГО прогона не зовётся —
-    один и тот же `clients` дели́тся между вызовами `score_domain`, как в реальном
-    `score_pending` (см. scoring.py:878, `clients = _make_clients()` один раз на прогон)."""
-    ap = _AparserAlwaysFailsSB()
-    wb = _Wayback()
-    clients = {
-        "aparser": ap,
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
-        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": wb,
-    }
-
-    for i in range(3):
-        did = _mk(domain=f"sbfail{i}.com", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.sb_calls == 3
-
-    did = _mk(domain="sbfourth.com", referring_domains=50, lane="bid")
-    out = scoring.score_domain(did, clients=clients)
-    assert "safebrowsing:circuit_open" in out["errors"]
-    assert ap.sb_calls == 3   # предохранитель сработал — 4-й вызов safebrowsing_check не звали
-
-
-class _AparserFlakySB:
-    """whois_probe стабилен; safebrowsing_check выдаёт исход из заранее заданного списка,
-    по одному на вызов — нужен тесту чередования "сбой/успех", где один и тот же
-    `clients` дели́тся между вызовами `score_domain` (как в реальном `score_pending`)."""
-    def __init__(self, outcomes):
-        self._outcomes = list(outcomes)
-
-    def whois_probe(self, dom):
-        return {"available": False, "created": datetime.now(timezone.utc) - timedelta(days=365 * 8)}
-
-    def safebrowsing_check(self, dom):
-        outcome = self._outcomes.pop(0)
-        if outcome == "boom":
-            raise RuntimeError("connect error")
-        return outcome
-
-
-def test_safebrowsing_circuit_breaker_resets_on_success_between_failures():
-    """Успешный ответ между сбоями сбрасывает счётчик — предохранитель не должен срабатывать
-    раньше времени на череде "2 сбоя / успех / 2 сбоя" (всего 4 сбоя, но НИ РАЗУ подряд 3)."""
-    ap = _AparserFlakySB(["boom", "boom", False, "boom", "boom"])
-    wb = _Wayback()
-    clients = {
-        "aparser": ap,
-        "rkn": type("R", (), {"is_listed": lambda self, d: False})(),
-        "blacklist": type("B", (), {"is_blacklisted": lambda self, d: False})(),
-        "searxng": type("S", (), {"indexed_echo": lambda self, d: True})(),
-        "wayback": wb,
-    }
-
-    for i in range(2):                                  # сбой 1, сбой 2
-        did = _mk(domain=f"sbmix-fail{i}.com", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.safebrowsing_failures == 2
-
-    did_ok = _mk(domain="sbmix-ok.com", referring_domains=50, lane="bid")
-    out = scoring.score_domain(did_ok, clients=clients)  # успех — сброс счётчика
-    assert out["reject_reason"] is None
-    assert ap.safebrowsing_failures == 0
-
-    for i in range(2):                                  # сбой 3, сбой 4 — НИ РАЗУ подряд 3
-        did = _mk(domain=f"sbmix-again{i}.com", referring_domains=50, lane="bid")
-        out = scoring.score_domain(did, clients=clients)
-        assert "safebrowsing:RuntimeError" in out["errors"]
-    assert ap.safebrowsing_failures == 2                # предохранитель НЕ сработал
 
 
 # --- квота: воронка не платит whois'ом дважды за детерминированный ответ ---------

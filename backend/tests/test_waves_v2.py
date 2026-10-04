@@ -248,7 +248,8 @@ def test_history_down_young_rdap_marks_age_unverified_and_keeps_domain_out_of_bu
     clients = {"rdap": rdap, "aparser": _CleanAp(), "wayback": _DownWB(),
                "rkn": type("R", (), {"is_listed": lambda self, x: False})(),
                "blacklist": type("B", (), {"is_blacklisted": lambda self, x: False})(),
-               "searxng": type("S", (), {"indexed_echo": lambda self, x: True})()}
+               "searxng": type("S", (), {"indexed_echo": lambda self, x: True})(),
+               "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})()}
     out = scoring.score_domain(did, clients=clients)
     assert rdap.calls == 1                                  # RDAP реально звали, не NoRdap-путь
     assert out["reject_reason"] != "too_young" and "age:unverified" in out["errors"]
@@ -268,3 +269,115 @@ def test_history_down_emd_or_old_rdap_age_does_not_mark_age_unverified():
     scoring._history_one(old, {"wayback": _DownWB()}, _st(min_age_years=5.0))
     assert emd.sig["errors"] == ["wayback:RuntimeError"]
     assert old.sig["errors"] == ["wayback:RuntimeError"]
+
+
+class FakeWR:
+    def __init__(self, configured=True, threats=(), boom=False):
+        self.configured, self._t, self.boom, self.calls = configured, list(threats), boom, 0
+
+    def threats(self, d):
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("webrisk down")
+        return list(self._t)
+
+
+class FakeBL:
+    def __init__(self, listed=False):
+        self.listed, self.calls = listed, 0
+
+    def is_blacklisted(self, d):
+        self.calls += 1
+        return self.listed
+
+
+def test_risk_without_webrisk_key_is_blind_not_rejected(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "")
+    s, bl = _state("ok.com"), FakeBL()
+    scoring._risk_one(s, {"webrisk": FakeWR(configured=False), "blacklist": bl})
+    assert s.alive and "webrisk:not_configured" in s.sig["errors"]
+    assert bl.calls == 0                                   # бесплатный Spamhaus — только некоммерческий
+
+
+def test_risk_threat_rejects_as_blacklist_but_leaves_blacklisted_column_alone():
+    """1.5: угроза Web Risk — улика в `webrisk_threats`; колонку `blacklisted` (сигнал Spamhaus)
+    Web Risk не пишет: без DQS её никто бы не перепроверил, и чистый ответ её потом не снял бы."""
+    s = _state("bad.com")
+    scoring._risk_one(s, {"webrisk": FakeWR(threats=["MALWARE"]), "blacklist": FakeBL()})
+    assert s.reject_reason == "blacklist" and s.sig["webrisk_threats"] == ["MALWARE"]
+    assert "blacklisted" not in s.sig
+
+
+def test_risk_webrisk_error_is_recorded_domain_stays():
+    s = _state("ok.com")
+    scoring._risk_one(s, {"webrisk": FakeWR(boom=True), "blacklist": FakeBL()})
+    assert s.alive and "webrisk:RuntimeError" in s.sig["errors"]
+
+
+def test_risk_webrisk_circuit_opens_after_three_failures():
+    """3.2: лежащий Web Risk — после 3 сбоев ПОДРЯД без сети до конца прогона (счётчик на
+    инстансе клиента, детерминированно, без таймингов). Домены едут дальше «вслепую»."""
+    wr = FakeWR(boom=True)
+    states = [_state(f"d{i}.com") for i in range(5)]
+    for s in states:
+        scoring._risk_one(s, {"webrisk": wr, "blacklist": FakeBL()})
+    assert wr.calls == 3
+    assert [s.sig["errors"][-1] for s in states] == ["webrisk:RuntimeError"] * 3 + ["webrisk:circuit_open"] * 2
+    assert all(s.alive for s in states)
+
+
+def test_risk_dqs_key_enables_spamhaus(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "SPAMHAUS_DQS_KEY", "k")
+    s, bl = _state("spam.com"), FakeBL(listed=True)
+    scoring._risk_one(s, {"webrisk": FakeWR(), "blacklist": bl})
+    assert s.reject_reason == "blacklist" and bl.calls == 1 and s.sig["blacklisted"] is True
+
+
+def test_decide_never_auto_approves_with_risk_error():
+    sig = {"wayback_checked": True, "age_years": 9, "deep_checked": True,
+           "errors": ["webrisk:not_configured"]}
+    assert scoring._decide(0.95, sig, 0.4) == "scored"            # Р2: одобряет только человек
+
+
+def test_blind_reason_names_webrisk_and_keeps_domain_out_of_bulk():
+    d = Domain(domain="blind.com", wayback_checked=True, prior_flags={}, age_years=9.0,
+               score_breakdown={"errors": ["webrisk:not_configured"], "history_evidence": []})
+    assert "Web Risk" in scoring.blind_reason(d)
+    assert scoring.bulk_ok(d) is False
+
+
+def test_make_clients_has_every_breaker_lock():
+    """Находка R2-15, урок v1 (2026-07-21: при переходе на волны лок получили не все клиенты риска):
+    предохранитель без своего лока в _make_clients — тихая гонка на счётчике под 12 потоками волны,
+    а сьют зелёный (фейки передают клиентов сами). Каждый предохранитель — свой лок; новый
+    (Задача 12: _llm_lock) дописывается сюда."""
+    c = scoring._make_clients()
+    for lock in ("_whois_lock", "_rdap_lock", "_webrisk_lock"):
+        assert hasattr(c.get(lock), "acquire"), lock
+
+
+def test_webrisk_breaker_locks_both_the_gate_check_and_the_increment():
+    """R2-15, урок v1: гонку на счётчике предохранителя ловит детерминированный спай-лок, а не
+    тайминг. Каждая из 3 попыток Web Risk до срабатывания берёт `_webrisk_lock` дважды (гейт-чек и
+    инкремент), 4-я — один раз (гейт-чек: канал уже закрыт). Пропуск любого входа — непокрытая
+    гонка под 12 потоками волны risk."""
+    import threading
+
+    class SpyLock:
+        def __init__(self):
+            self._real, self.enters = threading.Lock(), 0
+
+        def __enter__(self):
+            self._real.acquire()
+            self.enters += 1
+
+        def __exit__(self, *a):
+            self._real.release()
+    lock, wr = SpyLock(), FakeWR(boom=True)
+    for i in range(4):
+        scoring._risk_one(_state(f"d{i}.com"), {"webrisk": wr, "blacklist": FakeBL(),
+                                               "_webrisk_lock": lock})
+    assert wr.calls == 3 and wr.threat_failures == 3
+    assert lock.enters == 3 * 2 + 1
