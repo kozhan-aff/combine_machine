@@ -188,7 +188,7 @@ if __name__ == "__main__":  # self-check без БД: политика чист�
     assert dirty_reason(NS(**{**vars(weak), "score_breakdown": {"webrisk_threats": ["MALWARE"]}})) \
         == "blacklist"
     try:
-        check(rkn, "approved", allowlist=["com"])
+        check(rkn, "approved", allowlist=["com", "ru"])   # зона разрешена: отказ именно по грязи
         raise AssertionError("грязь обязана быть отвергнута")
     except TransitionDenied:
         pass

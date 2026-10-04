@@ -64,7 +64,8 @@ def test_scoring_hard_reject_on_webrisk_threat():
         d = s.get(Domain, did)
         assert d.clean is False and d.blacklisted is None          # 1.5: колонку Spamhaus не трогаем
         assert d.score_breakdown["webrisk_threats"] == ["MALWARE"]
-        assert dirty_reason(d) == "blacklist"                      # грязь видна по улике Web Risk
+        # грязь здесь видна по reject_reason; ветку улики webrisk_threats отдельно держит test_transitions
+        assert dirty_reason(d) == "blacklist"
 
 
 def test_panel_actions(client, monkeypatch):
