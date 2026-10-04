@@ -316,3 +316,18 @@ def test_settings_drop_unknown_weight_keys():
     from app.services import scoring_config as cfg
     w = _clean_weights({"history_cleanliness": 0.4, "topic_switch": 1.0, "trademark_risk": 1.0})
     assert set(w) == set(cfg.WEIGHTS)
+
+
+def test_classify_history_returns_texts_of_read_snapshots(monkeypatch):
+    """W5: тексты УЖЕ прочитанных снимков уходят в LLM-тему — лишних запросов к archive.org нет."""
+    from app.integrations.wayback import WaybackClient
+    wb = WaybackClient()
+    snaps = [{"timestamp": f"20{10 + i}0101000000", "original": "http://x.com/"} for i in range(5)]
+    monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: snaps)
+    monkeypatch.setattr(wb, "_fetch_raw", lambda ts, orig: "<html><title>VPN blog</title><body>"
+                        + "secure tunnel " * 300 + "</body></html>")
+    out = wb.classify_history("x.com", sample=5, polite=0)
+    assert out["wayback_checked"] is True and len(out["texts"]) == 5
+    assert all(len(t["text"]) <= 2000 for t in out["texts"])
+    monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: [])
+    assert wb.classify_history("x.com", sample=5, polite=0)["texts"] == []

@@ -67,7 +67,7 @@ FUNNEL_STAGES = [
     {"key": "avail", "label": "доступность (RDAP/whois)"},
     {"key": "risk", "label": "риск (Web Risk)"},
     {"key": "links", "label": "ссылки (Ahrefs)"},
-    {"key": "history", "label": "Wayback-история"},
+    {"key": "history", "label": "история + тема"},
 ]
 
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Авто-одобрения нет (Р2): любой домен
@@ -302,11 +302,12 @@ def _make_clients() -> dict:
     from app.integrations.rdap import RdapClient
     from app.integrations.webrisk import WebRiskClient
     from app.integrations.ahrefs import AhrefsClient
+    from app.integrations.llm import LlmClassifyClient
     return {
         "wayback": WaybackClient(), "blacklist": BlacklistClient(), "webrisk": WebRiskClient(),
         "aparser": AParserClient(), "rdap": RdapClient(), "ahrefs": AhrefsClient(),
         "_whois_lock": threading.Lock(), "_rdap_lock": threading.Lock(),
-        "_webrisk_lock": threading.Lock(),
+        "_webrisk_lock": threading.Lock(), "llm": LlmClassifyClient(), "_llm_lock": threading.Lock(),
     }
 
 
@@ -907,11 +908,36 @@ def _wave_risk(states: list, clients: dict, run) -> None:
     _run_concurrent(states, _CONCURRENCY["risk"], run, "risk", lambda s: _risk_one(s, clients))
 
 
+def _topic_one(s: FunnelState, clients: dict, texts: list) -> None:
+    """W5-мягкий: язык и тема прошлого сайта по УЖЕ прочитанным снимкам (LLM). Ничего не отклоняет
+    и не ослепляет (инвариант 3: жёсткие отказы — только детерминированный классификатор). Сбой,
+    непригодный ответ, нет клиента или сработал предохранитель «3 сбоя подряд» (зависший LiteLLM
+    держал бы слот волны) -> «тема не определена». EMD: язык — рынка набора (discovery), снимки
+    его не перезаписывают (находка 4.4)."""
+    from app.services import history_llm
+    llm, t = clients.get("llm"), None
+    if llm is not None:
+        try:
+            t = whois_router.guarded(llm, "classify_failures",
+                                     lambda: history_llm.classify_topics(s.domain, texts, llm),
+                                     "LLM (тема W5)", clients.get("_llm_lock"))
+        except Exception:  # noqa: BLE001 — мягкий сигнал: сбой LLM не отклоняет и не ослепляет
+            t = None
+    if not t:
+        s.sig["topic_unknown"] = True
+        return
+    if s.source == "emd":
+        t = {k: v for k, v in t.items() if k != "market_lang"}
+    s.sig.update(t)
+
+
 def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
     """W5 для ОДНОГО домена: Wayback-история + категорийный hard-reject + возраст по старшей из
-    двух дат (RDAP/whois из W2 и первый снимок) и гейт `too_young` (Р5)."""
+    двух дат (RDAP/whois из W2 и первый снимок) и гейт `too_young` (Р5) + тема прошлого сайта."""
+    texts: list = []
     try:
         hist = clients["wayback"].classify_history(s.domain)
+        texts = hist.get("texts") or []
         pf = hist.get("prior_flags") or {}
         s.sig["prior_flags"] = pf
         s.sig["wayback_checked"] = hist.get("wayback_checked")
@@ -952,6 +978,11 @@ def _history_one(s: FunnelState, clients: dict, st: dict) -> None:
             and s.sig["age_years"] < st["min_age_years"]):
         s.reject_reason = "too_young"
         s.alive = False
+
+    # Тема — только выжившим и только по проверенной истории: LLM на уже отклонённый домен —
+    # пустая трата времени, а по паре прочитанных снимков тему не судят.
+    if s.alive and s.sig.get("wayback_checked") and texts:
+        _topic_one(s, clients, texts)
 
 
 def _wave_history(states: list, clients: dict, st: dict, run) -> None:
@@ -1164,10 +1195,17 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # имеет права затирать то, что кто-то проверил (ревью Задачи 6, Critical 2).
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "blacklisted",
-                    "dr", "referring_domains", "trademark_risk", "backlinks", "organic_traffic"):
+                    "dr", "referring_domains", "trademark_risk", "backlinks", "organic_traffic",
+                    "market_lang", "topic", "topical_relevance"):
             v = sig.get(col)
             if v is not None:
                 setattr(d, col, v)
+        if sig.get("topic_unknown"):
+            # Исключение из правила «не затирать»: тему ЭТОТ прогон спрашивал, и ответа нет —
+            # старая тема рядом с «тема не определена» врала бы (находка 4.5). Близость к VPN НЕ
+            # стираем: перескор при лежащем LLM не вправе снять исключение «прошлая тема далека от
+            # VPN» (тот же принцип «перескор не отмывает»). Язык не трогаем (у EMD он из набора).
+            d.topic = None
         d.clean = result["status"] != "rejected"
         d.score = result["score"]
         prev = d.score_breakdown or {}
@@ -1188,7 +1226,9 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "sampled": _kept("sampled"),
                              "age_source": _kept("age_source"),
                              "whois_source": _kept("whois_source"),
-                             "webrisk_threats": _kept("webrisk_threats")}
+                             "webrisk_threats": _kept("webrisk_threats"),
+                             "topic_unknown": sig.get("topic_unknown"),
+                             "parked_share": _kept("parked_share")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку ДО РЕШЕНИЯ — unresolved-возврат

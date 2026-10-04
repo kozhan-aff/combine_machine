@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://192.168.1.77:4000"   # ponytail: dev-box default, override via .env
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "mistral"                        # mistral(=mistral-large) | mistral-small | ollama/<m>
+    LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
 
     # searxng — free SERP (локальный бокс)
     SEARXNG_URL: str = "http://192.168.1.77:8080"    # ponytail: dev-box default, override via .env

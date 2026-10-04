@@ -356,7 +356,7 @@ def test_make_clients_has_every_breaker_lock():
     а сьют зелёный (фейки передают клиентов сами). Каждый предохранитель — свой лок; новый
     (Задача 12: _llm_lock) дописывается сюда."""
     c = scoring._make_clients()
-    for lock in ("_whois_lock", "_rdap_lock", "_webrisk_lock"):
+    for lock in ("_whois_lock", "_rdap_lock", "_webrisk_lock", "_llm_lock"):
         assert hasattr(c.get(lock), "acquire"), lock
 
 
@@ -744,3 +744,117 @@ def test_open_gate_selection_unchanged_and_units_asked_once(monkeypatch):
     with db.SessionLocal() as s:
         left = [s.get(Domain, i).status for i in ids]
         assert left.count("discovered") == 1 and s.get(Domain, emd).status != "discovered"
+
+
+# --- W5 «история + тема» (Задача 12) -----------------------------------------------------------
+
+class FakeWB:
+    """Wayback с текстами прочитанных снимков (для темы W5)."""
+    def __init__(self, dirty=False, checked=True, texts=None, age=9.0):
+        self.dirty, self.checked, self.age = dirty, checked, age
+        self.texts = texts if texts is not None else [{"timestamp": "20190101000000", "text": "vpn reviews"}]
+
+    def classify_history(self, d):
+        flags = {c: False for c in ("adult", "pharma", "casino", "gambling", "spam")}
+        flags["casino"] = self.dirty
+        return {"prior_flags": flags, "first_seen": None, "age_years": self.age,
+                "wayback_checked": self.checked, "sampled": 5, "evidence": [], "texts": self.texts}
+
+
+class FakeLLM:
+    def __init__(self, answer=None, boom=False):
+        self.answer, self.boom, self.calls = answer, boom, 0
+
+    def complete(self, system, prompt, **kw):
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("llm down")
+        return self.answer or ('{"snapshots":[{"year":2019,"lang":"pl","topic":"vpn","parked":false}],'
+                               '"topic_summary":"vpn blog","vpn_adjacent":0.8}')
+
+
+def test_history_llm_fills_soft_signals():
+    s = _state("a.com")
+    scoring._history_one(s, {"wayback": FakeWB(), "llm": FakeLLM()}, _st())
+    assert s.alive and s.sig["market_lang"] == "pl" and s.sig["topical_relevance"] == 0.8
+    assert s.sig["topic"] == "vpn blog" and "topic_unknown" not in s.sig
+
+
+def test_history_llm_failure_is_soft():
+    s = _state("a.com")
+    scoring._history_one(s, {"wayback": FakeWB(), "llm": FakeLLM(boom=True)}, _st())
+    assert s.alive and s.sig.get("topic_unknown") is True and not s.sig["errors"]
+
+
+def test_dirty_history_rejects_before_llm():
+    s, llm = _state("a.com"), FakeLLM()
+    scoring._history_one(s, {"wayback": FakeWB(dirty=True), "llm": llm}, _st())
+    assert s.reject_reason == "history_dirty" and llm.calls == 0
+
+
+def test_llm_circuit_opens_after_three_failures():
+    """3.3: лежащий LiteLLM — после 3 сбоев ПОДРЯД без вызова до конца прогона (счётчик на
+    инстансе клиента, детерминированно, без таймингов). Домены едут дальше с «тема не определена»."""
+    llm = FakeLLM(boom=True)
+    states = [_state(f"t{i}.com") for i in range(5)]
+    for s in states:
+        scoring._history_one(s, {"wayback": FakeWB(), "llm": llm}, _st())
+    assert llm.calls == 3
+    assert all(s.alive and s.sig["topic_unknown"] is True and not s.sig["errors"] for s in states)
+
+
+def test_llm_breaker_locks_both_the_gate_check_and_the_increment():
+    """R2-15, урок v1: гонку на счётчике предохранителя ловит детерминированный спай-лок, а не
+    тайминг. Каждая из 3 попыток LLM до срабатывания берёт `_llm_lock` дважды (гейт-чек и
+    инкремент), 4-я — один раз (гейт-чек: канал уже закрыт). Пропуск любого входа — непокрытая
+    гонка под 4 потоками волны истории."""
+    import threading
+
+    class SpyLock:
+        def __init__(self):
+            self._real, self.enters = threading.Lock(), 0
+
+        def __enter__(self):
+            self._real.acquire()
+            self.enters += 1
+
+        def __exit__(self, *a):
+            self._real.release()
+    lock, llm = SpyLock(), FakeLLM(boom=True)
+    for i in range(4):
+        scoring._history_one(_state(f"t{i}.com"), {"wayback": FakeWB(), "llm": llm, "_llm_lock": lock},
+                             _st())
+    assert llm.calls == 3 and llm.classify_failures == 3
+    assert lock.enters == 3 * 2 + 1
+
+
+def test_emd_keeps_market_lang_of_its_set():
+    """4.4: язык EMD — язык рынка набора (discovery); снимки прошлого сайта его не перезаписывают."""
+    s = _state("mejorvpn.com", source="emd", lane="free")
+    scoring._history_one(s, {"wayback": FakeWB(), "llm": FakeLLM()}, _st())
+    assert "market_lang" not in s.sig and s.sig["topic"] == "vpn blog"
+
+
+def test_llm_failure_on_rescore_clears_topic_but_keeps_relevance():
+    """4.5: перескор со сбоем LLM не оставляет старую тему — «тема не определена» и в базе. А
+    близость к VPN (0.1) остаётся: перескор при лежащем LLM не отмывает «тема далека от VPN»."""
+    did = _mk("old-topic.com", deadline=NOW + timedelta(days=2), topic="casino reviews",
+              topical_relevance=0.1, market_lang="en")
+    scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), FakeAh({"old-topic.com": ROW}),
+        FakeWB(), llm=FakeLLM(boom=True)))
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.topic is None and float(d.topical_relevance) == 0.1
+        assert d.score_breakdown["topic_unknown"] is True and d.market_lang == "en"
+
+
+def test_llm_topic_reaches_the_domain_row():
+    did = _mk("pl-blog.com", deadline=NOW + timedelta(days=2))
+    scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), FakeAh({"pl-blog.com": ROW}),
+        FakeWB(), llm=FakeLLM()))
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert (d.market_lang, d.topic, float(d.topical_relevance)) == ("pl", "vpn blog", 0.8)
+        assert d.score_breakdown["topic_unknown"] is None
