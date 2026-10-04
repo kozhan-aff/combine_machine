@@ -700,3 +700,35 @@ def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits
     with db.SessionLocal() as s:
         statuses = {s.get(Domain, i).status for i in ids}
     assert statuses == {"rejected"}
+
+
+def test_run_waves_reports_every_funnel_stage_in_order(monkeypatch):
+    """Порядок чипов (FUNNEL_STAGES) и порядок волн — одно и то же: стадия, о которой волна не
+    отчиталась, висела бы на панели «ожидает» вечно. Порядок проверяется по последовательности
+    stage_key в jobs.report. Волны и финализация подменены пустышками — тест про конвейер, а не
+    про сигналы, поэтому переживает смену набора волн (Задачи 9–13)."""
+    from collections import defaultdict
+    from app.services import jobs
+    from app.services.settings import get_settings
+
+    class _Quiet:
+        """Клиент-пустышка: любой метод отвечает None (волны подменены, сеть не нужна)."""
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    for name in [n for n in dir(scoring) if n.startswith("_wave_")]:
+        monkeypatch.setattr(scoring, name, lambda alive, *a, **k: None)
+    monkeypatch.setattr(scoring, "_commit_result", lambda s, run, st: {"domain": s.domain})
+    real, keys = jobs.report, []
+
+    def spy(run_id, **kw):
+        if kw.get("stage_key"):
+            keys.append(kw["stage_key"])
+        return real(run_id, **kw)
+    monkeypatch.setattr(jobs, "report", spy)
+    states = [scoring.FunnelState(domain_id=i, domain=f"ord{i}.com", lane="bid", referring_domains=5,
+                                  acquire_deadline=None, feed_flags=None) for i in range(2)]
+    st = {**get_settings(), "units_floor": 0}
+    out = scoring._run_waves(states, defaultdict(_Quiet), st, None, None, None)
+    assert keys == [s["key"] for s in scoring.FUNNEL_STAGES]
+    assert [r["domain"] for r in out] == ["ord0.com", "ord1.com"]

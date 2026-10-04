@@ -1154,10 +1154,11 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
                run) -> list:
     """Оркестратор: волны по порядку дёшево->дорого, между каждой — checkpoint (коммит
     вышедших, отчёт волновой истории), отмена проверяется между волнами (внутри волны —
-    в _run_concurrent). Выжившие после ПОСЛЕДНЕЙ волны финализируются как решённые
-    (score/approved/scored) — см. _commit_result. Возвращает результаты в порядке
-    завершения (порядок не важен вызывающим — score_pending считает только длину,
-    score_domain — единственный элемент списка)."""
+    в _run_concurrent). Волны — таблица `waves` (ключ чипа, подпись водопада, функция) в
+    порядке FUNNEL_STAGES; цикл один на всех. Выжившие после ПОСЛЕДНЕЙ волны финализируются
+    как решённые — см. _commit_result. Возвращает результаты в порядке завершения (порядок
+    не важен вызывающим — score_pending считает только длину, score_domain — единственный
+    элемент списка)."""
     from app.services import jobs
 
     whois_b = whois_budget if whois_budget is None or hasattr(whois_budget, "take") \
@@ -1165,58 +1166,34 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, ahrefs_budge
     ahrefs_b = ahrefs_budget if ahrefs_budget is None or hasattr(ahrefs_budget, "take") \
         else _ListBudget(ahrefs_budget)
 
-    results = []
-    waterfall = []
-    total0 = len(states)
-
-    _wave_t0(states, st)
-    if jobs.cancelled(run):
-        raise jobs.Cancelled()
-    results += _checkpoint(states, run, st)
-    alive = [s for s in states if s.alive]
-    waterfall.append(f"RD: {total0} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall),
-               stage_key="rd", stage_before=total0, stage_after=len(alive))
-
-    _wave_whois(alive, clients, whois_b, st, run)
-    if jobs.cancelled(run):
-        raise jobs.Cancelled()
-    results += _checkpoint(alive, run, st)
-    before = len(alive); alive = [s for s in alive if s.alive]
-    waterfall.append(f"whois: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall),
-               stage_key="whois", stage_before=before, stage_after=len(alive))
-
-    _wave_risk(alive, clients, run)
-    if jobs.cancelled(run):
-        raise jobs.Cancelled()
-    results += _checkpoint(alive, run, st)
-    before = len(alive); alive = [s for s in alive if s.alive]
-    waterfall.append(f"risk: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall),
-               stage_key="risk", stage_before=before, stage_after=len(alive))
-
-    _wave_history(alive, clients, st, run)
-    if jobs.cancelled(run):
-        raise jobs.Cancelled()
-    results += _checkpoint(alive, run, st)
-    before = len(alive); alive = [s for s in alive if s.alive]
-    waterfall.append(f"history: {before} → {len(alive)}")
-    jobs.report(run, message=" · ".join(waterfall),
-               stage_key="history", stage_before=before, stage_after=len(alive))
-
-    _wave_ahrefs(alive, clients, ahrefs_b, run)
-    if jobs.cancelled(run):
-        raise jobs.Cancelled()
-    # выжившие после ПОСЛЕДНЕЙ волны — все ещё alive (Ahrefs никогда не отбраковывает),
-    # финализируем как решённых (compute_score внутри _commit_result)
-    for s in alive:
-        results.append(_commit_result(s, run, st))
-    waterfall.append(f"ahrefs: {len(alive)} решено")
-    # before==after: Ahrefs не фильтрует — полоска покажет "решено целиком", не отсев
-    jobs.report(run, message=" · ".join(waterfall),
-               stage_key="ahrefs", stage_before=len(alive), stage_after=len(alive))
-
+    # (ключ чипа, подпись в водопаде, волна). Порядок = порядок FUNNEL_STAGES — один источник
+    # правды: новая волна добавляется ОДНОЙ строкой здесь и одной в FUNNEL_STAGES.
+    waves = [
+        ("rd", "RD", lambda alive: _wave_t0(alive, st)),
+        ("whois", "whois", lambda alive: _wave_whois(alive, clients, whois_b, st, run)),
+        ("risk", "risk", lambda alive: _wave_risk(alive, clients, run)),
+        ("history", "history", lambda alive: _wave_history(alive, clients, st, run)),
+        ("ahrefs", "ahrefs", lambda alive: _wave_ahrefs(alive, clients, ahrefs_b, run)),
+    ]
+    results, waterfall, alive = [], [], list(states)
+    for i, (key, label, wave) in enumerate(waves):
+        before = len(alive)
+        wave(alive)
+        if jobs.cancelled(run):
+            raise jobs.Cancelled()
+        if i < len(waves) - 1:
+            results += _checkpoint(alive, run, st)
+            alive = [s for s in alive if s.alive]
+            after = len(alive)
+        else:
+            # ПОСЛЕДНЯЯ волна: финализируем ВСЕХ, кто в неё вошёл. _commit_result сам различает
+            # отказ / unresolved / скор — вышедшие на ней и выжившие решаются одним путём.
+            results += [_commit_result(s, run, st) for s in alive]
+            after = sum(1 for s in alive if s.alive)
+        # та же подпись и у последней волны: «N решено» считало бы только выживших
+        waterfall.append(f"{label}: {before} → {after}")
+        jobs.report(run, message=" · ".join(waterfall),
+                    stage_key=key, stage_before=before, stage_after=after)
     return results
 
 
