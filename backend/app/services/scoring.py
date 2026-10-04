@@ -1,7 +1,8 @@
 """M1b — Domain/donor scoring. Implements the funnel in docs/DONORS.md on the FREE stack.
 
 Order: t0 (зоны/бренды) -> avail (RDAP/whois) -> risk (Web Risk, Spamhaus с DQS) -> links (Ahrefs
-batch) -> history (Wayback) -> composite score + breakdown -> status scored | rejected (`approved` ставит только человек).
+batch) -> history (Wayback + тема) -> deep (анкоры финалистов) -> composite score + breakdown ->
+status scored | rejected (`approved` ставит только человек).
 `compute_score` is pure (unit-tested below); `score_domain` does the I/O + DB write.
 """
 import logging
@@ -68,6 +69,7 @@ FUNNEL_STAGES = [
     {"key": "risk", "label": "риск (Web Risk)"},
     {"key": "links", "label": "ссылки (Ahrefs)"},
     {"key": "history", "label": "история + тема"},
+    {"key": "deep", "label": "анкоры (Ahrefs)"},
 ]
 
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Авто-одобрения нет (Р2): любой домен
@@ -191,7 +193,22 @@ def blind_reason(d) -> str | None:
     # одобрения больше нет (Р2), и единственная защита — пакет такой домен не берёт.
     if d.whois_created is None and d.first_seen is None and d.age_years is None:
         return "возраст НЕ проверен: возраста нет ни из RDAP/whois, ни из архива"
+    # Анкоры финалистов (W6) не проверены: кап W6, пол остатка units, Ahrefs не ответил, пустой
+    # ответ при живых донорах — или домен оценён до W6 (ключа нет). На дропах RD раздут спамом:
+    # без анкоров одобрять пакетом нельзя (Р2 — гард переехал сюда из _decide). У EMD ссылок нет.
+    bd = d.score_breakdown or {}
+    if not bd.get("emd") and bd.get("deep_checked") is not True:
+        return ("анкоры НЕ проверены: кап W6, пол units, Ahrefs не ответил или язык прошлого сайта "
+                "неизвестен — ссылочный профиль может быть спамом")
     return None
+
+
+def topic_far(d) -> bool:
+    """Прошлая тема далека от VPN (инвариант 4; политика Google «expired domain abuse» — это ровно
+    смена темы). Такой домен человек одобряет только руками, глядя на тему: пакет его не берёт.
+    None («тема не определена») не исключает: незнание — не улика (спека §3.1)."""
+    tr = d.topical_relevance
+    return tr is not None and float(tr) < cfg.TOPIC_FAR_BELOW
 
 
 def history_note(d) -> str | None:
@@ -229,9 +246,14 @@ def bulk_ok(d) -> bool:
     основание «нельзя» обязано пройти через единый предикат, иначе строка инбокса подписала бы
     «история чистая» домен, который пакет молча пропускает. `history_verdict` ловит грязь ТОЛЬКО
     по `prior_flags`; РКН и блэклист — это отдельные колонки, и до сих пор их здесь не видел никто.
+
+    v2 (Р2 — авто-одобрения нет): всё, что раньше держали гарды `_decide`, держит этот предикат.
+    Плюс два основания «только руками»: прошлая тема далека от VPN (`topic_far`) и пустой балл
+    (EMD — решение за человеком; SQL пакета `score >= x` его тоже не берёт).
     """
     from app.services.transitions import dirty_reason   # ленивый: transitions зовёт нас в ответ
-    return history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
+    return (history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
+            and not topic_far(d) and d.score is not None)
 
 
 def _decide(score: float, sig: dict, manual_review_at: float) -> str:
@@ -386,7 +408,7 @@ def scorable(now):
 
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
-                 links_budget=None, run: int | None = None) -> dict:
+                 links_budget=None, run: int | None = None, deep_budget=None) -> dict:
     """Полная воронка для ОДНОГО домена — внешний контракт идентичен дореформенному:
     та же сигнатура, та же форма ответа. Внутри строит батч из ОДНОГО FunnelState и
     прогоняет его через тот же волновой конвейер, что и score_pending (Task 9) —
@@ -405,10 +427,10 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
         state = FunnelState(domain_id=d.id, domain=d.domain, lane=d.lane,
                             referring_domains=d.referring_domains,
                             acquire_deadline=d.acquire_deadline, feed_flags=d.feed_flags,
-                            source=d.source)
+                            source=d.source, market_lang=d.market_lang)
 
     c = clients or _make_clients()
-    results = _run_waves([state], c, st, whois_budget, links_budget, run)
+    results = _run_waves([state], c, st, whois_budget, links_budget, run, deep_budget=deep_budget)
     return results[0]
 
 
@@ -454,7 +476,7 @@ def score_pending(limit: int = 100) -> int:
                     (expired, 1),                             # окно дропа закрыто — уже упустили
                     else_=0)                                  # окно открыто/впереди — вот они и важны
         q = (select(Domain.id, Domain.domain, Domain.lane, Domain.referring_domains,
-                    Domain.acquire_deadline, Domain.feed_flags, Domain.source)
+                    Domain.acquire_deadline, Domain.feed_flags, Domain.source, Domain.market_lang)
              .where(Domain.status == "discovered", scorable(now))
              .order_by(tier,
                        Domain.acquire_deadline.asc(),         # внутри яруса — ближайший дроп первым
@@ -503,11 +525,12 @@ def score_pending(limit: int = 100) -> int:
     # Budget, а не [int]: волна avail конкурентная (12 потоков), голый `box[0] -= 1` под ней — гонка
     whois_budget = Budget(int(st["max_whois_per_run"]))
     links_budget = Budget(int(st["max_links_per_run"]))
+    deep_budget = Budget(int(st["max_deep_per_run"]))       # 0 = W6 выключен: анкоры не проверены
     total = len(rows)
     states = [FunnelState(domain_id=did, domain=name, lane=lane,
                           referring_domains=rd, acquire_deadline=deadline,
-                          feed_flags=flags, source=src)
-             for (did, name, lane, rd, deadline, flags, src) in rows]
+                          feed_flags=flags, source=src, market_lang=lang)
+             for (did, name, lane, rd, deadline, flags, src, lang) in rows]
     done = 0
     with jobs.track("score", stages=stages) as run:
         if not states:
@@ -516,7 +539,7 @@ def score_pending(limit: int = 100) -> int:
         else:
             try:
                 results = _run_waves(states, clients, st, whois_budget, links_budget, run=run,
-                                     notes=notes)
+                                     notes=notes, deep_budget=deep_budget)
             except jobs.Cancelled:
                 # _run_waves() на отмене RAISE'ит ДО своего `return results` (см. его тело) —
                 # локальный список результатов теряется вместе со стеком, ХОТЯ _checkpoint()
@@ -687,7 +710,8 @@ def recheck_acquirability(limit: int = 200) -> dict:
 # занят whois — скипаем в этой волне" — сами лимиты волн оператор не крутит.
 # history=4 — вежливость к archive.org (проектная ценность, не число для тюнинга).
 # W4 «ссылки» здесь нет: она идёт пачками ПОСЛЕДОВАТЕЛЬНО (лимит Ahrefs 60 запросов/мин).
-_CONCURRENCY = {"avail": 12, "risk": 12, "history": 4}
+# deep=2 — W6 стоит ~1,1 тыс. units на домен: не спешим.
+_CONCURRENCY = {"avail": 12, "risk": 12, "history": 4, "deep": 2}
 
 
 @dataclass
@@ -706,6 +730,7 @@ class FunnelState:
     unresolved_why: str | None = None
     alive: bool = True
     source: str | None = None       # v2: list/emd/… — W0 и W4/W6 ведут себя по-разному для EMD
+    market_lang: str | None = None  # язык прошлого сайта из БД — запасной для W6, если LLM молчит (R2-2)
 
 
 class Budget:
@@ -787,6 +812,12 @@ def _wave_t0(states: list, st: dict) -> None:
         elif brand_hit(s.domain, st["brand_tokens"]):
             s.sig["trademark_risk"] = True
             s.reject_reason, s.alive = "trademark", False
+        else:
+            # Бренд-проверка РЕАЛЬНО отработала и прошла (отказы флага фида и зоны до неё не дошли):
+            # пишем False, иначе колонка, однажды ставшая True, не снимается — `_commit_result` пишет
+            # только не-None. Оператор убрал токен из /settings -> перескор — единственный путь назад
+            # для `trademark` (он в DIRTY_REASONS). Отказ раньше бренда False не пишет: не проверяли.
+            s.sig["trademark_risk"] = False
 
 
 def _avail_one(s: FunnelState, clients: dict, budget, st: dict) -> None:
@@ -1130,6 +1161,83 @@ def _wave_links(states: list, clients: dict, st: dict, budget, run, notes: list 
             raise jobs.Cancelled()
 
 
+def _deep_one(s: FunnelState, clients: dict, st: dict) -> None:
+    """W6 для ОДНОГО финалиста: анкоры, затем история трафика — ОТДЕЛЬНЫМИ вызовами (находка 3.7):
+    сбой истории не выбрасывает уже оплаченный вердикт по анкорам.
+
+    `deep_checked=True` — только если анкоры реально получены (находка 1.3): пустой список при
+    живых донорах — это не «чисто», а «не проверено» (`deep:empty`). Сбой — `deep:<Исключение>`.
+    Язык прошлого сайта неизвестен, а отказ держался бы только на правиле скрипта — `deep:lang_unknown`
+    (находка R2-2): сбой LLM не отклоняет. Во всех трёх случаях домен идёт в решение, но вне пакета
+    («анкоры НЕ проверены»).
+    `spam_anchors` — улика для transitions.dirty_reason (находка 1.4): _commit_result хранит её
+    через _kept, и перескор, на котором W6 не дошла, спам-домен не отмывает."""
+    from app.services import link_signals
+    try:
+        anchors = clients["ahrefs"].anchors(s.domain)
+    except Exception as e:  # noqa: BLE001
+        s.sig["errors"].append(f"deep:{type(e).__name__}")
+        return
+    lang = s.sig.get("market_lang") or s.market_lang   # W5 этого прогона, иначе прошлый прогон (R2-2)
+    ratio = link_signals.spam_anchor_ratio(anchors, s.domain, lang)
+    if ratio is None and s.sig.get("referring_domains"):
+        s.sig["errors"].append("deep:empty")        # доноры есть, а анкоров нет — не «чисто»
+        return
+    if (not lang and ratio is not None and ratio > st["spam_anchor_max"]
+            and (link_signals.spam_anchor_ratio(anchors, s.domain, scripts=False) or 0.0)
+            <= st["spam_anchor_max"]):
+        # Язык прошлого сайта неизвестен, а отказ держится ТОЛЬКО на правиле скрипта: японский блог
+        # на .com при упавшем LLM ушёл бы в вечную грязь. Не отказ, а «анкоры не проверены».
+        s.sig["errors"].append("deep:lang_unknown")
+        return
+    s.sig["anchors"] = [{"anchor": str(a.get("anchor") or "")[:200], "refdomains": a.get("refdomains"),
+                         "is_spam": bool(a.get("is_spam"))} for a in anchors[:10]]
+    s.sig["spam_anchor_ratio"] = ratio
+    s.sig["spam_anchors"] = ratio is not None and ratio > st["spam_anchor_max"]
+    s.sig["deep_checked"] = True
+    if s.sig["spam_anchors"]:
+        s.reject_reason, s.alive = "spam_anchors", False
+        return                                      # спам-дроп: историю трафика не покупаем
+    try:
+        s.sig["peak_traffic"] = link_signals.peak_traffic(clients["ahrefs"].metrics_history(s.domain))
+    except Exception as e:  # noqa: BLE001 — вердикт по анкорам уже есть и остаётся
+        s.sig["errors"].append(f"deep_history:{type(e).__name__}")
+
+
+def _wave_deep(states: list, clients: dict, st: dict, budget, run, notes: list | None = None) -> None:
+    """W6 — дорогая проверка (~1,1 тыс. units) ТОЛЬКО для тех, кто уже набрал предварительный скор
+    ≥ manual_review_at — РАНТАЙМ-порог из /settings (находка 2.8) — и только с проверенной историей
+    (`wayback_checked`): на заведомо слабый домен и на домен «вслепую», которого пакет всё равно не
+    возьмёт, units не тратим. Лучшие первыми — кап `max_deep_per_run` уходит на тех, кого реально решать. Перед
+    волной — пол остатка units (Р3): ниже пола W6 не идёт, анкоры «не проверены». EMD пропускает
+    (у новорега нет ссылок)."""
+    cands = []
+    for s in states:
+        if not s.alive or s.source == "emd":
+            continue
+        s.sig["deep_checked"] = False
+        if not s.sig.get("wayback_checked"):
+            continue        # история не проверена — домен и так вне пакета, units на него не тратим
+        pre = compute_score(dict(s.sig), st.get("weights"))
+        if "hard_reject" not in pre["breakdown"] and pre["score"] >= st["manual_review_at"]:
+            cands.append((pre["score"], s))
+    if not cands:
+        return
+    # СВЕЖИЙ запрос остатка: W4 уже потратила units, а решение гейта в начале прогона
+    # (`_paid_gate`, кэш в clients["_paid_gate"]) устарело — `_units_below_floor` его не читает.
+    low = _units_below_floor(clients, st)
+    if low:
+        if notes is not None:
+            notes.append(low)
+        return
+    picked = []
+    for _, s in sorted(cands, key=lambda x: -x[0]):
+        if budget is not None and not budget.take():
+            break
+        picked.append(s)
+    _run_concurrent(picked, _CONCURRENCY["deep"], run, "deep", lambda s: _deep_one(s, clients, st))
+
+
 def _commit_result(state: FunnelState, run, st: dict) -> dict:
     """Записать итог ОДНОГО FunnelState в БД — прямой перенос хвоста сегодняшнего
     score_domain() (после вызова _funnel, было строки 684-811), но принимает state
@@ -1173,6 +1281,11 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
 
         if reject:
             result = {"score": 0.0, "status": "rejected", "breakdown": {"funnel_reject": reject}}
+        elif state.source == "emd":
+            # EMD — новорег: ни ссылок, ни трафика, скору не из чего складываться. Решение — за
+            # человеком (спека §3.2): scored без балла, в инбоксе «EMD — решение за тобой», пакет
+            # его не берёт (bulk_ok: балл пустой).
+            result = {"score": None, "status": "scored", "breakdown": {"emd": True}}
         else:
             # F25 / 4.12: W4 пишет `dr`/`referring_domains` только непустыми — DR из discovery
             # (или с прошлого прогона) лежит в строке домена, и без setdefault compute_score
@@ -1196,7 +1309,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         for col in ("lane", "whois_created", "acquirability_checked_at", "prior_flags",
                     "wayback_checked", "first_seen", "age_years", "blacklisted",
                     "dr", "referring_domains", "trademark_risk", "backlinks", "organic_traffic",
-                    "market_lang", "topic", "topical_relevance"):
+                    "market_lang", "topic", "topical_relevance", "anchors", "spam_anchor_ratio"):
             v = sig.get(col)
             if v is not None:
                 setattr(d, col, v)
@@ -1228,7 +1341,10 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "whois_source": _kept("whois_source"),
                              "webrisk_threats": _kept("webrisk_threats"),
                              "topic_unknown": sig.get("topic_unknown"),
-                             "parked_share": _kept("parked_share")}
+                             "parked_share": _kept("parked_share"),
+                             "deep_checked": sig.get("deep_checked"),
+                             "spam_anchors": _kept("spam_anchors"),
+                             "peak_traffic": _kept("peak_traffic")}
         d.status = result["status"]
         d.reject_reason = reject or ("low_score" if result["status"] == "rejected" else None)
         # F24: когда домен ПОСЛЕДНИЙ РАЗ прошёл воронку ДО РЕШЕНИЯ — unresolved-возврат
@@ -1256,7 +1372,7 @@ def _checkpoint(states: list, run, st: dict) -> list:
 
 
 def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget,
-               run, notes: list | None = None) -> list:
+               run, notes: list | None = None, deep_budget=None) -> list:
     """Оркестратор: волны по порядку дёшево->дорого, между каждой — checkpoint (коммит
     вышедших, отчёт волновой истории), отмена проверяется между волнами (внутри волны —
     в _run_concurrent). Волны — таблица `waves` (ключ чипа, подпись водопада, функция) в
@@ -1265,13 +1381,16 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
     не важен вызывающим — score_pending считает только длину, score_domain — единственный
     элемент списка). `notes` — пояснения волн к водопаду («остаток units ниже пола»): сообщение
     задачи переписывается после каждой волны, и сказанное волной иначе стёрлось бы; список
-    вызывающего (score_pending) — чтобы пояснение дожило и до итогового сообщения."""
+    вызывающего (score_pending) — чтобы пояснение дожило и до итогового сообщения. `deep_budget` —
+    кап W6 (None — без капа: ручная перепроверка одного домена)."""
     from app.services import jobs
 
     whois_b = whois_budget if whois_budget is None or hasattr(whois_budget, "take") \
         else _ListBudget(whois_budget)
     links_b = links_budget if links_budget is None or hasattr(links_budget, "take") \
         else _ListBudget(links_budget)
+    deep_b = deep_budget if deep_budget is None or hasattr(deep_budget, "take") \
+        else _ListBudget(deep_budget)
     notes = [] if notes is None else notes
 
     # (ключ чипа, подпись в водопаде, волна). Порядок = порядок FUNNEL_STAGES — один источник
@@ -1283,6 +1402,7 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
         ("risk", "risk", lambda alive: _wave_risk(alive, clients, run)),
         ("links", "ссылки", lambda alive: _wave_links(alive, clients, st, links_b, run, notes)),
         ("history", "history", lambda alive: _wave_history(alive, clients, st, run)),
+        ("deep", "анкоры", lambda alive: _wave_deep(alive, clients, st, deep_b, run, notes)),
     ]
     results, waterfall, alive = [], [], list(states)
     for i, (key, label, wave) in enumerate(waves):

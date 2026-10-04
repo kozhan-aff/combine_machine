@@ -1,4 +1,6 @@
 """Волны v2 (t0 / avail / risk / links / history / deep) — юнит-тесты на фейках, без сети."""
+import json
+import pathlib
 from datetime import datetime, timedelta, timezone
 
 import app.db as db
@@ -681,7 +683,11 @@ def test_paid_gate_unresolved_precedes_avail_so_no_lane_or_deadline_is_written(m
 def test_units_left_is_asked_once_per_run_when_floor_passes(monkeypatch):
     """Р3/R2-10: остаток units спрашивается ОДИН раз за прогон — в `_paid_gate` после W0, а не
     на каждой платной волне/пачке (лишний запрос на каждом домене свипа раз в час). Гард «один раз»
-    на ПРОХОДЯЩЕМ пути: на падающем волна по таким доменам не идёт и второй вопрос не задала бы."""
+    на ПРОХОДЯЩЕМ пути: на падающем волна по таким доменам не идёт и второй вопрос не задала бы.
+    W6 (Задача 13) спрашивает остаток ЕЩЁ раз — свежим запросом перед своей волной (W4 уже
+    потратила units), поэтому здесь её кандидатов нет: порог manual_review_at недостижим."""
+    from app.services.settings import update_settings
+    update_settings(manual_review_at=1.0)
     for name in ("once-a.com", "once-b.com"):
         _mk(name, deadline=NOW + timedelta(days=2))
     ah = FakeAh({"once-a.com": ROW, "once-b.com": ROW})
@@ -735,7 +741,7 @@ def test_closed_gate_units_floor_still_gives_emd_a_slot_and_asks_units_once(monk
 def test_open_gate_selection_unchanged_and_units_asked_once(monkeypatch):
     """Гейт открыт: прежнее поведение — не-EMD в пределах капа W4, один запрос остатка за прогон."""
     from app.services.settings import update_settings
-    update_settings(max_links_per_run=2)
+    update_settings(max_links_per_run=2, manual_review_at=1.0)   # W6 без кандидатов: её свежий запрос units не в счёт
     ah = FakeAh({f"held{i}.com": ROW for i in range(3)})
     ids, emd, rdap = _closed_gate_pool(monkeypatch, ah, rdap=FakeRdap(
         exists=True, registered=NOW - timedelta(days=4000)), n=3)
@@ -872,3 +878,374 @@ def test_llm_not_asked_when_history_not_checked():
     s, llm = _state("a.com"), FakeLLM()
     scoring._history_one(s, {"wayback": FakeWB(checked=False), "llm": llm}, _st())
     assert llm.calls == 0 and "topic_unknown" not in s.sig
+
+
+# --- W6 «анкоры», правила пакета, EMD (Задача 13) ---------------------------------------------
+
+FX = pathlib.Path(__file__).parent / "fixtures" / "v2"
+SPAM = json.loads((FX / "ahrefs_anchors_spam.json").read_text())["anchors"]
+CLEAN = [{"anchor": "goodvpnblog.com", "refdomains": 80, "is_spam": False},
+         {"anchor": "VPN speed test results", "refdomains": 40, "is_spam": False}]
+HIST = json.loads((FX / "ahrefs_metrics_history.json").read_text())["metrics"]
+STRONG = {**ROW, "domain_rating": 35.0, "refdomains": 900, "refips_subnets": 700}
+
+
+def _strong(s):
+    s.sig.update({"wayback_checked": True, "age_years": 10.0, "dr": 35.0, "referring_domains": 900,
+                  "ref_subnets": 700, "topical_relevance": 0.9})
+    return s
+
+
+def test_deep_spam_rejects_and_records():
+    s = _strong(_state("a.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=SPAM, history=HIST)}, _st(), None, None)
+    assert s.reject_reason == "spam_anchors" and s.sig["deep_checked"] is True
+    assert s.sig["spam_anchors"] is True and s.sig["spam_anchor_ratio"] == 1.0
+    assert len(s.sig["anchors"]) <= 10
+
+
+def test_deep_clean_keeps_and_sets_peak():
+    s = _strong(_state("a.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=CLEAN, history=HIST)}, _st(), None, None)
+    assert s.alive and s.sig["deep_checked"] is True and s.sig["peak_traffic"] == 1850
+    assert s.sig["spam_anchors"] is False
+
+
+def test_deep_only_for_promising_best_first_within_cap():
+    weak = _state("weak.com")                       # пустые сигналы -> предварительный скор < manual_review_at
+    good, better = _strong(_state("good.com")), _strong(_state("better.com"))
+    good.sig["dr"] = 10.0                           # DR зажат на 30 — разница должна быть НИЖЕ потолка
+    emd = _strong(_state("emd.com", source="emd", lane="free"))
+    ah = FakeAh(anchors=CLEAN, history=HIST)
+    scoring._wave_deep([weak, good, better, emd], {"ahrefs": ah}, _st(), scoring.Budget(1), None)
+    assert better.sig["deep_checked"] is True                 # лучший предварительный — первым
+    assert good.sig["deep_checked"] is False and weak.sig["deep_checked"] is False
+    assert "deep_checked" not in emd.sig and ah.deep_calls == 1
+
+
+def test_deep_prescore_uses_runtime_threshold():
+    """2.8: кандидатов W6 отбирает рантайм-порог manual_review_at из /settings, а не статичный."""
+    s, ah = _strong(_state("a.com")), FakeAh(anchors=CLEAN, history=HIST)
+    scoring._wave_deep([s], {"ahrefs": ah}, _st(manual_review_at=0.99), None, None)
+    assert ah.deep_calls == 0 and s.sig["deep_checked"] is False
+    weak, ah2 = _state("weak.com"), FakeAh(anchors=CLEAN)
+    weak.sig["wayback_checked"] = True
+    scoring._wave_deep([weak], {"ahrefs": ah2}, _st(manual_review_at=0.0), None, None)
+    assert ah2.deep_calls == 1
+
+
+def test_deep_skips_domain_without_checked_history():
+    """W6 не тратит units на домен с непроверенной историей: в пакет он и так не попадёт
+    («вслепую»), а человек сначала разберётся с историей (решение координатора 2026-10-02)."""
+    s, ah = _strong(_state("a.com")), FakeAh(anchors=CLEAN, history=HIST)
+    s.sig["wayback_checked"] = False
+    scoring._wave_deep([s], {"ahrefs": ah}, _st(), None, None)
+    assert ah.deep_calls == 0 and ah.units_calls == 0 and s.sig["deep_checked"] is False
+
+
+def test_deep_error_leaves_unchecked():
+    s = _strong(_state("a.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(boom=True)}, _st(), None, None)
+    assert s.alive and s.sig["deep_checked"] is False and "deep:RuntimeError" in s.sig["errors"]
+
+
+def test_deep_empty_anchors_with_donors_is_not_checked():
+    """1.3: доноры есть (RD 900), а анкоров нет — это не «чисто», а «не проверено». Нет доноров
+    (RD 0) — проверять нечего, и это честное «проверено»."""
+    s = _strong(_state("a.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=[], history=HIST)}, _st(), None, None)
+    assert s.alive and s.sig["deep_checked"] is False and "deep:empty" in s.sig["errors"]
+    none = _strong(_state("nodonors.com"))
+    none.sig["referring_domains"] = 0
+    scoring._wave_deep([none], {"ahrefs": FakeAh(anchors=[], history=HIST)}, _st(), None, None)
+    assert none.sig["deep_checked"] is True and none.sig["spam_anchor_ratio"] is None
+
+
+def test_deep_history_failure_keeps_paid_anchor_verdict():
+    """3.7: анкоры и история трафика — отдельные вызовы: сбой истории не выбрасывает оплаченный
+    вердикт по анкорам и «вслепую» домен не делает."""
+    s = _strong(_state("a.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=CLEAN, history_boom=True)}, _st(), None, None)
+    assert s.sig["deep_checked"] is True and s.sig["spam_anchor_ratio"] == 0.0
+    assert "deep_history:RuntimeError" in s.sig["errors"] and "peak_traffic" not in s.sig
+
+
+def test_deep_judges_anchor_script_by_past_site_language():
+    """Р1: прошлый сайт японский — японские анкоры на .com не спам."""
+    jp = [{"anchor": "東京のブログ", "refdomains": 50, "is_spam": False}]
+    s = _strong(_state("tokyoblog.com"))
+    s.sig["market_lang"] = "ja"
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=jp)}, _st(), None, None)
+    assert s.alive and s.sig["spam_anchor_ratio"] == 0.0
+
+
+def test_deep_unknown_language_alone_is_not_spam_anchors():
+    """R2-2: язык прошлого сайта неизвестен (LLM упал этим прогоном, в базе пусто) — отказ, который
+    держится ТОЛЬКО на правиле скрипта, не выносится: `spam_anchors` — вечная грязь, кнопкой не
+    вернуть, а сбой LLM не отклоняет. Домен — «анкоры не проверены» (вне пакета, но не грязь).
+    Флаг Ahrefs `is_spam` и стоп-слова отклоняют и без языка."""
+    jp = [{"anchor": "東京のブログ", "refdomains": 50, "is_spam": False}]
+    s = _strong(_state("tokyoblog.com"))
+    scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=jp, history=HIST)}, _st(), None, None)
+    assert s.alive and s.reject_reason is None and s.sig["deep_checked"] is False
+    assert "deep:lang_unknown" in s.sig["errors"] and "spam_anchors" not in s.sig
+    for extra in ({"anchor": "best casino bonus", "refdomains": 50, "is_spam": False},
+                  {"anchor": "東京", "refdomains": 50, "is_spam": True}):
+        bad = _strong(_state("tokyospam.com"))
+        scoring._wave_deep([bad], {"ahrefs": FakeAh(anchors=jp + [extra], history=HIST)}, _st(), None, None)
+        assert bad.reject_reason == "spam_anchors", extra
+
+
+def test_llm_down_japanese_anchors_are_not_dirt():
+    """R2-2 сквозной: LLM лежит, язык прошлого сайта неизвестен — японские анкоры не делают домен
+    грязным (раньше: `spam_anchors` навсегда, а на перескоре — пятно на ранее чистом домене)."""
+    from app.services import transitions
+    did = _mk("tokyo-down.com", deadline=NOW + timedelta(days=2))
+    jp = [{"anchor": "東京のブログ", "refdomains": 50, "is_spam": False}]
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+        FakeAh({"tokyo-down.com": STRONG}, anchors=jp, history=HIST), FakeWB(), llm=FakeLLM(boom=True)))
+    assert out["status"] == "scored" and out["reject_reason"] is None
+    assert "deep:lang_unknown" in out["errors"]
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert transitions.dirty_reason(d) is None and d.score_breakdown["deep_checked"] is False
+        assert scoring.bulk_ok(d) is False                  # «анкоры НЕ проверены» — только руками
+
+
+def test_llm_down_uses_market_lang_from_previous_run(monkeypatch):
+    """R2-2: LLM этого прогона лежит, но язык прошлого сайта известен с прошлого прогона (в БД) —
+    японские анкоры японского прошлого сайта не спам, анкоры проверены. Оба входа воронки:
+    перепроверка одного домена (score_domain) и пакетный прогон (score_pending)."""
+    jp = [{"anchor": "東京のブログ", "refdomains": 50, "is_spam": False}]
+    names = ("tokyo-one.com", "tokyo-batch.com")
+    ids = [_mk(n, deadline=NOW + timedelta(days=2), market_lang="ja") for n in names]
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+                            FakeAh({n: STRONG for n in names}, anchors=jp, history=HIST), FakeWB(),
+                            llm=FakeLLM(boom=True))
+    scoring.score_domain(ids[0], clients=clients)
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    with db.SessionLocal() as s:
+        for did in ids:
+            d = s.get(Domain, did)
+            assert d.status == "scored" and d.score_breakdown["deep_checked"] is True, d.domain
+            assert float(d.spam_anchor_ratio) == 0.0 and d.market_lang == "ja", d.domain
+
+
+def test_units_floor_skips_deep_and_says_why():
+    """Р3: остаток units ниже пола перед W6 — анкоры не проверяются (домен вне пакета), причина —
+    в пояснениях водопада (а через них — в сообщении задачи, см. тест W4)."""
+    s, ah, notes = _strong(_state("a.com")), FakeAh(anchors=CLEAN, units=100_000), []
+    scoring._wave_deep([s], {"ahrefs": ah}, _st(), None, None, notes)
+    assert ah.deep_calls == 0 and s.alive and s.sig["deep_checked"] is False
+    assert notes == ["Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены"]
+
+
+def test_score_pending_takes_deep_cap_from_settings(monkeypatch):
+    """2.9: кап W6 — из /settings. 0 = W6 выключен: ни одного платного вызова анкоров, домен —
+    «анкоры не проверены»."""
+    from app.services.settings import update_settings
+    update_settings(max_deep_per_run=0)
+    did = _mk("nodeep.com", deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"nodeep.com": STRONG}, anchors=CLEAN, history=HIST)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, FakeWB(),
+                            llm=FakeLLM())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert ah.deep_calls == 0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "scored" and d.score_breakdown["deep_checked"] is False
+
+
+def test_blind_reason_names_unchecked_anchors():
+    """Р2: гард «без проверенных анкоров не одобрять» переехал из _decide в пакет. Домен,
+    оценённый до W6 (ключа нет), — тоже «не проверены». У EMD ссылок нет — проверять нечего."""
+    base = dict(wayback_checked=True, prior_flags={}, age_years=9.0)
+    d = Domain(domain="anchors.com", score=0.8, score_breakdown={"errors": [], "deep_checked": False}, **base)
+    assert "анкоры" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
+    legacy = Domain(domain="v1.com", score=0.8, score_breakdown={"errors": []}, **base)
+    assert "анкоры" in scoring.blind_reason(legacy)
+    emd = Domain(domain="emd.com", score_breakdown={"errors": [], "emd": True}, **base)
+    assert scoring.blind_reason(emd) is None
+
+
+def test_far_past_topic_and_emd_stay_out_of_bulk():
+    """Р2 + инвариант 4: прошлая тема далека от VPN (< 0.3) — такой домен человек одобряет только
+    руками, глядя на тему; «тема не определена» (None) пакет не закрывает. EMD (балла нет) — тоже
+    только руками."""
+    base = dict(wayback_checked=True, prior_flags={}, age_years=9.0, score=0.8,
+                score_breakdown={"errors": [], "deep_checked": True})
+    assert scoring.bulk_ok(Domain(domain="near.com", topical_relevance=0.6, **base)) is True
+    assert scoring.bulk_ok(Domain(domain="unknown.com", topical_relevance=None, **base)) is True
+    far = Domain(domain="far.com", topical_relevance=0.1, **base)
+    assert scoring.topic_far(far) is True and scoring.bulk_ok(far) is False
+    emd = Domain(domain="emd.com", **{**base, "score": None, "score_breakdown": {"errors": [], "emd": True}})
+    assert scoring.bulk_ok(emd) is False
+
+
+def test_e2e_live_spam_drop_is_rejected_for_spam_anchors():
+    did = _mk("pharmaindustrie.com", deadline=NOW + timedelta(days=2))
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=datetime(1998, 7, 29, tzinfo=timezone.utc)),
+        FakeAh({"pharmaindustrie.com": ROW}, anchors=SPAM, history=HIST), FakeWB(), llm=FakeLLM()))
+    assert out["status"] == "rejected" and out["reject_reason"] == "spam_anchors"
+
+
+def test_e2e_clean_strong_domain_is_scored_and_lands_in_bulk():
+    """Р2: машина ставит максимум `scored`; чистый сильный, полностью проверенный домен попадает в
+    пакетное одобрение — одобряет его человек."""
+    from app.api import panel
+    did = _mk("goodvpnblog.com", source="list", lane=None)
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=False),
+        FakeAh({"goodvpnblog.com": STRONG}, anchors=CLEAN, history=[{"date": "2023-01-01", "org_traffic": 4000}]),
+        FakeWB(age=10.0), llm=FakeLLM(answer='{"snapshots":[],"topic_summary":"vpn","vpn_adjacent":0.9}')))
+    assert out["status"] == "scored" and out["reject_reason"] is None
+    with db.SessionLocal() as s:
+        ok, skipped = panel._bulk_candidates(s, 0.0)
+        assert [d.domain for d in ok] == ["goodvpnblog.com"] and skipped == 0
+
+
+def test_e2e_emd_is_scored_without_score_and_never_in_bulk():
+    """EMD — `scored` без балла («решение за тобой»): ни W4, ни W6 не тратятся, пакет его не берёт
+    даже при чистой истории (1.13)."""
+    from app.api import panel
+    did = _mk("mejorvpn.com", source="emd", lane="free", market_lang="es")
+    ah = FakeAh({})
+    out = scoring.score_domain(did, clients=_full_clients(FakeRdap(exists=False), ah, FakeWB(), llm=FakeLLM()))
+    assert out["status"] == "scored" and out["score"] is None
+    assert ah.batches == [] and ah.deep_calls == 0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.score is None and d.score_breakdown.get("emd") is True and d.market_lang == "es"
+        assert scoring.bulk_ok(d) is False and panel._bulk_candidates(s, 0.0) == ([], 0)
+
+
+def test_rescore_with_ahrefs_down_does_not_launder_spam_anchors():
+    """1.4: отказ `spam_anchors` -> перескор, на котором Ahrefs упал (W6 не дошла) -> улика в
+    score_breakdown цела, домен по-прежнему грязный и в оборот кнопкой не возвращается."""
+    import pytest
+    from app.services import transitions
+    did = _mk("spammy.com", deadline=NOW + timedelta(days=2))
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+                            FakeAh({"spammy.com": STRONG}, anchors=SPAM, history=HIST), FakeWB(), llm=FakeLLM())
+    assert scoring.score_domain(did, clients=clients)["reject_reason"] == "spam_anchors"
+    class _AnchorsDown(FakeAh):
+        def anchors(self, d, limit=50):
+            raise RuntimeError("ahrefs down")
+    out = scoring.score_domain(did, clients={**clients, "ahrefs": _AnchorsDown({"spammy.com": STRONG})})
+    assert out["reject_reason"] is None and "deep:RuntimeError" in out["errors"]
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.score_breakdown["spam_anchors"] is True               # улику не стёрли
+        assert transitions.dirty_reason(d) == "spam_anchors"
+        with pytest.raises(transitions.TransitionDenied):
+            transitions.check(d, "approved")
+
+
+def test_rescore_with_llm_down_keeps_far_topic_out_of_bulk():
+    """Сбой LLM на перескоре не снимает исключение «прошлая тема далека от VPN»: близость 0.1 из
+    прошлого прогона сохранена, и полностью проверенный в остальном домен в пакет не попадает."""
+    from app.api import panel
+    did = _mk("far-topic.com", deadline=NOW + timedelta(days=2), topic="casino reviews",
+              topical_relevance=0.1)
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+        FakeAh({"far-topic.com": STRONG}, anchors=CLEAN, history=HIST), FakeWB(),
+        llm=FakeLLM(boom=True)))
+    assert out["status"] == "scored"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert float(d.topical_relevance) == 0.1 and d.topic is None
+        assert scoring.blind_reason(d) is None and scoring.topic_far(d) is True
+        assert panel._bulk_candidates(s, 0.0) == ([], 1)
+
+
+class CountingWB(FakeWB):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.calls = 0
+
+    def classify_history(self, d):
+        self.calls += 1
+        return super().classify_history(d)
+
+
+def test_e2e_early_exit_spends_nothing_expensive():
+    """Спека §8: домен, отсеянный на W0–W3, не тратит ни units Ahrefs, ни запросов к archive.org.
+    Бесплатный запрос остатка units — один раз в начале прогона, у переживших W0 (R2-10)."""
+    for name, rdap, wr in (("nordvpn-deals.com", FakeRdap(exists=False), FakeWR()),            # W0 бренд
+                           ("taken-free.com", FakeRdap(exists=True, registered=NOW), FakeWR()),  # W2 занят
+                           ("malware.com", FakeRdap(exists=False), FakeWR(threats=["MALWARE"]))):  # W3 риск
+        did = _mk(name, "mx" if name == "taken-free.com" else "list", "free" if name == "taken-free.com" else None)
+        ah, wb = FakeAh({name: ROW}), CountingWB()
+        out = scoring.score_domain(did, clients={**_full_clients(rdap, ah, wb), "webrisk": wr})
+        assert out["status"] == "rejected", name
+        assert ah.batches == [] and ah.deep_calls == 0 and wb.calls == 0, name
+        assert ah.units_calls == (0 if name == "nordvpn-deals.com" else 1), name
+
+
+class _UnitsDrain(FakeAh):
+    """Остаток units падает ниже пола между началом прогона и W6 (W4 потратила): первый ответ — выше пола."""
+    def units_left(self):
+        super().units_left()
+        return 2_000_000 if self.units_calls == 1 else 100_000
+
+
+def test_deep_floor_is_a_fresh_units_query_not_the_cached_gate(monkeypatch):
+    """Контроль 1 (Задача 11 + 13): `_paid_gate` кэширует решение начала прогона, но перед W6 остаток
+    спрашивается ЗАНОВО — W4 уже потратила units. Кэш гейта (открыт) не должен пропустить W6 при
+    остатке ниже пола: ровно два запроса units_left, анкоры не куплены, причина — в сообщении."""
+    from app.services import jobs
+    did = _mk("drain.com", deadline=NOW + timedelta(days=2))
+    ah = _UnitsDrain({"drain.com": STRONG}, anchors=CLEAN, history=HIST)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, FakeWB(),
+                            llm=FakeLLM())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert ah.units_calls == 2 and ah.deep_calls == 0
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.status == "scored" and d.score_breakdown["deep_checked"] is False
+    assert "остаток 100 000 < пола 300 000" in jobs.last("score")["message"]
+
+
+def test_trademark_domain_is_rehabilitated_after_brand_token_removed():
+    """Контроль 2: `trademark` теперь в DIRTY_REASONS (кнопкой не вернуть), единственный путь назад —
+    перескор. Оператор убрал бренд-токен из /settings -> W0 бренд-проверку ПРОШЛА и пишет
+    trademark_risk=False (раньше колонка оставалась True навсегда: пишется только не-None). Причина
+    `trademark` снимается, домен не залипает грязным."""
+    from app.services import transitions
+    from app.services.settings import get_settings, update_settings
+    did = _mk("nordvpn-deals.com", source="list", lane=None, deadline=NOW + timedelta(days=2))
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
+                            FakeAh({"nordvpn-deals.com": STRONG}, anchors=CLEAN, history=HIST), FakeWB(),
+                            llm=FakeLLM())
+    assert scoring.score_domain(did, clients=clients)["reject_reason"] == "trademark"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.trademark_risk is True and transitions.dirty_reason(d) == "trademark"
+    update_settings(brand_tokens=[t for t in get_settings()["brand_tokens"] if t != "nordvpn"])
+    out = scoring.score_domain(did, clients=clients)
+    assert out["reject_reason"] != "trademark"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.trademark_risk is False and d.reject_reason != "trademark"
+        assert transitions.dirty_reason(d) is None
+
+
+def test_trademark_flag_is_not_cleared_when_the_brand_check_did_not_run():
+    """Грязь не отмывается перескором, где бренд-проверка НЕ выполнялась: отказ W0 раньше бренда
+    (зона вне белого списка) оставляет trademark_risk как был."""
+    did = _mk("nordvpn-deals.com", source="list", lane=None, trademark_risk=True)
+    out = scoring.score_domain(did, clients=_full_clients(FakeRdap(), FakeAh(), FakeWB()),
+                               whois_budget=None)
+    assert out["status"] == "rejected"
+    from app.services.settings import update_settings
+    update_settings(tld_allowlist=["net"])           # .com закрыта: W0 режет по зоне ДО бренда
+    out = scoring.score_domain(did, clients=_full_clients(FakeRdap(), FakeAh(), FakeWB()))
+    assert out["reject_reason"] == "tld_closed"
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did).trademark_risk is True

@@ -109,8 +109,8 @@ def test_webrisk_or_blacklist_error_caps_at_scored():
     assert clean["status"] == "scored" and clean["score"] >= 0.70      # сильный, но одобряет человек
 
     def _dom(errors):
-        return Domain(domain="i1.com", wayback_checked=True, prior_flags={}, age_years=8,
-                      score_breakdown={"errors": errors, "history_evidence": []})
+        return Domain(domain="i1.com", wayback_checked=True, prior_flags={}, age_years=8, score=0.8,
+                      score_breakdown={"errors": errors, "history_evidence": [], "deep_checked": True})
     assert bulk_ok(_dom([])) is True                                   # базовая линия: пакет берёт
     for err in ("webrisk:ConnectError", "webrisk:not_configured", "blacklist:RuntimeError"):
         assert compute_score({**strong, "errors": [err]})["status"] == "scored"

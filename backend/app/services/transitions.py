@@ -53,10 +53,13 @@
 # машина больше не судит (в 0025 `legacy_ru` перезаписывает и «отмытые» v1-домены с `rkn`). Зону
 # добавили в белый список — путь назад тот же, что у грязи: перескор, а не кнопка.
 #
+# v2 (W0/W6): `trademark` — чужой VPN-бренд в имени (юридический риск), `spam_anchors` — ссылочный
+# профиль засыпан спамом. Ни то ни другое не крутится порогом — до кассы никогда.
+#
 # `not_acquirable` здесь НЕТ намеренно: «домен занят» — это не грязь, а чужая покупка. Оператор,
 # знающий, что домен всё-таки дропнулся, вправе вернуть его руками.
 DIRTY_REASONS = frozenset({"rkn", "blacklist", "history_dirty", "feed_flag", "safebrowsing",
-                           "legacy_ru", "tld_closed"})
+                           "legacy_ru", "tld_closed", "trademark", "spam_anchors"})
 
 # Куда домен вправе двинуть ЧЕЛОВЕК. Ключ — ИСХОДНЫЙ статус (именно его и не смотрели).
 # Пустое множество = «отсюда руками не двигают»:
@@ -112,6 +115,10 @@ def dirty_reason(d) -> str | None:
     # пишет, находка 1.5): перескор, на котором Web Risk упал, её не стирает (_kept).
     if (d.score_breakdown or {}).get("webrisk_threats"):
         return "blacklist"
+    # Спам-анкоры — улика W6 в score_breakdown (_kept): перескор, на котором Ahrefs упал или W6 не
+    # дошла (кап, пол units), её не стирает (находка 1.4).
+    if (d.score_breakdown or {}).get("spam_anchors") is True:
+        return "spam_anchors"
     if history_verdict(d) == "dirty":
         return "history_dirty"
     return None

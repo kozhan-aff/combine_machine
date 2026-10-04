@@ -119,7 +119,7 @@ def _in_bulk(sig: dict, out: dict, **breakdown) -> bool:
                    wayback_checked=sig.get("wayback_checked"), prior_flags=sig.get("prior_flags"),
                    age_years=sig.get("age_years"),
                    score_breakdown={"errors": sig.get("errors", []), "history_evidence": [],
-                                    **breakdown})
+                                    "deep_checked": True, **breakdown})
         s.add(d); s.commit()
         ok, _ = _bulk_candidates(s, 0.0)
         return d.id in {x.id for x in ok}
@@ -239,7 +239,10 @@ def _clients(whois, wayback=None):
             "wayback": wayback or _WaybackAged(),
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
-                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
+                                      "batch": lambda self, ds: {d: {} for d in ds},
+                                      "anchors": lambda self, d, limit=50: [
+                                          {"anchor": d, "refdomains": 10, "is_spam": False}],
+                                      "metrics_history": lambda self, d, years=5, today=None: []})()}
 
 
 def _add(**kw) -> int:

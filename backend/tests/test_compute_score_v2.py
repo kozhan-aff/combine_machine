@@ -70,8 +70,8 @@ def test_decide_never_approves_only_scored_or_rejected():
 def test_domain_without_any_age_is_blind_and_out_of_bulk():
     """Гард «возраст неизвестен» жил в _decide; авто-одобрения больше нет (Р2), и его держит
     пакет: возраста не дал никто (ни RDAP/whois, ни архив) — домен «вслепую», в пакет не идёт."""
-    kw = dict(domain="noage.com", wayback_checked=True, prior_flags={},
-              score_breakdown={"errors": [], "history_evidence": []})
+    kw = dict(domain="noage.com", wayback_checked=True, prior_flags={}, score=0.8,
+              score_breakdown={"errors": [], "history_evidence": [], "deep_checked": True})
     d = Domain(**kw)
     assert blind_reason(d) == "возраст НЕ проверен: возраста нет ни из RDAP/whois, ни из архива"
     assert bulk_ok(d) is False

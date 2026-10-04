@@ -52,7 +52,7 @@ def test_bulk_approve_skips_blind_domains(client):
     прочитанной истории — это и был баг F2 (пустой Wayback ошибки не бросает), и фикстура,
     молчавшая об этом поле, ровно его и покрывала собой."""
     _add(domain="clean.com", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
-         prior_flags={}, score_breakdown={"errors": []})
+         prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     _add(domain="weak.ru", status="scored", score=0.5, wayback_checked=True,
@@ -66,7 +66,7 @@ def test_bulk_approve_skips_blind_domains(client):
 
 def test_bulk_preview_counts(client):
     _add(domain="clean.ru", status="scored", score=0.9, wayback_checked=True, age_years=10.0,
-         prior_flags={}, score_breakdown={"errors": []})
+         prior_flags={}, score_breakdown={"errors": [], "deep_checked": True})
     _add(domain="blind.ru", status="scored", score=0.9,
          score_breakdown={"errors": ["wayback:ConnectError"]})
     body = client.get("/domains/bulk-preview?min_score=0.8").json()

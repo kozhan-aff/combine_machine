@@ -83,5 +83,5 @@ def test_blind_reason_flags_unverified_history():
     d = Domain(domain="x.ru", score_breakdown={"errors": ["wayback:ConnectError"]})
     assert "Wayback" in scoring.blind_reason(d)
     clean = Domain(domain="y.ru", wayback_checked=True, prior_flags={}, age_years=10.0,
-                   score_breakdown={"errors": []})
+                   score_breakdown={"errors": [], "deep_checked": True})
     assert scoring.blind_reason(clean) is None

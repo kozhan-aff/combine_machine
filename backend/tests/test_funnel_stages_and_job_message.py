@@ -1,4 +1,4 @@
-"""FUNNEL_STAGES (5, не 6 — эхо слито в risk) и API-контракт, питающий волновую
+"""FUNNEL_STAGES (6 волн v2: t0 → avail → risk → links → history → deep) и API-контракт, питающий волновую
 waterfall-строку в jobCard(). НЕ визуальные тесты: клиентский JS/CSS здесь не
 исполняется и не проверяется — это отдельно подтверждено живым рендером через
 chrome-devtools (см. review Task 10, 2026-07-21)."""
@@ -11,11 +11,11 @@ from app.models.job import JobRun
 from app.services import scoring
 
 
-def test_task10_funnel_stages_has_5_not_6():
-    """Task 10: FUNNEL_STAGES drops 'echo' — now 5 stages, not 6."""
-    assert len(scoring.FUNNEL_STAGES) == 5
+def test_funnel_stages_are_the_six_v2_waves():
+    """v2: шесть чипов — по одному на волну, в порядке волн (эха больше нет)."""
+    assert len(scoring.FUNNEL_STAGES) == 6
     keys = [s["key"] for s in scoring.FUNNEL_STAGES]
-    assert keys == ["t0", "avail", "risk", "links", "history"]
+    assert keys == ["t0", "avail", "risk", "links", "history", "deep"]
     assert "echo" not in keys
     # v2: риск — это Google Web Risk (РКН, Safe Browsing и эхо удалены)
     risk_stage = next(s for s in scoring.FUNNEL_STAGES if s["key"] == "risk")
@@ -64,7 +64,7 @@ def test_task10_job_card_shows_waterfall_for_running_score():
     assert score_job is not None
     assert score_job["status"] == "running"
     assert score_job["message"] == "RD: 5510 → 4310 · whois: 4310 → 3800 · risk: идёт, 1200/3800"
-    assert len(score_job["stages"]) == 5  # Verify 5 stages in the job
+    assert len(score_job["stages"]) == 6  # шесть чипов волн v2
 
 
 def test_task10_stages_have_correct_structure():

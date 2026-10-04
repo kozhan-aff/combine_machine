@@ -51,7 +51,10 @@ def _clients(whois_dt=None, wayback=None, rkn=False, bl=False, indexed_echo=True
             "wayback": wayback,
             "webrisk": type("WR", (), {"configured": True, "threats": lambda self, d: []})(),
             "ahrefs": type("Ah", (), {"units_left": lambda self: 2_000_000,
-                                      "batch": lambda self, ds: {d: {} for d in ds}})()}
+                                      "batch": lambda self, ds: {d: {} for d in ds},
+                                      "anchors": lambda self, d, limit=50: [
+                                          {"anchor": d, "refdomains": 10, "is_spam": False}],
+                                      "metrics_history": lambda self, d, years=5, today=None: []})()}
 
 
 def _clients_whois_raises(wb, rkn=False, bl=False, indexed_echo=True,
