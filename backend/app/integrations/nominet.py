@@ -16,8 +16,13 @@ URL = "https://droplists.nominet.uk/current/uk.csv.gz"
 
 def parse_droplist(text: str, now: datetime, lookahead_days: int) -> list[dict]:
     hi = now + timedelta(days=lookahead_days)
+    reader = csv.DictReader(io.StringIO(text))
+    # Переименованная колонка — громкая ошибка, а не тихий [] (иначе смена формата = «пустой день»).
+    for col in ("domain", "drop_time"):
+        if col not in (reader.fieldnames or []):
+            raise ValueError(f"Nominet: сменился формат, нет колонки {col}")
     out = []
-    for row in csv.DictReader(io.StringIO(text)):
+    for row in reader:
         d = (row.get("domain") or "").strip().lower()
         try:
             dt = datetime.fromisoformat((row.get("drop_time") or "").strip().replace("Z", "+00:00"))

@@ -20,10 +20,18 @@ API = "https://client.dropcatch.com/GetFileUrl"
 
 def parse_dropping_zip(raw: bytes) -> list[dict]:
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        name = next(n for n in z.namelist() if n.lower().endswith(".csv"))
+        name = next((n for n in z.namelist() if n.lower().endswith(".csv")), None)
+        if name is None:
+            raise ValueError("DropCatch: в архиве нет CSV")
         text = z.read(name).decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    # Смена формата не должна выглядеть как «пустой день»: законных нулей у источника нет,
+    # поэтому переименованная колонка — громкая ошибка, а не молчаливый [].
+    for col in ("Domain", "Drop Date"):
+        if col not in (reader.fieldnames or []):
+            raise ValueError(f"DropCatch: сменился формат, нет колонки {col}")
     out = []
-    for row in csv.DictReader(io.StringIO(text)):
+    for row in reader:
         # Имена в фиде в смешанном регистре — канон нижний, иначе дедуп по домену промахнётся.
         d = (row.get("Domain") or "").strip().lower()
         try:

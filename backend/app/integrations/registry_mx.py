@@ -15,11 +15,18 @@ def parse_deleted(text: str) -> list[dict]:
     # Перед заголовком идёт штамп времени — ищем заголовок, а не берём первую строку.
     start = next((i for i, ln in enumerate(lines) if ln.lower().startswith("dominio,")), None)
     if start is None:
-        return []
+        # Законных нулей у источника нет: нет заголовка = сменился формат, а не «пустой день».
+        raise ValueError("registry.mx: сменился формат, не найден заголовок Dominio")
+    reader = csv.DictReader(lines[start:])
+    # Ключи сводим к нижнему регистру — тот же регистр, что и при поиске заголовка выше.
+    reader.fieldnames = [(f or "").strip().lower() for f in (reader.fieldnames or [])]
+    for col in ("dominio", "disponible"):
+        if col not in reader.fieldnames:
+            raise ValueError(f"registry.mx: сменился формат, нет колонки {col.capitalize()}")
     out = []
-    for row in csv.DictReader(lines[start:]):
-        d = (row.get("Dominio") or "").strip().lower()
-        if d and (row.get("Disponible") or "").strip().lower() == "true":
+    for row in reader:
+        d = (row.get("dominio") or "").strip().lower()
+        if d and (row.get("disponible") or "").strip().lower() == "true":
             out.append({"domain": d, "source": "mx", "lane": "free", "acquire_deadline": None})
     return out
 
