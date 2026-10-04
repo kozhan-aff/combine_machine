@@ -440,18 +440,32 @@ def _require_cf_write(request: Request) -> None:
 
 
 def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
-                   form_err: str | None = None, status_code: int = 200):
+                   form_err: str | None = None, status_code: int = 200,
+                   draft: dict | None = None):
     """Экран /settings. Остаток units Ahrefs — из кэша диагностики, без сети (находка 3.4).
     Наборы EMD — json.dumps без \\u-экранирования (|tojson прятал «grátis»); `emd_draft` —
-    непринятый ввод оператора после ошибки JSON (находка 6.1)."""
+    непринятый ввод оператора после ошибки JSON (находка 6.1).
+
+    `draft` — ВСЁ остальное, что оператор отправил (числа, веса, тумблеры, тексты зон и брендов):
+    при ошибке форма возвращается с его значениями поверх сохранённых, иначе он чинит JSON, жмёт
+    «Сохранить» — и прочие правки молча теряются. В БД draft не пишется, только рисуется."""
     import json
     from app.services import settings as st
     s = st.get_settings()
+    draft = draft or {}
+    s.update({k: v for k, v in draft.get("nums", {}).items() if v is not None})
+    s["weights"] = {**s["weights"], **draft.get("weights", {})}
+    if "sources" in draft:
+        s["sources_enabled"] = draft["sources"]
     emd_text = emd_draft if emd_draft is not None else json.dumps(s["emd_sets"], ensure_ascii=False,
                                                                   indent=1)
+    tld_text = draft.get("tld_allowlist")
+    brand_text = draft.get("brand_tokens")
     return templates.TemplateResponse(request, "settings.html", {
         "active": "settings", "s": s, "counts": _pool_counts(db, s),
-        "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err},
+        "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
+        "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
+        "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
         status_code=status_code)
 
 
@@ -1250,7 +1264,18 @@ def settings_save(request: Request, db: Session = Depends(get_session),
     except ValueError as e:
         # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
         # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
-        return _settings_page(request, db, emd_draft=emd_sets, status_code=400,
+        draft = {"nums": {"min_referring_domains": min_referring_domains, "min_age_years": min_age_years,
+                          "approve_at": approve_at, "manual_review_at": manual_review_at,
+                          "max_whois_per_run": max_whois_per_run, "min_dr": min_dr,
+                          "max_links_per_run": max_links_per_run, "max_deep_per_run": max_deep_per_run,
+                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max},
+                 "weights": weights,
+                 "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
+                             "mx": bool(mx), "emd": bool(emd)},
+                 # без маркера v2_lists этих полей в форме не было — не подменяем их пустотой
+                 "tld_allowlist": tld_allowlist if v2_lists else None,
+                 "brand_tokens": brand_tokens if v2_lists else None}
+        return _settings_page(request, db, emd_draft=emd_sets, status_code=400, draft=draft,
                               form_err=f"Не сохранено ничего: {e}. Наборы EMD — JSON-список, "
                                        "пример — в «зачем это» у станции EMD.")
     return _back("/settings", msg="Настройки сохранены")

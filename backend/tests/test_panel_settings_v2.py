@@ -1,6 +1,7 @@
 """Экран /settings v2: новые поля видны и сохраняются; пустая textarea очищает, отсутствующее поле
 не трогает; плохой JSON EMD не затирает сохранённое и не теряет ввод; остаток units — из кэша /diag."""
 from datetime import datetime, timedelta, timezone
+from markupsafe import escape as html_escape      # тот же экранер, что у Jinja (`"` -> &#34;)
 
 import app.db as db
 from app.models.domain import Domain
@@ -145,4 +146,38 @@ def test_invalid_lists_flash_error_keep_saved_and_input(client):
 def test_brand_tokens_hint_one_brand_one_token(client):
     """Токены режутся по пробелам: «private internet access» стал бы тремя токенами и массово
     ложно отклонял бы домены — подсказка под полем говорит писать бренд слитно."""
-    assert "privateinternetaccess" in client.get("/settings").text
+    html = client.get("/settings").text
+    # фраза есть ТОЛЬКО в подсказке (слово privateinternetaccess рендерится и в textarea из дефолтов)
+    assert "один бренд — один токен" in html and "стал бы тремя токенами" in html
+
+
+def test_error_rerender_keeps_all_operator_input(client):
+    """I1: на ошибке форма возвращается с ОТПРАВЛЕННЫМИ значениями (пороги, зоны, бренды, EMD, веса,
+    тумблеры), а не сохранёнными: иначе оператор чинит JSON, жмёт «Сохранить» — и остальные правки
+    молча теряются. В БД при этом ничего не пишется."""
+    update_settings(min_dr=12, tld_allowlist=["com"], brand_tokens=["nordvpn"])
+    for bad in ('[{"keywords": ["x"], oops', "5", '[{"keywords":["best.vpn"],"tlds":["com"]}]'):
+        r = client.post("/settings/save", data={**BASE, "v2_lists": "1", "min_dr": 40, "tld_allowlist": "mx",
+                                                "brand_tokens": "foo", "emd_sets": bad, "units_floor": 750000,
+                                                "w_age": 0.5, "nominet": "on"}, follow_redirects=False)
+        assert r.status_code == 400 and 'class="flash err"' in r.text, bad
+        assert 'name="min_dr" min="0" max="60" step="1" value="40"' in r.text, bad
+        assert 'name="units_floor" min="0" max="2000000" step="50000" value="750000"' in r.text, bad
+        assert 'name="w_age" min="0" max="1" step="0.01"\n             value="0.5"' in r.text, bad
+        assert ">mx</textarea>" in r.text and ">foo</textarea>" in r.text, bad
+        assert 'name="nominet" checked' in r.text and 'name="mx" checked' not in r.text, bad
+        assert str(html_escape(bad)) in r.text, bad
+        s = get_settings()
+        assert s["min_dr"] == 12.0 and s["tld_allowlist"] == ["com"] and s["brand_tokens"] == ["nordvpn"], bad
+
+
+def test_ahrefs_units_zero_or_negative_is_fail(monkeypatch):
+    """M4: 0 и отрицательный остаток (перерасход) — «fail»: без units платные волны стоят."""
+    from app.config import settings
+    from app.integrations.ahrefs import AhrefsClient
+    from app.services import diagnostics
+    monkeypatch.setattr(settings, "AHREFS_API_KEY", "k")
+    for left, status in ((-5, "fail"), (0, "fail"), (1, "ok")):
+        monkeypatch.setattr(AhrefsClient, "units_left", lambda self, v=left: v)
+        out = diagnostics.run_diagnostics(specs=[s for s in diagnostics._spec() if s[0] == "ahrefs"])
+        assert out[0]["status"] == status, left

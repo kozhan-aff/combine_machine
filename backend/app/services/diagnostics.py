@@ -79,9 +79,11 @@ def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
     t0 = time.monotonic()
     try:
         v = fn()
-        out = {**base, "status": "ok" if v else "fail",
+        num = isinstance(v, int) and not isinstance(v, bool)
+        # 0 и отрицательный остаток (перерасход) — «fail»: без units платные волны стоят
+        out = {**base, "status": "ok" if (v > 0 if num else v) else "fail",
                "ms": int((time.monotonic() - t0) * 1000), "error": None}
-        if isinstance(v, int) and not isinstance(v, bool):
+        if num:
             out["value"] = v            # число (остаток units Ahrefs) — для экранов без сети
         return out
     except Exception as e:  # noqa: BLE001 — любой сбой интеграции = красный, не 500

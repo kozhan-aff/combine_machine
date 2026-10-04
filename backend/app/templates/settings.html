@@ -99,7 +99,7 @@
       быть владельцем и которые продаёт наш регистратор — см. docs/v2/research/cctld-markets.md.
       .com.mx и .com.co — отдельные зоны, NameSilo их не продаёт. Пустое поле — вернуть стартовый
       список (пустой белый список остановил бы всю машину).</div></details>
-    <div class="go"><textarea name="tld_allowlist" rows="4" style="flex:1 1 320px">{{ s.tld_allowlist|join('\n') }}</textarea></div>
+    <div class="go"><textarea name="tld_allowlist" rows="4" style="flex:1 1 320px">{{ tld_text }}</textarea></div>
   </div>
   <div class="station">
     <div class="plate">Чужие VPN-бренды — <b>в имени домена = отказ</b></div>
@@ -107,7 +107,7 @@
       <div class="what-body">Домен с чужой торговой маркой (nordvpn-deals.com) — юридический риск, такой
       не покупаем. Токен с «vpn» или от 7 букв ищется подстрокой, короче — только отдельным словом
       между дефисами (иначе javastudio.com отклонялся бы по avast). Пустое поле — стартовый список.</div></details>
-    <div class="go"><textarea name="brand_tokens" rows="4" style="flex:1 1 320px">{{ s.brand_tokens|join('\n') }}</textarea>
+    <div class="go"><textarea name="brand_tokens" rows="4" style="flex:1 1 320px">{{ brand_text }}</textarea>
       <span class="hint" title="пробел, запятая и перенос строки разделяют токены">один бренд — один токен, слитно
         (например <code>privateinternetaccess</code>); между токенами — пробел, запятая или перенос строки.
         «private internet access» через пробелы стал бы тремя токенами.</span></div>
