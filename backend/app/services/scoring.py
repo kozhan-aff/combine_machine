@@ -430,6 +430,8 @@ def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                             source=d.source, market_lang=d.market_lang)
 
     c = clients or _make_clients()
+    if deep_budget is None and int(st["max_deep_per_run"]) == 0:
+        deep_budget = Budget(0)     # 0 = W6 выключен и для ручной кнопки «▶»: ≈1,1 тыс. units не тратим
     results = _run_waves([state], c, st, whois_budget, links_budget, run, deep_budget=deep_budget)
     return results[0]
 
@@ -1179,19 +1181,31 @@ def _deep_one(s: FunnelState, clients: dict, st: dict) -> None:
         s.sig["errors"].append(f"deep:{type(e).__name__}")
         return
     lang = s.sig.get("market_lang") or s.market_lang   # W5 этого прогона, иначе прошлый прогон (R2-2)
-    ratio = link_signals.spam_anchor_ratio(anchors, s.domain, lang)
-    if ratio is None and s.sig.get("referring_domains"):
-        s.sig["errors"].append("deep:empty")        # доноры есть, а анкоров нет — не «чисто»
+    try:
+        # Разбор оплаченного ответа — под try: кривая строка (не dict, нечисловой refdomains) иначе
+        # ушла бы в общий except волны — только в лог, без `deep:` в errors, а units уже списаны.
+        ratio = link_signals.spam_anchor_ratio(anchors, s.domain, lang)
+        script_only = (not lang and ratio is not None and ratio > st["spam_anchor_max"]
+                       and (link_signals.spam_anchor_ratio(anchors, s.domain, scripts=False) or 0.0)
+                       <= st["spam_anchor_max"])
+        top = [{"anchor": str(a.get("anchor") or "")[:200], "refdomains": a.get("refdomains"),
+                "is_spam": bool(a.get("is_spam"))} for a in anchors[:10]]
+    except Exception as e:  # noqa: BLE001 — «не проверено», не отказ
+        s.sig["errors"].append(f"deep:{type(e).__name__}")
         return
-    if (not lang and ratio is not None and ratio > st["spam_anchor_max"]
-            and (link_signals.spam_anchor_ratio(anchors, s.domain, scripts=False) or 0.0)
-            <= st["spam_anchor_max"]):
+    # RD неизвестен в сигнале (W4 пишет его только непустым) — берём из состояния домена (БД/фид).
+    # Неизвестен совсем (None) — это «не проверено», а не «доноров нет»: нулём считается только 0.
+    rd = s.sig.get("referring_domains")
+    rd = s.referring_domains if rd is None else rd
+    if ratio is None and rd != 0:
+        s.sig["errors"].append("deep:empty")        # доноры есть (или RD неизвестен), анкоров нет — не «чисто»
+        return
+    if script_only:
         # Язык прошлого сайта неизвестен, а отказ держится ТОЛЬКО на правиле скрипта: японский блог
         # на .com при упавшем LLM ушёл бы в вечную грязь. Не отказ, а «анкоры не проверены».
         s.sig["errors"].append("deep:lang_unknown")
         return
-    s.sig["anchors"] = [{"anchor": str(a.get("anchor") or "")[:200], "refdomains": a.get("refdomains"),
-                         "is_spam": bool(a.get("is_spam"))} for a in anchors[:10]]
+    s.sig["anchors"] = top
     s.sig["spam_anchor_ratio"] = ratio
     s.sig["spam_anchors"] = ratio is not None and ratio > st["spam_anchor_max"]
     s.sig["deep_checked"] = True
@@ -1221,20 +1235,22 @@ def _wave_deep(states: list, clients: dict, st: dict, budget, run, notes: list |
         pre = compute_score(dict(s.sig), st.get("weights"))
         if "hard_reject" not in pre["breakdown"] and pre["score"] >= st["manual_review_at"]:
             cands.append((pre["score"], s))
-    if not cands:
-        return
-    # СВЕЖИЙ запрос остатка: W4 уже потратила units, а решение гейта в начале прогона
-    # (`_paid_gate`, кэш в clients["_paid_gate"]) устарело — `_units_below_floor` его не читает.
-    low = _units_below_floor(clients, st)
-    if low:
-        if notes is not None:
-            notes.append(low)
-        return
+    # Сначала отбор под кап: при max_deep_per_run=0 W6 выключена — запроса units нет и «платные
+    # волны пропущены» про выключенную волну не пишем.
     picked = []
     for _, s in sorted(cands, key=lambda x: -x[0]):
         if budget is not None and not budget.take():
             break
         picked.append(s)
+    if not picked:
+        return
+    # СВЕЖИЙ запрос остатка (один на волну, не на домен): W4 уже потратила units, а решение гейта в
+    # начале прогона (`_paid_gate`, кэш в clients["_paid_gate"]) устарело — `_units_below_floor` его не читает.
+    low = _units_below_floor(clients, st)
+    if low:
+        if notes is not None:
+            notes.append(low)
+        return
     _run_concurrent(picked, _CONCURRENCY["deep"], run, "deep", lambda s: _deep_one(s, clients, st))
 
 

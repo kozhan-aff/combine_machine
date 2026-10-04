@@ -1249,3 +1249,107 @@ def test_trademark_flag_is_not_cleared_when_the_brand_check_did_not_run():
     assert out["reject_reason"] == "tld_closed"
     with db.SessionLocal() as s:
         assert s.get(Domain, did).trademark_risk is True
+
+
+# --- fix round 1 (Задача 13): RD неизвестен != 0, кап на ручном пути, разбор ответа, пол после капа ---
+
+def test_deep_unknown_rd_with_empty_anchors_is_not_checked_but_zero_rd_is():
+    """I-1: W4 пишет referring_domains в sig только непустым, поэтому «нет ключа» — это «RD неизвестен»,
+    а не «доноров нет». RD берётся из состояния домена (БД/фид); неизвестен совсем — тоже «не проверено».
+    Нулём считается только настоящий 0."""
+    db_rd = _strong(_state("a.com"))
+    db_rd.referring_domains = 900
+    del db_rd.sig["referring_domains"]
+    nowhere = _strong(_state("b.com"))
+    del nowhere.sig["referring_domains"]
+    zero_db = _strong(_state("c.com"))
+    zero_db.referring_domains = 0
+    del zero_db.sig["referring_domains"]
+    zero_sig = _strong(_state("d.com"))
+    zero_sig.sig["referring_domains"] = 0
+    ah = FakeAh(anchors=[], history=HIST)
+    scoring._wave_deep([db_rd, nowhere, zero_db, zero_sig], {"ahrefs": ah}, _st(), None, None)
+    for s in (db_rd, nowhere):
+        assert s.sig["deep_checked"] is False and "deep:empty" in s.sig["errors"], s.domain
+    for s in (zero_db, zero_sig):
+        assert s.sig["deep_checked"] is True and s.sig["spam_anchor_ratio"] is None, s.domain
+
+
+def test_e2e_null_refdomains_from_ahrefs_with_rd_in_db_stays_out_of_bulk():
+    """I-1 сквозной: RD 900 лежит в БД, Ahrefs вернул refdomains=None, анкоров нет -> анкоры «не
+    проверены», домен scored, но пакет его не берёт (раньше: deep_checked=True и балл по RD из БД)."""
+    from app.api import panel
+    from app.services.settings import update_settings
+    update_settings(manual_review_at=0.0)             # W6 должна ДОЙТИ до домена (предскор без RD из БД)
+    did = _mk("nullrd.com", deadline=NOW + timedelta(days=2), referring_domains=900)
+    ah = FakeAh({"nullrd.com": {**STRONG, "refdomains": None}}, anchors=[], history=HIST)
+    out = scoring.score_domain(did, clients=_full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, FakeWB(), llm=FakeLLM()))
+    assert out["status"] == "scored" and "deep:empty" in out["errors"] and ah.deep_calls == 1
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.score_breakdown["deep_checked"] is False
+        assert "анкоры" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
+        assert panel._bulk_candidates(s, 0.0)[0] == []
+
+
+def test_manual_score_domain_respects_zero_deep_cap():
+    """I-2: «0 = W6 выключен» действует и на ручную кнопку «▶» (score_domain без капа): ни anchors, ни
+    metrics_history, ни свежего запроса units перед W6 (остаётся только запрос гейта начала прогона).
+    Кап > 0 — W6 идёт как прежде, пол units по-прежнему проверяется (второй запрос)."""
+    from app.services.settings import update_settings
+
+    class _Ah(FakeAh):
+        history_calls = 0
+
+        def metrics_history(self, d, years=5, today=None):
+            self.history_calls += 1
+            return super().metrics_history(d, years, today)
+
+    def _run(name):
+        did = _mk(name, deadline=NOW + timedelta(days=2))
+        ah = _Ah({name: STRONG}, anchors=CLEAN, history=HIST)
+        scoring.score_domain(did, clients=_full_clients(
+            FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, FakeWB(), llm=FakeLLM()))
+        return ah
+
+    update_settings(max_deep_per_run=0)
+    off = _run("manual-off.com")
+    assert off.deep_calls == 0 and off.history_calls == 0 and off.units_calls == 1
+    update_settings(max_deep_per_run=5)
+    on = _run("manual-on.com")
+    assert on.deep_calls == 1 and on.history_calls == 1 and on.units_calls == 2
+
+
+def test_deep_malformed_anchor_row_is_a_recorded_error_not_a_silent_log():
+    """M-3: кривая строка в ОПЛАЧЕННОМ ответе — `deep:<Исключение>` в errors, домен «не проверено»
+    (не отказ), а не тихий лог общего except волны."""
+    for bad, exc in (("just a string", "AttributeError"),
+                     ({"anchor": "x", "refdomains": "many"}, "ValueError")):
+        s = _strong(_state("a.com"))
+        scoring._wave_deep([s], {"ahrefs": FakeAh(anchors=[*CLEAN, bad], history=HIST)}, _st(), None, None)
+        assert s.alive and s.reject_reason is None and s.sig["deep_checked"] is False, bad
+        assert f"deep:{exc}" in s.sig["errors"] and "anchors" not in s.sig, bad
+
+
+def test_deep_cap_zero_asks_no_units_and_says_nothing_about_skipped_paid_waves():
+    """M-2: отбор под кап — ДО запроса остатка. Кап 0 (W6 выключена): units_left не зовётся и нет
+    сообщения «платные волны пропущены» про выключенную волну, даже если остаток ниже пола."""
+    s, ah, notes = _strong(_state("a.com")), FakeAh(anchors=CLEAN, units=100), []
+    scoring._wave_deep([s], {"ahrefs": ah}, _st(), scoring.Budget(0), None, notes)
+    assert ah.units_calls == 0 and ah.deep_calls == 0 and notes == []
+    assert s.sig["deep_checked"] is False
+
+
+def test_deep_floor_is_one_fresh_query_per_run_not_per_domain(monkeypatch):
+    """M-4: на проходящем пути с двумя кандидатами units_left — ровно 2 раза за прогон (гейт начала +
+    один свежий перед W6), а не по разу на домен: защита от переезда проверки пола в _deep_one."""
+    names = ("two-a.com", "two-b.com")
+    for n in names:
+        _mk(n, deadline=NOW + timedelta(days=2))
+    ah = FakeAh({n: STRONG for n in names}, anchors=CLEAN, history=HIST)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, FakeWB(),
+                            llm=FakeLLM())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)
+    assert ah.deep_calls == 2 and ah.units_calls == 2
