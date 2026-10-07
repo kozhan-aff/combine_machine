@@ -23,11 +23,12 @@ import app.models.settings
 import app.models.autonomy
 import app.models.job
 import app.models.domain_score_log
+import app.models.secret
 # reference the modules so their table-registration side effect (create_all needs
 # every table, incl. index_history from publish.check_index) isn't seen as a dead import
 _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring,
                     app.models.settings, app.models.autonomy, app.models.job,
-                    app.models.domain_score_log)
+                    app.models.domain_score_log, app.models.secret)
 
 from app.integrations.rdap import RdapClient
 
@@ -108,6 +109,28 @@ def sqlite_db():
     db.SessionLocal.configure(bind=engine)
     yield engine
     Base.metadata.drop_all(engine)
+
+
+@pytest.fixture(autouse=True)
+def _no_key_overrides(monkeypatch):
+    """Переопределения ключей из БД («Ключи и сервисы») по умолчанию ВЫКЛЮЧЕНЫ в тестах: иначе каждое
+    чтение settings.X ходило бы в sqlite из потоков воронки (общее соединение StaticPool, THREADSAFE=2
+    — см. _drain_background_jobs) и кэш протекал бы между тестами с разными движками. Тесты самой
+    фичи берут фикстуру `key_overrides` — она включает механизм."""
+    from app.services import api_keys
+    monkeypatch.setattr(api_keys, "ENABLED", False)
+    api_keys.invalidate()
+    yield
+    api_keys.invalidate()
+
+
+@pytest.fixture
+def key_overrides(_no_key_overrides, monkeypatch):
+    """Включить переопределения ключей из БД (sqlite-харнесс) на время теста."""
+    from app.services import api_keys
+    monkeypatch.setattr(api_keys, "ENABLED", True)
+    api_keys.invalidate()
+    return api_keys
 
 
 @pytest.fixture(autouse=True)

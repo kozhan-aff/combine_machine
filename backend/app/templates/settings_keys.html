@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Настройки — Ключи и сервисы{% endblock %}
+{% block content %}
+<h2><span class="idx">⚙</span> Настройки
+  <span class="hint">Ключи и сервисы — вписываются здесь, без правки .env и рестарта</span></h2>
+
+<div class="chips">
+  <a class="chip" href="/settings" title="пороги скоринга воронки M1 и включённые источники Discovery">Воронка</a>
+  <a class="chip" href="/settings/cloudflare"
+     title="read-only правда Cloudflare: подключения, аккаунты, зоны, DNS, сертификаты">Cloudflare</a>
+  <a class="chip on" href="/settings/keys"
+     title="API-ключи, пароли и адреса сервисов: вписать или сменить из панели">Ключи и сервисы</a>
+</div>
+
+{% if form_err %}<div class="flash err"><span class="tag">Ошибка</span><span>{{ form_err }}</span></div>{% endif %}
+{% if not auth_configured %}<div class="flash warn"><span class="tag">Закрыто</span><span>Менять ключи
+  нельзя, пока в .env не заданы <b>PANEL_USER</b>/<b>PANEL_PASS</b>: без Basic-auth панель открыта всей сети.</span></div>{% endif %}
+{% if request.query_params.get('msg') %}
+<div class="row" style="margin-bottom:14px">
+  <a class="btn btn-acc" href="/diag" title="пингует каждый сервис живьём и показывает, видит ли панель новые ключи">
+    Проверить связь → Диагностика</a>
+  <span class="hint">правка действует сразу в панели и не позже чем через 5 секунд — в воркере автопилота</span>
+</div>
+{% endif %}
+
+<details class="what" style="max-width:760px; margin-bottom:16px"><summary>как это работает</summary>
+  <div class="what-body">Значение, вписанное здесь, лежит в БД и <b>побеждает .env</b>; галка «к .env»
+  удаляет его, и снова работает значение из .env. <b>Пустое поле = «не менять»</b>: ничего не стирается.
+  Секреты целиком не показываются — только маска по последним четырём символам. Ключи хранятся в БД
+  как есть, без шифрования: панель живёт в LAN под Basic-auth. Сами <b>DATABASE_URL, PANEL_USER,
+  PANEL_PASS, GITHUB_REPO</b> и каталог секретов Cloudflare отсюда не меняются — только в .env, чтобы нельзя было
+  запереть себя из панели.</div></details>
+
+<form method="post" action="/settings/keys" autocomplete="off" style="display:grid; gap:6px">
+{% for g in groups %}
+  <h2 style="font-size:13px; margin:18px 0 8px; color:var(--mut)">{{ g.title }}</h2>
+  <div class="wrap">
+  <table>
+    <thead><tr><th>Параметр</th><th>Сейчас</th><th style="width:42%">Новое значение</th><th>К .env</th></tr></thead>
+    <tbody>
+    {% for r in g.rows %}
+      <tr>
+        <td style="white-space:normal; min-width:200px" title="{{ r.hint }}">{{ r.label }}<br>
+          <code>{{ r.key }}</code></td>
+        <td style="white-space:normal">
+          {% if r.source == 'db' %}<span class="badge b-scored" title="значение из БД, вписано в панели">БД</span>
+          {% elif r.source == 'env' %}<span class="badge b-default" title="значение из .env">.env</span>
+          {% else %}<span class="badge b-default" title="нигде не задан">не задан</span>{% endif %}
+          {% if r.shown %}<code>{{ r.shown }}</code>{% endif %}
+        </td>
+        <td>
+          {% if r.kind == 'choice' %}
+            <select name="v_{{ r.key }}" style="width:100%">
+              <option value="">— не менять —</option>
+              {% for c in r.choices %}<option value="{{ c }}" {{ 'selected' if draft.get(r.key) == c }}>{{ c }}</option>{% endfor %}
+            </select>
+          {% elif r.kind == 'json' %}
+            <textarea name="v_{{ r.key }}" rows="3" autocomplete="off" spellcheck="false"
+                      placeholder="не менять" maxlength="{{ r.max_len }}"
+                      style="width:100%; min-width:200px; -webkit-text-security:disc"></textarea>
+          {% else %}
+            <input type="{{ 'password' if r.secret else 'text' }}" name="v_{{ r.key }}" autocomplete="off"
+                   spellcheck="false" placeholder="не менять" maxlength="{{ r.max_len }}"
+                   {% if not r.secret and draft.get(r.key) %}value="{{ draft.get(r.key) }}"{% endif %}
+                   style="width:100%; min-width:200px">
+          {% endif %}
+        </td>
+        <td><input type="checkbox" name="r_{{ r.key }}" value="1"
+                   {{ 'disabled' if r.source != 'db' }}
+                   title="{{ 'удалить значение из БД: снова будет работать значение из .env' if r.source == 'db' else 'в БД нет значения — сбрасывать нечего' }}"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <details class="what" style="margin-top:6px"><summary>где взять — {{ g.title }}</summary>
+    <div class="what-body">{{ g.note }}
+      <ul style="margin:8px 0 0; padding-left:18px">
+      {% for r in g.rows %}<li><b>{{ r.label }}</b> — {{ r.hint }}</li>{% endfor %}
+      </ul></div></details>
+{% endfor %}
+  <div class="station" style="max-width:760px; margin-top:18px">
+    <div class="plate">Применить — <b>записать только заполненное</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Сохраняются только заполненные поля и отмеченные «к .env». Если хоть одно значение
+      не прошло проверку, не сохраняется ничего — исправь и отправь снова. Смена ключей Backorder и
+      Optimizator ничего не запускает и ничего не покупает: денежный гейт остаётся ручным.</div></details>
+    <div class="go">
+      <button class="btn-acc" {{ 'disabled' if not auth_configured }}
+              title="записать заполненные поля и сбросы к .env">Сохранить</button>
+      <span class="hint">после сохранения — «Проверить связь» в Диагностике</span>
+    </div>
+  </div>
+</form>
+{% endblock %}

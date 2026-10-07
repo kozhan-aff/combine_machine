@@ -36,6 +36,9 @@ _TESTPOINT = "test"     # DBL-домен, всегда листнут (127.0.1.2
 
 class BlacklistClient:
     _control_ok: bool | None = None       # кэш контроля на процесс
+    # (DNS_RESOLVER, SPAMHAUS_DQS_KEY), при которых контроль прошёл: оператор меняет их из панели
+    # без рестарта, и «контроль прошёл» для старого резолвера/ключа ничего не говорит о новом
+    _control_key: tuple | None = None
     # Волновая архитектура (2026-07-20): is_blacklisted() зовётся конкурентно из _wave_risk (до
     # 12 потоков). Без лока несколько потоков одновременно видят _control_ok в исходном None и
     # КАЖДЫЙ шлёт свой DNS-запрос тест-поинта — не только лишняя нагрузка на резолвер, а реальная
@@ -80,7 +83,9 @@ class BlacklistClient:
         (до рестарта контейнера) загонял бы КАЖДЫЙ последующий домен в путь «история не
         проверена», хотя Spamhaus восстановился через секунду."""
         with BlacklistClient._control_lock:
-            if BlacklistClient._control_ok:
+            key = (settings.DNS_RESOLVER, settings.SPAMHAUS_DQS_KEY)
+            # _control_key None = флаг выставлен напрямую (тесты) — доверяем как раньше
+            if BlacklistClient._control_ok and BlacklistClient._control_key in (None, key):
                 return
             try:
                 ip = self._resolve(self._dbl_host(_TESTPOINT))
@@ -89,6 +94,7 @@ class BlacklistClient:
             ok = bool(ip and ip.startswith("127."))
             if ok:
                 BlacklistClient._control_ok = True     # кэшируем только успех
+                BlacklistClient._control_key = key
                 return
             raise RuntimeError(
                 "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "

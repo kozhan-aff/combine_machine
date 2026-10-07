@@ -21,16 +21,25 @@ _SECRET_FIELDS = (
     "SERPAPI_KEY", "YANDEX_WORDSTAT_TOKEN", "BACKORDER_LOGIN", "BACKORDER_PASSWORD",
     "OPTIMIZATOR_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
     "LLM_API_KEY", "APARSER_API_KEY", "GITHUB_TOKEN", "PANEL_PASS", "SPAMHAUS_DQS_KEY",
-    "WEBRISK_API_KEY",
+    "WEBRISK_API_KEY", "GSC_SERVICE_ACCOUNT_JSON",
 )
 
 
+def _secret_fields() -> tuple:
+    """Секретные поля: прежний список + все секреты экрана «Ключи и сервисы» (белый список)."""
+    from app.services.api_keys import SECRET_KEYS
+    return tuple(dict.fromkeys(_SECRET_FIELDS + SECRET_KEYS))
+
+
 def _scrub(s: str) -> str:
-    """Затереть любое непустое значение секрета из настроек, встретившееся в тексте."""
-    for name in _SECRET_FIELDS:
-        val = getattr(settings, name, "")
-        if val and isinstance(val, str) and val in s:
-            s = s.replace(val, "***")
+    """Затереть любое непустое значение секрета из настроек, встретившееся в тексте. getattr
+    видит и переопределения из панели (БД), и .env: затираем оба — старый .env-ключ мог быть
+    в запросе, ушедшем до смены."""
+    for name in _secret_fields():
+        env = settings.env_value(name) if name in type(settings).model_fields else ""
+        for val in (getattr(settings, name, ""), env):
+            if val and isinstance(val, str) and val in s:
+                s = s.replace(val, "***")
     return s
 
 
