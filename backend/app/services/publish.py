@@ -148,8 +148,16 @@ def publish_site(site_id: int) -> dict:
                                       "CTA не выведется; поправь оффер")
                 continue
             if offer is None:
-                warnings.append(f"{p.url_path}: у страницы нет оффера — опубликована БЕЗ "
-                                "партнёрской ссылки (привяжи оффер к сайту)")
+                # без оффера страница — просто текст без партнёрки: в интернет её не выпускаем
+                # (иначе оператор узнаёт постфактум, а автопилот публикует без человека)
+                failed[p.url_path] = ("у страницы нет оффера — публикация без партнёрской ссылки "
+                                      "заблокирована; привяжи оффер к сайту")
+                continue
+            if not offer.active and not reserve_url:
+                # оффер выключен, резервного URL нет: CTA повёл бы на мёртвую партнёрку
+                failed[p.url_path] = (f"оффер «{offer.brand}» выключен и резервный URL не задан — "
+                                      "включи оффер или задай резервный URL")
+                continue
             bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url))
             doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid)
             try:

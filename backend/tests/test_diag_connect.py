@@ -155,7 +155,13 @@ def _seed_site(page_statuses=()) -> int:
         d = Domain(domain="ex.com", source="dropcatch", status="purchased")
         s.add(d)
         s.commit()
+        # публикация без оффера заблокирована — у сайта со страницами он есть
+        from app.models.offer import Offer
+        off = Offer(brand="B", affiliate_link="https://ex.com/aff", active=True, language="ru")
+        s.add(off)
+        s.commit()
         site = Site(domain_id=d.id, status="content" if page_statuses else "provisioning",
+                    offer_id=off.id if page_statuses else None,
                     doc_root="/www/wwwroot/ex.com",
                     aapanel_site_name="ex.com" if page_statuses else None)
         s.add(site)

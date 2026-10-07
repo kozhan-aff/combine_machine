@@ -286,8 +286,8 @@ def test_publish_uses_reserve_url_for_deactivated_offer(monkeypatch):
 
 
 def test_publish_keeps_dead_link_when_no_reserve_row(monkeypatch):
-    """Без строки OfferSettings вовсе (обычное состояние до Task 3/первой настройки) publish_site
-    не падает и не меняет поведение — мёртвая ссылка остаётся как есть."""
+    """Без строки OfferSettings вовсе publish_site не падает, но и мёртвую ссылку выключенного
+    оффера не публикует молча: страница уходит в failed (нужен оффер или резервный URL)."""
     from app.services import content, publish
     from app.integrations.aapanel import AaPanelClient
 
@@ -320,9 +320,8 @@ def test_publish_keeps_dead_link_when_no_reserve_row(monkeypatch):
 
     monkeypatch.setattr(AaPanelClient, "_post", _post)
     out = publish.publish_site(site_id)
-    assert out["status"] == "published"
-    home = written["/www/wwwroot/reserve-off.ru/index.html"]
-    assert "ex.com/dead2" in home    # сегодняшнее поведение сохранено
+    assert out["status"] == "failed" and "выключен" in out["failed"]["/"]
+    assert not written
 
 
 def test_offer_settings_singleton_roundtrip():

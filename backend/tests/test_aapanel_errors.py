@@ -319,7 +319,13 @@ def _seed_site(page_statuses=()) -> int:
         s.commit()
         s.refresh(d)
         # сайт со страницами — уже провиженный (publish не пишет в сайт без vhost'а, S5-09)
+        # публикация без оффера заблокирована — у сайта со страницами он есть
+        from app.models.offer import Offer
+        off = Offer(brand="B", affiliate_link="https://ex.com/aff", active=True, language="ru")
+        s.add(off)
+        s.commit()
         site = Site(domain_id=d.id, status="content" if page_statuses else "provisioning",
+                    offer_id=off.id if page_statuses else None,
                     doc_root="/www/wwwroot/ex.ru",
                     aapanel_site_name="ex.ru" if page_statuses else None)
         s.add(site)

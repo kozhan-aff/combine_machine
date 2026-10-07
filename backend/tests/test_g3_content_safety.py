@@ -222,16 +222,32 @@ def test_publish_unverified_page_stays_edited_and_site_not_published(monkeypatch
         assert s.get(Domain, s.get(Site, sid).domain_id).status == "purchased"
 
 
-def test_publish_without_offer_warns_loudly_and_sweep_surfaces_it(monkeypatch):
+def test_publish_without_offer_is_blocked_before_writing_and_sweep_surfaces_it(monkeypatch):
     sid = _site()
-    _page(sid, status="edited")
-    _fake_panel(monkeypatch)
+    pid = _page(sid, status="edited")
+    writes = _fake_panel(monkeypatch)
     out = publish.publish_site(sid)
-    assert out["status"] == "published" and "БЕЗ партнёрской ссылки" in out["warnings"][0]
+    assert out["status"] == "failed" and "нет оффера" in out["failed"]["/"]
+    assert not writes and _status(pid) == "edited"                  # в интернет не ушла
     sid2 = _site(domain="g3b.com")
     _page(sid2, status="edited")
     done, errs = orch._stage_publish(10)
-    assert any("БЕЗ партнёрской ссылки" in e for e in errs)
+    assert any("нет оффера" in e for e in errs)
+
+
+def test_publish_blocks_inactive_offer_without_reserve_url_but_allows_with_it(monkeypatch):
+    oid = _offer(active=False)
+    sid = _site(offer_id=oid)
+    pid = _page(sid, status="edited", offer_id=oid)
+    writes = _fake_panel(monkeypatch)
+    out = publish.publish_site(sid)
+    assert out["status"] == "failed" and "выключен" in out["failed"]["/"]
+    assert not writes and _status(pid) == "edited"
+    from app.models.offer import OfferSettings
+    with db.SessionLocal() as s:
+        s.add(OfferSettings(id=1, reserve_offer_url="https://ex.com/reserve"))
+        s.commit()
+    assert publish.publish_site(sid)["status"] == "published"
 
 
 def test_publish_blocks_page_whose_cta_would_vanish(monkeypatch):
@@ -250,7 +266,7 @@ def test_legacy_page_does_not_fall_back_to_foreign_global_offer(monkeypatch):
     _page(sid, status="edited", offer_id=None, lang=None)
     writes = _fake_panel(monkeypatch)
     out = publish.publish_site(sid)
-    assert out["warnings"] and all("ex.com/aff" not in v for v in writes.values())
+    assert out["failed"] and not writes
 
 
 # ── S6-07: раскрытие в языке страницы и рядом со ссылкой ──────────────────────
@@ -374,6 +390,18 @@ def test_check_index_rotates_oldest_first_and_respects_cooldown(monkeypatch):
     orch._stage_check_index(10)
     assert [s for s, _ in seen] == [never, old]                     # fresh и indexed пропущены
     assert fresh not in [s for s, _ in seen] and indexed not in [s for s, _ in seen]
+
+
+def test_check_index_rotation_takes_longest_unchecked_not_lowest_id(monkeypatch):
+    # id1 проверен недавно (но просрочен), id2 — давно: при cap=1 обязан идти id2, не меньший id
+    recent = _published("r.com", timedelta(hours=7))
+    ancient = _published("s.com", timedelta(days=5))
+    assert recent < ancient
+    seen = []
+    monkeypatch.setattr("app.services.publish.check_index",
+                        lambda sid, only_due=False: seen.append(sid) or {"pages": {"/": "not_indexed"}})
+    orch._stage_check_index(1)
+    assert seen == [ancient]
 
 
 def test_check_index_stage_stops_when_engines_are_down(monkeypatch):
