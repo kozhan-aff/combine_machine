@@ -100,6 +100,10 @@ class Page(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Последняя попытка publish_site по этой edited-странице (любой исход). Ротация стадии publish
+    # в оркестраторе: сайт, который не публикуется (нет оффера, домен не подтвердил запись, сбой
+    # панели), уходит в хвост очереди и не занимает cap навсегда.
+    publish_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     site: Mapped["Site"] = relationship(back_populates="pages")
 

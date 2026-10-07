@@ -255,34 +255,24 @@ def _stage_publish(cap):
     """Сайты с ≥1 edited-страницей -> publish_site (публикует все edited; гейт держится в сервисе)."""
     from sqlalchemy import select
     from app.db import SessionLocal
-    from app.models.site import Site, Page
+    from app.models.site import Page
     from app.services import publish
+    from datetime import datetime, timezone
 
     done, errs = 0, []
     with SessionLocal() as db:
-        from app.models.offer import Offer, OfferSettings
-        from app.models.site import Site as _S
-        from app.services.content import site_offer, cta_link
-        st = db.get(OfferSettings, 1)
-        reserve = st.reserve_offer_url if st else None
-        # Очередь не должна голодать (G3): сайт, у которого ВСЕ edited-страницы заведомо
-        # заблокированы публикацией (нет оффера / выключен без резервного URL / CTA не выйдет),
-        # навсегда остаётся edited. Если считать его в cap, он с меньшим id занимает слот на каждом
-        # свипе, и нормальные сайты не публикуются никогда. Поэтому готовые идут первыми под cap,
-        # а заблокированные — после, тоже под cap, только чтобы их причина попала в ошибки свипа.
-        ready, stuck = [], []
-        for sid in [r[0] for r in db.execute(
-                select(Site.id).where(Site.id.in_(
-                    select(Page.site_id).where(Page.status == "edited"))).order_by(Site.id)).all()]:
-            fb = site_offer(db, db.get(_S, sid))
-            pubs = False
-            for p in db.execute(select(Page).where(Page.site_id == sid, Page.status == "edited")).scalars():
-                o = db.get(Offer, p.offer_id) if p.offer_id is not None else fb
-                if o is not None and cta_link(o, reserve) is not None and (o.active or reserve):
-                    pubs = True
-                    break
-            (ready if pubs else stuck).append(sid)
-        ids = ready[:cap] + stuck[:cap]
+        # Очередь не должна голодать (G3): сайт, который не публикуется (нет оффера, выключен без
+        # резервного URL, домен не подтверждает запись, не провиженен, сбой панели), навсегда остаётся
+        # edited. При `ORDER BY id LIMIT cap` он с меньшим id занимал бы слот на каждом свипе, и
+        # нормальные сайты не публиковались бы никогда. Ротация по давности последней попытки
+        # (как в _stage_check_index) закрывает все причины разом, без копии блок-правил publish.
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
+        oldest: dict[int, datetime] = {}
+        for sid, at in db.execute(select(Page.site_id, Page.publish_attempted_at)
+                                  .where(Page.status == "edited")).all():
+            at = publish._aware(at) or epoch
+            oldest[sid] = min(at, oldest.get(sid, at))
+        ids = [sid for sid, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))][:cap]
     for sid in ids:
         try:
             out = publish.publish_site(sid)

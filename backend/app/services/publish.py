@@ -112,10 +112,15 @@ def publish_site(site_id: int) -> dict:
         if not pages:
             return {"status": "no_edited_pages",
                     "hint": "гейт: публикуются только страницы в статусе 'edited'"}
+        # Любая попытка (в т.ч. отказ до записи) — отметка для ротации стадии publish в оркестраторе
+        _attempt = datetime.now(timezone.utc)
+        for p in pages:
+            p.publish_attempted_at = _attempt
         # S5-09/S6-12/S7-05: публиковать можно только в провиженный сайт. Раньше проверки не было —
         # файлы писались в docroot без vhost'а/зоны (CreateFile создаёт каталоги сам), страницы и
         # сайт помечались published; на legacy-строке без doc_root падал AttributeError на rstrip.
         if (site.status not in PUBLISH_STATUSES or not site.aapanel_site_name or not site.doc_root):
+            db.commit()
             return {"status": "not_provisioned",
                     "hint": f"сайт в статусе «{site.status}», vhost "
                             f"{'есть' if site.aapanel_site_name else 'не создан'} — сначала provision"}

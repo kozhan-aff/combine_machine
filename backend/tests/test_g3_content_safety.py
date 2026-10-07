@@ -448,5 +448,54 @@ def test_sweep_publish_blocked_site_with_lower_id_does_not_starve_queue(monkeypa
     _fake_panel(monkeypatch)
     for _ in range(3):
         done, errs = orch._stage_publish(1)
-    assert _status(pid_ok) != "edited"                      # нормальный сайт дошёл до публикации
+    assert _status(pid_ok) == "published"                   # нормальный сайт дошёл до публикации
     assert any("нет оффера" in e for e in errs)             # причина блокировки по-прежнему видна
+
+
+@pytest.mark.parametrize("bad", ["no_offer", "inactive", "unsafe_link"])
+def test_sweep_publish_rotation_covers_every_block_reason(monkeypatch, bad):
+    # любая причина, по которой сайт с меньшим id не публикуется, не держит слот cap=1 вечно
+    if bad == "no_offer":
+        sid_bad = _site(domain="bad.com")
+        _page(sid_bad, status="edited")
+    else:
+        bo = _offer(active=(bad != "inactive"),
+                    link="javascript:alert(1)" if bad == "unsafe_link" else "https://ex.com/aff")
+        sid_bad = _site(domain="bad.com", offer_id=bo)
+        _page(sid_bad, status="edited", offer_id=bo)
+    oid = _offer(brand="Good")
+    pid_ok = _page(_site(domain="good.com", offer_id=oid), status="edited", offer_id=oid)
+    _fake_panel(monkeypatch)
+    orch._stage_publish(1)
+    orch._stage_publish(1)
+    assert _status(pid_ok) == "published"
+
+
+def test_sweep_publish_rotation_unverified_domain_does_not_starve(monkeypatch):
+    # оффер в порядке, но домен не подтверждает запись (NS/vhost/502): страница остаётся edited
+    oid = _offer()
+    pid_dead = _page(_site(domain="dead.com", offer_id=oid), status="edited", offer_id=oid)
+    pid_ok = _page(_site(domain="good.com", offer_id=oid), status="edited", offer_id=oid)
+    _fake_panel(monkeypatch)
+    monkeypatch.setattr(settings, "PUBLISH_VERIFY", True)
+    monkeypatch.setattr(publish, "_verify_live",
+                        lambda domain, path, bid: "HTTP 502" if domain == "dead.com" else None)
+    for _ in range(3):
+        orch._stage_publish(1)
+    assert _status(pid_dead) == "edited" and _status(pid_ok) == "published"
+
+
+def test_sweep_publish_legacy_page_without_offer_id_still_published(monkeypatch):
+    oid = _offer()
+    pid = _page(_site(domain="legacy.com", offer_id=oid), status="edited", offer_id=None)
+    _fake_panel(monkeypatch)
+    orch._stage_publish(1)
+    assert _status(pid) == "published"
+
+
+def test_publish_stamps_attempt_even_when_not_provisioned():
+    sid = _site(status="new")
+    pid = _page(sid, status="edited")
+    assert publish.publish_site(sid)["status"] == "not_provisioned"
+    with db.SessionLocal() as s:
+        assert s.get(Page, pid).publish_attempted_at is not None
