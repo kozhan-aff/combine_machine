@@ -260,10 +260,29 @@ def _stage_publish(cap):
 
     done, errs = 0, []
     with SessionLocal() as db:
-        ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.id.in_(
-                select(Page.site_id).where(Page.status == "edited")))
-            .order_by(Site.id).limit(cap)).all()]
+        from app.models.offer import Offer, OfferSettings
+        from app.models.site import Site as _S
+        from app.services.content import site_offer, cta_link
+        st = db.get(OfferSettings, 1)
+        reserve = st.reserve_offer_url if st else None
+        # Очередь не должна голодать (G3): сайт, у которого ВСЕ edited-страницы заведомо
+        # заблокированы публикацией (нет оффера / выключен без резервного URL / CTA не выйдет),
+        # навсегда остаётся edited. Если считать его в cap, он с меньшим id занимает слот на каждом
+        # свипе, и нормальные сайты не публикуются никогда. Поэтому готовые идут первыми под cap,
+        # а заблокированные — после, тоже под cap, только чтобы их причина попала в ошибки свипа.
+        ready, stuck = [], []
+        for sid in [r[0] for r in db.execute(
+                select(Site.id).where(Site.id.in_(
+                    select(Page.site_id).where(Page.status == "edited"))).order_by(Site.id)).all()]:
+            fb = site_offer(db, db.get(_S, sid))
+            pubs = False
+            for p in db.execute(select(Page).where(Page.site_id == sid, Page.status == "edited")).scalars():
+                o = db.get(Offer, p.offer_id) if p.offer_id is not None else fb
+                if o is not None and cta_link(o, reserve) is not None and (o.active or reserve):
+                    pubs = True
+                    break
+            (ready if pubs else stuck).append(sid)
+        ids = ready[:cap] + stuck[:cap]
     for sid in ids:
         try:
             out = publish.publish_site(sid)
