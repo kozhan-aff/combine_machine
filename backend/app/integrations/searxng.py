@@ -67,3 +67,17 @@ class SearxngClient(BaseClient):
         r = self.request("GET", f"{self.base_url}/search",
                          params={"q": "ping", "format": "json"})
         return "results" in r.json()
+
+    def health(self, query: str = "site:wikipedia.org") -> bool:
+        """Семантическая проверка (S6-09/S7-04/F8-03): контрольный site:-запрос, у которого
+        ОБЯЗАН быть ненулевой результат — ровно тот оператор, на котором M5 проверяет индексацию.
+        Нулевая выдача -> RuntimeError с перечнем неотвечающих движков (CAPTCHA/suspended),
+        а не зелёный «транспорт жив»: ping() этого не видит, и /diag был зелёным при мёртвом M5."""
+        data = self.search_full(query)
+        if data.get("results"):
+            return True
+        dead = [f"{e[0]} ({e[1]})" for e in (data.get("unresponsive_engines") or [])
+                if isinstance(e, (list, tuple)) and len(e) >= 2][:4]
+        raise RuntimeError(
+            f"0 результатов на контрольный запрос {query!r}; движки не отвечают: {', '.join(dead)}"
+            if dead else f"0 результатов на контрольный запрос {query!r} (движки молчат без ошибок)")

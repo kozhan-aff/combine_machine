@@ -91,6 +91,35 @@ class CloudflareClient(BaseClient):
         result = self._result(resp)
         return result.get("status") == "active"
 
+    def ping_detail(self) -> str:
+        """Активность токена + права, ЕСЛИ токен может прочитать собственные политики (F8-18).
+
+        Возвращает пометку для /diag. Права записи (создать зону, DNS) иначе вскрылись бы только
+        на первом provision. verify отдаёт id токена; GET /user/tokens/{id} читает политики, но
+        сам требует права на чтение токенов — типичный zone-токен его не имеет (403), тогда честно
+        пишем «права записи не проверены». Только чтение; формат policies[].permission_groups[].name
+        — по публичной документации CF, не по живому образцу: разбор защитный."""
+        res = self._result(self.request("GET", f"{self.base_url}/user/tokens/verify",
+                                        headers=self._headers())) or {}
+        if res.get("status") != "active":
+            raise RuntimeError(f"токен не активен: {res.get('status')}")
+        base = "токен активен"
+        try:
+            pol = self._result(self.request(
+                "GET", f"{self.base_url}/user/tokens/{res.get('id')}", headers=self._headers()))
+            names = [str(g.get("name") or "") for p in (pol or {}).get("policies") or []
+                     for g in p.get("permission_groups") or []]
+        except Exception:  # noqa: BLE001 — нет права читать свои политики: не ошибка токена
+            names = []
+        if not names:
+            return f"{base}; права записи не проверены (токен не читает свои политики)"
+        write = [n for n in names if "write" in n.lower() or "edit" in n.lower()]
+        if not write:
+            raise RuntimeError(f"токен активен, но только на чтение: {', '.join(names)[:120]}")
+        missing = [k for k in ("Zone", "DNS") if not any(k.lower() in n.lower() for n in write)]
+        return (f"{base}; права записи: {', '.join(write)[:100]}"
+                + (f"; ⚠ не найдено: {'/'.join(missing)}" if missing else ""))
+
     # --- zones ----------------------------------------------------------
 
     def find_zone(self, domain: str) -> dict | None:

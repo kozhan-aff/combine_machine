@@ -25,10 +25,10 @@
 </div>
 
 <div class="toolbar">
-  <form method="get" action="/diag">
-    <button class="btn-acc" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
+  <form method="post" action="/diag/refresh">
+    <button class="btn-acc" title="пропинговать все сервисы ещё раз (до {{ timeout|int }} с); LLM и SearXNG — заново, не из 10-минутного кэша">↻ Проверить все сервисы снова</button>
   </form>
-  <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
+  <span class="hint">{% if checked_at %}снимок от {{ checked_at.strftime('%H:%M:%S') }} UTC · {% endif %}страница показывает кэш (фон обновляет раз в 5 минут), живой прогон — только кнопкой</span>
 </div>
 
 {% set mod_titles = {'M1':'M1 — поиск и скоринг','M2':'M2 — выкуп','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
@@ -57,7 +57,7 @@
             <span class="meter" style="width:48px" title="доля от таймаута пинга ({{ timeout|int }} с)"><i class="m-mid" style="width:{{ [ (c.ms/(timeout*10))|round|int, 100]|min }}%"></i></span>
           {% else %}<span class="hint">—</span>{% endif %}
         </td>
-        <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or '' }}</td>
+        <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or c.note or '' }}</td>
       </tr>
     {% endfor %}
     </tbody>

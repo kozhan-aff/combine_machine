@@ -456,12 +456,12 @@ def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_ses
 def diag_view(request: Request):
     from app.services import deploy as _deploy
     from app.services.diagnostics import PING_TIMEOUT
-    checks = diag_cache.refresh()   # та же цена (живой прогон) + кладём в кэш -> баннер консистентен с /diag
+    checks, checked_at = diag_cache.get()   # кэш мгновенно (живой прогон — только кнопкой и фоном)
     ok = sum(1 for c in checks if c["status"] == "ok")
     crit_down = [c["label"] for c in checks if c.get("critical") and c["status"] == "fail"]
     return templates.TemplateResponse(request, "diag.html", {
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
-        "crit_down": crit_down, "timeout": PING_TIMEOUT,
+        "crit_down": crit_down, "timeout": PING_TIMEOUT, "checked_at": checked_at,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
         "status": _deploy.deploy_status(),
     })
@@ -469,9 +469,9 @@ def diag_view(request: Request):
 
 @router.post("/diag/refresh")
 def diag_refresh(request: Request):
-    """Кнопка «перепроверить» в баннере: синхронный прогон диагностики (≤20с, пинги
-    параллельны), редирект назад — оператор остаётся на своём экране, баннер отражает свежий кэш."""
-    diag_cache.refresh()
+    """Явная «проверить снова» (на /diag и в баннере): синхронный прогон диагностики (≤20с, пинги
+    параллельны, single-flight, TTL-кэш проб сброшен), редирект назад — баннер отражает свежий кэш."""
+    diag_cache.refresh(force=True)
     raw = request.headers.get("referer") or "/"
     p = urlsplit(raw)
     # выбрасываем прежние flash-параметры: иначе старый ?err= подавит «перепроверено», а повторные клики пухнут URL

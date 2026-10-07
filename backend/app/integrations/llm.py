@@ -3,6 +3,8 @@
 See docs/api/llm.md. Base settings.LLM_BASE_URL (LiteLLM :4000), no key on current box.
 Models: mistral(=mistral-large, quality), mistral-small, ollama/* (free local).
 """
+import httpx
+
 from app.config import settings
 from app.integrations.base import BaseClient
 
@@ -42,6 +44,46 @@ class LlmClient(BaseClient):
     def ping(self) -> bool:
         r = self.request("GET", f"{self.base_url}/v1/models", headers=self._headers())
         return "data" in r.json()
+
+
+    def probe(self, timeout: float = 15.0) -> bool:
+        """Реальный микро-completion ВЫБРАННОЙ модели (max_tokens=4), а не GET /v1/models (S2-01/S6-01).
+
+        /v1/models отвечает 200, даже когда модель закрыта тарифом (403), упёрлась в лимит (429) или
+        её бэкенд (Ollama) недостижим (500) — /diag был зелёным при мёртвой генерации. Одна попытка
+        без ретрая и короткий таймаут; причина — текстом в RuntimeError. Токены тратит ничтожно, но
+        вызывающий (diagnostics) кэширует результат на 10 минут."""
+        body = {"model": self.model, "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 4, "stream": False}
+        try:
+            r = self._request_once("POST", f"{self.base_url}/v1/chat/completions",
+                                   json=body, headers=self._headers(), timeout=timeout)
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            label = {401: "ключ не принят", 403: "модель недоступна (тариф/права)",
+                     429: "лимит запросов", 404: "модель не найдена"}.get(
+                         code, "бэкенд модели недоступен" if code >= 500 else "запрос отвергнут")
+            raise RuntimeError(f"модель {self.model}: HTTP {code} — {label}"
+                               f"{_err_text(e.response)}") from None
+        except httpx.TransportError as e:
+            raise RuntimeError(f"LiteLLM недоступен: {type(e).__name__} {e}".strip()) from None
+        try:
+            ok = bool(r.json()["choices"])
+        except (ValueError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            raise RuntimeError(f"модель {self.model}: ответ completion без choices")
+        return True
+
+
+def _err_text(resp) -> str:
+    """Короткий текст ошибки из тела LiteLLM ({"error": {"message": ...}}) — для /diag."""
+    try:
+        err = resp.json().get("error")
+        msg = err.get("message") if isinstance(err, dict) else err
+    except (ValueError, AttributeError):
+        msg = None
+    return f": {' '.join(str(msg).split())[:80]}" if msg else ""
 
 
 class LlmClassifyClient(LlmClient):

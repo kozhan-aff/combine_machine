@@ -96,6 +96,24 @@ def _no_live_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clean_diag_and_panel_state():
+    """Предохранитель aaPanel (пауза после отказа авторизации), кэш /diag и TTL-кэш проб LLM/SearXNG —
+    модульные глобалы процесса: без сброса пауза от одного теста блокировала бы панель в соседнем,
+    а кэш /diag протекал бы в чужой рендер."""
+    from app.integrations import aapanel
+    from app.services import diag_cache, diagnostics
+
+    def _reset():
+        aapanel.reset_block()
+        diagnostics.reset_probe_cache()
+        diag_cache._checks = None
+        diag_cache._checked_at = None
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def sqlite_db():
     """Fresh in-memory DB per test, bound into app.db. StaticPool = one shared conn."""
     engine = create_engine(
