@@ -45,9 +45,6 @@ def provision(site_id: int) -> dict:
     from app.integrations.cloudflare import CloudflareClient
     from app.integrations.aapanel import AaPanelClient, require_open
 
-    # Префлайт: панель на паузе (отказ авторизации/бан) — падаем ДО шагов Cloudflare, а не после;
-    # иначе каждый тик свипа заново гонял бы CF-запросы и упирался в закрытую панель (S5-01).
-    require_open()
     with SessionLocal() as db:
         site = db.get(Site, site_id)
         if site is None:
@@ -88,6 +85,10 @@ def provision(site_id: int) -> dict:
         #     (шаг 1 коммитит cf_zone_id), ensure_zone/ensure_a_record — check-before-create,
         #     ensure_site пропускает уже созданный сайт. Оператор чинит причину, жмёт
         #     «Provision» ещё раз — и дело доезжает с того же места, ничего не дублируя.
+        # Префлайт: панель на паузе (отказ авторизации/бан) — падаем ДО обращения к панели (S5-01).
+        # Стоит ЗДЕСЬ, а не в начале: зона CF и выдача NS (awaiting_ns, шаг на часы) от панели не
+        # зависят — пауза не должна лишать оператора списка NS для регистратора.
+        require_open()
         ap = AaPanelClient()
         root = site.doc_root or docroot_for(domain)
         ap.ensure_site(domain, root)

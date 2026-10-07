@@ -165,18 +165,57 @@ def _seed_site(page_statuses=()) -> int:
         return site.id
 
 
-def test_provision_preflight_stops_before_cloudflare_when_panel_paused(monkeypatch):
-    """S5-01 п.3: панель на паузе -> provision падает ДО зоны/DNS в Cloudflare (раньше каждый
-    тик свипа заново гонял CF-шаги и только потом упирался в панель)."""
-    from app.services import provisioning
+class _FakeCF:
+    """Cloudflare без сети: зона pending/active по флагу класса; считает шаги."""
+    status = "pending"
+    steps: list = []
 
-    def _boom():
-        raise AssertionError("Cloudflare не должен вызываться, пока панель на паузе")
-    monkeypatch.setattr("app.integrations.cloudflare.CloudflareClient", _boom)
+    def ensure_zone(self, domain):
+        self.steps.append("ensure_zone")
+        return {"id": "z1", "status": self.status, "name_servers": ["a.ns.cf", "b.ns.cf"]}
+
+    def get_zone(self, zone_id):
+        return {"id": zone_id, "status": self.status, "name_servers": ["a.ns.cf", "b.ns.cf"]}
+
+    def ensure_a_record(self, *a, **kw):
+        self.steps.append("a_record")
+
+    def get_zone_setting(self, *a, **kw):
+        return {"value": "full"}
+
+
+def _pause_panel(monkeypatch, status):
+    _FakeCF.status, _FakeCF.steps = status, []
+    monkeypatch.setattr("app.integrations.cloudflare.CloudflareClient", _FakeCF)
+    monkeypatch.setattr(settings, "VPS_ORIGIN_IP", "203.0.113.9")
     aapanel._block.update(until=time.monotonic() + 600, reason="IP validation failed",
                           fp=aapanel._fingerprint())
+
+
+def test_provision_paused_panel_still_returns_ns_for_pending_zone(monkeypatch):
+    """S5-01: пауза панели не отнимает у оператора NS — зона создаётся, возвращается awaiting_ns,
+    в панель не уходит ни одного запроса (шаг NS самый долгий и от панели не зависит)."""
+    from app.services import provisioning
+    _pause_panel(monkeypatch, "pending")
+    panel = _Panel()
+    monkeypatch.setattr(AaPanelClient, "_request_once", lambda self, *a, **kw: panel.request(*a, **kw))
+    out = provisioning.provision(_seed_site())
+    assert out["status"] == "awaiting_ns" and out["name_servers"] == ["a.ns.cf", "b.ns.cf"]
+    assert _FakeCF.steps == ["ensure_zone"] and panel.calls == []
+
+
+def test_provision_paused_panel_stops_before_any_panel_request_on_active_zone(monkeypatch):
+    """S5-01: зона active -> CF-шаги прошли, а на панели провижн падает AaPanelBlocked ДО сети."""
+    from app.services import provisioning
+    _pause_panel(monkeypatch, "active")
+    panel = _Panel()
+    monkeypatch.setattr(AaPanelClient, "_request_once", lambda self, *a, **kw: panel.request(*a, **kw))
+    sid = _seed_site()
     with pytest.raises(AaPanelBlocked):
-        provisioning.provision(_seed_site())
+        provisioning.provision(sid)
+    assert _FakeCF.steps == ["ensure_zone", "a_record"] and panel.calls == []
+    with db.SessionLocal() as s:
+        assert s.get(Site, sid).status == "provisioning"
 
 
 def test_publish_stops_when_panel_paused_and_keeps_pages_edited():
