@@ -446,7 +446,6 @@ def test_sweep_publish_blocked_site_with_lower_id_does_not_starve_queue(monkeypa
     sid_ok = _site(domain="good.com", offer_id=oid)
     pid_ok = _page(sid_ok, status="edited", offer_id=oid)
     _fake_panel(monkeypatch)
-    _live(monkeypatch, [], "ok") if False else None
     for _ in range(3):
         done, errs = orch._stage_publish(1)
     assert _status(pid_ok) != "edited"                      # нормальный сайт дошёл до публикации
