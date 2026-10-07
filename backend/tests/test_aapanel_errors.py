@@ -283,6 +283,7 @@ class _CF:
     def __init__(self, ssl_boom: Exception | None = None, ssl_current_mode: str = "off"):
         self.ssl_boom = ssl_boom
         self.ssl_calls = 0
+        self.ssl_modes = []
         self.ssl_current_mode = ssl_current_mode
 
     def ensure_zone(self, domain):
@@ -299,8 +300,15 @@ class _CF:
 
     def set_ssl(self, zid, mode="full"):
         self.ssl_calls += 1
+        self.ssl_modes.append(mode)
         if self.ssl_boom:
             raise self.ssl_boom
+        return True
+
+    def set_zone_setting(self, zid, sid, value):
+        return True
+
+    def activation_check(self, zid):
         return True
 
 
@@ -494,7 +502,7 @@ def test_site_card_shows_ssl_error(client, monkeypatch):
         s.commit()
 
     html = client.get(f"/sites/{sid}").text
-    assert "SSL-режим Cloudflare не переключился" in html
+    assert "SSL/настройках зоны Cloudflare" in html
     assert "Cloudflare 403" in html
 
 

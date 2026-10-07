@@ -295,18 +295,24 @@ class AaPanelClient(BaseClient):
     def site_exists(self, name: str) -> bool:
         return any(s.get("name") == name for s in self.list_sites())
 
-    def add_site(self, domain: str, path: str, php_version: str = "00", port: int = 80) -> dict:
+    def add_site(self, domain: str, path: str, php_version: str = "00", port: int = 80,
+                 aliases: list[str] | None = None) -> dict:
         """Create an nginx vhost. version="00" = pure static (no PHP) — our default.
 
         Not idempotent by itself (duplicate => status/msg error); use ensure_site().
         Отказ (нет прав, «сайт уже есть», кончилось место) -> RuntimeError: раньше он
         возвращался обычным словарём, provision его не смотрел и объявлял сайт готовым.
         Успех приходит БЕЗ ключа `status` ({"siteStatus": true, ...}) — _ok его пропускает.
+
+        `aliases` — доп. имена vhost'а (www.<домен>, S5-12): идут в `domainlist` webname. Форма
+        поля `count` для непустого списка по докам не подтверждена живьём — берём число алиасов
+        (так в аудите); пустой список — прежний проверенный вид (`[]`, 0).
         """
+        al = list(aliases or [])
         return _ok(self._post(
             "/site?action=AddSite",
             {
-                "webname": json.dumps({"domain": domain, "domainlist": [], "count": 0}),
+                "webname": json.dumps({"domain": domain, "domainlist": al, "count": len(al)}),
                 "path": path,
                 "type_id": 0,
                 "type": "PHP",  # "PHP" even for static; version "00" disables PHP
@@ -386,11 +392,19 @@ class AaPanelClient(BaseClient):
             # сборок другие — UNVERIFIED выше). Ставить в SetSSL пустой сертификат нельзя.
             raise RuntimeError(f"aaPanel apply_cert_api: ответ без key/cert: {str(issued)[:160]}")
 
-        # Step 2 — deploy to the vhost. NB: the cert PEM goes in the field named `csr`
-        # (aaPanel misnomer — it is the full certificate chain, not a signing request).
+        # Step 2 — deploy to the vhost.
+        return self.set_ssl(site_name, key, cert)
+
+    def set_ssl(self, site_name: str, key_pem: str, cert_pem: str) -> dict:
+        """Положить готовый сертификат+ключ на vhost (SetSSL). Используется и ACME-веткой
+        apply_ssl, и выпуском Cloudflare Origin CA (services/provisioning). Отказ -> RuntimeError.
+
+        NB: PEM сертификата/цепочки идёт в поле `csr` (aaPanel misnomer — это сертификат, не запрос).
+        Формат SetSSL по docs/api/aapanel.md ещё НЕ проверен вживую — поэтому выпуск Origin CA
+        в провижне выключен флагом ORIGIN_CA_AUTO."""
         return _ok(self._post(
             "/site?action=SetSSL",
-            {"type": 1, "siteName": site_name, "key": key, "csr": cert},
+            {"type": 1, "siteName": site_name, "key": key_pem, "csr": cert_pem},
         ), "SetSSL")
 
     def delete_site(self, site_name: str, site_id: int, remove_dir: bool = True,

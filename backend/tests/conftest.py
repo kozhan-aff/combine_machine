@@ -270,3 +270,33 @@ def client(monkeypatch):
     monkeypatch.setattr(BackorderClient, "find_order", lambda self, domain: None)
     monkeypatch.setattr(BackorderClient, "order", _no_live_order)
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def origin_probe(monkeypatch):
+    """Пробы origin провижна (services/provisioning.probe_origin) — по умолчанию в MockTransport:
+    http и https отвечают 200, Origin CA выключен. Тест правит `.http`/`.https` (код ответа или
+    исключение httpx) и читает `.requests` (что реально ушло: URL по IP, Host, SNI)."""
+    import httpx
+    from app.config import settings
+    from app.services import provisioning
+
+    class _Origin:
+        http = 200
+        https = 200
+        requests: list = []
+
+    o = _Origin()
+    o.requests = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        o.requests.append(req)
+        res = o.https if req.url.scheme == "https" else o.http
+        if isinstance(res, Exception):
+            raise res
+        return httpx.Response(res, text="ok")
+
+    monkeypatch.setattr(provisioning, "_origin_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(settings, "ORIGIN_CA_AUTO", False, raising=False)
+    return o

@@ -1178,20 +1178,20 @@ def provision_action(site_id: int, request: Request):
     try:
         r = provisioning.provision(site_id)
         if r.get("status") == "awaiting_ns":
-            ns = ", ".join(r.get("name_servers") or [])
-            return _back(f"/sites/{site_id}",
-                         msg=f"Зона создана, ждёт NS. Пропиши у регистратора: {ns} — потом повтори Provision.")
+            return _back(f"/sites/{site_id}", msg=f"Зона создана, ждёт NS: {r.get('hint', '')}")
         if r.get("status") == "error":
             return _back(f"/sites/{site_id}", err=r.get("error", "provision error"))
         if r.get("ssl_error"):
-            # Зелёный баннер «готов: DNS + vhost + SSL» поверх упавшего SSL — это ровно то
-            # враньё, от которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под
-            # вопросом: говорим об этом красным и оставляем след на карточке (site.ssl_error).
+            # Зелёный баннер «готов» поверх упавшего SSL/настроек зоны — ровно то враньё, от
+            # которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под вопросом:
+            # говорим об этом красным и оставляем след на карточке (site.ssl_error).
             return _back(f"/sites/{site_id}", err=(
-                "Provision прошёл (зона + A-запись + vhost), но SSL-режим Cloudflare НЕ "
-                f"переключился: {r['ssl_error']}. HTTPS может не работать — почини причину "
-                "и нажми Provision ещё раз (идемпотентно)."))
-        return _back(f"/sites/{site_id}", msg="Provision готов: DNS proxied + vhost + SSL. Дальше — генерация.")
+                "Provision прошёл (зона + vhost + A-записи), но SSL/настройки зоны Cloudflare встали "
+                f"не полностью: {r['ssl_error']}. Почини причину и нажми Provision ещё раз (идемпотентно)."))
+        tls = {"origin_ca": "свой Origin-сертификат, Cloudflare strict",
+               "ok": "origin отвечает по HTTPS, Cloudflare full"}.get(
+            r.get("origin_https"), "HTTPS на origin нет — Cloudflare flexible")
+        return _back(f"/sites/{site_id}", msg=f"Provision готов: vhost + DNS (apex и www) + проверка origin. SSL: {tls}. Дальше — генерация.")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
 

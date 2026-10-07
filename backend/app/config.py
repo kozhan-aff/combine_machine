@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     # locally) to pin TLS instead of verify=False. Recommended for remote panels.
     AAPANEL_CA_BUNDLE: str = ""
     VPS_ORIGIN_IP: str = ""
+    # M3: выпускать Cloudflare Origin CA на каждый домен и ставить его в aaPanel (SetSSL), чтобы
+    # перевести зону в Full(strict). ВЫКЛ по умолчанию: ручка SetSSL и права токена («SSL and
+    # Certificates: Edit») ни разу не проверены вживую (инвариант «не гадать форматы») — пока
+    # выключено, провижн держит CF во flexible и честно пишет origin_https='none'.
+    ORIGIN_CA_AUTO: bool = False
 
     # gsc
     GSC_SERVICE_ACCOUNT_JSON: str = ""

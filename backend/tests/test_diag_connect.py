@@ -183,6 +183,12 @@ class _FakeCF:
     def get_zone_setting(self, *a, **kw):
         return {"value": "full"}
 
+    def set_zone_setting(self, *a, **kw):
+        return True
+
+    def activation_check(self, zone_id):
+        return True
+
 
 def _pause_panel(monkeypatch, status):
     _FakeCF.status, _FakeCF.steps = status, []
@@ -213,7 +219,9 @@ def test_provision_paused_panel_stops_before_any_panel_request_on_active_zone(mo
     sid = _seed_site()
     with pytest.raises(AaPanelBlocked):
         provisioning.provision(sid)
-    assert _FakeCF.steps == ["ensure_zone", "a_record"] and panel.calls == []
+    # S5-13: DNS идёт ПОСЛЕ vhost — при паузе панели CF-зона остаётся без A-записи (трафика на
+    # origin без vhost нет), повтор доедет идемпотентно
+    assert _FakeCF.steps == ["ensure_zone"] and panel.calls == []
     with db.SessionLocal() as s:
         assert s.get(Site, sid).status == "provisioning"
 

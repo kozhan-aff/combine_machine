@@ -30,6 +30,19 @@ class Site(Base):
     # пробовали); текст = провижн доехал, но HTTPS под вопросом. Показывается на /sites/{id}.
     ssl_error: Mapped[str | None] = mapped_column(Text)
 
+    # M3: шаг провижна и состояние origin-HTTPS (миграция 0027). Режим SSL Cloudflare ВЫВОДИТСЯ из
+    # origin_https, а не наоборот: full/strict без HTTPS-vhost+сертификата на origin даёт 525.
+    #   origin_https: NULL/'none' — на origin нет подтверждённого HTTPS (CF 'flexible');
+    #                 'ok'        — origin отвечает по HTTPS (сертификат не наш) -> CF 'full';
+    #                 'origin_ca' — наш Cloudflare Origin CA поставлен в aaPanel и ответил -> 'strict'.
+    #   provision_step: zone | await_ns | vhost | origin_tls | dns | verify | done — на каком шаге
+    #                 остановился последний прогон (карточка сайта и свип показывают его словами).
+    origin_https: Mapped[str | None] = mapped_column(String(16))
+    provision_step: Mapped[str | None] = mapped_column(String(24))
+    cf_name_servers: Mapped[list | None] = mapped_column(JSON)          # NS, которые поставить у регистратора
+    ns_waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ns_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # последний activation_check
+
     niche: Mapped[str | None] = mapped_column(String(255))
     template: Mapped[str | None] = mapped_column(String(255))
 
