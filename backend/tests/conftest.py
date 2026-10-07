@@ -199,6 +199,14 @@ def _no_panel_auth():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_publish_verify(monkeypatch):
+    """HTTP-проверка опубликованной страницы (publish._verify_live) ходит на сам домен — в тестах
+    по умолчанию выключена; тесты проверки включают её и подменяют siteprobe.fetch."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "PUBLISH_VERIFY", False)
+
+
+@pytest.fixture(autouse=True)
 def _no_paid_keys(monkeypatch):
     """Тесты герметичны к .env оператора и к сети реестров.
 

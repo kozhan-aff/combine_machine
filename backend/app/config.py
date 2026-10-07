@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://portfolio:portfolio@db:5432/portfolio"
     APP_ENV: str = "dev"
 
+    # M5: после записи страниц в docroot публикация проверяет HTTP-ответом самого домена, что
+    # отдаётся именно записанная версия (метка build-id). Выключается только если домен
+    # заведомо недостижим с бокса (закрытая сеть); по умолчанию страница не `published`, пока
+    # не проверена.
+    PUBLISH_VERIFY: bool = True
+
     # Ahrefs API v3 (integrations/ahrefs.py): DR-free, batch-analysis, анкоры, история трафика
     AHREFS_API_KEY: str = ""
 

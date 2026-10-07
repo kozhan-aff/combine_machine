@@ -46,7 +46,7 @@ def test_offer_pick_is_consistent_between_generate_and_publish(monkeypatch):
 
     with db.SessionLocal() as s:
         body = s.query(Page).filter(Page.site_id == site_id).first().body
-        picked = _pick_offer(s, site_id).brand
+        picked = _pick_offer(s, s.get(Site, site_id)).brand
     assert "NordVPN" in body and "Surfshark" not in body    # content written about NordVPN
     assert picked == "NordVPN"                               # link will go to NordVPN too
 

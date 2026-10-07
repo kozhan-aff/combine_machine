@@ -517,14 +517,16 @@ def test_publish_aapanel_refusal_keeps_pages_edited(monkeypatch):
     """РЕГРЕССИЯ, сквозная. Панель отказала на записи файла — в docroot ПУСТО. До фикса
     страница получала `published`, сайт — `published`, и проверка индексации потом искала в
     поисковике страницу, которой нет. Гейт редактуры не сдвинут: статус остаётся `edited`,
-    публикация просто честно не состоялась."""
+    публикация честно не состоялась — и результат несёт причину (S7-18), а не исключение
+    без списка записанного."""
     from app.services import publish
     _panel_env(monkeypatch, CreateFile=CREATE_OK, SaveFileBody=NO_SUCH_FILE)
     sid = _seed_site(page_statuses=("edited",))
 
-    with pytest.raises(RuntimeError, match="Configuration file not exist"):
-        publish.publish_site(sid)
+    out = publish.publish_site(sid)
 
+    assert out["status"] == "failed" and out["pages"] == [] and out["written"] == []
+    assert "Configuration file not exist" in out["failed"]["/"]
     with db.SessionLocal() as s:
         site = s.get(Site, sid)
         page = s.query(Page).filter_by(site_id=sid).one()
@@ -532,11 +534,10 @@ def test_publish_aapanel_refusal_keeps_pages_edited(monkeypatch):
         assert site.status != "published" and site.published_at is None
 
 
-def test_publish_partial_failure_publishes_nothing(monkeypatch):
-    """Отказ на ВТОРОЙ странице: первая уже легла на диск, но в БД `published` не получает
-    никто — транзакция откатывается целиком. Рассинхрона нет: write_file идемпотентен
-    (CreateFile+SaveFileBody перезаписывают тело), повтор просто положит первую страницу снова.
-    Лучше записать дважды, чем соврать один раз."""
+def test_publish_partial_failure_reports_written_and_publishes_only_those(monkeypatch):
+    """Отказ на ВТОРОЙ странице: первая легла на диск и публикуется, вторая остаётся `edited`
+    с причиной в `failed`. Информация о записанном не теряется (S7-18), отказ одной страницы
+    не обрывает остальные. write_file идемпотентен — повтор доложит остаток."""
     from app.services import publish
     written = []
 
@@ -553,14 +554,14 @@ def test_publish_partial_failure_publishes_nothing(monkeypatch):
     monkeypatch.setattr(AaPanelClient, "_post", _post)
     sid = _seed_site(page_statuses=("edited", "edited"))
 
-    with pytest.raises(RuntimeError):
-        publish.publish_site(sid)
+    out = publish.publish_site(sid)
 
     assert written == ["/www/wwwroot/ex.ru/index.html"]        # первая реально записана
+    assert out["status"] == "partial" and out["pages"] == ["/"] and "/p1" in out["failed"]
     with db.SessionLocal() as s:
         assert [p.status for p in s.query(Page).filter_by(site_id=sid).order_by(Page.id)] \
-            == ["edited", "edited"]
-        assert s.get(Site, sid).status != "published"
+            == ["published", "edited"]
+        assert s.get(Site, sid).status == "published"
 
 
 def test_publish_still_publishes_when_panel_answers(monkeypatch):

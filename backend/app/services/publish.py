@@ -3,7 +3,7 @@
 Hard gate: a page publishes ONLY from status 'edited' (never 'draft'). Then index
 monitoring via SearXNG `site:` (GSC excluded from v1 — manual/free check). See PLAN §2.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, unquote
 
 
@@ -51,42 +51,62 @@ def _target_path(doc_root: str, url_path: str) -> str:
     return f"{doc_root.rstrip('/')}/{sub + '/' if sub else ''}index.html"
 
 
-def _pick_offer(db, site_id: int):
-    from sqlalchemy import select
-    from app.models.offer import Offer, SiteOffer
-    # deterministic order_by(Offer.id): MUST match content.generate_site's pick, or the page
-    # is written about one brand and the sponsored link points at another.
-    off = db.execute(
-        select(Offer).join(SiteOffer, SiteOffer.offer_id == Offer.id)
-        .where(SiteOffer.site_id == site_id, Offer.active.is_(True))
-        .order_by(Offer.id).limit(1)
-    ).scalar_one_or_none()
-    if off is None:  # fall back to any active offer
-        off = db.execute(
-            select(Offer).where(Offer.active.is_(True)).order_by(Offer.id).limit(1)
-        ).scalar_one_or_none()
-    return off
+def _pick_offer(db, site):
+    """Оффер для legacy-страницы без offer_id: тот, что явно привязан к сайту. Глобального
+    «первого активного оффера» нет (S6-13/S5-16): нет привязки -> None -> публикация громко
+    предупредит, а не поставит чужую партнёрку."""
+    from app.services.content import site_offer
+    return site_offer(db, site)
 
 
 # Статусы сайта, в которые публикуем: provision() уже довёл инфраструктуру до `content`.
 PUBLISH_STATUSES = frozenset({"content", "published", "monitoring"})
 
 
+def _verify_live(domain: str, url_path: str, build_id: str) -> str | None:
+    """HTTP-проверка после записи (S5-05/S7-18): домен отдаёт 200 и ИМЕННО нашу версию
+    (метка build-id). None = проверено, иначе причина словами. Провал не значит «записи нет» —
+    значит «опубликованной считать нельзя»: чаще всего NS ещё не делегированы или vhost
+    отдаёт заглушку панели."""
+    from app.integrations import siteprobe
+    url = f"https://{domain}{url_path if url_path.startswith('/') else '/' + url_path}"
+    url += ("&" if "?" in url else "?") + f"_pv={build_id}"       # мимо кэша CDN
+    try:
+        status, text = siteprobe.fetch(url)
+    except Exception as e:  # noqa: BLE001 — DNS/TLS/таймаут: причина оператору
+        return f"{type(e).__name__}: {e}"[:200]
+    if status != 200:
+        return f"HTTP {status}"
+    if f"content='{build_id}'" not in text and f'content="{build_id}"' not in text:
+        return "отдаётся не записанная версия (заглушка панели, старый кэш или не тот docroot)"
+    return None
+
+
 def publish_site(site_id: int) -> dict:
-    """Deploy every 'edited' page of a site. Refuses if there are none (the edit gate)."""
+    """Deploy every 'edited' page of a site. Refuses if there are none (the edit gate).
+
+    Постраничный исход (S7-18): страница получает `published` ТОЛЬКО если файл записан И домен
+    отдал именно эту версию (settings.PUBLISH_VERIFY). Отказ или непроверенная запись одной
+    страницы не обрывает остальные и не теряет информацию: ответ несёт `pages` (опубликованные),
+    `written` (легли на диск), `failed` и `unverified` с причинами. status: published | partial |
+    failed. Непроверенная страница остаётся `edited` — повтор идемпотентен (write_file
+    перезаписывает).
+    """
     from sqlalchemy import select
+    from app.config import settings
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.domain import Domain
     from app.models.offer import Offer
-    from app.integrations.aapanel import AaPanelClient
-    from app.services.content import render_html
+    from app.integrations.aapanel import AaPanelClient, AaPanelBlocked
+    from app.services.content import render_html, build_id_of, cta_link
 
     with SessionLocal() as db:
         site = db.get(Site, site_id)
         if site is None:
             raise ValueError(f"site {site_id} not found")
-        domain = db.get(Domain, site.domain_id).domain
+        dom = db.get(Domain, site.domain_id)
+        domain = dom.domain
         pages = db.execute(select(Page).where(
             Page.site_id == site_id, Page.status == "edited")).scalars().all()
         if not pages:
@@ -100,55 +120,95 @@ def publish_site(site_id: int) -> dict:
                     "hint": f"сайт в статусе «{site.status}», vhost "
                             f"{'есть' if site.aapanel_site_name else 'не создан'} — сначала provision"}
 
-        # F26 (аудит 2026-07-14): «текущий активный оффер сайта» больше НЕ пересчитывается заново
-        # при каждой публикации — он мог смениться (SiteOffer добавлен/убран) с момента генерации,
-        # и тогда страница про бренд A уходила в интернет со ссылкой на бренд B и чужим `lang`.
-        # Считаем его ОДИН РАЗ здесь только как fallback — ИСКЛЮЧИТЕЛЬНО для legacy-страниц
-        # (созданных до миграции 0018), у которых p.offer_id пуст и восстанавливать нечего.
-        fallback_offer = _pick_offer(db, site_id)
+        # F26 (аудит 2026-07-14): «текущий активный оффер сайта» НЕ пересчитывается при каждой
+        # публикации — он мог смениться с момента генерации. Fallback — ИСКЛЮЧИТЕЛЬНО для
+        # legacy-страниц (до миграции 0018) с пустым p.offer_id.
+        fallback_offer = _pick_offer(db, site)
         # F3 (аудит 2026-07-15): выключенный оффер публикуется как есть (offer_id — зафиксированное
         # решение о бренде, F26), но подставляем общий резервный URL вместо мёртвой ссылки, если
-        # оператор его настроил. Читаем ОДИН РАЗ на весь publish_site() — резерв общий для всего
-        # портфеля, не per-странице.
+        # оператор его настроил. Читаем ОДИН РАЗ на весь publish_site().
         from app.models.offer import OfferSettings
         _offer_settings = db.get(OfferSettings, 1)
         reserve_url = _offer_settings.reserve_offer_url if _offer_settings else None
         ap = AaPanelClient()
         now = datetime.now(timezone.utc)
-        published = []
+        published, written, failed, unverified, warnings = [], [], {}, {}, []
+        blocked = None
         for p in pages:
             # Каждая страница несёт СВОЙ offer_id/lang, зафиксированные в момент генерации
             # (content.generate_site) — читаем их, а не «текущее» состояние сайта.
-            if p.offer_id is not None:
-                offer = db.get(Offer, p.offer_id)
-            else:
-                offer = fallback_offer
+            offer = db.get(Offer, p.offer_id) if p.offer_id is not None else fallback_offer
             # <html lang=...>: приоритет — язык, под который страница реально писалась;
             # для legacy-страниц без p.lang — язык текущего оффера, дефолт 'ru'.
             lang = p.lang or (offer.language if offer and offer.language else "ru")
-            # `published` СТАВИТСЯ ТОЛЬКО ПОСЛЕ ТОГО, КАК ПАНЕЛЬ ПОДТВЕРДИЛА ЗАПИСЬ. Раньше отказ
-            # aaPanel (HTTP 200 + {"status": false}) не смотрел никто: страница помечалась
-            # опубликованной, сайт — `published`, а в docroot не было ничего. Дальше M5 честно
-            # спрашивал у поисковика про несуществующий URL и писал `not_indexed` — машина
-            # расследовала последствия собственного вранья (F14/F16).
-            # Теперь write_file поднимает RuntimeError, и он летит наверх НЕ ПОЙМАННЫМ: db.commit()
-            # ниже не выполняется -> страницы остаются `edited`, сайт — в прежнем статусе.
-            # Файлы страниц, успевших записаться до отказа, лежат на диске — и это не рассинхрон:
-            # write_file идемпотентен (CreateFile+SaveFileBody перезаписывают тело), повторная
-            # публикация просто положит их снова. Лучше записать дважды, чем соврать один раз.
-            ap.write_file(_target_path(site.doc_root, p.url_path),
-                          render_html(p, offer, lang=lang, reserve_url=reserve_url))
+            if offer is not None and cta_link(offer, reserve_url) is None:
+                # оффер привязан, а CTA молча не выйдет (пустая/небезопасная ссылка) — страница
+                # без своей единственной ссылки не должна уходить в интернет (S6-07)
+                failed[p.url_path] = (f"ссылка оффера «{offer.brand}» пуста или небезопасна — "
+                                      "CTA не выведется; поправь оффер")
+                continue
+            if offer is None:
+                warnings.append(f"{p.url_path}: у страницы нет оффера — опубликована БЕЗ "
+                                "партнёрской ссылки (привяжи оффер к сайту)")
+            bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url))
+            doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid)
+            try:
+                ap.write_file(_target_path(site.doc_root, p.url_path), doc)
+            except AaPanelBlocked as e:
+                blocked = e                      # панель на паузе: остальным писать бесполезно
+                break
+            except Exception as e:  # noqa: BLE001 — отказ ОДНОЙ страницы не теряет остальные
+                failed[p.url_path] = f"{type(e).__name__}: {e}"[:300]
+                continue
+            written.append(p.url_path)
+            if settings.PUBLISH_VERIFY:
+                why = _verify_live(domain, p.url_path, bid)
+                if why:
+                    unverified[p.url_path] = why
+                    continue
+            # `published` — только после подтверждения панелью И (если включено) самим доменом.
             p.status = "published"
             p.published_at = now
             published.append(p.url_path)
 
-        site.status = "published"
-        site.published_at = now
+        if published:
+            if site.status != "monitoring":
+                site.status = "published"
+            site.published_at = now
+            if dom.status == "purchased":        # S7-10: первая живая публикация -> домен live
+                dom.status = "live"
         db.commit()
-        return {"status": "published", "domain": domain, "pages": published}
+        if blocked is not None:
+            raise blocked
+        out = {"domain": domain, "pages": published, "written": written,
+               "failed": failed, "unverified": unverified, "warnings": warnings}
+        if published and not failed and not unverified:
+            out["status"] = "published"
+        else:
+            out["status"] = "partial" if published else "failed"
+        return out
 
 
-def check_index(site_id: int) -> dict:
+# Перепроверка индексации (S7-16): ждать нечего у только что опубликованной, а вот страница,
+# уже найденная в индексе, не требует вопросов каждый час — иначе ~60 site:-запросов/час к
+# поисковикам, которые и так отвечают «too many requests».
+INDEX_RECHECK = timedelta(hours=6)             # не в индексе / не выяснено
+INDEX_RECHECK_INDEXED = timedelta(days=3)      # уже в индексе
+
+
+def _aware(dt):
+    return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def index_due(page, now) -> bool:
+    """Пора ли переспрашивать индекс у страницы (cooldown после последней проверки)."""
+    ck = _aware(page.index_checked_at)
+    if ck is None:
+        return True
+    return now - ck >= (INDEX_RECHECK_INDEXED if page.index_status == "indexed" else INDEX_RECHECK)
+
+
+def check_index(site_id: int, only_due: bool = False) -> dict:
     """SearXNG `site:` check for each published page -> pages.index_status + index_history.
 
     Стадия крутится АВТОПИЛОТОМ (orchestrator._stage_check_index), поэтому каждая её неточность
@@ -188,6 +248,8 @@ def check_index(site_id: int) -> dict:
 
         sx = SearxngClient()
         now = datetime.now(timezone.utc)
+        if only_due:                      # автопилот: только те, у кого вышел cooldown (S7-16)
+            pages = [p for p in pages if index_due(p, now)]
         out = {}
         for p in pages:
             q = f"site:{domain}{p.url_path if p.url_path != '/' else ''}"
@@ -205,8 +267,13 @@ def check_index(site_id: int) -> dict:
             p.index_checked_at = now
             db.add(IndexHistory(page_id=p.id, checked_at=now, index_status=p.index_status))
             out[p.url_path] = p.index_status
+        # S7-10: первая страница в индексе -> сайт под мониторингом (published -> monitoring)
+        if site.status == "published" and any(v == "indexed" for v in out.values()):
+            site.status = "monitoring"
         db.commit()
-        return {"domain": domain, "pages": out}
+        return {"domain": domain, "pages": out,
+                # все проверенные страницы `unknown` -> движки молчат; автопилот не долбит дальше
+                "all_unknown": bool(out) and all(v == "unknown" for v in out.values())}
 
 
 if __name__ == "__main__":  # pure path helper self-check

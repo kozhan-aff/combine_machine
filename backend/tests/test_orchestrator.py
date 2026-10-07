@@ -35,7 +35,15 @@ def test_last_finished_sweep_at_returns_latest():
 # --- стадии + run_sweep -----------------------------------------------------
 from app.models.domain import Domain, AcquisitionOrder
 from app.models.site import Site, Page
+from app.models.offer import Offer
 from app.services import autonomy
+
+
+def _offer_id() -> int:
+    with db.SessionLocal() as s:
+        o = Offer(brand="NordVPN", affiliate_link="https://ex.com/aff", active=True)
+        s.add(o); s.commit()
+        return o.id
 
 
 def _enable(**stages):
@@ -104,7 +112,7 @@ def test_generate_stage_uses_competitor(monkeypatch):
     with db.SessionLocal() as s:
         d = Domain(domain="g.ru", source="backorder", status="purchased")
         s.add(d); s.commit()
-        s.add(Site(domain_id=d.id, status="content")); s.commit()       # content без страниц
+        s.add(Site(domain_id=d.id, status="content", offer_id=_offer_id())); s.commit()   # content без страниц
     _enable(auto_generate=True)
     orch.run_sweep(trigger="cron")
     assert seen.get("uc") is True                                       # спек: use_competitor=True
@@ -124,7 +132,7 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
         s.add(Domain(domain="scored.ru", source="backorder", status="scored"))
         d = Domain(domain="site.ru", source="backorder", status="purchased")
         s.add(d); s.commit()
-        site = Site(domain_id=d.id, status="content"); s.add(site); s.commit()
+        site = Site(domain_id=d.id, status="content", offer_id=_offer_id()); s.add(site); s.commit()
         s.add(Page(site_id=site.id, url_path="/", status="draft", body="<p>x</p>")); s.commit()
     _enable(auto_discovery=True, auto_score=True, auto_queue=True, auto_provision=True,
             auto_generate=True, auto_publish=True, auto_check_index=True)
@@ -132,7 +140,7 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
     monkeypatch.setattr("app.services.provisioning.provision", lambda sid: {})
     monkeypatch.setattr("app.services.content.generate_site", lambda site_id, use_competitor=False: 0)
     monkeypatch.setattr("app.services.publish.publish_site", lambda sid: {})
-    monkeypatch.setattr("app.services.publish.check_index", lambda sid: {})
+    monkeypatch.setattr("app.services.publish.check_index", lambda sid, only_due=False: {})
     out = orch.run_sweep(trigger="cron")
     # хендлеры ловят Exception — проглоченный AssertionError гейт-заглушки осел бы в errors.
     # Пустые errors + done доказывают: ни одна гейт-функция не была вызвана нигде в свипе.

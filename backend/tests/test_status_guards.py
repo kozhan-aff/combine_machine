@@ -6,6 +6,7 @@ import pytest
 import app.db as db
 from app.config import settings
 from app.models.domain import Domain
+from app.models.offer import Offer
 from app.models.site import Page, Site
 from app.services import content, orchestrator, publish
 
@@ -15,7 +16,11 @@ def _site(status="provisioning", name=None, doc_root="/www/wwwroot/g.com", pages
         d = Domain(domain="g.com", source="dropcatch", status="purchased")
         s.add(d)
         s.commit()
-        site = Site(domain_id=d.id, status=status, aapanel_site_name=name, doc_root=doc_root)
+        off = Offer(brand="NordVPN", affiliate_link="https://ex.com/aff", active=True)
+        s.add(off)
+        s.commit()
+        site = Site(domain_id=d.id, status=status, aapanel_site_name=name, doc_root=doc_root,
+                    offer_id=off.id)
         s.add(site)
         s.commit()
         for i, st in enumerate(pages):
