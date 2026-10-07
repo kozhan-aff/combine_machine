@@ -336,6 +336,8 @@ def _panel_env(monkeypatch, cf=None, **routes):
     monkeypatch.setattr(settings, "VPS_ORIGIN_IP", "185.201.252.187")
     cf = cf or _CF()
     monkeypatch.setattr("app.integrations.cloudflare.CloudflareClient", lambda: cf)
+    # маркер-файл (write_file) и AddDomain — штатные ответы панели, если тест их не переопределил
+    routes = {"CreateFile": {"status": True}, "SaveFileBody": {"status": True}, **routes}
     monkeypatch.setattr(AaPanelClient, "_post", _fake_post(routes))
     return cf
 

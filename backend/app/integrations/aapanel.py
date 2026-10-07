@@ -353,6 +353,22 @@ class AaPanelClient(BaseClient):
                 raise
             return {"exists": True, "name": domain}
 
+    def add_domains(self, site_name: str, domains: list[str]) -> dict:
+        """Дописать алиасы (www.<домен>) в УЖЕ существующий vhost: ensure_site у готового сайта
+        aliases игнорирует. Отказ конверта -> RuntimeError.
+
+        UNVERIFIED вживую (/site?action=AddDomain: id + webname + domain, несколько имён через
+        перевод строки — по исходникам панели). Ответ несёт СПИСОК по каждому домену, а не общий
+        status: «домен уже привязан» там норма, поэтому построчно не судим. Судья — не этот ответ,
+        а проба провижна (маркер-файл по Host=алиас): подтвердила — алиас есть, нет — www без DNS."""
+        site_id = next((s.get("id") for s in self.list_sites() if s.get("name") == site_name), None)
+        if site_id is None:
+            raise RuntimeError(f"aaPanel AddDomain: site not found: {site_name}")
+        return _ok(self._post(
+            "/site?action=AddDomain",
+            {"id": site_id, "webname": site_name, "domain": "\n".join(domains)},
+        ), "AddDomain")
+
     def apply_ssl(self, domain: str, site_name: str) -> dict:
         """Issue + deploy an origin cert. Успех -> dict, ЛЮБОЙ отказ -> RuntimeError.
 

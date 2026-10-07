@@ -274,9 +274,11 @@ def client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def origin_probe(monkeypatch):
-    """Пробы origin провижна (services/provisioning.probe_origin) — по умолчанию в MockTransport:
-    http и https отвечают 200, Origin CA выключен. Тест правит `.http`/`.https` (код ответа или
-    исключение httpx) и читает `.requests` (что реально ушло: URL по IP, Host, SNI)."""
+    """Пробы origin провижна (services/provisioning.probe_marker) — по умолчанию в MockTransport:
+    http и https отвечают 200, Origin CA выключен. Проба ищет в ТЕЛЕ nonce маркер-файла
+    (`/cm-probe-*`), поэтому «наш vhost» эмулируется выдачей nonce; `_new_nonce` подменён на константу.
+    Тест правит `.http`/`.https` (код ответа или исключение httpx), `.marker_http`/`.marker_https`/`.www`
+    (False = на этот вход отвечает ЧУЖОЙ/дефолтный vhost: 200 без nonce) и читает `.requests`."""
     import httpx
     from app.config import settings
     from app.services import provisioning
@@ -284,6 +286,10 @@ def origin_probe(monkeypatch):
     class _Origin:
         http = 200
         https = 200
+        marker_http = True      # наш vhost обслуживает apex по HTTP
+        marker_https = True     # ...по HTTPS
+        www = True              # ...и www-алиас
+        nonce = "test-nonce"
         requests: list = []
 
     o = _Origin()
@@ -291,12 +297,19 @@ def origin_probe(monkeypatch):
 
     def handler(req: httpx.Request) -> httpx.Response:
         o.requests.append(req)
-        res = o.https if req.url.scheme == "https" else o.http
+        https = req.url.scheme == "https"
+        res = o.https if https else o.http
         if isinstance(res, Exception):
             raise res
+        ours = o.marker_https if https else o.marker_http
+        if req.headers["host"].startswith("www."):
+            ours = ours and o.www
+        if res == 200 and ours and req.url.path.startswith("/cm-probe-"):
+            return httpx.Response(200, text=o.nonce)
         return httpx.Response(res, text="ok")
 
     monkeypatch.setattr(provisioning, "_origin_client",
                         lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(provisioning, "_new_nonce", lambda: o.nonce)
     monkeypatch.setattr(settings, "ORIGIN_CA_AUTO", False, raising=False)
     return o

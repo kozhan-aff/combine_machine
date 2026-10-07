@@ -67,13 +67,20 @@ class _CF:
 
 
 class _Panel:
-    def __init__(self, ssl_ok=True, add_ok=True):
+    def __init__(self, ssl_ok=True, add_ok=True, sites=None, on_add_domain=None):
         self.calls, self.ssl_ok, self.add_ok = [], ssl_ok, add_ok
+        self.sites, self.on_add_domain = sites or [], on_add_domain
 
     def __call__(self, path, data=None):
         self.calls.append((path, data))
         if "getData" in path:
-            return {"data": []}
+            return {"data": self.sites}
+        if "CreateFile" in path or "SaveFileBody" in path:
+            return {"status": True}
+        if "AddDomain" in path:
+            if self.on_add_domain:
+                self.on_add_domain()
+            return {"domains": [{"name": "www.ex.com", "status": True}]}
         if "AddSite" in path:
             return {"siteStatus": True} if self.add_ok else {"status": False, "msg": "boom"}
         if "SetSSL" in path:
@@ -123,9 +130,44 @@ def test_no_origin_https_means_flexible_never_full(monkeypatch, origin_probe):
 
 
 def test_https_ok_but_foreign_cert_gives_full_not_strict(monkeypatch):
+    """HTTPS отдаёт НАШ маркер, но сертификат не Origin CA -> full, не strict."""
     cf, _ = _env(monkeypatch, _CF(ssl="off"))
     out = provisioning.provision(_seed())
     assert out["ssl_mode"] == "full" and cf.mode == "full" and _site(1).origin_https == "ok"
+
+
+def test_foreign_ssl_vhost_answering_200_is_not_confirmed_https(monkeypatch, origin_probe):
+    """КРИТИЧНО (ревью G2): на :443 уже есть чужой ssl-vhost, nginx отдаёт ему неизвестный SNI — код
+    200, а тела с нашим nonce нет. Раньше это считалось «HTTPS ок» -> CF full -> посетители нового
+    домена видели чужой сайт портфеля. Теперь режим остаётся flexible, причина названа."""
+    origin_probe.marker_https = False
+    cf, _ = _env(monkeypatch, _CF(ssl="full"))
+    out = provisioning.provision(_seed())
+    assert _site(1).origin_https == "none" and out["ssl_mode"] == "flexible" and cf.mode == "flexible"
+    assert "чужой/дефолтный vhost" in out["ssl_error"]
+    assert "ssl:full" not in cf.steps and "ssl:strict" not in cf.steps
+
+
+def test_marker_nonce_is_written_to_docroot_and_probed(monkeypatch, origin_probe):
+    """Маркер кладётся в docroot САЙТА через панель, а проба просит именно этот файл по IP+Host(+SNI)."""
+    _, panel = _env(monkeypatch)
+    provisioning.provision(_seed())
+    save = next(d for p, d in panel.calls if "SaveFileBody" in p)
+    name = provisioning.marker_name("ex.com")
+    assert save["path"] == f"/www/wwwroot/ex.com/{name}" and save["data"] == origin_probe.nonce
+    https = next(r for r in origin_probe.requests if r.url.scheme == "https")
+    assert https.url.path == f"/{name}" and https.extensions["sni_hostname"] == "ex.com"
+    assert provisioning.marker_name("a.com") != provisioning.marker_name("b.com")   # не общий отпечаток
+
+
+def test_default_vhost_answering_200_does_not_pass_verify(monkeypatch, origin_probe):
+    """Ревью G2 (Important): дефолтный vhost aaPanel на :80 отвечает 200 на любой Host. Без нашего
+    маркера в теле финальная проверка обязана упасть, а не объявить сайт готовым."""
+    origin_probe.marker_http = False
+    _env(monkeypatch)
+    out = provisioning.provision(_seed())
+    assert out["status"] == "error" and out["step"] == "verify" and "маркера нашего vhost нет" in out["error"]
+    assert _site(1).status == "provisioning"
 
 
 def test_operator_strict_kept_when_origin_https_answers(monkeypatch):
@@ -200,7 +242,8 @@ def test_not_ready_until_origin_answers_http(monkeypatch, origin_probe):
 def test_probe_goes_to_origin_ip_with_host_and_sni(monkeypatch, origin_probe):
     _env(monkeypatch)
     provisioning.provision(_seed())
-    http = next(r for r in origin_probe.requests if r.url.scheme == "http")
+    http = next(r for r in origin_probe.requests if r.url.scheme == "http" and r.headers["host"] == "ex.com"
+                and r.url.path != "/")
     https = next(r for r in origin_probe.requests if r.url.scheme == "https")
     assert http.url.host == IP and http.headers["host"] == "ex.com"
     assert https.url.host == IP and https.headers["host"] == "ex.com"
@@ -230,6 +273,31 @@ def test_www_alias_dns_and_zone_hardening(monkeypatch):
     webname = json.loads(next(d for p, d in panel.calls if "AddSite" in p)["webname"])
     assert webname["domainlist"] == ["www.ex.com"]
     assert cf.settings == {"always_use_https": "on", "min_tls_version": "1.2"}
+
+
+def test_existing_vhost_without_www_alias_gets_adddomain_then_dns(monkeypatch, origin_probe):
+    """Ревью G2 (Important): vhost создан до появления www-алиаса. Проба по Host=www не проходит ->
+    AddDomain -> проба проходит -> только тогда A-запись www."""
+    origin_probe.www = False
+    sites = [{"id": 5, "name": "ex.com", "path": "/www/wwwroot/ex.com"}]
+    cf, panel = _env(monkeypatch, panel=_Panel(sites=sites, on_add_domain=lambda: setattr(origin_probe, "www", True)))
+    out = provisioning.provision(_seed())
+    add = next(d for p, d in panel.calls if "AddDomain" in p)
+    assert add == {"id": 5, "webname": "ex.com", "domain": "www.ex.com"}
+    assert not [p for p, _ in panel.calls if "AddSite" in p]
+    assert ("www.ex.com", IP, True) in cf.records and out["www"] is True
+    assert not any("www" in w for w in out.get("warnings", []))
+
+
+def test_www_dns_skipped_while_alias_unconfirmed(monkeypatch, origin_probe):
+    """AddDomain не помог (или ручка отказала) -> A-записи www НЕТ, провижн не падает, оператор предупреждён."""
+    origin_probe.www = False
+    sites = [{"id": 5, "name": "ex.com", "path": "/www/wwwroot/ex.com"}]
+    cf, _ = _env(monkeypatch, panel=_Panel(sites=sites))
+    out = provisioning.provision(_seed())
+    assert out["status"] == "provisioned" and out["www"] is False
+    assert ("ex.com", IP, True) in cf.records and "a:www.ex.com" not in cf.steps
+    assert any("A-запись www НЕ создана" in w for w in out["warnings"])
 
 
 def test_dns_goes_after_vhost_and_never_without_it(monkeypatch):
@@ -327,7 +395,7 @@ def test_closed_origin_on_unknown_host_has_no_warning(monkeypatch, origin_probe)
     def handler(req):
         if req.headers["host"].endswith(".invalid"):
             raise httpx.RemoteProtocolError("empty reply")
-        return httpx.Response(200)
+        return httpx.Response(200, text="test-nonce")      # наш vhost отдаёт маркер
     monkeypatch.setattr(provisioning, "_origin_client",
                         lambda: httpx.Client(transport=httpx.MockTransport(handler)))
     _env(monkeypatch)

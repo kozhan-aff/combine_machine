@@ -7,6 +7,7 @@ finish DNS + vhost + SSL. See BUILD_SPEC §7 M3 and docs/PIPELINE.md.
 """
 from datetime import datetime, timedelta, timezone
 
+import hashlib
 import secrets
 
 import httpx
@@ -58,10 +59,9 @@ def _origin_client() -> httpx.Client:
 
 
 def probe_origin(ip: str, domain: str, *, https: bool) -> tuple[bool, str]:
-    """Финальная проверка шага (S4-02/S7-08): домен РАЗРЕШАЕТСЯ НА ORIGIN (минуя DNS и Cloudflare):
-    GET <scheme>://<origin_ip>/ с Host=<домен> (и SNI=<домен> для https). Ок = ответ без 5xx.
-    Ограничение: дефолтный vhost aaPanel на HTTP тоже отвечает 200 — но HTTPS на чужой Host он
-    закрывает без ответа (S5-04), поэтому HTTPS-проба различает «наш vhost с сертификатом»."""
+    """Грубая проба «хоть что-то отвечает» (без 5xx). Для ДОКАЗАТЕЛЬСТВА, что отвечает именно наш
+    vhost, она не годится — см. probe_marker. Остаётся для origin_exposure_warning, где важен
+    сам факт ответа на неизвестный Host."""
     ext = {"sni_hostname": domain} if https else {}
     try:
         with _origin_client() as c:
@@ -69,6 +69,39 @@ def probe_origin(ip: str, domain: str, *, https: bool) -> tuple[bool, str]:
     except httpx.HTTPError as e:
         return False, f"{type(e).__name__}: {e}"[:200]
     return r.status_code < 500, f"HTTP {r.status_code}"
+
+
+NOT_OURS = "маркера нашего vhost нет"   # ответ есть, но это не наш сайт (дефолтный/чужой vhost)
+
+
+def _new_nonce() -> str:
+    return secrets.token_hex(12)       # шов для тестов: фикстура подменяет на константу
+
+
+def marker_name(domain: str) -> str:
+    """Имя маркер-файла в docroot: стабильное для домена (повтор провижна перезаписывает один файл, а
+    не копит их) и разное у сайтов (общий путь на весь портфель был бы отпечатком)."""
+    h = hashlib.sha256(f"{domain}|{settings.AAPANEL_API_KEY}".encode()).hexdigest()[:12]
+    return f"cm-probe-{h}.txt"
+
+
+def probe_marker(ip: str, host: str, *, https: bool, name: str, nonce: str) -> tuple[bool, str]:
+    """ДОКАЗАТЕЛЬСТВО, что Host=<host> на origin обслуживает НАШ vhost (S4-02/S7-08/S5-04): GET
+    <scheme>://<ip>/<маркер> с Host (и SNI для https) и сверка ТЕЛА с nonce, который мы только что
+    положили в docroot. Любой код без nonce — не наш сайт: при единственном ssl-vhost на :443 nginx
+    отдаёт неизвестный SNI ему, а дефолтный vhost aaPanel на :80 отвечает 200 на любой Host — оба
+    дали бы «успех» по коду ответа. 5xx/обрыв — отдельная причина."""
+    ext = {"sni_hostname": host} if https else {}
+    try:
+        with _origin_client() as c:
+            r = c.get(f"{'https' if https else 'http'}://{ip}/{name}", headers={"Host": host}, extensions=ext)
+    except httpx.HTTPError as e:
+        return False, f"{type(e).__name__}: {e}"[:200]
+    if r.status_code == 200 and nonce in r.text:
+        return True, "HTTP 200"
+    if r.status_code < 500:
+        return False, f"HTTP {r.status_code}, {NOT_OURS}"
+    return False, f"HTTP {r.status_code}"
 
 
 def origin_exposure_warning(ip: str) -> str | None:
@@ -260,6 +293,27 @@ def provision(site_id: int) -> dict:
         db.commit()
 
         problems: list[str] = []   # сбои шагов, которые не роняют vhost, но не должны исчезать молча
+        warnings: list[str] = []   # предупреждения оператору (не про SSL): www без алиаса, открытый origin
+
+        # Маркер-файл: все пробы origin ниже сверяют его ТЕЛО (nonce), а не код ответа. Файл кладём
+        # в docroot САЙТА: vhost с другим root/чужой vhost/дефолтная заглушка его не отдадут.
+        # Сбой записи летит наверх, как отказ ensure_site (провижн идемпотентен, повтор безопасен).
+        nonce, mname = _new_nonce(), marker_name(domain)
+        ap.write_file(f"{root.rstrip('/')}/{mname}", nonce)
+        www = f"www.{domain}"
+        # www-алиас: у НОВОГО vhost он приходит в AddSite, у существующего (ensure_site возвращает
+        # exists и aliases игнорирует) — дописываем через AddDomain. Судья — проба по Host=www:
+        # DNS на www создаём только если алиас подтверждён (иначе посетитель получил бы чужой vhost).
+        www_ok, www_detail = probe_marker(ip, www, https=False, name=mname, nonce=nonce)
+        if not www_ok:
+            try:
+                ap.add_domains(domain, [www])
+            except Exception as e:  # noqa: BLE001 — ручка не сверена вживую; решает повторная проба
+                warnings.append(f"AddDomain {www}: {type(e).__name__}: {e}"[:200])
+            www_ok, www_detail = probe_marker(ip, www, https=False, name=mname, nonce=nonce)
+        if not www_ok:
+            warnings.append(f"{www} не обслуживается vhost'ом на origin ({www_detail}) — A-запись www НЕ "
+                            "создана; добавь домен-алиас в aaPanel и повтори провижн")
 
         # 4. origin TLS: (опц.) наш Origin CA -> проба HTTPS по IP -> origin_https.
         site.provision_step = "origin_tls"
@@ -269,13 +323,19 @@ def provision(site_id: int) -> dict:
                 site.origin_https = "origin_ca"
             except Exception as e:  # noqa: BLE001 — без сертификата остаёмся во flexible, сайт жив
                 problems.append(f"Origin CA: {type(e).__name__}: {e}"[:300])
-        https_ok, https_detail = probe_origin(ip, domain, https=True)
+        # «ok» только с доказательством: по HTTPS на ЭТОТ Host+SNI отдаётся наш маркер. Иначе (в т.ч.
+        # 200 от чужого/дефолтного ssl-vhost) режим не выше flexible — иначе посетители нового домена
+        # увидели бы по HTTPS чужой сайт портфеля (footprint).
+        https_ok, https_detail = probe_marker(ip, domain, https=True, name=mname, nonce=nonce)
         if https_ok:
             if site.origin_https != "origin_ca":
-                site.origin_https = "ok"      # HTTPS отвечает, но сертификат не наш -> full, не strict
+                site.origin_https = "ok"      # HTTPS наш, но сертификат не Origin CA -> full, не strict
         else:
             if site.origin_https == "origin_ca":
                 problems.append(f"Origin CA установлен, но HTTPS на origin не отвечает ({https_detail})")
+            elif NOT_OURS in https_detail:
+                problems.append(f"HTTPS на origin отдаёт чужой/дефолтный vhost ({https_detail}) — CF "
+                                "остаётся во flexible")
             site.origin_https = "none"
         db.commit()
 
@@ -296,16 +356,17 @@ def provision(site_id: int) -> dict:
         site.provision_step = "dns"
         db.commit()
         cf.ensure_a_record(zone["id"], domain, ip, proxied=True)
-        cf.ensure_a_record(zone["id"], f"www.{domain}", ip, proxied=True)
+        if www_ok:
+            cf.ensure_a_record(zone["id"], www, ip, proxied=True)
 
-        # 7. Финальная проверка: домен на origin отвечает по HTTP (и по HTTPS, если заявлено).
+        # 7. Финальная проверка: наш vhost (маркер в теле) отвечает на Host=домен по HTTP.
         # Без неё «готов» было словом, а не фактом (S4-02/S7-08).
         site.provision_step = "verify"
-        http_ok, http_detail = probe_origin(ip, domain, https=False)
+        http_ok, http_detail = probe_marker(ip, domain, https=False, name=mname, nonce=nonce)
         if not http_ok:
             db.commit()
             return {"status": "error", "domain": domain, "step": "verify",
-                    "error": f"vhost не отвечает по HTTP на origin {ip} с Host={domain}: {http_detail} — "
+                    "error": f"наш vhost не отвечает по HTTP на origin {ip} с Host={domain}: {http_detail} — "
                              "сайт не объявлен готовым, повтор провижна безопасен"}
 
         site.provision_step = "done"
@@ -314,10 +375,12 @@ def provision(site_id: int) -> dict:
         db.commit()
         out = {"status": "provisioned", "domain": domain, "site_id": site.id,
                "cf_zone_id": site.cf_zone_id, "doc_root": root,
-               "origin_https": site.origin_https, "ssl_mode": ssl_mode}
+               "origin_https": site.origin_https, "ssl_mode": ssl_mode, "www": www_ok}
         warn = origin_exposure_warning(ip)
         if warn:
-            out["warnings"] = [warn]
+            warnings.append(warn)
+        if warnings:
+            out["warnings"] = warnings
         if site.ssl_error:
             out["ssl_error"] = site.ssl_error
         return out
