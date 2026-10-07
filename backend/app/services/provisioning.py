@@ -43,8 +43,11 @@ def provision(site_id: int) -> dict:
     from app.models.site import Site
     from app.models.domain import Domain
     from app.integrations.cloudflare import CloudflareClient
-    from app.integrations.aapanel import AaPanelClient
+    from app.integrations.aapanel import AaPanelClient, require_open
 
+    # Префлайт: панель на паузе (отказ авторизации/бан) — падаем ДО шагов Cloudflare, а не после;
+    # иначе каждый тик свипа заново гонял бы CF-запросы и упирался в закрытую панель (S5-01).
+    require_open()
     with SessionLocal() as db:
         site = db.get(Site, site_id)
         if site is None:

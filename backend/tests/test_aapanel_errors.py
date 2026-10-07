@@ -139,14 +139,14 @@ def test_post_recomputes_signature_on_each_retry_attempt(monkeypatch):
             if len(self.seen_request_times) == 1:
                 return httpx.Response(500, json={"msg": "boom"},
                                       request=httpx.Request(method, url))
-            return httpx.Response(200, json=ADD_OK, request=httpx.Request(method, url))
+            return httpx.Response(200, json=LIST_EMPTY, request=httpx.Request(method, url))
 
         def close(self):
             pass
 
     panel = _FlakyPanel()
     c = _client(panel)
-    c.add_site("ex.ru", "/www/wwwroot/ex.ru")   # первая попытка 500 -> ретрай -> вторая 200
+    c.list_sites()   # чтение: первая попытка 500 -> ретрай -> вторая 200 (записи 5xx не ретраят, S5-10)
     assert len(panel.seen_request_times) == 2
     assert panel.seen_request_times[0] != panel.seen_request_times[1]
 
@@ -251,11 +251,11 @@ def test_write_file_carries_createfile_reason():
     """Настоящий отказ CreateFile (нет прав, диск полон) не проскакивает: файла не появилось,
     SaveFileBody падает «Configuration file not exist» — и оператор должен увидеть ПЕРВОПРИЧИНУ,
     а не только последнее звено цепочки."""
-    c = _client(_Panel(create=AUTH_FAIL, save=NO_SUCH_FILE))
+    c = _client(_Panel(create={"status": False, "msg": "Permission denied"}, save=NO_SUCH_FILE))
     with pytest.raises(RuntimeError) as e:
         c.write_file("/www/wwwroot/ex.ru/vs/index.html", "<h1>hi</h1>")
     assert "Configuration file not exist" in str(e.value)
-    assert "Secret key verification failed" in str(e.value), str(e.value)
+    assert "Permission denied" in str(e.value), str(e.value)
 
 
 # ============================ 2. провижн (M3) ============================
