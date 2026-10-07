@@ -527,6 +527,52 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
     return _settings_page(request, db)
 
 
+def _keys_page(request: Request, form_err: str | None = None, draft: dict | None = None,
+               status_code: int = 200):
+    """Экран «Ключи и сервисы». В шаблон уходят только маски секретов (api_keys.describe);
+    `draft` — введённое НЕ-секретное (при ошибке валидации форма не теряет адреса/модели)."""
+    from app.services import api_keys
+    return templates.TemplateResponse(request, "settings_keys.html", {
+        "active": "settings", "groups": api_keys.describe(), "form_err": form_err,
+        "draft": draft or {}}, status_code=status_code)
+
+
+@router.get("/settings/keys", response_class=HTMLResponse)
+def settings_keys_view(request: Request):
+    return _keys_page(request)
+
+
+@router.post("/settings/keys")
+async def settings_keys_save(request: Request):
+    """Сохранить ключи/адреса. Берём из формы ТОЛЬКО ключи белого списка (`v_<KEY>` — значение,
+    `r_<KEY>` — «сбросить к .env»): посторонние поля (PANEL_PASS, DATABASE_URL, что угодно) не
+    читаются вовсе. Пустое значение = не менять. Значения не попадают ни в flash, ни в лог."""
+    from app.services import api_keys
+    form = await request.form()
+
+    def _str(name):
+        v = form.get(name)
+        return v if isinstance(v, str) else ""
+
+    updates = {k: _str("v_" + k) for k in api_keys.EDITABLE}
+    resets = {k for k in api_keys.EDITABLE if _str("r_" + k)}
+    try:
+        res = api_keys.save(updates, resets)
+    except ValueError as e:                    # текст ValueError — наш, без значений
+        draft = {k: v.strip() for k, v in updates.items() if v.strip() and not api_keys.EDITABLE[k].secret}
+        return _keys_page(request, form_err=f"Не сохранено ничего: {e}", draft=draft, status_code=400)
+    except RuntimeError as e:
+        return _keys_page(request, form_err=str(e), status_code=500)
+    if not res["changed"] and not res["reset"]:
+        return _back("/settings/keys", msg="Ничего не изменено: все поля пустые")
+    parts = []
+    if res["changed"]:
+        parts.append("Сохранено: " + ", ".join(res["changed"]))
+    if res["reset"]:
+        parts.append("Сброшено к .env: " + ", ".join(res["reset"]))
+    return _back("/settings/keys", msg=" · ".join(parts))
+
+
 @router.get("/settings/cloudflare", response_class=HTMLResponse)
 def settings_cloudflare_view(request: Request):
     """Read-only экран правды Cloudflare (задача 7, P0). Ни одной формы, мутирующей CF —

@@ -1,9 +1,40 @@
-"""Application settings loaded from environment (.env)."""
+"""Application settings loaded from environment (.env).
+
+Поверх .env — переопределения из панели («Ключи и сервисы», таблица secret_override): чтение
+`settings.<KEY>` для ключей из белого списка (services/api_keys.py) сначала смотрит их, потом
+.env. Рестарт не нужен, backend и worker (разные процессы) видят правку в пределах TTL кэша.
+Любой сбой БД/нет таблицы -> молча значение из .env.
+"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД).
+# Белый список разрешённых — в services/api_keys.py; здесь только быстрый отсев до обращения к нему.
+NOT_EDITABLE = frozenset({"DATABASE_URL", "APP_ENV", "PANEL_USER", "PANEL_PASS",
+                          "CLOUDFLARE_SECRETS_DIR"})
+
+
+def _override(name: str):
+    try:
+        from app.services import api_keys    # лениво: на импорте config БД/модели ещё не готовы
+        return api_keys.get_override(name)
+    except Exception:  # noqa: BLE001 — любой сбой = значение из .env, ничего не роняем
+        return None
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    def __getattribute__(self, name):
+        val = super().__getattribute__(name)
+        if name[:1].isupper() and name not in NOT_EDITABLE:     # поля настроек — ЗАГЛАВНЫЕ
+            ov = _override(name)
+            if ov is not None:
+                return ov
+        return val
+
+    def env_value(self, name: str):
+        """Значение ТОЛЬКО из .env/окружения (мимо переопределений) — для экрана ключей."""
+        return super().__getattribute__(name)
 
     DATABASE_URL: str = "postgresql+psycopg://portfolio:portfolio@db:5432/portfolio"
     APP_ENV: str = "dev"
