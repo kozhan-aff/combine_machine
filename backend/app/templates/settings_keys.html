@@ -13,6 +13,8 @@
 </div>
 
 {% if form_err %}<div class="flash err"><span class="tag">Ошибка</span><span>{{ form_err }}</span></div>{% endif %}
+{% if not auth_configured %}<div class="flash warn"><span class="tag">Закрыто</span><span>Менять ключи
+  нельзя, пока в .env не заданы <b>PANEL_USER</b>/<b>PANEL_PASS</b>: без Basic-auth панель открыта всей сети.</span></div>{% endif %}
 {% if request.query_params.get('msg') %}
 <div class="row" style="margin-bottom:14px">
   <a class="btn btn-acc" href="/diag" title="пингует каждый сервис живьём и показывает, видит ли панель новые ключи">
@@ -26,7 +28,7 @@
   удаляет его, и снова работает значение из .env. <b>Пустое поле = «не менять»</b>: ничего не стирается.
   Секреты целиком не показываются — только маска по последним четырём символам. Ключи хранятся в БД
   как есть, без шифрования: панель живёт в LAN под Basic-auth. Сами <b>DATABASE_URL, PANEL_USER,
-  PANEL_PASS</b> и каталог секретов Cloudflare отсюда не меняются — только в .env, чтобы нельзя было
+  PANEL_PASS, GITHUB_REPO</b> и каталог секретов Cloudflare отсюда не меняются — только в .env, чтобы нельзя было
   запереть себя из панели.</div></details>
 
 <form method="post" action="/settings/keys" autocomplete="off" style="display:grid; gap:6px">
@@ -54,7 +56,8 @@
             </select>
           {% elif r.kind == 'json' %}
             <textarea name="v_{{ r.key }}" rows="3" autocomplete="off" spellcheck="false"
-                      placeholder="не менять" style="width:100%; min-width:200px; -webkit-text-security:disc"></textarea>
+                      placeholder="не менять" maxlength="{{ r.max_len }}"
+                      style="width:100%; min-width:200px; -webkit-text-security:disc"></textarea>
           {% else %}
             <input type="{{ 'password' if r.secret else 'text' }}" name="v_{{ r.key }}" autocomplete="off"
                    spellcheck="false" placeholder="не менять" maxlength="{{ r.max_len }}"
@@ -83,7 +86,8 @@
       не прошло проверку, не сохраняется ничего — исправь и отправь снова. Смена ключей Backorder и
       Optimizator ничего не запускает и ничего не покупает: денежный гейт остаётся ручным.</div></details>
     <div class="go">
-      <button class="btn-acc" title="записать заполненные поля и сбросы к .env">Сохранить</button>
+      <button class="btn-acc" {{ 'disabled' if not auth_configured }}
+              title="записать заполненные поля и сбросы к .env">Сохранить</button>
       <span class="hint">после сохранения — «Проверить связь» в Диагностике</span>
     </div>
   </div>

@@ -17,11 +17,10 @@
 import ipaddress
 import json
 import logging
-import re
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from app.config import NOT_EDITABLE, settings
@@ -43,7 +42,7 @@ class Field:
     label: str
     hint: str                     # «где взять» — идёт в title и в раскрывающийся блок модуля
     secret: bool = False          # секрет маскируется «••••1234», не-секрет виден целиком
-    kind: str = "text"            # text | url | ip | repo | choice | json
+    kind: str = "text"            # text | url | ip | choice | json
     choices: tuple = ()
     max_len: int = MAX_LEN
 
@@ -64,9 +63,7 @@ GROUPS = [
             "Spamhaus блокирует. Пусто — системный резолвер.", kind="ip"),
       Field("APARSER_URL", "A-Parser · адрес", "Адрес A-Parser, например http://192.168.1.77:9091.",
             kind="url"),
-      Field("APARSER_API_KEY", "A-Parser · пароль API", "Пароль API из настроек A-Parser.", secret=True),
-      Field("APARSER_PROXY_CHECKER", "A-Parser · прокси-чекер", "Имя прокси-чекера из интерфейса A-Parser "
-            "(на боксе — ipv6_free). Примечание: код сейчас это поле не читает.")]),
+      Field("APARSER_API_KEY", "A-Parser · пароль API", "Пароль API из настроек A-Parser.", secret=True)]),
     ("m2", "M2 · выкуп",
      "Смена этих ключей ничего не запускает и ничего не покупает: заказ по-прежнему уходит провайдеру "
      "только после ручного подтверждения в «Выкупе».",
@@ -118,17 +115,21 @@ GROUPS = [
             secret=True),
       Field("GSC_SERVICE_ACCOUNT_JSON", "Google Search Console · JSON сервис-аккаунта",
             "Содержимое JSON-ключа сервис-аккаунта целиком (Google Cloud → IAM → Service accounts → Keys). "
-            "Аккаунт нужно добавить в свойство GSC.", secret=True, kind="json", max_len=MAX_LEN_JSON)]),
+            "Аккаунт нужно добавить в свойство GSC. Вставь JSON целиком; в Firefox текст виден при вводе.",
+            secret=True, kind="json", max_len=MAX_LEN_JSON)]),
     ("infra", "Инфраструктура",
      "Самообновление из git и опциональные локальные сервисы.",
-     [Field("GITHUB_REPO", "GitHub · репозиторий", "Формат владелец/репо, например kozhan-aff/combine_machine.",
-            kind="repo"),
-      Field("GITHUB_TOKEN", "GitHub · токен", "Fine-grained PAT с правом чтения Contents (Settings → "
+     [Field("GITHUB_TOKEN", "GitHub · токен", "Fine-grained PAT с правом чтения Contents (Settings → "
             "Developer settings). Нужен для кнопки «Обновить из git».", secret=True),
       Field("BROWSERLESS_URL", "Browserless · адрес", "Опциональный headless-браузер, например "
             "http://192.168.1.77:3000.", kind="url"),
       Field("N8N_URL", "n8n · адрес", "Опциональный адрес n8n.", kind="url")]),
 ]
+
+# Смена адреса сервиса отправит ключ на новый хост — говорим об этом в подсказке КАЖДОГО url-поля
+_URL_WARN = " Внимание: смена адреса отправит ключ на новый хост."
+GROUPS = [(g, t, n, [replace(f, hint=f.hint + _URL_WARN) if f.kind == "url" else f for f in fs])
+          for g, t, n, fs in GROUPS]
 
 EDITABLE = {f.key: f for _, _, _, fields in GROUPS for f in fields}
 assert not (set(EDITABLE) & NOT_EDITABLE), "в белый список попал запретный ключ"
@@ -137,9 +138,11 @@ SECRET_KEYS = tuple(k for k, f in EDITABLE.items() if f.secret)
 
 # ---------- кэш переопределений ----------
 
-_cache: dict | None = None
+_cache: dict | None = None     # текущий снимок; None = нет снимка (старт или после invalidate) -> читатель ждёт
+_last_good: dict | None = None  # последний УСПЕШНО загруженный снимок: на нём живём при сбое БД
 _loaded_at = 0.0
-_lock = threading.Lock()
+_gen = 0                       # поколение: invalidate() его двигает, загрузка, начатая до него, не публикуется
+_lock = threading.Lock()       # только выбор «кто обновляет»; чтение снимка замка не берёт
 _failed = False                # прошлая загрузка упала — не спамим предупреждением каждые TTL секунд
 _tls = threading.local()       # защита от рекурсии: загрузка из БД сама может прочитать settings.*
 
@@ -152,33 +155,53 @@ def _load() -> dict:
 
 
 def _snapshot() -> dict:
-    global _cache, _loaded_at, _failed
+    """Stale-while-revalidate: пока снимок есть (пусть протухший), читатели его отдают и НЕ ждут;
+    обновляет ровно один поток (замок берётся без ожидания). Ждут только когда снимка нет вовсе
+    (первый вызов, сразу после save) — там без свежих данных не обойтись."""
+    global _cache, _last_good, _loaded_at, _failed
     c = _cache
     if c is not None and time.monotonic() - _loaded_at < TTL:
         return c
     if getattr(_tls, "busy", False):                 # реентерабельный вызов из самой загрузки
-        return c or {}
-    with _lock:
+        return c if c is not None else (_last_good or {})
+    if c is not None:
+        if not _lock.acquire(blocking=False):
+            return c                                 # кто-то уже обновляет — отдаём устаревший
+    else:
+        _lock.acquire()
+    try:
         if _cache is not None and time.monotonic() - _loaded_at < TTL:
-            return _cache                            # пока ждали замок, соседний поток уже загрузил
+            return _cache                            # пока ждали, соседний поток уже загрузил
+        gen = _gen
         _tls.busy = True
         try:
             data = _load()
             _failed = False
-        except Exception as e:  # noqa: BLE001 — нет таблицы/БД лежит -> .env; в лог только тип (не текст)
+        except Exception as e:  # noqa: BLE001 — нет таблицы/БД лежит; в лог только тип (не текст)
             if not _failed:
-                log.warning("secret_override недоступна (%s) — работаем на .env", type(e).__name__)
+                log.warning("secret_override недоступна (%s) — держим последний снимок/.env", type(e).__name__)
             _failed = True
-            data = {}
+            data = None
         finally:
             _tls.busy = False
-        _cache, _loaded_at = data, time.monotonic()
+        if data is None:
+            # сбой: НЕ сбрасываем в {} — ключи (особенно BACKORDER_*) не должны внезапно «пропасть»
+            # на время недоступности БД. На .env откатываемся, только если успешной загрузки не было.
+            _cache = _last_good if _last_good is not None else {}
+            _loaded_at = time.monotonic()            # пауза перед повтором
+            return _cache
+        if gen != _gen:
+            return data       # save() случился во время загрузки: данные могли устареть — не публикуем
+        _cache, _last_good, _loaded_at = data, data, time.monotonic()
         return data
+    finally:
+        _lock.release()
 
 
 def invalidate() -> None:
     """Сбросить кэш этого процесса (после save; соседние процессы обновятся по TTL)."""
-    global _cache
+    global _cache, _gen
+    _gen += 1
     _cache = None
 
 
@@ -218,24 +241,24 @@ def validate(f: Field, raw: str) -> str:
     if len(v) > f.max_len:
         raise ValueError(f"{f.key}: слишком длинное значение (максимум {f.max_len} символов)")
     if f.kind == "url":
-        u = urlsplit(v)
-        if v.split("://", 1)[0].lower() not in ("http", "https") or "://" not in v or not u.hostname:
+        try:
+            host = urlsplit(v).hostname
+        except ValueError:                           # напр. «http://[::1» — битый IPv6-литерал
+            host = None
+        if v.split("://", 1)[0].lower() not in ("http", "https") or "://" not in v or not host:
             raise ValueError(f"{f.key}: адрес должен начинаться с http:// или https:// и содержать хост")
     elif f.kind == "ip":
         try:
             ipaddress.ip_address(v)
         except ValueError:
             raise ValueError(f"{f.key}: нужен IP-адрес (например 192.168.1.10)") from None
-    elif f.kind == "repo":
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+", v):
-            raise ValueError(f"{f.key}: формат владелец/репозиторий, например kozhan-aff/combine_machine")
     elif f.kind == "choice":
         if v not in f.choices:
             raise ValueError(f"{f.key}: допустимо одно из: {', '.join(f.choices)}")
     elif f.kind == "json":
         try:
             ok = isinstance(json.loads(v), dict)
-        except ValueError:
+        except (ValueError, RecursionError):         # глубоко вложенный JSON роняет разбор рекурсией
             ok = False
         if not ok:
             raise ValueError(f"{f.key}: нужен JSON-объект (содержимое ключа сервис-аккаунта целиком)")

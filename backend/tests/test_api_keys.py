@@ -1,6 +1,6 @@
 """«Ключи и сервисы»: переопределения из БД поверх .env, экран /settings/keys, секреты не утекают."""
-import importlib.util
 import pathlib
+import threading
 import time
 
 import pytest
@@ -14,6 +14,17 @@ from app.models.secret import SecretOverride
 @pytest.fixture
 def ak(key_overrides):
     return key_overrides
+
+
+@pytest.fixture(autouse=True)
+def _panel_auth(request, monkeypatch):
+    """POST /settings/keys требует настроенного Basic-auth (PANEL_USER/PANEL_PASS) — тестовый клиент
+    логинится. Тест на «auth не настроен» сам обнуляет оба поля и client.auth."""
+    if "client" not in request.fixturenames:
+        return
+    monkeypatch.setattr(settings, "PANEL_USER", "op")
+    monkeypatch.setattr(settings, "PANEL_PASS", "pw")
+    request.getfixturevalue("client").auth = ("op", "pw")
 
 
 def _rows() -> dict:
@@ -148,7 +159,8 @@ def test_page_links_present(client):
     ("v_LLM_MODEL", "a" * 513),
     ("v_VPS_ORIGIN_IP", "not-an-ip"),
     ("v_SEO_DATA_PROVIDER", "bing"),
-    ("v_GITHUB_REPO", "no-slash"),
+    ("v_LLM_BASE_URL", "http://[::1"),                          # urlsplit -> ValueError, не 500
+    ("v_GSC_SERVICE_ACCOUNT_JSON", '{"a":' + "[" * 5000),     # RecursionError в json.loads
     ("v_GSC_SERVICE_ACCOUNT_JSON", "not json"),
     ("v_GSC_SERVICE_ACCOUNT_JSON", "[1, 2]"),
 ])
@@ -163,7 +175,7 @@ def test_validation_accepts_good_values(client, ak):
     big_json = '{"type": "service_account",\n "k": "' + "x" * 3000 + '"}'
     r = _post(client, v_LLM_BASE_URL="https://llm.example/v1", v_VPS_ORIGIN_IP="203.0.113.5",
               v_DNS_RESOLVER="10.0.0.2", v_SEO_DATA_PROVIDER="serpapi",
-              v_GITHUB_REPO="owner/repo.name", v_GSC_SERVICE_ACCOUNT_JSON=big_json)
+              v_GSC_SERVICE_ACCOUNT_JSON=big_json)
     assert r.status_code == 303
     assert _rows()["GSC_SERVICE_ACCOUNT_JSON"] == big_json        # переводы строк внутри JSON допустимы
 
@@ -188,7 +200,8 @@ def test_non_whitelisted_keys_are_not_written(client, ak):
 
 
 def test_save_rejects_forbidden_keys_directly(ak):
-    for k in ("PANEL_PASS", "PANEL_USER", "DATABASE_URL", "APP_ENV", "CLOUDFLARE_SECRETS_DIR", "NOPE"):
+    for k in ("PANEL_PASS", "PANEL_USER", "DATABASE_URL", "APP_ENV", "CLOUDFLARE_SECRETS_DIR",
+              "GITHUB_REPO", "APARSER_PROXY_CHECKER", "NOPE"):
         with pytest.raises(ValueError):
             ak.save({k: "x"})
         with pytest.raises(ValueError):
@@ -210,7 +223,8 @@ def test_whitelist_excludes_locked_fields():
     from app.config import NOT_EDITABLE
     from app.services import api_keys
     assert not (set(api_keys.EDITABLE) & NOT_EDITABLE)
-    assert {"PANEL_PASS", "PANEL_USER", "DATABASE_URL", "APP_ENV", "CLOUDFLARE_SECRETS_DIR"} <= NOT_EDITABLE
+    assert {"PANEL_PASS", "PANEL_USER", "DATABASE_URL", "APP_ENV", "CLOUDFLARE_SECRETS_DIR",
+            "GITHUB_REPO"} <= NOT_EDITABLE
 
 
 def test_whitelist_matches_settings_fields():
@@ -273,12 +287,127 @@ def test_cache_is_not_hit_on_every_read(ak, monkeypatch):
 
 
 def test_no_recursion_when_load_reads_settings(ak, monkeypatch):
-    """_load, прочитавший settings.*, не должен зациклиться/задедлочиться."""
+    """_load, прочитавший settings.*, не должен зациклиться/задедлочиться. При регрессии тест ПАДАЕТ
+    (join с таймаутом), а не вешает весь сьют."""
     def reentrant():
         return {"LLM_MODEL": settings.LLM_API_KEY or "x"}
     monkeypatch.setattr(ak, "_load", reentrant)
     ak.invalidate()
-    assert settings.LLM_MODEL == "x"
+    out = []
+    t = threading.Thread(target=lambda: out.append(settings.LLM_MODEL), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "чтение settings зависло (рекурсия/дедлок в _snapshot)"
+    assert out == ["x"]
+
+
+# ---- сбой БД не сбрасывает последний снимок (особенно BACKORDER_*) ----
+
+def _expire(ak, monkeypatch):
+    monkeypatch.setattr(ak, "_loaded_at", time.monotonic() - ak.TTL - 1)
+
+
+def _boom():
+    raise RuntimeError("db down")
+
+
+def test_db_failure_keeps_last_good_snapshot(client, ak, monkeypatch):
+    _post(client, v_BACKORDER_LOGIN="db-login", v_BACKORDER_PASSWORD="db-pass-123456", v_LLM_MODEL="m-db")
+    assert settings.BACKORDER_LOGIN == "db-login"               # снимок успешно загружен
+    monkeypatch.setattr(ak, "_load", _boom)
+    _expire(ak, monkeypatch)
+    assert settings.BACKORDER_LOGIN == "db-login"               # сбой -> override НЕ пропал
+    assert settings.BACKORDER_PASSWORD == "db-pass-123456" and settings.LLM_MODEL == "m-db"
+    # пауза перед повтором: сразу следующее чтение БД не дёргает
+    calls = []
+    monkeypatch.setattr(ak, "_load", lambda: calls.append(1) or _boom())
+    settings.BACKORDER_LOGIN
+    assert calls == []
+    # БД вернулась — снимок обновился
+    monkeypatch.setattr(ak, "_load", lambda: {"BACKORDER_LOGIN": "new"})
+    _expire(ak, monkeypatch)
+    assert settings.BACKORDER_LOGIN == "new"
+
+
+def test_failure_before_any_success_falls_back_to_env(ak, monkeypatch):
+    monkeypatch.setattr(ak, "_load", _boom)
+    ak.invalidate()
+    monkeypatch.setattr(ak, "_last_good", None)
+    assert settings.LLM_MODEL == settings.env_value("LLM_MODEL")
+
+
+# ---- stale-while-revalidate и поколение: детерминированно, спай-замком, не таймингом ----
+
+class _SpyLock:
+    def __init__(self, nonblocking_result=True):
+        self.blocking_acquires = 0
+        self.nonblocking_calls = 0
+        self.nonblocking_result = nonblocking_result
+        self.releases = 0
+
+    def acquire(self, blocking=True, *a):
+        if blocking:
+            self.blocking_acquires += 1
+            return True
+        self.nonblocking_calls += 1
+        return self.nonblocking_result
+
+    def release(self):
+        self.releases += 1
+
+
+def test_stale_reader_does_not_wait_while_another_thread_refreshes(ak, monkeypatch):
+    monkeypatch.setattr(ak, "_load", lambda: {"LLM_MODEL": "v1"})
+    ak.invalidate()
+    assert settings.LLM_MODEL == "v1"                           # снимок есть
+    _expire(ak, monkeypatch)
+    spy = _SpyLock(nonblocking_result=False)                    # «обновляет другой поток»
+    monkeypatch.setattr(ak, "_lock", spy)
+    loads = []
+    monkeypatch.setattr(ak, "_load", lambda: loads.append(1) or {"LLM_MODEL": "v2"})
+    assert settings.LLM_MODEL == "v1"                           # отдали устаревший, не ждали
+    assert spy.blocking_acquires == 0 and spy.nonblocking_calls == 1 and loads == []
+
+
+def test_stale_refresher_loads_once_and_releases(ak, monkeypatch):
+    monkeypatch.setattr(ak, "_load", lambda: {"LLM_MODEL": "v1"})
+    ak.invalidate()
+    settings.LLM_MODEL
+    _expire(ak, monkeypatch)
+    spy = _SpyLock(nonblocking_result=True)
+    monkeypatch.setattr(ak, "_lock", spy)
+    monkeypatch.setattr(ak, "_load", lambda: {"LLM_MODEL": "v2"})
+    assert settings.LLM_MODEL == "v2"
+    assert spy.blocking_acquires == 0 and spy.releases == 1
+
+
+def test_no_snapshot_reader_blocks_for_first_load(ak, monkeypatch):
+    ak.invalidate()                                             # снимка нет вовсе -> ждём свежего
+    spy = _SpyLock()
+    monkeypatch.setattr(ak, "_lock", spy)
+    monkeypatch.setattr(ak, "_load", lambda: {"LLM_MODEL": "first"})
+    assert settings.LLM_MODEL == "first"
+    assert spy.blocking_acquires == 1 and spy.releases == 1
+
+
+def test_invalidate_during_load_discards_stale_result(ak, monkeypatch):
+    """save() commit + invalidate() случились, пока чужой поток читал таблицу: его результат
+    (до save) не должен лечь в кэш и «отменить» свежую запись на TTL."""
+    state = {"db": {"LLM_MODEL": "old"}, "n": 0}
+
+    def load():
+        state["n"] += 1
+        snapshot = dict(state["db"])                  # поток прочитал таблицу...
+        if state["n"] == 1:
+            state["db"] = {"LLM_MODEL": "saved"}      # ...пока шёл save() в этом процессе
+            ak.invalidate()
+        return snapshot
+
+    monkeypatch.setattr(ak, "_load", load)
+    ak.invalidate()
+    assert settings.LLM_MODEL == "old"                # тот самый читатель получил то, что прочитал
+    assert settings.LLM_MODEL == "saved"              # но кэш не отравлен: следующее чтение — свежее
+    assert state["n"] == 2
 
 
 def test_overrides_disabled_by_default_in_tests(client):
@@ -311,10 +440,66 @@ def test_blacklist_control_cache_invalidates_on_resolver_change(monkeypatch):
 # ---- миграция ----
 
 def test_migration_0026_chain():
-    p = pathlib.Path(__file__).parents[1] / "alembic" / "versions" / "0026_secret_override.py"
-    spec = importlib.util.spec_from_file_location("m0026", p)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    assert m.revision == "0026_secret_override" and m.down_revision == "0025_v2_m1"
-    heads = [f.name for f in p.parent.glob("0*.py")]
-    assert sorted(heads)[-1] == "0026_secret_override.py"
+    import re
+    d = pathlib.Path(__file__).parents[1] / "alembic" / "versions"
+    revs = {}
+    for f in d.glob("0*.py"):
+        t = f.read_text()
+        revs[re.search(r'^revision = "([^"]+)"', t, re.M).group(1)] = \
+            re.search(r'^down_revision = "?([^"\n]+?)"?$', t, re.M).group(1)
+    assert revs["0026_secret_override"] == "0025_v2_m1"
+    heads = set(revs) - set(revs.values())            # у 0001 down_revision = None -> строка "None"
+    assert len(heads) == 1                                      # одна голова, цепочка линейна
+    node, chain = next(iter(heads)), []
+    while node in revs:
+        chain.append(node)
+        node = revs[node]
+    assert "0026_secret_override" in chain
+
+
+# ---- гейт панели: без PANEL_USER/PANEL_PASS ключи менять нельзя ----
+
+def test_post_refused_without_panel_auth(client, ak, monkeypatch):
+    monkeypatch.setattr(settings, "PANEL_USER", "")
+    monkeypatch.setattr(settings, "PANEL_PASS", "")
+    client.auth = None
+    r = _post(client, v_LLM_MODEL="x", v_AHREFS_API_KEY="sk-NOAUTH-1234567890")
+    assert r.status_code == 403
+    assert "PANEL_USER" in r.text and "NOAUTH" not in r.text
+    assert _rows() == {}
+    page = client.get("/settings/keys").text
+    assert "Закрыто" in page and "disabled" in page
+
+
+def test_post_refused_with_only_user_configured(client, ak, monkeypatch):
+    monkeypatch.setattr(settings, "PANEL_PASS", "")
+    client.auth = None
+    assert _post(client, v_LLM_MODEL="x").status_code == 403
+    assert _rows() == {}
+
+
+def test_github_repo_not_editable(client, ak):
+    html = client.get("/settings/keys").text
+    assert 'name="v_GITHUB_REPO"' not in html
+    r = _post(client, v_GITHUB_REPO="evil/repo")
+    assert r.status_code == 303 and _rows() == {}
+
+
+def test_url_hints_warn_about_key_exfiltration(ak):
+    urls = [f for f in ak.EDITABLE.values() if f.kind == "url"]
+    assert urls and all("новый хост" in f.hint for f in urls)
+    assert "APARSER_PROXY_CHECKER" not in ak.EDITABLE
+
+
+def test_json_textarea_has_maxlength(client, ak):
+    html = client.get("/settings/keys").text
+    i = html.index('name="v_GSC_SERVICE_ACCOUNT_JSON"')
+    assert 'maxlength="8192"' in html[i:i + 400]
+
+
+def test_broken_url_and_json_errors_name_the_field(ak):
+    """Исключение urlsplit/json не должно уходить голым: сообщение называет поле и ничего не цитирует."""
+    for key, bad in (("LLM_BASE_URL", "http://[::1"), ("GSC_SERVICE_ACCOUNT_JSON", '{"a":' + "[" * 5000)):
+        with pytest.raises(ValueError) as e:
+            ak.validate(ak.EDITABLE[key], bad)
+        assert str(e.value).startswith(key + ":") and "[::1" not in str(e.value)

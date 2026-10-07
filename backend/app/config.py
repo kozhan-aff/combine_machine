@@ -7,10 +7,11 @@
 """
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД).
+# Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД;
+# GITHUB_REPO — смена репо + «Обновить из git» = чужой код на боксе).
 # Белый список разрешённых — в services/api_keys.py; здесь только быстрый отсев до обращения к нему.
 NOT_EDITABLE = frozenset({"DATABASE_URL", "APP_ENV", "PANEL_USER", "PANEL_PASS",
-                          "CLOUDFLARE_SECRETS_DIR"})
+                          "CLOUDFLARE_SECRETS_DIR", "GITHUB_REPO"})
 
 
 def _override(name: str):

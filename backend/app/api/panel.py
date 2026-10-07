@@ -15,6 +15,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 from fastapi import APIRouter, Request, Depends, Form, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -534,12 +535,40 @@ def _keys_page(request: Request, form_err: str | None = None, draft: dict | None
     from app.services import api_keys
     return templates.TemplateResponse(request, "settings_keys.html", {
         "active": "settings", "groups": api_keys.describe(), "form_err": form_err,
-        "draft": draft or {}}, status_code=status_code)
+        "draft": draft or {}, "auth_configured": bool(settings.PANEL_USER and settings.PANEL_PASS)},
+        status_code=status_code)
 
 
 @router.get("/settings/keys", response_class=HTMLResponse)
 def settings_keys_view(request: Request):
     return _keys_page(request)
+
+
+def _keys_save(request: Request, updates: dict, resets: set):
+    """Синхронная часть сохранения (БД, рендер) — вызывается из async-роута через threadpool,
+    чтобы не блокировать event loop."""
+    from app.services import api_keys
+    # Жёсткий гейт (по прецеденту _require_cf_write): ключи — это деньги и доступ к инфраструктуре,
+    # а плоская LAN-панель без Basic-auth пустила бы к ним любого в сети. Раньше любого разбора формы.
+    if not (settings.PANEL_USER and settings.PANEL_PASS):
+        return _keys_page(request, status_code=403,
+                          form_err="Не сохранено ничего: задайте PANEL_USER и PANEL_PASS в .env — без "
+                                   "Basic-auth менять ключи из панели нельзя (панель открыта всей сети).")
+    try:
+        res = api_keys.save(updates, resets)
+    except ValueError as e:                    # текст ValueError — наш, без значений
+        draft = {k: v.strip() for k, v in updates.items() if v.strip() and not api_keys.EDITABLE[k].secret}
+        return _keys_page(request, form_err=f"Не сохранено ничего: {e}", draft=draft, status_code=400)
+    except RuntimeError as e:
+        return _keys_page(request, form_err=str(e), status_code=500)
+    if not res["changed"] and not res["reset"]:
+        return _back("/settings/keys", msg="Ничего не изменено: все поля пустые")
+    parts = []
+    if res["changed"]:
+        parts.append("Сохранено: " + ", ".join(res["changed"]))
+    if res["reset"]:
+        parts.append("Сброшено к .env: " + ", ".join(res["reset"]))
+    return _back("/settings/keys", msg=" · ".join(parts))
 
 
 @router.post("/settings/keys")
@@ -556,21 +585,7 @@ async def settings_keys_save(request: Request):
 
     updates = {k: _str("v_" + k) for k in api_keys.EDITABLE}
     resets = {k for k in api_keys.EDITABLE if _str("r_" + k)}
-    try:
-        res = api_keys.save(updates, resets)
-    except ValueError as e:                    # текст ValueError — наш, без значений
-        draft = {k: v.strip() for k, v in updates.items() if v.strip() and not api_keys.EDITABLE[k].secret}
-        return _keys_page(request, form_err=f"Не сохранено ничего: {e}", draft=draft, status_code=400)
-    except RuntimeError as e:
-        return _keys_page(request, form_err=str(e), status_code=500)
-    if not res["changed"] and not res["reset"]:
-        return _back("/settings/keys", msg="Ничего не изменено: все поля пустые")
-    parts = []
-    if res["changed"]:
-        parts.append("Сохранено: " + ", ".join(res["changed"]))
-    if res["reset"]:
-        parts.append("Сброшено к .env: " + ", ".join(res["reset"]))
-    return _back("/settings/keys", msg=" · ".join(parts))
+    return await run_in_threadpool(_keys_save, request, updates, resets)
 
 
 @router.get("/settings/cloudflare", response_class=HTMLResponse)
