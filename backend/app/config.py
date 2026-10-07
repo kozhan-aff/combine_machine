@@ -5,6 +5,7 @@
 .env. Рестарт не нужен, backend и worker (разные процессы) видят правку в пределах TTL кэша.
 Любой сбой БД/нет таблицы -> молча значение из .env.
 """
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД;
@@ -81,6 +82,13 @@ class Settings(BaseSettings):
     # Certificates: Edit») ни разу не проверены вживую (инвариант «не гадать форматы») — пока
     # выключено, провижн держит CF во flexible и честно пишет origin_https='none'.
     ORIGIN_CA_AUTO: bool = False
+
+    @field_validator("ORIGIN_CA_AUTO", mode="before")
+    @classmethod
+    def _blank_flag_is_off(cls, v):
+        # `ORIGIN_CA_AUTO=` (пустая строка, как велит комментарий в .env.example «пусто/0») —
+        # pydantic на пустом bool падает ValidationError и роняет backend/worker/alembic при импорте.
+        return False if isinstance(v, str) and not v.strip() else v
 
     # gsc
     GSC_SERVICE_ACCOUNT_JSON: str = ""
