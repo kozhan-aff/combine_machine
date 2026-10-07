@@ -4,6 +4,12 @@
 > Вход в текущую работу — **`docs/v2/CLAUDE.md`**. При противоречии прав `docs/v2/`.
 > Всё ниже описывает v1 (.ru/.рф): это история и уроки, полезные для понимания кода, но не текущая задача.
 
+> **Состояние на 2026-10-07:** M1 v2 и экран «Ключи и сервисы» (`/settings/keys`) влиты в `main`; бокс на v2-коде.
+> Аудит цепочки — `docs/v2/audit-2026-10-07.md` (125 находок); исправления идут на ветке `fix/audit-2026-10-07`
+> (группы G1–G8, сводка в `docs/v2/CLAUDE.md` после слияния). Обзор открытого кода — `docs/v2/research/open-source-2026-10-07.md`,
+> спецификация NameSilo (выбранный регистратор) — `docs/v2/research/namesilo-api-spec.md`. Ключа Ahrefs не будет (только A-Parser);
+> LLM на боксе — Ollama через LiteLLM с `think:false`. Подробности — Basic Memory, проект `combine_machine`.
+
 Стартовый скелет проекта **VPN Affiliate Portfolio** — машины полного цикла для
 портфеля VPN affiliate-сайтов. Ты (Claude Code) подхватываешь проект с этого каркаса.
 
@@ -550,3 +556,10 @@ is[...]`), проверять только с бокса (`/diag`).
   не полагаться на память. Живой UI-дебаг — Playwright/chrome-devtools плагины.
 - Бокс — Windows (PowerShell): в командах для пользователя не использовать `~`, `#`-комментарии в
   одной строке с командой и unix-пути; репо на боксе — `D:\combine_machine`.
+
+## Basic Memory
+
+Use Basic Memory project "combine_machine" for repository-specific knowledge.
+Search "combine_machine" first and "shared" second.
+Store cross-project knowledge in "shared".
+Store repository-specific decisions in "combine_machine".
