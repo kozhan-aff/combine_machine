@@ -1185,7 +1185,8 @@ def provision_action(site_id: int, request: Request):
         tls = {"origin_ca": "свой Origin-сертификат, Cloudflare strict",
                "ok": "origin отвечает по HTTPS, Cloudflare full"}.get(
             r.get("origin_https"), "HTTPS на origin нет — Cloudflare flexible")
-        return _back(f"/sites/{site_id}", msg=f"Provision готов: vhost + DNS (apex и www) + проверка origin. SSL: {tls}. Дальше — генерация.")
+        warn = f" ⚠ {'; '.join(r['warnings'])}." if r.get("warnings") else ""
+        return _back(f"/sites/{site_id}", msg=f"Provision готов: vhost + DNS (apex и www) + проверка origin. SSL: {tls}. Дальше — генерация.{warn}")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
 

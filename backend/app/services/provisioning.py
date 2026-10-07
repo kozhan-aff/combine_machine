@@ -7,6 +7,8 @@ finish DNS + vhost + SSL. See BUILD_SPEC §7 M3 and docs/PIPELINE.md.
 """
 from datetime import datetime, timedelta, timezone
 
+import secrets
+
 import httpx
 
 from app.config import settings
@@ -67,6 +69,19 @@ def probe_origin(ip: str, domain: str, *, https: bool) -> tuple[bool, str]:
     except httpx.HTTPError as e:
         return False, f"{type(e).__name__}: {e}"[:200]
     return r.status_code < 500, f"HTTP {r.status_code}"
+
+
+def origin_exposure_warning(ip: str) -> str | None:
+    """S5-14 (гард): origin по неизвестному Host не должен отвечать содержательно. Дефолтный vhost
+    aaPanel отдаёт заглушку «Site is created successfully!» — отпечаток панели, по которому сканеры
+    (Censys/Shodan) связывают IP со всем портфелем. Не блокирует провижн, только предупреждает:
+    лечится ОДИН раз на VPS (default-vhost с 444 + файрвол 80/443 только для IP Cloudflare — см.
+    docs/v2/origin-hardening-runbook.md), а не на каждом сайте."""
+    ok, detail = probe_origin(ip, f"unlisted-{secrets.token_hex(4)}.invalid", https=False)
+    if ok and detail.startswith("HTTP 2"):
+        return (f"origin {ip} отвечает {detail} на неизвестный Host (дефолтная заглушка aaPanel) — "
+                "сделай default-vhost 444 и файрвол 80/443 только для Cloudflare (runbook origin-hardening)")
+    return None
 
 
 def _key_and_csr(domain: str) -> tuple[str, str]:
@@ -300,6 +315,9 @@ def provision(site_id: int) -> dict:
         out = {"status": "provisioned", "domain": domain, "site_id": site.id,
                "cf_zone_id": site.cf_zone_id, "doc_root": root,
                "origin_https": site.origin_https, "ssl_mode": ssl_mode}
+        warn = origin_exposure_warning(ip)
+        if warn:
+            out["warnings"] = [warn]
         if site.ssl_error:
             out["ssl_error"] = site.ssl_error
         return out

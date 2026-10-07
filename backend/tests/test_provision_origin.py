@@ -310,3 +310,25 @@ def test_card_shows_ns_to_set_and_origin_state(client):
         s.get(Site, sid).origin_https = "origin_ca"
         s.commit()
     assert "Cloudflare strict" in client.get(f"/sites/{sid}").text
+
+
+# --- гард открытого origin (S5-14) ---------------------------------------------------------------
+
+def test_default_vhost_page_on_unknown_host_warns(monkeypatch, origin_probe):
+    _env(monkeypatch)
+    out = provisioning.provision(_seed())                 # фикстура origin_probe: http=200 на любой Host
+    assert "неизвестный Host" in out["warnings"][0]
+    unknown = [r for r in origin_probe.requests if r.headers["host"].endswith(".invalid")]
+    assert unknown and unknown[0].url.host == IP
+
+
+def test_closed_origin_on_unknown_host_has_no_warning(monkeypatch, origin_probe):
+    """default-vhost 444: на чужой Host — обрыв; на наш Host — нормальный ответ."""
+    def handler(req):
+        if req.headers["host"].endswith(".invalid"):
+            raise httpx.RemoteProtocolError("empty reply")
+        return httpx.Response(200)
+    monkeypatch.setattr(provisioning, "_origin_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    _env(monkeypatch)
+    assert "warnings" not in provisioning.provision(_seed())
