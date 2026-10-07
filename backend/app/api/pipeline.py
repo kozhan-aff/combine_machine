@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from app.api.guards import require_cf_write
 from app.db import get_session
 from app.models.domain import Domain
 from app.models.site import Site, Page
@@ -15,6 +16,18 @@ from app.services import provisioning, content, publish
 from app.services.content import is_safe_url
 
 router = APIRouter(tags=["pipeline"])
+
+
+def _run(fn, *args, **kw):
+    """Сервис -> HTTP-ответ без голых 500. Отказ по состоянию (сайт не провиженен, не найден) — 4xx
+    с человеческим текстом; сбой внешней системы (CF/aaPanel/сеть) — 502 с типом и причиной (тексты
+    клиентов CF/aaPanel секретов не несут)."""
+    try:
+        return fn(*args, **kw)
+    except ValueError as e:
+        raise HTTPException(404 if "not found" in str(e) else 409, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"{type(e).__name__}: {e}")
 
 
 class OfferIn(BaseModel):
@@ -90,13 +103,16 @@ def make_site(domain_id: int):
 
 @router.post("/sites/{site_id}/provision")
 def do_provision(site_id: int):
-    return provisioning.provision(site_id)
+    # Тот же CF-write-гейт, что у HTML-роута: provision создаёт зону/DNS и меняет SSL-режим боевым
+    # токеном — без настроенных PANEL_USER/PANEL_PASS сюда пускать нельзя (S4-11/S7-15).
+    require_cf_write()
+    return _run(provisioning.provision, site_id)
 
 
 # --- M4 content -------------------------------------------------------------
 @router.post("/sites/{site_id}/generate")
 def do_generate(site_id: int, lang: str = "ru"):
-    return {"created": content.generate_site(site_id, lang=lang)}
+    return {"created": _run(content.generate_site, site_id, lang=lang)}
 
 
 @router.post("/pages/{page_id}/edit")
@@ -117,7 +133,10 @@ def attach_offer(site_id: int, so: SiteOfferIn, db: Session = Depends(get_sessio
 # --- M5 publish + monitor ---------------------------------------------------
 @router.post("/sites/{site_id}/publish")
 def do_publish(site_id: int):
-    return publish.publish_site(site_id)   # refuses non-'edited' pages
+    r = _run(publish.publish_site, site_id)   # refuses non-'edited' pages
+    if r.get("status") == "not_provisioned":
+        raise HTTPException(409, r.get("hint", "сайт не провиженен"))
+    return r
 
 
 @router.post("/sites/{site_id}/check-index")

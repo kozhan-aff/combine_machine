@@ -88,6 +88,10 @@ def _clean(body: str) -> str:
     return b.strip()
 
 
+# Статусы сайта, в которых можно генерировать контент (инфраструктура уже поднята provision()).
+GENERATE_STATUSES = frozenset({"content", "published", "monitoring"})
+
+
 def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = None,
                   use_competitor: bool = False) -> int:
     """Generate draft pages for a site via LiteLLM. Returns count created. status stays 'draft'.
@@ -106,6 +110,12 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
         site = db.get(Site, site_id)
         if site is None:
             raise ValueError(f"site {site_id} not found")
+        if site.status not in GENERATE_STATUSES:
+            # S6-12/S7-05: раньше статус безусловно ставился в 'content' — сайт в `provisioning`
+            # перескакивал провижн (автопилот брал только provisioning и больше его не доводил, а
+            # publish потом выкладывал файлы без зоны и vhost'а), а published откатывался назад.
+            raise ValueError(f"сайт #{site_id} в статусе «{site.status}»: сначала provision — "
+                             "контент пишется для готовой инфраструктуры")
 
         existing_page = db.execute(
             select(Page).where(Page.site_id == site_id).order_by(Page.id).limit(1)
@@ -169,7 +179,7 @@ def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = No
                         status="draft", body=body, lang=lang,
                         offer_id=(offer.id if offer else None)))
             created += 1
-        site.status = "content"
+        # статус сайта здесь НЕ трогаем: в `content` его переводит только provision()
         try:
             db.commit()
         except IntegrityError:

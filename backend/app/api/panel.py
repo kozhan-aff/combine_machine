@@ -21,6 +21,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.guards import require_cf_write
 from app.config import settings
 from app.db import get_session, SessionLocal
 from app.models.cloudflare import (
@@ -481,16 +482,9 @@ def diag_refresh(request: Request):
 
 
 def _require_cf_write(request: Request) -> None:
-    """Hard gate: любой CF-write требует НАСТРОЕННЫЙ panel auth. Same-origin недостаточен
-    (аудит §11/§15) — панель живёт на LAN, а same-origin ничего не доказывает про то, кто
-    физически может достучаться до порта. Транспортная Basic-проверка (если включена) стоит
-    отдельно; здесь проверяется, что auth ВООБЩЕ сконфигурирован — иначе плоская LAN-экспозиция
-    открывает Cloudflare-мутации кому угодно, кто знает IP. `request` не используется сейчас —
-    параметр под будущие роуты-потребители (P1+ мутации), которые зовут этот гейт первой строкой,
-    как и запуск sync (задача 5)."""
-    if not (settings.PANEL_USER and settings.PANEL_PASS):
-        raise HTTPException(status_code=403,
-                            detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
+    """Тонкая обёртка над app.api.guards.require_cf_write (общий гейт панели и /api).
+    `request` не используется — параметр под роуты-потребители, которые зовут гейт первой строкой."""
+    require_cf_write()
 
 
 def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
@@ -1242,6 +1236,8 @@ def publish_action(site_id: int):
         if r.get("status") == "no_edited_pages":
             return _back(f"/sites/{site_id}",
                          err="Гейт редактуры: нет страниц в статусе edited — сначала вычитай черновики.")
+        if r.get("status") == "not_provisioned":
+            return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт не провиженен')}.")
         return _back(f"/sites/{site_id}", msg=f"Опубликовано: {', '.join(r.get('pages', []))}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"публикация: {e}")

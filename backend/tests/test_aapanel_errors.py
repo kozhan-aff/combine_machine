@@ -318,7 +318,10 @@ def _seed_site(page_statuses=()) -> int:
         s.add(d)
         s.commit()
         s.refresh(d)
-        site = Site(domain_id=d.id, status="provisioning", doc_root="/www/wwwroot/ex.ru")
+        # сайт со страницами — уже провиженный (publish не пишет в сайт без vhost'а, S5-09)
+        site = Site(domain_id=d.id, status="content" if page_statuses else "provisioning",
+                    doc_root="/www/wwwroot/ex.ru",
+                    aapanel_site_name="ex.ru" if page_statuses else None)
         s.add(site)
         s.commit()
         s.refresh(site)

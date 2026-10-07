@@ -68,6 +68,10 @@ def _pick_offer(db, site_id: int):
     return off
 
 
+# Статусы сайта, в которые публикуем: provision() уже довёл инфраструктуру до `content`.
+PUBLISH_STATUSES = frozenset({"content", "published", "monitoring"})
+
+
 def publish_site(site_id: int) -> dict:
     """Deploy every 'edited' page of a site. Refuses if there are none (the edit gate)."""
     from sqlalchemy import select
@@ -88,6 +92,13 @@ def publish_site(site_id: int) -> dict:
         if not pages:
             return {"status": "no_edited_pages",
                     "hint": "гейт: публикуются только страницы в статусе 'edited'"}
+        # S5-09/S6-12/S7-05: публиковать можно только в провиженный сайт. Раньше проверки не было —
+        # файлы писались в docroot без vhost'а/зоны (CreateFile создаёт каталоги сам), страницы и
+        # сайт помечались published; на legacy-строке без doc_root падал AttributeError на rstrip.
+        if (site.status not in PUBLISH_STATUSES or not site.aapanel_site_name or not site.doc_root):
+            return {"status": "not_provisioned",
+                    "hint": f"сайт в статусе «{site.status}», vhost "
+                            f"{'есть' if site.aapanel_site_name else 'не создан'} — сначала provision"}
 
         # F26 (аудит 2026-07-14): «текущий активный оффер сайта» больше НЕ пересчитывается заново
         # при каждой публикации — он мог смениться (SiteOffer добавлен/убран) с момента генерации,

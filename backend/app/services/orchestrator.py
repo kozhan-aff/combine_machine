@@ -253,7 +253,12 @@ def _stage_publish(cap):
             .order_by(Site.id).limit(cap)).all()]
     for sid in ids:
         try:
-            publish.publish_site(sid)
+            out = publish.publish_site(sid)
+            if isinstance(out, dict) and out.get("status") == "not_provisioned":
+                # edited-страницы есть, а сайт не провиженен (S5-09) — это не «сделано», а отказ:
+                # оператор должен увидеть его в ошибках свипа, а не в идеальной сводке.
+                errs.append(f"site#{sid}: {out.get('hint', 'сайт не провиженен')}")
+                continue
             done += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")

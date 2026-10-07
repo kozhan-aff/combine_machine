@@ -155,7 +155,9 @@ def _seed_site(page_statuses=()) -> int:
         d = Domain(domain="ex.com", source="dropcatch", status="purchased")
         s.add(d)
         s.commit()
-        site = Site(domain_id=d.id, status="provisioning", doc_root="/www/wwwroot/ex.com")
+        site = Site(domain_id=d.id, status="content" if page_statuses else "provisioning",
+                    doc_root="/www/wwwroot/ex.com",
+                    aapanel_site_name="ex.com" if page_statuses else None)
         s.add(site)
         s.commit()
         for i, st in enumerate(page_statuses):

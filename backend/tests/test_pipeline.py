@@ -9,6 +9,7 @@ import time
 
 import app.db as db
 from app.models.domain import Domain
+from app.models.site import Site
 
 
 def _add(obj):
@@ -140,6 +141,15 @@ def test_run_score_double_start_and_jobs_live(client, monkeypatch):
     assert client.post("/run/nope/cancel", follow_redirects=False).status_code == 404   # только известные джобы
 
 
+def _provisioned(site_id: int) -> None:
+    """Провижн (M3) в этих сквозных тестах не гоняем — отмечаем его результат: без него generate и
+    publish честно отказывают (S5-09/S6-12/S7-05)."""
+    with db.SessionLocal() as s:
+        site = s.get(Site, site_id)
+        site.status, site.aapanel_site_name = "content", f"site{site_id}.test"
+        s.commit()
+
+
 def test_edit_gate_and_publish(client, monkeypatch):
     # offer (the machine's input); JSON API lives under /api
     offer_id = client.post("/api/offers", json={
@@ -150,6 +160,7 @@ def test_edit_gate_and_publish(client, monkeypatch):
     did = _add(Domain(domain="review-site.com", source="backorder", status="approved"))
     assert client.post(f"/api/domains/{did}/purchase").json()["status"] == "purchased"
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
 
     # M4 generate (mock LiteLLM) -> 3 DRAFT pages
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
@@ -288,6 +299,7 @@ def test_panel_screens_render(client, monkeypatch):
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.status == "purchased")).scalar_one()
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
                         lambda self, system, prompt, **kw: "<h2>D</h2>")
     client.post(f"/api/sites/{site_id}/generate")
@@ -340,6 +352,7 @@ def test_deactivated_offer_shows_badge_on_site_card(client, monkeypatch):
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.domain == "offer-badge.ru")).scalar_one()
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
     # оффер привязан ДО генерации -> content.generate_site стампует его в p.offer_id
     client.post(f"/sites/{site_id}/attach-offer", data={"offer_id": offer_id},
                 follow_redirects=False)

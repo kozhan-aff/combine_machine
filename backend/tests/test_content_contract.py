@@ -34,7 +34,8 @@ def _make_site(domain="cc.ru") -> int:
         s.add(d)
         s.commit()
         s.refresh(d)
-        site = Site(domain_id=d.id, status="content", doc_root=f"/www/wwwroot/{domain}")
+        site = Site(domain_id=d.id, status="content", doc_root=f"/www/wwwroot/{domain}",
+                    aapanel_site_name=domain)
         s.add(site)
         s.commit()
         s.refresh(site)
