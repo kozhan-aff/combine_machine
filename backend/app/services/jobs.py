@@ -66,10 +66,10 @@ from datetime import datetime, timedelta, timezone
 
 HEARTBEAT_SEC = 60                   # как часто живой прогон трогает свой updated_at
 STALE_MIN = 5                        # молчит дольше -> труп. 5 пропущенных ударов (см. шапку)
-# по потоку на КАЖДОЕ имя джоба (discovery|score|recheck|sweep|cf_sync). Меньше — и третий
+# по потоку на КАЖДОЕ имя джоба (discovery|score|recheck|sweep|cf_sync|generate). Меньше — и третий
 # одновременный запуск молча ляжет в очередь пула: строки в реестре ещё нет, панель ничего не
 # рисует, кнопка выглядит сломанной. Один оператор, пять кнопок — пять потоков.
-_EXEC = ThreadPoolExecutor(max_workers=5)
+_EXEC = ThreadPoolExecutor(max_workers=6)
 # уже отданные в пул, но ещё не открывшие свою строку в БД (см. spawn) — гонка своего процесса
 _INFLIGHT: set[str] = set()
 # RLock (не Lock): is_running() теперь тоже смотрит в _INFLIGHT (см. её докстринг и правку ниже),

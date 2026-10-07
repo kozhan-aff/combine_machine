@@ -50,7 +50,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -1145,18 +1145,30 @@ def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depe
 
 @router.post("/sites/{site_id}/attach-offer")
 def attach_offer_action(site_id: int, offer_id: int = Form(...), db: Session = Depends(get_session)):
+    # Явная привязка (S6-13/S7-12): Site.offer_id — оффер, про который пишутся страницы. Уже
+    # сгенерированные страницы свой offer_id сохраняют (F26) — меняется только дальнейшая генерация.
+    site = db.get(Site, site_id)
+    offer = db.get(Offer, offer_id)
+    if site is None or offer is None:
+        return _back(f"/sites/{site_id}" if site else "/", err="сайт или оффер не найден")
+    if not offer.active:
+        return _back(f"/sites/{site_id}", err=f"оффер «{offer.brand}» выключен — привяжи активный")
+    site.offer_id = offer_id
     exists = db.execute(select(SiteOffer).where(
         SiteOffer.site_id == site_id, SiteOffer.offer_id == offer_id)).scalar_one_or_none()
     if not exists:
         db.add(SiteOffer(site_id=site_id, offer_id=offer_id))
-        try:
-            db.commit()
-        except IntegrityError:
-            # TOCTOU на uq_site_offer (F24): под READ COMMITTED оба конкурентных запроса
-            # видят «нет» и оба вставляют — второй коммит бьётся об уникальный индекс.
-            # Дружелюбно, а не голым 500: оффер уже привязан — это и был желаемый исход.
-            db.rollback()
-            return _back(f"/sites/{site_id}", msg="Оффер уже привязан")
+    try:
+        db.commit()
+    except IntegrityError:
+        # TOCTOU на uq_site_offer (F24): под READ COMMITTED оба конкурентных запроса
+        # видят «нет» и оба вставляют — второй коммит бьётся об уникальный индекс.
+        # Дружелюбно, а не голым 500: оффер уже привязан — это и был желаемый исход.
+        # Откат унёс и Site.offer_id — выставляем заново.
+        db.rollback()
+        db.get(Site, site_id).offer_id = offer_id
+        db.commit()
+        return _back(f"/sites/{site_id}", msg="Оффер уже привязан")
     return _back(f"/sites/{site_id}", msg="Оффер привязан")
 
 
@@ -1192,25 +1204,50 @@ def provision_action(site_id: int, request: Request):
 
 
 @router.post("/sites/{site_id}/generate")
-def generate_action(site_id: int, lang: str = Form("ru")):
-    from app.services import content
-    try:
-        # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
-        n = content.generate_site(site_id, lang=lang, use_competitor=True)
-        return _back(f"/sites/{site_id}",
-                     msg=f"Сгенерировано {n} черновиков. Дальше — редактура (гейт: publish берёт только edited).")
-    except Exception as e:  # noqa: BLE001
-        return _back(f"/sites/{site_id}", err=f"генерация: {e}")
+def generate_action(site_id: int, lang: str = Form("ru"), db: Session = Depends(get_session)):
+    """Генерация — фоновая задача `generate` (S6-11/S7-14): LLM пишет минуты, держать ради этого
+    HTTP-запрос нельзя. Явный отказ (нет сайта/оффера) отдаём сразу, а не потом в карточке задачи."""
+    from app.services import content, jobs
+    site = db.get(Site, site_id)
+    if site is None:
+        return _back("/", err=f"сайт #{site_id} не найден")
+    if content.status_refusal(site):
+        return _back(f"/sites/{site_id}", err=f"генерация: {content.status_refusal(site)}")
+    has_offer = content.site_offer(db, site) is not None or db.scalar(
+        select(Page.id).where(Page.site_id == site_id, Page.offer_id.is_not(None)).limit(1))
+    if not has_offer:
+        return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
+                     "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
+    # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
+    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang, use_competitor=True))
+    if not ok:
+        return _back(f"/sites/{site_id}", err="Генерация уже идёт — дождись её на Пульте")
+    return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "
+                 "Дальше — редактура (гейт: publish берёт только edited).")
 
 
 @router.post("/pages/{page_id}/save")
 def page_save_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
+    """ОДОБРИТЬ (гейт): draft -> edited. Тело — ровно то, что редактор видит в форме. Потерянное
+    поле и очищенная textarea для FastAPI неразличимы (пустое значение = «нет поля»), поэтому обе
+    ситуации дают пустое тело, и гейт его не пропускает (S7-11): старый текст молча не одобряется."""
     from app.services import content
     p = db.get(Page, page_id)
     sid = p.site_id if p else None
     try:
         content.mark_edited(page_id, body)   # ЧЕЛОВЕК прошёл гейт: draft -> edited (+ sanitize)
         return _back(f"/sites/{sid}", msg="Страница сохранена как edited — можно публиковать.")
+    except Exception as e:  # noqa: BLE001
+        return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
+
+
+@router.post("/pages/{page_id}/draft")
+def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
+    """Сохранить правку КАК ЧЕРНОВИК, без одобрения (S6-16): статус не edited, публикация не возьмёт."""
+    from app.services import content
+    try:
+        content.save_draft(page_id, body)
+        return _back(f"/pages/{page_id}", msg="Черновик сохранён (не одобрен — публикация его не возьмёт).")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
@@ -1239,7 +1276,14 @@ def publish_action(site_id: int):
                          err="Гейт редактуры: нет страниц в статусе edited — сначала вычитай черновики.")
         if r.get("status") == "not_provisioned":
             return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт не провиженен')}.")
-        return _back(f"/sites/{site_id}", msg=f"Опубликовано: {', '.join(r.get('pages', []))}")
+        warn = (" ⚠ " + "; ".join(r["warnings"])) if r.get("warnings") else ""
+        problems = [f"{k}: не записана — {v}" for k, v in (r.get("failed") or {}).items()] + \
+                   [f"{k}: записана, но домен не подтвердил — {v}" for k, v in (r.get("unverified") or {}).items()]
+        if r.get("status") in ("partial", "failed"):
+            done = f"Опубликовано: {', '.join(r.get('pages', [])) or 'ничего'}. " if r.get("pages") else ""
+            return _back(f"/sites/{site_id}", err=f"{done}Не опубликовано — {'; '.join(problems)}. "
+                         f"Повтор безопасен (идемпотентно).{warn}")
+        return _back(f"/sites/{site_id}", msg=f"Опубликовано и проверено на домене: {', '.join(r.get('pages', []))}.{warn}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"публикация: {e}")
 

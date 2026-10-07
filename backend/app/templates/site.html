@@ -101,7 +101,7 @@
         <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит
           недостающие, существующие не тронет.{% else %}Создаст 3 страницы про привязанный бренд:
           обзор (/), сравнение (/vs), настройка (/setup) — все в статусе <b>draft</b>, наружу
-          не попадают до твоей редактуры. Синхронно, ≈1–2 мин.{% endif %}</div></div>
+          не попадают до твоей редактуры. Идёт в фоне (≈1–2 мин): прогресс по страницам — на Пульте.{% endif %}</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px; align-items:center">
           <select name="lang" title="язык, на котором LLM напишет черновики"><option value="ru">ru</option><option value="en">en</option></select>

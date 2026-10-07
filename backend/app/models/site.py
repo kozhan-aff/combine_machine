@@ -44,6 +44,9 @@ class Site(Base):
     ns_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # последний activation_check
 
     niche: Mapped[str | None] = mapped_column(String(255))
+    # Оффер сайта, привязанный ЯВНО (миграция 0028): о нём пишутся страницы и на него ведёт CTA.
+    # Без него генерация отказывает — «самого раннего активного оффера портфеля» больше нет.
+    offer_id: Mapped[int | None] = mapped_column(ForeignKey("offers.id"))
     template: Mapped[str | None] = mapped_column(String(255))
 
     gsc_verified: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -117,16 +117,28 @@ def do_generate(site_id: int, lang: str = "ru"):
 
 @router.post("/pages/{page_id}/edit")
 def do_edit(page_id: int, body: EditIn):
-    return content.mark_edited(page_id, body.body)   # HARD GATE: draft -> edited (human)
+    return _run(content.mark_edited, page_id, body.body)   # HARD GATE: draft -> edited (human)
+
+
+@router.post("/pages/{page_id}/draft")
+def do_draft(page_id: int, body: EditIn):
+    """Сохранить правку как черновик, без одобрения (статус остаётся draft)."""
+    try:
+        return content.save_draft(page_id, body.body or "")
+    except ValueError as e:
+        raise HTTPException(404 if "not found" in str(e) else 409, str(e))
 
 
 @router.post("/sites/{site_id}/offer")
 def attach_offer(site_id: int, so: SiteOfferIn, db: Session = Depends(get_session)):
+    site = db.get(Site, site_id)
+    if site is not None:
+        site.offer_id = so.offer_id          # явная привязка: оффер, про который пишется сайт
     exists = db.execute(select(SiteOffer).where(          # зеркало panel: без дублей SiteOffer
         SiteOffer.site_id == site_id, SiteOffer.offer_id == so.offer_id)).scalar_one_or_none()
     if not exists:
         db.add(SiteOffer(site_id=site_id, **so.model_dump()))
-        db.commit()
+    db.commit()
     return {"site_id": site_id, "offer_id": so.offer_id}
 
 
