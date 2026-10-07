@@ -35,7 +35,7 @@ class CloudflareConnection(Base):
     secret_ref: Mapped[str] = mapped_column(String(255))  # env:NAME | file:basename
     token_fingerprint: Mapped[str | None] = mapped_column(String(128))   # sha256 первых N; НЕ токен
     token_hint: Mapped[str | None] = mapped_column(String(24))           # напр. "...AB12" (хвост)
-    status: Mapped[str] = mapped_column(String(24), default="unverified")  # unverified|ok|error
+    status: Mapped[str] = mapped_column(String(24), default="unverified")  # unverified|ok|warn|error
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error_code: Mapped[str | None] = mapped_column(String(32))

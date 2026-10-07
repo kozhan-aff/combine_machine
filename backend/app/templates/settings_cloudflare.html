@@ -26,6 +26,9 @@
         {% if c.status == 'ok' %}<span class="led led-ok"></span>ok
         {% elif c.status == 'error' %}<span class="led led-bad"
               title="{{ c.last_error_safe or '' }}"></span>error
+        {% elif c.status == 'warn' %}<span class="led led-warn"
+              title="{{ c.last_error_safe or '' }}"></span>предупреждение
+          <div class="hint">{{ (c.last_error_safe or '')|truncate(140) }}</div>
         {% else %}<span class="led led-warn"></span>не проверен{% endif %}
       </td>
       <td>
