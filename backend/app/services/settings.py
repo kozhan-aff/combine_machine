@@ -146,7 +146,22 @@ def _discovery_view(opts) -> dict:
             # жёсткий отказ по спискам чистоты (UT1/blocklistproject): ВЫКЛ по умолчанию — recall списков
             # не измерен, сначала оператор смотрит счётчик на /settings и первые попадания руками
             "hard_reject_lists": o.get("hard_reject_lists") is True,
+            # authority из рангов Common Crawl: пороги перцентиля и бонус Majestic (выкл по умолчанию)
+            **_rank_view(o),
             "zone_channels": _clean_zone_channels(o.get("zone_channels", cfg.ZONE_CHANNELS))}
+
+
+def _rank_view(o: dict) -> dict:
+    """Пороги нормировки authority (перцентиль 0..1) и тумблер бонуса Majestic. Мусор/инверсия -> дефолты."""
+    def f(k, default):
+        try:
+            return float(o.get(k, default))
+        except (TypeError, ValueError):
+            return default
+    low, full = f("rank_pct_low", cfg.RANK_PCT_LOW), f("rank_pct_full", cfg.RANK_PCT_FULL)
+    if not (0.0 <= low < full <= 1.0):
+        low, full = cfg.RANK_PCT_LOW, cfg.RANK_PCT_FULL
+    return {"rank_pct_low": low, "rank_pct_full": full, "rank_majestic": o.get("rank_majestic") is True}
 
 
 def _clean_zone_channels(raw) -> dict:
@@ -290,8 +305,19 @@ def update_settings(**kw) -> dict:
                 setattr(r, k, _clean_list(kw[k]))
         if (kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None
                 or kw.get("zone_channels") is not None or kw.get("units_daily_cap") is not None
-                or kw.get("hard_reject_lists") is not None):
+                or kw.get("hard_reject_lists") is not None or kw.get("rank_pct_low") is not None
+                or kw.get("rank_pct_full") is not None or kw.get("rank_majestic") is not None):
             cur = dict(r.discovery_opts or {})
+            if (kw.get("rank_pct_low") is not None or kw.get("rank_pct_full") is not None
+                    or kw.get("rank_majestic") is not None):
+                now_v = _rank_view(cur)
+                low = float(kw["rank_pct_low"]) if kw.get("rank_pct_low") is not None else now_v["rank_pct_low"]
+                full = float(kw["rank_pct_full"]) if kw.get("rank_pct_full") is not None else now_v["rank_pct_full"]
+                if not (0.0 <= low < full <= 1.0):
+                    raise ValueError("пороги рангов: нужно 0 <= нижний < верхний <= 1 (перцентиль)")   # до commit
+                cur.update(rank_pct_low=low, rank_pct_full=full)
+                if kw.get("rank_majestic") is not None:
+                    cur["rank_majestic"] = bool(kw["rank_majestic"])
             if kw.get("units_daily_cap") is not None:
                 cur["units_daily_cap"] = max(0, min(int(kw["units_daily_cap"]), 2_000_000))
             if kw.get("hard_reject_lists") is not None:

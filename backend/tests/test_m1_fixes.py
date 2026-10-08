@@ -121,11 +121,15 @@ def test_webrisk_or_blacklist_error_caps_at_scored():
 
 # ---------- Ahrefs: authority (DR) получает реальный вес ----------
 
-def test_authority_none_dr_contributes_zero():
+def test_authority_none_dr_is_no_data_neutral():
     from app.services.scoring import compute_score
     out = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
                          "referring_domains": 3000, "dr": None})
-    assert out["breakdown"]["components"]["authority"] == 0.0
+    # W2d: нет ни DR, ни ранга — «нет данных» (нейтральные 0.5), не «плохо» (0)
+    assert out["breakdown"]["components"]["authority"] == 0.5
+    zero = compute_score({"wayback_checked": True, "prior_flags": {}, "age_years": 8,
+                          "referring_domains": 3000, "dr": 0.0})
+    assert zero["breakdown"]["components"]["authority"] == 0.0     # DR 0 известен — это ноль
 
 
 def test_authority_real_dr_contributes_nonzero():

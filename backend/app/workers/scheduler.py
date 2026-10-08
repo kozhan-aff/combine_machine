@@ -48,6 +48,18 @@ def refresh_domain_lists() -> None:
         print(f"[worker] списки чистоты не обновлены: {type(e).__name__}", flush=True)
 
 
+def refresh_domain_ranks() -> None:
+    """Раз в месяц: обновить ранги доменов (Common Crawl, при включении — Majestic). Тот же срез и пул
+    покрыт целиком — стрим не начинается. Сбой — в лог: без рангов authority просто «нет данных»."""
+    from app.services import domain_ranks, jobs
+    try:
+        domain_ranks.refresh(force=False)
+    except jobs.AlreadyRunning:
+        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] ранги доменов не обновлены: {type(e).__name__}", flush=True)
+
+
 def tick() -> None:
     from app.services import orchestrator
     from app.services.autonomy import get_autonomy
@@ -73,6 +85,8 @@ def main() -> None:
                   misfire_grace_time=TICK_MIN * 60)
     sched.add_job(refresh_domain_lists, "cron", hour=3, minute=30, id="domain_lists_refresh",
                   misfire_grace_time=6 * 3600, coalesce=True)
+    sched.add_job(refresh_domain_ranks, "cron", day=2, hour=4, minute=30, id="domain_ranks_refresh",
+                  misfire_grace_time=24 * 3600, coalesce=True)
     print(f"[worker] autopilot tick every {TICK_MIN} min (throttle from autonomy_settings)", flush=True)
     sched.start()
 

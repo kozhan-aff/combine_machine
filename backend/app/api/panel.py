@@ -51,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists", "domain_ranks")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -157,6 +157,20 @@ def _pool_counts(db: Session, s: dict) -> dict:
             "age": n(or_(Domain.whois_created <= cutoff, Domain.age_years >= s["min_age_years"])),
             "approve": n(Domain.score >= s["approve_at"]),
             "manual": n(Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])}
+
+
+def _ranks_view(db: Session) -> dict:
+    """Блок «Ранги доменов» на /settings: что загружено + итог последней загрузки (ошибку разбора видно в панели)."""
+    from app.services import domain_ranks, jobs
+    try:
+        last = jobs.last("domain_ranks")
+    except Exception:  # noqa: BLE001
+        last = None
+    try:
+        return {"overview": domain_ranks.overview(db), "last": last}
+    except Exception:  # noqa: BLE001 — таблицы нет (миграция не накачена) не должно ронять /settings
+        db.rollback()
+        return {"overview": [], "last": last}
 
 
 def _lists_view(db: Session) -> dict:
@@ -560,7 +574,7 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
     tld_text = draft.get("tld_allowlist")
     brand_text = draft.get("brand_tokens")
     return templates.TemplateResponse(request, "settings.html", {
-        "active": "settings", "s": s, "counts": _pool_counts(db, s), "lists": _lists_view(db),
+        "active": "settings", "s": s, "counts": _pool_counts(db, s), "lists": _lists_view(db), "ranks": _ranks_view(db),
         "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
         "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
         "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
@@ -844,6 +858,15 @@ def lists_refresh(request: Request):
     from app.services import domain_lists, jobs
     ok = jobs.spawn("domain_lists", domain_lists.refresh)
     return _back_here(request, err=None if ok else jobs.busy_msg("Загрузка списков уже идёт"))
+
+
+@router.post("/settings/ranks/refresh")
+def ranks_refresh(request: Request):
+    """Ручная загрузка рангов (Common Crawl + Majestic, если включён): файл читается потоком и может идти
+    долго — фоновая задача с прогрессом, не ждём ночи/месяца."""
+    from app.services import domain_ranks, jobs
+    ok = jobs.spawn("domain_ranks", domain_ranks.refresh)
+    return _back_here(request, err=None if ok else jobs.busy_msg("Загрузка рангов уже идёт"))
 
 
 @router.post("/settings/cloudflare/sync")
@@ -1462,6 +1485,8 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                   tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
                   emd_sets: str | None = Form(None), v2_lists: str = Form(""),
                   hard_reject_lists: str = Form(""),
+                  rank_pct_low: float | None = Form(None), rank_pct_full: float | None = Form(None),
+                  rank_majestic: str = Form(""),
                   dropcatch: str = Form(""), nominet: str = Form(""),
                   mx: str = Form(""), emd: str = Form(""), namesilo_auction: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
@@ -1494,7 +1519,9 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                                             "namesilo_auction": bool(namesilo_auction)},
                            weights=weights or None,
                            # чекбокс без маркера v2_lists (старый шаблон, curl) настройку не трогает
-                           hard_reject_lists=bool(hard_reject_lists) if v2_lists else None)
+                           hard_reject_lists=bool(hard_reject_lists) if v2_lists else None,
+                           rank_pct_low=rank_pct_low, rank_pct_full=rank_pct_full,
+                           rank_majestic=bool(rank_majestic) if v2_lists else None)
     except ValueError as e:
         # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
         # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
@@ -1503,7 +1530,9 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                           "max_whois_per_run": max_whois_per_run, "min_dr": min_dr,
                           "max_links_per_run": max_links_per_run, "max_deep_per_run": max_deep_per_run,
                           "units_floor": units_floor, "spam_anchor_max": spam_anchor_max,
-                          "hard_reject_lists": bool(hard_reject_lists) if v2_lists else None},
+                          "hard_reject_lists": bool(hard_reject_lists) if v2_lists else None,
+                          "rank_pct_low": rank_pct_low, "rank_pct_full": rank_pct_full,
+                          "rank_majestic": bool(rank_majestic) if v2_lists else None},
                  "weights": weights,
                  "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
                              "mx": bool(mx), "emd": bool(emd),

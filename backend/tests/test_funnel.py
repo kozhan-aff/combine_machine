@@ -203,7 +203,7 @@ def test_history_dirty_rejects_after_wayback():
 
 
 def test_low_score_reject():
-    did = _mk(domain="weak.com", referring_domains=1, lane="bid")
+    did = _mk(domain="weak.com", referring_domains=1, lane="bid", dr=0)   # DR 0 известен: не «нет данных» (0.5)
     wb = _WaybackWeak()
     old_enough = datetime.now(timezone.utc) - timedelta(days=1150)   # ~3.15 года, чуть старше порога
     out = scoring.score_domain(did, clients=_clients(old_enough, wb))
@@ -663,7 +663,7 @@ def test_wayback_down_is_explained_in_job_message(monkeypatch):
     """archive.org лёг: домены уходят unresolved, а в сообщении задачи — причина (не тишина)."""
     from types import SimpleNamespace
     from app.services import jobs, scoring
-    for name in ("_wave_t0", "_paid_gate", "_wave_avail", "_wave_risk", "_wave_lists", "_wave_probe",
+    for name in ("_wave_t0", "_paid_gate", "_wave_avail", "_wave_risk", "_wave_lists", "_wave_ranks", "_wave_probe",
                  "_wave_links", "_persist_links", "_wave_deep", "_checkpoint"):
         monkeypatch.setattr(scoring, name, lambda *a, **k: [])
 

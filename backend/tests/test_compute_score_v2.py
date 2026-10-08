@@ -31,7 +31,8 @@ def test_hard_rejects(sig, code):
 def test_missing_soft_signals_are_neutral():
     comp = compute_score(dict(BASE))["breakdown"]["components"]
     assert comp["topical_fit"] == 0.5 and comp["anchor_quality"] == 0.5 and comp["traffic_history"] == 0.5
-    assert comp["rd"] == 0.0 and comp["authority"] == 0.0
+    # authority без DR и без ранга — «нет данных» (0.5, W2d), а не ноль; rd без сигнала по-прежнему 0
+    assert comp["rd"] == 0.0 and comp["authority"] == 0.5
 
 
 def test_pbn_suspect_halves_rd():
