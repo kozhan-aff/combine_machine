@@ -58,8 +58,14 @@ class Theme:
     benefits_first: bool      # блок иконок преимуществ до или после статьи
 
     def k(self, name: str) -> str:
-        """Имя css-класса с префиксом сайта: у каждого домена свои."""
-        return f"{self.prefix}-{name}"
+        """Имя css-класса: у каждого домена целиком своё (хеш от соли сайта), без общей схемы
+        «префикс-роль» — иначе по регулярке `k[0-9a-f]{4}-(hd|nav|…)` сайты портфеля сцепляются."""
+        return "c" + hashlib.sha256(f"{self.prefix}:{name}".encode()).hexdigest()[:8]
+
+    def asset(self, name: str) -> str:
+        """Путь файла в webroot: имена ассетов сайта тоже выводятся из сида (не общие site.css/hero.svg)."""
+        ext = "." + name.rsplit(".", 1)[1] if "." in name else ""
+        return f"assets/a{hashlib.sha256(f'{self.prefix}/{name}'.encode()).hexdigest()[:10]}{ext}"
 
 
 def _seed(domain: str) -> str:
@@ -138,7 +144,8 @@ def build_css(theme: Theme) -> str:
     root = (f":root{{--bg:{p['bg']};--sf:{p['surface']};--fg:{p['fg']};--mu:{p['muted']};--ac:{p['accent']};"
             f"--ac2:{p['accent2']};--acf:{p['accent_fg']};--bd:{p['border']};--r:{theme.radius};"
             f"--font:{theme.font};--hfont:{theme.head_font};--w:{_WIDTH[theme.layout]}}}\n")
-    return (root + _BASE_CSS + _LAYOUT_CSS[theme.layout] + "\n").replace("§", theme.prefix + "-")
+    out = root + _BASE_CSS + _LAYOUT_CSS[theme.layout] + "\n"
+    return re.sub(r"§(\w+)", lambda m: theme.k(m.group(1)), out)
 
 
 # ── мелочи страницы ───────────────────────────────────────────────────────────
@@ -199,16 +206,16 @@ def render_document(ctx: SiteContext, lang: str, *, title: str, description: str
                  f"<meta property='og:site_name' content='{_e(ctx.domain)}'>",
                  "<meta name='twitter:card' content='summary_large_image'>"]
         if ctx.assets:
-            head.append(f"<meta property='og:image' content='https://{ctx.domain}/assets/og.svg'>")
+            head.append(f"<meta property='og:image' content='https://{ctx.domain}/{th.asset('og.svg')}'>")
     if ctx.assets:
-        head += ["<link rel='icon' type='image/svg+xml' href='/assets/favicon.svg'>",
-                 "<link rel='stylesheet' href='/assets/site.css'>"]
+        head += [f"<link rel='icon' type='image/svg+xml' href='/{th.asset('favicon.svg')}'>",
+                 f"<link rel='stylesheet' href='/{th.asset('s.css')}'>"]
     else:
         head.append(f"<style>{build_css(th)}</style>")
 
     hero = ""
     if ctx.assets:
-        hero = (f"<img class='{k('hero')}' src='/assets/hero.svg' width='1200' height='360' loading='lazy' "
+        hero = (f"<img class='{k('hero')}' src='/{th.asset('hero.svg')}' width='1200' height='360' loading='lazy' "
                 f"alt='{_e(t(lg, 'alt_hero', title=title))}'>")
     h1 = f"<h1>{_e(title)}</h1>"
     lead = hero + h1 if th.hero_first else h1 + hero
@@ -216,12 +223,12 @@ def render_document(ctx: SiteContext, lang: str, *, title: str, description: str
     benefits = chart = ""
     if ctx.assets and (url_path or "/").strip("/") == "":
         items = "".join(
-            f"<li><img src='/assets/icon-{n}.svg' width='48' height='48' loading='lazy' "
+            f"<li><img src='/{th.asset(f'icon-{n}.svg')}' width='48' height='48' loading='lazy' "
             f"alt='{_e(t(lg, 'b_' + n))}'>{_e(t(lg, 'b_' + n))}</li>" for n in ("privacy", "speed", "access"))
         benefits = f"<ul class='{k('ben')}'>{items}</ul>"
     if ctx.assets and ctx.chart and (url_path or "").strip("/") == "vs":
         w, h = ctx.chart
-        chart = (f"<figure class='{k('fig')}'><img src='/assets/chart-servers.svg' width='{w}' height='{h}' "
+        chart = (f"<figure class='{k('fig')}'><img src='/{th.asset('chart-servers.svg')}' width='{w}' height='{h}' "
                  f"loading='lazy' alt='{_e(t(lg, 'alt_chart'))}'>"
                  f"<figcaption>{_e(t(lg, 'facts_title'))} ({_e(t(lg, 'facts_servers'))})</figcaption></figure>")
 
@@ -246,6 +253,11 @@ def render_document(ctx: SiteContext, lang: str, *, title: str, description: str
 
 # ── набор файлов сайта ────────────────────────────────────────────────────────
 
+def marker_path(domain: str) -> str:
+    """Путь маркера версии сайта (деплоится ПОСЛЕДНИМ среди assets)."""
+    return theme_for(domain).asset("v")
+
+
 def build_assets(domain: str, lang: str, brand: str = "", home_title: str = "",
                  provider: str = "svg-local") -> dict:
     """{'assets/site.css': ..., ...} — общие файлы сайта. Детерминированно по домену/языку."""
@@ -254,20 +266,21 @@ def build_assets(domain: str, lang: str, brand: str = "", home_title: str = "",
     th, seed, img = theme_for(domain), _seed(domain), get_provider(provider)
     pal = th.pal
     files = {
-        "assets/site.css": build_css(th),
-        "assets/favicon.svg": img.favicon(seed, pal, seed[:1]),
-        "assets/hero.svg": img.hero(seed, pal),
-        "assets/og.svg": img.og(seed, pal, home_title or seed),
+        th.asset("s.css"): build_css(th),
+        th.asset("favicon.svg"): img.favicon(seed, pal, seed[:1]),
+        th.asset("hero.svg"): img.hero(seed, pal),
+        th.asset("og.svg"): img.og(seed, pal, home_title or seed),
     }
     for n in ("privacy", "speed", "access"):
-        files[f"assets/icon-{n}.svg"] = img.icon(n, pal)
+        files[th.asset(f"icon-{n}.svg")] = img.icon(n, pal)
     if brand and facts_for(brand):
         items = sorted(((v["brand"], int(re.sub(r"\D", "", str(v["servers"])) or 0))
                         for v in VPN_FACTS.values()), key=lambda x: -x[1])
-        files["assets/chart-servers.svg"] = img.bar_chart(
+        files[th.asset("chart-servers.svg")] = img.bar_chart(
             f"{t(lang, 'facts_title')} — {t(lang, 'facts_servers')}", items, pal)
     digest = hashlib.sha256("".join(f"{p}\0{c}\0" for p, c in sorted(files.items())).encode()).hexdigest()[:16]
-    files["assets/.version"] = f"template={TEMPLATE_VERSION}\nbuild={digest}\ndomain={seed}\n"
+    # маркер версии: имя и формат выводятся из сида (общий /assets/.version сцепил бы сайты портфеля)
+    files[marker_path(domain)] = hashlib.sha256(f"{TEMPLATE_VERSION}:{seed}:{digest}".encode()).hexdigest() + "\n"
     return files
 
 

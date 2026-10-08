@@ -194,7 +194,8 @@ def publish_site(site_id: int) -> dict:
         home_title = next((p.title for p, _, _ in ready if p.url_path.strip("/") == ""), ready[0][0].title)
         assets = site_builder.build_assets(domain, lang0, brand0, home_title or "")
         root = site.doc_root.rstrip("/")
-        order = [f for f in assets if f != "assets/.version"] + ["assets/.version"]   # маркер — последним
+        mk = site_builder.marker_path(domain)
+        order = [f for f in assets if f != mk] + [mk]   # маркер — последним
         written_files = []
         try:
             for rel in order:

@@ -122,7 +122,7 @@ def test_document_has_full_head_nav_h1_footer():
     assert "<meta name='description' content='First paragraph here.'>" in out
     assert "<link rel='canonical' href='https://best-vpn.com/vs/'>" in out
     assert "og:title" in out and "og:image" in out and "og:locale' content='de_DE'" in out
-    assert "name='viewport'" in out and "rel='icon'" in out and "/assets/site.css" in out
+    assert "name='viewport'" in out and "rel='icon'" in out and "/" + sb.theme_for("best-vpn.com").asset("s.css") in out
     assert "<header" in out and "<nav" in out and "href='/vs/' aria-current='page'" in out
     assert "<footer" in out and "Affiliate-Links" in out
     assert "<style" not in out                              # один общий CSS-файл
@@ -185,6 +185,24 @@ def test_site_pages_do_not_link_to_other_portfolio_domains():
     assert hosts <= {"alpha-vpn.com", "ex.com"}
 
 
+def _A(domain, name):
+    return sb.theme_for(domain).asset(name)
+
+
+def test_portfolio_footprint_no_shared_asset_names_class_scheme_or_marker():
+    """Инвариант 4: у двух сайтов портфеля нет общих путей assets, маркера и схемы имён классов."""
+    ds = ["alpha-vpn.com", "beta-secure.net", "gamma.org", "delta-vpn.io"]
+    fl = {d: sb.build_assets(d, "en", "NordVPN", "Home") for d in ds}
+    for i, a in enumerate(ds):
+        assert not any(n.endswith((".version", "site.css", "hero.svg")) for n in fl[a])
+        for b in ds[i + 1:]:
+            assert not set(fl[a]) & set(fl[b]), (a, b)
+            ca, cb = sb.build_css(sb.theme_for(a)), sb.build_css(sb.theme_for(b))
+            assert not set(re.findall(r"\.(c[0-9a-f]{8})", ca)) & set(re.findall(r"\.(c[0-9a-f]{8})", cb))
+    css = fl[ds[0]][_A(ds[0], "s.css")]
+    assert "§" not in css and not re.search(r"\.k[0-9a-f]{4}-", css)
+
+
 # ── (4) графика ───────────────────────────────────────────────────────────────
 
 def test_assets_are_deterministic_valid_svg_and_versioned():
@@ -196,19 +214,21 @@ def test_assets_are_deterministic_valid_svg_and_versioned():
             root = ET.fromstring(body)
             assert root.tag.endswith("svg"), name
             assert "http" not in body.replace("http://www.w3.org/2000/svg", ""), name
-    assert 'width="1200" height="630"' in a["assets/og.svg"]
-    assert "assets/chart-servers.svg" in a and "NordVPN" in a["assets/chart-servers.svg"]
-    assert a["assets/.version"].startswith("template=1") and "build=" in a["assets/.version"]
-    assert "assets/chart-servers.svg" not in sb.build_assets("x.com", "en", "NoSuchBrand")
+    assert 'width="1200" height="630"' in a[_A("alpha-vpn.com", "og.svg")]
+    chart = _A("alpha-vpn.com", "chart-servers.svg")
+    assert chart in a and "NordVPN" in a[chart]
+    assert re.fullmatch(r"[0-9a-f]{64}\n", a[sb.marker_path("alpha-vpn.com")])
+    assert chart not in sb.build_assets("alpha-vpn.com", "en", "NoSuchBrand")
 
 
 def test_home_has_benefit_icons_and_vs_has_chart_with_local_img_only():
     home, vs = _doc("x.com", "de"), _doc("x.com", "de", path="/vs")
-    assert home.count("/assets/icon-") == 3 and "Privatsphäre" in home
-    assert "/assets/chart-servers.svg" in vs and "Balkendiagramm" in vs
+    assert sum(f"/{_A('x.com', f'icon-{n}.svg')}" in home for n in ("privacy", "speed", "access")) == 3
+    assert "Privatsphäre" in home
+    assert f"/{_A('x.com', 'chart-servers.svg')}" in vs and "Balkendiagramm" in vs
     for out in (home, vs):
         for src in re.findall(r"<img[^>]*src='([^']+)'", out):
-            assert re.fullmatch(r"/assets/[a-z0-9.-]+\.svg", src)
+            assert re.fullmatch(r"/assets/a[0-9a-f]{10}\.svg", src)
         assert all("loading='lazy'" in tag and "alt=" in tag and "width=" in tag
                    for tag in re.findall(r"<img[^>]*>", out))
 
@@ -256,14 +276,14 @@ def test_publish_deploys_assets_then_pages_then_sitemap(writes):
     first_page = paths.index("index.html")
     assets = [p for p in paths if p.startswith("assets/")]
     assert paths[:len(assets)] == assets and all(paths.index(a) < first_page for a in assets)
-    assert paths.index("assets/.version") == len(assets) - 1                 # маркер — последним
+    assert paths.index(sb.marker_path("g8.com")) == len(assets) - 1                 # маркер — последним
     assert paths[-2:] == ["robots.txt", "sitemap.xml"] or paths[-2:] == ["sitemap.xml", "robots.txt"]
     body = dict(writes)
     sm = body["/www/wwwroot/g8.com/sitemap.xml"]
     assert "/vs/" in sm and "/setup/" not in sm                               # draft не в sitemap
     home = body["/www/wwwroot/g8.com/index.html"]
     assert "href='/vs/'" in home and "/setup/" not in home                    # nav — только живые
-    assert "rel='stylesheet' href='/assets/site.css'" in home
+    assert f"rel='stylesheet' href='/{_A('g8.com', 's.css')}'" in home
 
 
 def test_publish_is_idempotent_same_bytes(writes):
@@ -276,15 +296,15 @@ def test_publish_is_idempotent_same_bytes(writes):
         s.commit()
     writes.clear()
     publish.publish_site(sid)
-    assert dict(writes)["/www/wwwroot/g8.com/assets/site.css"] == first["/www/wwwroot/g8.com/assets/site.css"]
-    assert dict(writes)["/www/wwwroot/g8.com/assets/.version"] == first["/www/wwwroot/g8.com/assets/.version"]
+    for rel in (_A("g8.com", "s.css"), sb.marker_path("g8.com")):
+        assert dict(writes)[f"/www/wwwroot/g8.com/{rel}"] == first[f"/www/wwwroot/g8.com/{rel}"]
 
 
 def test_asset_failure_leaves_pages_untouched_and_reports_written(monkeypatch):
     log = []
 
     def _w(self, path, body):
-        if path.endswith("assets/hero.svg"):
+        if path.endswith(_A("g8.com", "hero.svg")):
             raise RuntimeError("disk full")
         log.append(path)
     monkeypatch.setattr("app.integrations.aapanel.AaPanelClient.__init__", lambda self: None)
@@ -293,7 +313,7 @@ def test_asset_failure_leaves_pages_untouched_and_reports_written(monkeypatch):
     out = publish.publish_site(sid)
     assert out["status"] == "failed" and "disk full" in out["failed"]["/"]
     assert not any(p.endswith("index.html") for p in log)                    # страницы не тронуты
-    assert out["assets_written"] == ["assets/site.css", "assets/favicon.svg"]
+    assert out["assets_written"] == [_A("g8.com", "s.css"), _A("g8.com", "favicon.svg")]
     with db.SessionLocal() as s:
         assert s.query(Page).filter_by(site_id=sid).one().status == "edited"
 
