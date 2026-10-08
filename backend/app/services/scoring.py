@@ -249,6 +249,12 @@ def history_note(d) -> str | None:
     return None
 
 
+def list_hits(d) -> list:
+    """Категории списков чистоты (UT1/blocklistproject), в которых числится домен
+    (`score_breakdown.list_hits`, пишет волна risk). Пусто — не числится ЛИБО списки не проверялись."""
+    return list((d.score_breakdown or {}).get("list_hits") or [])
+
+
 def bulk_ok(d) -> bool:
     """Домен годится для ПАКЕТНОГО одобрения и вправе носить подпись «история чистая».
 
@@ -267,8 +273,10 @@ def bulk_ok(d) -> bool:
     (EMD — решение за человеком; SQL пакета `score >= x` его тоже не берёт).
     """
     from app.services.transitions import dirty_reason   # ленивый: transitions зовёт нас в ответ
+    # Попадание в список чистоты (мягкий сигнал, жёсткий отказ выключен) — «нет авто-одобрения при
+    # ненулевом попадании»: пакет такой домен не берёт, решение за человеком, который видит категорию.
     return (history_verdict(d) == "clean" and not blind_reason(d) and not dirty_reason(d)
-            and not topic_far(d) and d.score is not None)
+            and not topic_far(d) and not list_hits(d) and d.score is not None)
 
 
 def _decide(score: float, sig: dict, manual_review_at: float) -> str:
@@ -637,7 +645,7 @@ def _blind_state(d) -> "FunnelState":
            "ref_subnets": bd.get("ref_subnets"), "rd_dofollow": bd.get("rd_dofollow"),
            "peak_traffic": bd.get("peak_traffic"), "deep_checked": bd.get("deep_checked"),
            "spam_anchors": bd.get("spam_anchors"), "webrisk_threats": bd.get("webrisk_threats"),
-           "blacklisted": d.blacklisted}
+           "list_hits": bd.get("list_hits"), "blacklisted": d.blacklisted}
     return FunnelState(domain_id=d.id, domain=d.domain, lane=d.lane,
                        referring_domains=d.referring_domains, acquire_deadline=d.acquire_deadline,
                        feed_flags=d.feed_flags, sig=sig, source=d.source, market_lang=d.market_lang)
@@ -1097,6 +1105,35 @@ def _wave_risk(states: list, clients: dict, run, notes: list | None = None) -> N
         if note not in notes:
             notes.append(note)
     _run_concurrent(states, _CONCURRENCY["risk"], run, "risk", lambda s: _risk_one(s, clients))
+
+
+def _wave_lists(states: list, st: dict) -> None:
+    """W3-списки: попадание домена в списки чистоты (UT1/blocklistproject) — языконезависимая проверка
+    «домен числился в gambling/adult/phishing/malware/drugs». Идёт ПОСЛЕ Web Risk/Spamhaus на тех, кто
+    выжил, одним запросом в БД из основного потока (конкурентный харнесс тут не нужен).
+
+    Сигнал МЯГКИЙ: `sig["list_hits"]` = категории (может быть []), пишется в score_breakdown и закрывает
+    пакетное одобрение (bulk_ok). Жёсткий отказ `list_hit` — только при `hard_reject_lists` и только по
+    scoring_config.HARD_LIST_CATEGORIES. Списки не загружены (таблица пуста) или БД не ответила —
+    сигнал НЕ пишется: «не знаем» не равно «чисто» (прошлый list_hits при этом сохраняет _kept)."""
+    from app.services import domain_lists
+    alive = [s for s in states if s.alive]
+    if not alive:
+        return
+    try:
+        hits = domain_lists.lookup([s.domain for s in alive])
+    except Exception as e:  # noqa: BLE001 — сбой чтения списков не приговор домену
+        for s in alive:
+            s.sig["errors"].append(f"lists:{type(e).__name__}")
+        return
+    if hits is None:
+        return
+    hard_on = bool(st.get("hard_reject_lists"))
+    for s in alive:
+        cats = hits.get(s.domain, [])
+        s.sig["list_hits"] = cats
+        if hard_on and domain_lists.hard_hits(cats):
+            s.reject_reason, s.alive = "list_hit", False
 
 
 def _topic_one(s: FunnelState, clients: dict, texts: list) -> None:
@@ -1703,6 +1740,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
                              "age_source": _kept("age_source"),
                              "whois_source": _kept("whois_source"),
                              "webrisk_threats": _kept("webrisk_threats"),
+                             "list_hits": _kept("list_hits"),
                              "topic_unknown": sig.get("topic_unknown"),
                              "parked_share": _kept("parked_share"),
                              "deep_checked": sig.get("deep_checked"),
@@ -1793,7 +1831,7 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
         # W0 и сразу решение «пойдут ли платные волны» (R2-10) — до того, как W2/W3 потратятся
         ("t0", "фильтры", lambda alive: (_wave_t0(alive, st), _paid_gate(alive, clients, st, notes))),
         ("avail", "доступность", lambda alive: _wave_avail(alive, clients, whois_b, st, run)),
-        ("risk", "risk", lambda alive: _wave_risk(alive, clients, run, notes)),
+        ("risk", "risk", lambda alive: (_wave_risk(alive, clients, run, notes), _wave_lists(alive, st))),
         # дешёвая проба архива ДО платной W4 (S2-06): too_young по CDX не должен стоить 25 units
         ("probe", "архив", lambda alive: _wave_probe(alive, clients, st, run)),
         ("links", "ссылки", lambda alive: (_wave_links(alive, clients, st, links_b, run, notes),

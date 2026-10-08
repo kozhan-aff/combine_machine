@@ -159,6 +159,16 @@ def _pool_counts(db: Session, s: dict) -> dict:
             "manual": n(Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])}
 
 
+def _lists_view(db: Session) -> dict:
+    """Блок «Списки чистоты» на /settings: что загружено + сколько кандидатов пула попало бы под отказ."""
+    from app.services import domain_lists
+    try:
+        return {"overview": domain_lists.overview(db), **domain_lists.pool_counts(db)}
+    except Exception:  # noqa: BLE001 — таблицы нет (миграция не накачена) не должно ронять /settings
+        db.rollback()
+        return {"overview": [], "hard": 0, "any": 0}
+
+
 def _gates(db: Session) -> dict:
     """Счётчики «ждёт тебя» у трёх человеческих гейтов (для экрана Автопилот + Пульта)."""
     from app.models.domain import AcquisitionOrder
@@ -252,7 +262,7 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
     from sqlalchemy import case
     from app.services import jobs
     from app.services.scoring import (blind_reason, emd_newreg, history_evidence,
-                                      history_note, history_verdict, stale_donors, topic_far,
+                                      history_note, history_verdict, list_hits, stale_donors, topic_far,
                                       DROP_GRACE)
     from app.services.settings import get_settings
     from app.services.transitions import dirty_reason, zone_closed
@@ -316,6 +326,8 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
         "page_size": INBOX_PAGE, "langs": langs, "f_lang": lang or "",
         # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
+        # попадание в списки чистоты UT1/blocklistproject (мягкий сигнал): id -> категории
+        "list_hit_cats": {d.id: list_hits(d) for d in inbox + ready if list_hits(d)},
         # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
         "newreg_ids": {d.id for d in inbox if emd_newreg(d)},
         # Р2: «пакет от скора» по умолчанию = «порог сильного кандидата» из /settings
@@ -544,7 +556,7 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
     tld_text = draft.get("tld_allowlist")
     brand_text = draft.get("brand_tokens")
     return templates.TemplateResponse(request, "settings.html", {
-        "active": "settings", "s": s, "counts": _pool_counts(db, s),
+        "active": "settings", "s": s, "counts": _pool_counts(db, s), "lists": _lists_view(db),
         "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
         "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
         "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
@@ -1437,6 +1449,7 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                   spam_anchor_max: float | None = Form(None),
                   tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
                   emd_sets: str | None = Form(None), v2_lists: str = Form(""),
+                  hard_reject_lists: str = Form(""),
                   dropcatch: str = Form(""), nominet: str = Form(""),
                   mx: str = Form(""), emd: str = Form(""), namesilo_auction: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
@@ -1467,7 +1480,9 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                            brand_tokens=brand_tokens, emd_sets=emd_sets,
                            sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd),
                                             "namesilo_auction": bool(namesilo_auction)},
-                           weights=weights or None)
+                           weights=weights or None,
+                           # чекбокс без маркера v2_lists (старый шаблон, curl) настройку не трогает
+                           hard_reject_lists=bool(hard_reject_lists) if v2_lists else None)
     except ValueError as e:
         # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
         # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
@@ -1475,7 +1490,8 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                           "approve_at": approve_at, "manual_review_at": manual_review_at,
                           "max_whois_per_run": max_whois_per_run, "min_dr": min_dr,
                           "max_links_per_run": max_links_per_run, "max_deep_per_run": max_deep_per_run,
-                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max},
+                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max,
+                          "hard_reject_lists": bool(hard_reject_lists) if v2_lists else None},
                  "weights": weights,
                  "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
                              "mx": bool(mx), "emd": bool(emd),

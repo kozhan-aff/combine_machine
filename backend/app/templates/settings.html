@@ -213,6 +213,25 @@
     </div>
   </div>
   <div class="station">
+    <div class="plate">Списки чистоты — <b>UT1 и blocklistproject</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Раз в сутки воркер скачивает списки доменов по категориям (казино, adult, фишинг,
+      малварь, наркотики) и хранит только зоны из белого списка. Домен кандидата, найденный в списке, получает
+      мягкий сигнал: в инбоксе — пометка с категорией, пакетное одобрение его не берёт (решаешь ты).
+      Жёсткий отказ (<code>list_hit</code>) — только по казино и adult и только если включить ниже: сначала
+      посмотри счётчик и первые попадания руками, recall списков на реальных дропах не измерен.
+      Источники: UT1 blacklists (© Université Toulouse 1 Capitole, CC BY-SA 4.0), blocklistproject (Unlicense).</div></details>
+    <div class="go">
+      <label title="по умолчанию выкл: сначала проверь попадания глазами"><input type="checkbox" name="hard_reject_lists" {{ 'checked' if s.hard_reject_lists }}> жёсткий отказ по казино / adult</label>
+      <span class="hint">под отказ попало бы кандидатов пула: <b>{{ lists.hard }}</b>; в любых списках: <b>{{ lists.any }}</b> / {{ counts.total }}</span>
+    </div>
+    <div class="go">
+      {% if lists.overview %}
+        {% for o in lists.overview %}<span class="hint" title="обновлено {{ o.updated_at }}">{{ o.source }}/{{ o.category }}: <b>{{ o.n }}</b></span> {% endfor %}
+      {% else %}<span class="hint">списки ещё не загружены — первая загрузка ночью (03:30 UTC) после запуска воркера; пока сигнал не пишется («не знаем» ≠ «чисто»)</span>{% endif %}
+    </div>
+  </div>
+  <div class="station">
     <div class="plate">Применить — <b>записать пороги в конвейер</b></div>
     <details class="what"><summary>зачем это</summary>
       <div class="what-body">«Сохранить» записывает пороги и источники в настройки — действовать начнут

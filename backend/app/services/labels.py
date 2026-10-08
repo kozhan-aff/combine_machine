@@ -30,7 +30,7 @@ REJECT_RU = {
     "safebrowsing": "Google Safe Browsing",
     # v2 (коды v1 выше остаются: в базе есть легаси-строки)
     "tld_closed": "зона не наша", "trademark": "чужой бренд", "spam_anchors": "спам-анкоры",
-    "legacy_ru": "РФ (архив v1)",
+    "legacy_ru": "РФ (архив v1)", "list_hit": "в списке чистоты (казино/adult)",
 }
 
 # Источник домена (Domain.source). Легаси v1 — для старых строк реестра.

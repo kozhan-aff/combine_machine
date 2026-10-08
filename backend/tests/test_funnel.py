@@ -663,7 +663,7 @@ def test_wayback_down_is_explained_in_job_message(monkeypatch):
     """archive.org лёг: домены уходят unresolved, а в сообщении задачи — причина (не тишина)."""
     from types import SimpleNamespace
     from app.services import jobs, scoring
-    for name in ("_wave_t0", "_paid_gate", "_wave_avail", "_wave_risk", "_wave_probe",
+    for name in ("_wave_t0", "_paid_gate", "_wave_avail", "_wave_risk", "_wave_lists", "_wave_probe",
                  "_wave_links", "_persist_links", "_wave_deep", "_checkpoint"):
         monkeypatch.setattr(scoring, name, lambda *a, **k: [])
 
