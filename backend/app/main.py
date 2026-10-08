@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
 
 from app.config import settings
@@ -39,6 +40,8 @@ async def lifespan(app):
 
 
 app = FastAPI(title="VPN Affiliate Portfolio", lifespan=lifespan)
+# gzip тяжёлых HTML (F8-12): реестр на 1000 строк — 2 МБ, в LAN терпимо, через туннель — нет
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 

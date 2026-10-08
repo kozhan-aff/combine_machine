@@ -226,8 +226,12 @@ def _urgent(d, soon, now) -> bool:
     return dl <= soon
 
 
+INBOX_PAGE = 300   # строк инбокса M1 на страницу (F8-12)
+
+
 @router.get("/domains", response_class=HTMLResponse)
-def domains_view(request: Request, lang: str | None = None, db: Session = Depends(get_session)):
+def domains_view(request: Request, lang: str | None = None, page: int = 1,
+                 db: Session = Depends(get_session)):
     """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool.
 
     `?lang=xx` — фильтр по языку прошлого сайта. Счётчик «на решении» и список языков — ДО
@@ -270,6 +274,13 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
     counts = _domain_counts(db)
     soon = now + timedelta(days=_URGENT_DAYS)
     urgent = sum(1 for d in inbox + ready if _urgent(d, soon, now))
+    # Страница инбокса (F8-12): тяжёлый расчёт вердиктов/улик идёт по КАЖДОЙ показанной строке, а при
+    # v2-потоке scored растёт без предела. Счётчики выше (urgent/langs/inbox_total) считаны по ВСЕМУ
+    # списку, режем только отрисовку; порядок уже общий, так что страницы не пересекаются.
+    inbox_n = len(inbox)
+    pages = max(1, -(-inbox_n // INBOX_PAGE))
+    page = max(1, min(page, pages))
+    inbox = inbox[(page - 1) * INBOX_PAGE: page * INBOX_PAGE]
     reasons = dict(db.execute(
         select(Domain.reject_reason, func.count()).where(Domain.status == "rejected")
         .group_by(Domain.reject_reason)).all())
@@ -290,7 +301,8 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
         # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
                    history_evidence(d), _bulk_eligible(d, allow), history_note(d)) for d in inbox],
-        "inbox_total": inbox_total, "langs": langs, "f_lang": lang or "",
+        "inbox_total": inbox_total, "inbox_n": inbox_n, "page": page, "pages": pages,
+        "page_size": INBOX_PAGE, "langs": langs, "f_lang": lang or "",
         # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
         # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
@@ -333,8 +345,10 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
 
 @router.get("/domains/pool", response_class=HTMLResponse)
 def domains_pool_view(request: Request, status: str | None = None, min_score: float | None = None,
-                      limit: int = 200, show_all: bool = False, db: Session = Depends(get_session)):
-    """Полный реестр — для расследований, а не для ежедневной работы."""
+                      limit: int = 200, page: int = 1, show_all: bool = False,
+                      db: Session = Depends(get_session)):
+    """Полный реестр — для расследований, а не для ежедневной работы. `limit` — размер страницы,
+    `page` — номер (F8-12: раньше строки за топ-1000 по score были недостижимы)."""
     limit = max(1, min(limit, 1000))            # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
@@ -347,12 +361,17 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
     from app.services.settings import get_settings
     from app.services.transitions import dirty_reason, zone_closed
     allow = get_settings()["tld_allowlist"]          # одно чтение настроек на страницу
+    matched = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    pages = max(1, -(-matched // limit))
+    page = max(1, min(page, pages))
+    # id в хвосте сортировки — стабильные страницы при равных score/RD (иначе строка могла бы
+    # переехать между страницами или пропасть)
     rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
-                                    Domain.referring_domains.desc().nulls_last())
-                      .limit(limit)).scalars().all()
+                                    Domain.referring_domains.desc().nulls_last(), Domain.id)
+                      .limit(limit).offset((page - 1) * limit)).scalars().all()
     counts = _domain_counts(db)
     return templates.TemplateResponse(request, "pool.html", {
-        "active": "domains", "rows": rows, "counts": counts, "total": sum(counts.values()),
+        "active": "domains", "rows": rows, "page": page, "pages": pages, "matched": matched, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
         # какие строки грязные — решает ПОЛИТИКА, а не шаблон по списку кодов: реестр рисует
         # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.

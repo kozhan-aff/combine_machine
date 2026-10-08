@@ -80,7 +80,7 @@
 
 {# ---- ИНБОКС ---- #}
 <h2><span class="idx">◉</span> Ждёт твоего решения
-  <span class="hint">{{ inbox|length }} доменов</span>
+  <span class="hint">{{ inbox_n }} доменов{% if pages > 1 %} · страница {{ page }} из {{ pages }}{% endif %}</span>
   {% if urgent %}<span class="badge b-scored" title="дедлайн дропа на носу — решай сегодня">⌛ через {{ urgent_days }} дня дроп: {{ urgent }}</span>{% endif %}
   <span class="hint" style="margin-left:auto">сортировка по срочности дропа, а не по score</span>
 </h2>
@@ -258,6 +258,13 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
   </tbody>
 </table>
 </div>
+{% if pages > 1 %}
+<div class="chips" style="margin:8px 0">
+  {% set lq = ('lang=' ~ f_lang ~ '&') if f_lang else '' %}
+  {% if page > 1 %}<a class="chip" href="/domains?{{ lq }}page={{ page - 1 }}">← назад</a>{% endif %}
+  {% if page < pages %}<a class="chip" href="/domains?{{ lq }}page={{ page + 1 }}">вперёд → ({{ page_size }} на странице)</a>{% endif %}
+</div>
+{% endif %}
 {% elif f_lang %}
 <div class="card empty">По языку {{ f_lang }} ничего нет — <a href="/domains">все языки</a>.</div>
 {% else %}

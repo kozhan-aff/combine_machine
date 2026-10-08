@@ -105,6 +105,16 @@ class Domain(Base):
 
     orders: Mapped[list["AcquisitionOrder"]] = relationship(back_populates="domain")
 
+    # Индексы под сортировки/фильтры панели и воронки (F8-12). До них были только domain и status:
+    # ORDER BY acquire_deadline / score и фильтры reject_reason / lane шли seq-scan'ом по всей таблице.
+    # market_lang и topic в SQL не фильтруются (инбокс режет язык в Python) — их не индексируем.
+    __table_args__ = (
+        Index("ix_domains_status_deadline", "status", "acquire_deadline"),
+        Index("ix_domains_status_score", "status", "score"),
+        Index("ix_domains_reject_reason", "reject_reason"),
+        Index("ix_domains_lane", "lane"),
+    )
+
 
 class AcquisitionOrder(Base):
     __tablename__ = "acquisition_orders"
