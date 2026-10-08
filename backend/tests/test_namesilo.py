@@ -822,3 +822,49 @@ def test_discovery_writes_auction_created_and_bid_to_domain():
     created = datetime(2015, 3, 1, tzinfo=timezone.utc)
     d = _new_domain("a.com", {"source": "namesilo_auction", "lane": "bid", "created": created, "bid": 33.5}, None)
     assert d.whois_created == created and d.acquire_price == 33.5
+
+
+def test_auction_current_bid_between_ceiling_and_ceiling_plus_renew_is_refused(monkeypatch, make):
+    """Ставка 25 > потолка 20, но < потолок+продление 31.5: сравнивать надо с ПОТОЛКОМ, не с o.cost."""
+    lots_then = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    lots_now = ok(auctions=[_lot("lot.com", bid=25.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=[lots_then, lots_now], bidAuction=ok(),
+                   getAccountBalance=ok(balance=500.0), getPrices=PRICES)
+    oid = _flow("lot.com", source="namesilo_auction")
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "выросла" in r["error"] and srv.n("bidAuction") == []
+    # отказ принял сам execute ДО клиента: клиентский гард bid() (запасной) не добрался бы до третьего
+    # чтения лотов — подмена потолка на потолок+продление пропустила бы заказ до него
+    assert len(srv.n("listAuctions")) == 2 and "подтверждённых 20.00" in r["error"]
+
+
+def test_auction_renew_price_drift_at_execute_is_refused(monkeypatch, make):
+    """Продление подорожало между подтверждением и отправкой: замороженная сумма больше не верна."""
+    pricier = ok(com={"registration": "9.0", "transfer": "9.0", "renew": "14.00"})
+    lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=500.0),
+                   getPrices=[PRICES, pricier])
+    oid = _flow("lot.com", source="namesilo_auction")
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "продления" in r["error"] and srv.n("bidAuction") == []
+
+
+def test_queue_auction_row_has_ceiling_field_and_honest_confirm(client, monkeypatch, make):
+    """Панель: у лота аукциона — поле потолка (min = текущая ставка, USD), не «цена фиксированная»;
+    POST с потолком замораживает потолок + продление."""
+    lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=100.0),
+                   getPrices=PRICES)
+    with db.SessionLocal() as s:
+        d = Domain(domain="lot.com", source="namesilo_auction", status="approved", lane="bid", acquire_price=20.0)
+        s.add(d)
+        s.commit()
+        did = d.id
+    oid = acquisition.create_order(did)
+    html = client.get("/queue").text
+    assert 'name="bid_rub"' in html and 'min="20.0"' in html and "потолок" in html
+    assert "Цена фиксированная" not in html
+    r = client.post(f"/queue/{oid}/confirm", data={"bid_rub": "40"}, follow_redirects=False)
+    assert r.status_code == 303
+    o = _order(oid)
+    assert float(o.cost) == 51.5 and o.result["auction_ceiling"] == 40.0

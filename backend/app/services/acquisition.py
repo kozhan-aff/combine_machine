@@ -1311,6 +1311,9 @@ def list_orders() -> list[dict]:
                         "result": ({k: (_scrub_text(v) if isinstance(v, str) else v)
                                     for k, v in o.result.items()} if isinstance(o.result, dict) else o.result),
                         "domain_id": o.domain_id,
+                        # источник и текущая ставка лота — для формы потолка аукциона в очереди
+                        "source": d.source if d is not None else None,
+                        "ask": float(d.acquire_price) if d is not None and d.acquire_price is not None else None,
                         "dirty": dirty_reason(d) if d is not None else None,
                         "stuck": o.status == "ordering" and _claim_expired(o)})
     return out

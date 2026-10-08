@@ -1037,9 +1037,14 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
     from app.services import acquisition
     try:
         r = acquisition.confirm_order(order_id, bid_rub or None)
-        bid = r.get("bid_rub")
-        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт)"
-                                   f"{f', ставка {bid:.0f} ₽' if bid else ''}. Можно отправлять.")
+        bid, cur = r.get("bid_rub"), r.get("currency")
+        if not bid:
+            tail = ""
+        elif cur in (None, "RUB"):
+            tail = f", ставка {bid:.0f} ₽"
+        else:      # аукцион NameSilo: полное списание (потолок + продление) в валюте котировки
+            tail = f", к списанию до {bid:.2f} {cur} (потолок + продление)"
+        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт){tail}. Можно отправлять.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
 

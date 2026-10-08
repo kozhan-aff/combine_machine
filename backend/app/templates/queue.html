@@ -78,7 +78,7 @@
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
           {% elif o.confirm_expired %}<span class="led led-todo"></span><span class="hint" style="color:var(--bad)" title="подтверждению больше суток (config ACQ_CONFIRM_TTL_HOURS): цена и тариф могли измениться — реши заново">просрочено</span>
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
-      <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} {{ {'RUB':'₽'}.get(o.currency, o.currency) }}{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td class="num">{% if o.bid %}{{ ('%.0f' if o.currency in (none, 'RUB') else '%.2f')|format(o.bid) }} {{ {'RUB':'₽'}.get(o.currency, o.currency) }}{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
         {% if o.dirty and o.status in ['pending_confirm', 'failed'] %}
           {# ни ставки, ни отправки. Отказ держит СЕРВИС: confirm_order и execute_confirmed_order
@@ -115,6 +115,15 @@
           {% else %}
             <span class="hint">сетка тарифов {{ o.zone }} не загрузилась — подтвердить нельзя</span>
           {% endif %}
+          {% elif o.source == 'namesilo_auction' %}
+          {# лот аукциона NameSilo: цена НЕ фиксирована. Человек задаёт ПОТОЛОК ставки (не ниже текущей),
+             списание = потолок + год продления; confirm_order замораживает именно эту сумму, execute
+             отказывает, если ставка выросла выше потолка или продление подорожало. #}
+          <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
+                onsubmit="return confirm('Подтвердить ставку на {{ o.domain }} с потолком ' + this.bid_rub.value + ' USD? Это аукцион: цена не фиксирована. Спишется до потолка + год продления (сумму уточнит провайдер при подтверждении). Это денежный гейт.')">
+            <input type="number" name="bid_rub" step="0.01" {% if o.ask %}min="{{ o.ask }}" value="{{ o.ask }}"{% endif %} required
+                   style="width:90px" title="потолок ставки, USD (не ниже текущей{% if o.ask %} {{ '%.2f'|format(o.ask) }}{% endif %}). К нему добавится год продления">
+            <button class="btn-sm btn-buy" title="аукцион: поднять денежный гейт с выбранным потолком ставки; спишется потолок + год продления">✓ подтвердить (потолок, USD)</button></form>
           {% else %}
           {# optimizator: цена ФИКСИРОВАНА (не выбор человека, в отличие от ставки backorder) —
              тарифного селектора для этого канала не существует, показывать backorder-сетку
