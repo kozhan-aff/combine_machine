@@ -177,12 +177,18 @@ def test_empty_content_with_reasoning_is_clear_error(monkeypatch):
 # --- переопределение с экрана ключей приходит строкой ---
 
 @pytest.mark.parametrize("raw,expect_think", [("false", False), ("False", False), ("true", True)])
-def test_think_override_string_from_panel(monkeypatch, raw, expect_think):
-    from app.services import api_keys
-    c, seen = _plain(monkeypatch, "x")
-    # _plain выставил settings.LLM_THINK=False напрямую; снимаем, чтобы читалось переопределение
-    monkeypatch.undo()
-    monkeypatch.setattr(api_keys, "ENABLED", True)
+def test_think_override_string_from_panel(monkeypatch, key_overrides, raw, expect_think):
+    api_keys = key_overrides
+    # без _plain: он выставляет settings.LLM_THINK напрямую и заглушил бы переопределение;
+    # monkeypatch.undo() тут нельзя — он откатил бы и autouse-рубильники сети/ключей
+    c = LlmClient()
+    seen = []
+
+    def once(method, url, **kw):
+        seen.append(kw["json"])
+        return _ok("ok")
+    c.request = once
+    c._request_once = once
     monkeypatch.setattr(api_keys, "_snapshot", lambda: {"LLM_THINK": raw})
     c.complete("s", "p", model="ollama/qwen3.5:9b-q8_0")
     assert ("think" in seen[0]) is (not expect_think)
