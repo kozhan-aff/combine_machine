@@ -25,11 +25,13 @@ import app.models.job
 import app.models.domain_score_log
 import app.models.secret
 import app.models.domain_list
+import app.models.domain_rank
 # reference the modules so their table-registration side effect (create_all needs
 # every table, incl. index_history from publish.check_index) isn't seen as a dead import
 _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.models.monitoring,
                     app.models.settings, app.models.autonomy, app.models.job,
-                    app.models.domain_score_log, app.models.secret, app.models.domain_list)
+                    app.models.domain_score_log, app.models.secret, app.models.domain_list,
+                    app.models.domain_rank)
 
 from app.integrations.rdap import RdapClient
 

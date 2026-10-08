@@ -67,6 +67,18 @@ GROUPS = [
       Field("DOMAIN_LISTS_BLP_URL", "Списки чистоты · blocklistproject (адрес)", "Базовый адрес "
             "blocklistproject (Unlicense), по умолчанию https://blocklistproject.github.io/Lists/alt-version. "
             "Ключа нет. Менять только для своего зеркала.", kind="url"),
+      Field("CC_RANKS_URL", "Ранги доменов · Common Crawl (адрес файла)", "Прямой адрес файла "
+            "…-domain-ranks.txt.gz нужного среза Common Crawl. Пусто — свежий срез берётся автоматически из "
+            "списка срезов. Ключа нет. Файл читается потоком, на диск не пишется.", kind="url"),
+      Field("CC_GRAPHINFO_URL", "Ранги доменов · список срезов Common Crawl", "Адрес graphinfo.json со "
+            "списком срезов web graph, по умолчанию https://index.commoncrawl.org/graphinfo.json. Менять "
+            "только для своего зеркала.", kind="url"),
+      Field("CC_GRAPH_BASE_URL", "Ранги доменов · база файлов графа", "Базовый адрес файлов web graph, по "
+            "умолчанию https://data.commoncrawl.org/projects/hyperlinkgraph. Менять только для зеркала.",
+            kind="url"),
+      Field("MAJESTIC_URL", "Ранги доменов · Majestic Million (адрес)", "Список топ-1M Majestic "
+            "(CC BY 3.0), по умолчанию https://downloads.majestic.com/majestic_million.csv. Ключа нет. "
+            "Нужен только для необязательного бонуса к авторитетности.", kind="url"),
       Field("APARSER_URL", "A-Parser · адрес", "Адрес A-Parser, например http://192.168.1.77:9091.",
             kind="url"),
       Field("APARSER_API_KEY", "A-Parser · пароль API", "Пароль API из настроек A-Parser.", secret=True)]),

@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     # если оператор завёл свой зеркальный сервер; ключей у обоих источников нет.
     DOMAIN_LISTS_UT1_URL: str = "https://dsi.ut-capitole.fr/blacklists/download"
     DOMAIN_LISTS_BLP_URL: str = "https://blocklistproject.github.io/Lists/alt-version"
+    # Ранги доменов (services/domain_ranks.py): бесплатный заменитель Ahrefs DR. CC_RANKS_URL — прямой адрес
+    # файла domain-ranks.txt.gz; пусто — свежий срез определяется по CC_GRAPHINFO_URL (список срезов
+    # Common Crawl). Срез НЕ зашит в код: он устаревает каждые три месяца. MAJESTIC_URL — Majestic Million.
+    CC_RANKS_URL: str = ""
+    CC_GRAPHINFO_URL: str = "https://index.commoncrawl.org/graphinfo.json"
+    CC_GRAPH_BASE_URL: str = "https://data.commoncrawl.org/projects/hyperlinkgraph"
+    MAJESTIC_URL: str = "https://downloads.majestic.com/majestic_million.csv"
 
     # опц. локальные сервисы (тот же бокс)
     BROWSERLESS_URL: str = ""
