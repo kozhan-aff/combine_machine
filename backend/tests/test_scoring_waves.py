@@ -512,11 +512,11 @@ def test_score_pending_reports_honest_count_when_cancelled_after_partial_commits
     from app.services import jobs as jobs_mod
     real_wave_risk = scoring._wave_risk
 
-    def spy_risk(states, clients, run):
+    def spy_risk(states, clients, run, notes=None):
         # к этому моменту W0 и W2 УЖЕ закоммитили все 5 (alive пуст) — отмена здесь
         # проверяет именно то, что происходит МЕЖДУ волнами, после реальных чекпоинтов.
         jobs_mod.request_cancel("score")
-        return real_wave_risk(states, clients, run)
+        return real_wave_risk(states, clients, run, notes)
     monkeypatch.setattr(scoring, "_wave_risk", spy_risk)
 
     class _Ap:
