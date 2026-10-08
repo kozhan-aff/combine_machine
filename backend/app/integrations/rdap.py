@@ -106,12 +106,12 @@ class RdapClient(BaseClient):
         return domain.rsplit(".", 1)[-1].lower() in self._bootstrap()
 
     def request(self, method: str, url: str, **kwargs):
-        """429 не ретраим на транспортном уровне (SIDN: 1+2 с ретраев вхолостую, Retry-After нет) —
+        """4xx (429, 404…) не ретраим на транспортном уровне (SIDN: 1+2 с ретраев вхолостую, Retry-After нет) —
         его обрабатывает `lookup` по зоне. Транспортные ошибки и 5xx — прежний ретрай BaseClient."""
         try:
             return self._request_once(method, url, **kwargs)
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
+            if e.response.status_code < 500:   # 404 (свободен), 429, 4xx: повтор бессмыслен и идёт мимо _slot
                 raise
         except httpx.TransportError:
             pass

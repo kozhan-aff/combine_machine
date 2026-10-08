@@ -49,7 +49,12 @@ def conditional_get(client, url: str, **kwargs):
         headers["If-None-Match"] = v["etag"]
     if v.get("last_modified"):
         headers["If-Modified-Since"] = v["last_modified"]
-    r = client.request("GET", url, headers=headers, **kwargs)
+    try:
+        r = client.request("GET", url, headers=headers, **kwargs)
+    except httpx.HTTPStatusError as e:   # реальный транспорт: raise_for_status() превращает 304 в исключение
+        if e.response.status_code == 304:
+            raise NotModified(url) from e
+        raise
     if r.status_code == 304:
         raise NotModified(url)
     hdr = getattr(r, "headers", None) or {}

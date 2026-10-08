@@ -73,12 +73,12 @@ STOPWORDS = {
               "вебкам", "секс знакомств",
               # es / pt
               "sexo gratis", "sexo grátis", "videos de sexo", "vídeos de sexo", "mujeres desnudas",
-              "putas", "acompanhantes", "webcam erótica",
+              "putas gratis", "acompanhantes", "webcam erótica",
               # de / nl
               "sexfilme", "erotikfilme", "sexkontakte", "nacktbilder", "livecam sex",
               "seksfilm", "sexfilm", "sekscontact", "naaktfoto", "erotische massage",
               # fr / it
-              "film x", "sexe gratuit", "rencontre sexe", "escort girl", "sesso gratis",
+              "film x gratuit", "sexe gratuit", "rencontre sexe", "escort girl", "sesso gratis",
               "incontri sesso",
               # sl / pl / cs
               "erotične masaže", "spremljevalke", "darmowe porno", "sex kamerki", "erotyczne masaże",
@@ -90,12 +90,12 @@ STOPWORDS = {
                "farmacia en línea", "farmacia online", "farmácia online", "sin receta", "sem receita",
                "senza ricetta", "farmaci generici", "comprar cialis", "comprar viagra",
                # de / nl
-               "apotheke", "rezeptfrei", "ohne rezept", "potenzmittel", "apotheek",
+               "online apotheke", "rezeptfrei", "ohne rezept", "potenzmittel", "online apotheek",
                "zonder recept", "potentiemiddel",
                # fr
                "pharmacie en ligne", "sans ordonnance", "médicaments sans",
                # sl / pl / cs
-               "brez recepta", "lekarna", "bez recepty", "apteka online", "tabletki na potencję",
+               "brez recepta", "lekarna online", "bez recepty", "apteka online", "tabletki na potencję",
                "bez receptu", "lékárna online", "tabletky na potenci"],
     "casino": ["casino", "roulette", "slots", "jackpot", "blackjack", "baccarat",
                "free spins", "casino bonus", "azino", "azino777", "joycasino",
@@ -105,7 +105,7 @@ STOPWORDS = {
                "пинап казино", "джойказино",
                # es / pt / it
                "casino en línea", "tragamonedas", "tragaperras", "ruleta", "juegos de azar",
-               "giros gratis", "cassino", "caça-níqueis", "caça níquel", "jogos de azar",
+               "giros gratis", "cassino online", "caça-níqueis", "caça níquel", "jogos de azar",
                "rodadas grátis", "casinò", "slot machine", "giochi d'azzardo", "giri gratuiti",
                # de / nl / fr
                "spielbank", "spielautomaten", "glücksspiel", "freispiele", "gokkasten",

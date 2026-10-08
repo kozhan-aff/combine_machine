@@ -189,6 +189,22 @@ def test_conditional_get_sends_validators_and_raises_on_304():
     assert c.sent == {"If-None-Match": '"abc"', "If-Modified-Since": "Wed, 01 Oct 2026 03:01:00 GMT"}
 
 
+def test_conditional_get_304_through_real_base_client():
+    """Реальный BaseClient на MockTransport: raise_for_status() делает из 304 HTTPStatusError — он
+    обязан стать NotModified, а не «источник упал» (ревью G4, S1-11)."""
+    from app.integrations.base import BaseClient
+
+    class C(BaseClient):
+        validators = {"etag": '"abc"'}
+    c = C()
+    c._client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(304, request=r)))
+    with pytest.raises(NotModified):
+        conditional_get(c, "http://x/file")
+    c._client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404, request=r)))
+    with pytest.raises(httpx.HTTPStatusError):
+        conditional_get(c, "http://x/file")
+
+
 def test_conditional_get_stores_new_validators():
     class C:
         def request(self, method, url, headers=None, **kw):

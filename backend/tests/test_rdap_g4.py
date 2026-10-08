@@ -141,3 +141,22 @@ def test_request_does_not_retry_429_at_transport_level():
     with pytest.raises(httpx.HTTPStatusError):
         c.request("GET", "https://rdap/x")
     assert len(calls) == 1
+
+
+def test_request_404_is_one_real_request_not_retried(clk):
+    """Реальный BaseClient на MockTransport: 404 (свободный домен) — РОВНО один запрос, без второго
+    в обход _slot; 429 — тоже один (ревью G4, S1-06)."""
+    for code in (404, 429):
+        n = []
+
+        def h(request, code=code):
+            n.append(1)
+            return httpx.Response(code, request=request)
+        c = RdapClient()
+        c._servers = {"nl": "https://rdap.sidn.nl/"}
+        c._client = httpx.Client(transport=httpx.MockTransport(h))
+        try:
+            c.lookup("free.nl")
+        except rdap_mod.RdapThrottled:
+            pass
+        assert len(n) == (1 if code == 404 else 2)   # 429: lookup сам делает ровно одну повторную попытку

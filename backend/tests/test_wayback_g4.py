@@ -48,7 +48,11 @@ def test_foreign_clean_texts_stay_clean():
     for t in ("Nuestro taller familiar fabrica muebles de madera a medida desde 1985",
               "Onze bakkerij verkoopt vers brood, taarten en koffie in het centrum",
               "Unser Familienbetrieb bietet Heizungsbau und Sanitärinstallation in Köln",
-              "Kancelář nabízí účetnictví, daňové poradenství a mzdy pro malé firmy"):
+              "Kancelář nabízí účetnictví, daňové poradenství a mzdy pro malé firmy",
+              # подстроки коротких стоп-слов внутри обычных слов (ревью G4: putas/film x/cassino)
+              "Las disputas vecinales se resuelven en el juzgado; las disputas laborales también",
+              "Ons film X-Men avond: film X-Men is vanavond te zien in de bioscoop",
+              "La città di Cassino ospita un museo; Cassino fu ricostruita dopo la guerra"):
         assert _classify_text(t) == set()
 
 
