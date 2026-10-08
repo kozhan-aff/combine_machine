@@ -82,3 +82,16 @@ def test_deploy_busy_check_runs_under_lock(monkeypatch):
     monkeypatch.setattr(deploy, "_busy_jobs", lambda: seen.append(deploy._LOCK.locked()) or ["score"])
     assert deploy.git_pull()["ok"] is False and deploy.git_force_pull()["ok"] is False
     assert seen == [True, True]
+
+
+def test_jobs_do_not_start_while_deploy_lock_held(client):
+    """Пока идёт pull (deploy._LOCK), новая задача не открывается — иначе её оборвёт --reload."""
+    from app.services import deploy, jobs
+    assert deploy._LOCK.acquire(blocking=False)
+    try:
+        assert jobs._open("score", "manual", None) is None
+    finally:
+        deploy._LOCK.release()
+    rid = jobs._open("score", "manual", None)
+    assert rid is not None
+    jobs._own(rid, status="done")

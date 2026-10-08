@@ -217,8 +217,17 @@ def _blank() -> dict:
 
 
 def _open(name: str, trigger: str, stages: list | None) -> int | None:
-    """Атомарно занять замок; вернуть id строки или None (уже идёт)."""
+    """Атомарно занять замок; вернуть id строки или None (уже идёт).
+
+    Пока идёт git pull (deploy._LOCK), новые задачи НЕ стартуют: pull сначала проверяет живые
+    задачи, а потом перезапускает процесс (--reload) — задача, стартовавшая в промежутке,
+    оборвалась бы посреди платной волны. Закрывает окно в рамках процесса панели (где и живёт
+    замок); воркер — отдельный процесс и замка не видит, его свип страхует только проверка
+    живых задач в самом pull."""
     from sqlalchemy.exc import IntegrityError
+    from app.services import deploy
+    if deploy._LOCK.locked():
+        return None
     from app.db import SessionLocal
     from app.models.job import JobRun
     with _DB_LOCK, SessionLocal() as db:

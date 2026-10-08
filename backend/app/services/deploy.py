@@ -126,7 +126,7 @@ def git_pull() -> dict:
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
-        if busy := _busy_jobs():  # под замком: окно «проверка → захват» закрыто
+        if busy := _busy_jobs():  # под замком: jobs._open не стартует новое, пока замок занят
             return _busy_error(busy)
         old = deploy_status().get("hash", "")
         try:
@@ -157,7 +157,7 @@ def git_force_pull() -> dict:
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
-        if busy := _busy_jobs():  # под замком: окно «проверка → захват» закрыто
+        if busy := _busy_jobs():  # под замком: jobs._open не стартует новое, пока замок занят
             return _busy_error(busy)
         env = _git_env()
         old = deploy_status().get("hash", "")
