@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://192.168.1.77:4000"   # ponytail: dev-box default, override via .env
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "mistral"                        # mistral(=mistral-large) | mistral-small | ollama/<m>
+    LLM_THINK: bool = False                           # ollama/*: False -> шлём "think": false (без рассуждений); True -> модель думает как задумано
     LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
     LLM_CLASSIFY_FALLBACK_MODEL: str = ""             # W5: запасная модель при 401/403/404/429/5xx основной; пусто -> без запасной
 

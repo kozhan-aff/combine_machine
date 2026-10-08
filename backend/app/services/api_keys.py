@@ -99,9 +99,13 @@ GROUPS = [
             "http://192.168.1.77:4000.", kind="url"),
       Field("LLM_API_KEY", "LLM · ключ", "Ключ LiteLLM/провайдера. На локальном боксе ключ не нужен.",
             secret=True),
-      Field("LLM_MODEL", "LLM · модель для текстов", "Имя модели в LiteLLM: mistral, mistral-small, ollama/…"),
+      Field("LLM_MODEL", "LLM · модель для текстов", "Имя модели в LiteLLM: mistral, mistral-small, ollama/…. "
+            "Рекомендуется ollama/qwen3.5:9b-q8_0 (на боксе есть и hf.co/unsloth/Qwen3.8-27B-GGUF:Q3_K_M)."),
+      Field("LLM_THINK", "LLM · режим рассуждений (ollama)", "Выкл (по умолчанию) — для ollama/* шлётся "
+            "think:false: ответ за ~1 с вместо ~30 с и пустого текста. Вкл — модель рассуждает.",
+            kind="choice", choices=("false", "true")),
       Field("LLM_CLASSIFY_MODEL", "LLM · модель-классификатор", "Модель для темы/языка снимков истории. "
-            "Пусто — берётся модель для текстов."),
+            "Пусто — берётся модель для текстов. Рекомендуется тот же ollama/qwen3.5:9b-q8_0."),
       Field("SEARXNG_URL", "SearXNG · адрес", "Локальный мета-поиск, например http://192.168.1.77:8080. "
             "Нужен для проверки индексации (site:).", kind="url"),
       Field("SEO_DATA_PROVIDER", "Провайдер SERP/ключевых слов", "Какой платный провайдер использовать, "

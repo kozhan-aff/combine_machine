@@ -14,6 +14,15 @@ class LlmEmptyContent(RuntimeError):
     max_tokens. Явная ошибка вместо пустой строки, которую вызывающий молча пропустит (S6-10)."""
 
 
+def _apply_think(body: dict) -> dict:
+    """Для ollama/* шлём "think": false (если не включено LLM_THINK): thinking-модели (qwen3.x)
+    без него отдают пустой content и только reasoning (~31 с на 300 ток. против ~1 с). Для
+    остальных моделей (mistral и т.п.) поле не добавляется. Явный think в body не перетирается."""
+    if str(body.get("model", "")).startswith("ollama/") and not settings.LLM_THINK:
+        body.setdefault("think", False)
+    return body
+
+
 class LlmClient(BaseClient):
     POOLED = True
     def __init__(self, timeout: float = 120.0):
@@ -37,6 +46,7 @@ class LlmClient(BaseClient):
             "stream": False,
             **kwargs,
         }
+        _apply_think(body)
         r = self.request("POST", f"{self.base_url}/v1/chat/completions",
                          json=body, headers=self._headers())
         # content can be null (filtered/blocked) or the envelope may lack choices — return ""
@@ -48,7 +58,8 @@ class LlmClient(BaseClient):
             return ""
         if not content and (msg.get("reasoning_content") or msg.get("reasoning")):
             raise LlmEmptyContent(f"модель {body['model']}: ответ пуст, есть только reasoning "
-                                  "(thinking-модель упёрлась в max_tokens — отключи thinking или подними лимит)")
+                                  "(thinking-модель упёрлась в max_tokens — для ollama/* оставь "
+                                  "LLM_THINK=false, иначе подними лимит)")
         return content or ""
 
     def ping(self) -> bool:
@@ -65,6 +76,7 @@ class LlmClient(BaseClient):
         вызывающий (diagnostics) кэширует результат на 10 минут."""
         body = {"model": self.model, "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 4, "stream": False}
+        _apply_think(body)
         try:
             r = self._request_once("POST", f"{self.base_url}/v1/chat/completions",
                                    json=body, headers=self._headers(), timeout=timeout)
