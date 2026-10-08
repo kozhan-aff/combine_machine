@@ -9,6 +9,11 @@ from app.config import settings
 from app.integrations.base import BaseClient
 
 
+class LlmEmptyContent(RuntimeError):
+    """Модель вернула только рассуждение (reasoning) без ответа: «thinking»-модель упёрлась в
+    max_tokens. Явная ошибка вместо пустой строки, которую вызывающий молча пропустит (S6-10)."""
+
+
 class LlmClient(BaseClient):
     def __init__(self, timeout: float = 120.0):
         # mistral-large generation blows past BaseClient's 30s default (ReadTimeout on /generate);
@@ -36,9 +41,13 @@ class LlmClient(BaseClient):
         # content can be null (filtered/blocked) or the envelope may lack choices — return ""
         # rather than raising, so one bad page doesn't abort a whole generation batch.
         try:
-            content = r.json()["choices"][0]["message"]["content"]
+            msg = r.json()["choices"][0]["message"]
+            content = msg["content"]
         except (KeyError, IndexError, TypeError):
             return ""
+        if not content and (msg.get("reasoning_content") or msg.get("reasoning")):
+            raise LlmEmptyContent(f"модель {body['model']}: ответ пуст, есть только reasoning "
+                                  "(thinking-модель упёрлась в max_tokens — отключи thinking или подними лимит)")
         return content or ""
 
     def ping(self) -> bool:
@@ -89,13 +98,48 @@ def _err_text(resp) -> str:
 class LlmClassifyClient(LlmClient):
     """Классификация темы снимков в W5 (services/history_llm.py): короткий ответ, а не страница.
 
-    Таймаут 30 с и ОДНА попытка, без ретраев BaseClient: зависший LiteLLM иначе держал бы слот
-    волны истории ~6 минут на КАЖДЫЙ домен (120 с × 3 попытки). Предохранитель «3 сбоя подряд»
-    ставит воронка (scoring._topic_one, whois.guarded). Модель — LLM_CLASSIFY_MODEL (ollama-модель
-    бокса), пусто -> LLM_MODEL."""
+    Таймаут 60 с (локальная модель на холодном старте), без ретраев BaseClient: зависший LiteLLM
+    иначе держал бы слот на ~6 минут на КАЖДЫЙ домен (120 с × 3 попытки). Единственный повтор —
+    ReadTimeout у ollama-модели (холодная загрузка весов). Предохранитель «3 сбоя подряд» ставит
+    воронка (scoring._topic_one, whois.guarded). Модель — LLM_CLASSIFY_MODEL (ollama-модель бокса),
+    пусто -> LLM_MODEL; при 401/403/404/429/5xx — явный фолбэк LLM_CLASSIFY_FALLBACK_MODEL, а если
+    он не задан или тоже отказал, — RuntimeError с кодом и текстом (оператор видит причину в
+    сообщении задачи, а не немое «тема не определена» у всех доменов: S2-01).
+
+    «Thinking»-модели ollama (qwen3.x) без `reasoning_effort=none` думают 40+ с и отдают пустой
+    content при малом max_tokens (S2-09/S6-10): для ollama/* параметр добавляется сам."""
+    FALLBACK_CODES = (401, 403, 404, 429)
+
     def __init__(self):
-        super().__init__(timeout=30.0)
+        super().__init__(timeout=60.0)
         self.model = settings.LLM_CLASSIFY_MODEL or settings.LLM_MODEL
+        self.fallback = settings.LLM_CLASSIFY_FALLBACK_MODEL
 
     def request(self, method: str, url: str, **kwargs):
         return self._request_once(method, url, **kwargs)
+
+    def complete(self, system: str, prompt: str, **kwargs) -> str:
+        first = kwargs.pop("model", self.model)
+        models = [first] + ([self.fallback] if self.fallback and self.fallback != first else [])
+        errors = []
+        for m in models:
+            opts = dict(kwargs)
+            local = m.startswith("ollama")
+            if local:
+                opts.setdefault("reasoning_effort", "none")
+            for attempt in range(2 if local else 1):
+                try:
+                    return super().complete(system, prompt, model=m, **opts)
+                except httpx.ReadTimeout:
+                    if attempt == 0 and local:
+                        continue                  # холодный старт модели — один повтор
+                    errors.append(f"модель {m}: таймаут {self._client.timeout.read:.0f} с")
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code
+                    if code not in self.FALLBACK_CODES and code < 500:
+                        raise
+                    errors.append(f"модель {m}: HTTP {code}{_err_text(e.response)}")
+                except LlmEmptyContent as e:
+                    errors.append(str(e))
+                break
+        raise RuntimeError("; ".join(errors))
