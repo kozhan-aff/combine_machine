@@ -44,7 +44,7 @@ DECISION = {
 
 # Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
 MIN_AGE_YEARS = 3.0                                          # W5: возраст по старшей дате; моложе — too_young
-SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True}  # dropcatch — после проверки ToS оператором
+SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True, "namesilo_auction": False}  # dropcatch — после проверки ToS оператором
 MAX_WHOIS_PER_RUN = 200        # кап whois:43 через A-Parser за прогон (зоны без RDAP; RDAP не капается)
 
 # ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----

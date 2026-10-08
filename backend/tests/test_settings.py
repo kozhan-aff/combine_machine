@@ -34,7 +34,7 @@ def test_default_test_sources_are_off_offline_guard():
     дефолт, а не совпадение с самим патчем."""
     s = st.get_settings()
     assert s["sources_enabled"] == {"dropcatch": False, "nominet": False,
-                                    "mx": False, "emd": False}
+                                    "mx": False, "emd": False, "namesilo_auction": False}
 
 
 def test_max_whois_per_run_default_and_clamp():

@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # на https://optimizator.ru без правки кода.
     OPTIMIZATOR_BASE_URL: str = "http://optimizator.ru"
 
+    # NameSilo (международный регистратор, канал «registrar»). Ключ ходит ТОЛЬКО в query и маскируется
+    # везде (diagnostics._scrub, log_scrub). BASE_URL по умолчанию — /apibatch: автоматизация на /api
+    # нарушает ToS (docs/v2/research/namesilo-api-spec.md §1). SANDBOX=true -> sandbox.namesilo.com/api.
+    NAMESILO_API_KEY: str = ""
+    NAMESILO_BASE_URL: str = "https://www.namesilo.com/apibatch"
+    NAMESILO_SANDBOX: bool = False
+    NAMESILO_CONTACT_ID: str = ""                     # contact_id профиля регистранта (contactAdd на сайте)
+    NAMESILO_ALLOW_PREMIUM: bool = False              # премиум-домены (premium=1) — только по явному флагу оператора
+
     # M2: сколько часов живёт подтверждение выкупа (S3-07). Дальше исполнить старый confirm нельзя —
     # человек подтверждает заново (и цена/тариф перезамораживаются).
     ACQ_CONFIRM_TTL_HOURS: int = 24

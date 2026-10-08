@@ -196,7 +196,8 @@ def _default_sources_offline(sqlite_db, monkeypatch):
     discovery._clients. Зависимость от sqlite_db — только порядок фикстур."""
     from app.services import scoring_config as cfg
     monkeypatch.setattr(cfg, "SOURCES_ENABLED",
-                        {"dropcatch": False, "nominet": False, "mx": False, "emd": False})
+                        {"dropcatch": False, "nominet": False, "mx": False, "emd": False,
+                         "namesilo_auction": False})
     yield
 
 
@@ -247,7 +248,7 @@ def _no_paid_keys(monkeypatch):
     фонового потока. Тест, которому нужен RDAP в воронке, передаёт фейк через clients["rdap"];
     юнит-тесты самого клиента берут фикстуру real_rdap_bootstrap."""
     from app.config import settings
-    for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY"):
+    for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY", "NAMESILO_API_KEY"):
         monkeypatch.setattr(settings, key, "")
     monkeypatch.setattr(RdapClient, "_bootstrap", lambda self: {})
     yield

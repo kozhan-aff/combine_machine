@@ -16,6 +16,8 @@ from app.services import diag_cache
 # httpx на INFO пишет ПОЛНЫЙ URL запроса. billmgr backorder требует креды прямо в query
 # (authinfo=LOGIN:PASSWORD) — один --log-level=info, и пароль в docker-логах. Прибиваем явно.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+from app.log_scrub import install as _install_log_scrub  # noqa: E402
+_install_log_scrub()     # ключ NameSilo в query: маска и на случай, если уровень httpx подымут до INFO
 
 
 async def _diag_loop():

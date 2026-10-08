@@ -208,6 +208,7 @@
       <label title="pending delete .com/.net/.org — ~134 тыс. строк в день"><input type="checkbox" name="dropcatch" {{ 'checked' if s.sources_enabled.dropcatch }}> DropCatch <span class="hint">(включать после проверки ToS)</span></label>
       <label title="официальный список дропов .uk/.co.uk"><input type="checkbox" name="nominet" {{ 'checked' if s.sources_enabled.nominet }}> Nominet</label>
       <label title="удалённые .mx — свободны к регистрации"><input type="checkbox" name="mx" {{ 'checked' if s.sources_enabled.mx }}> registry.mx</label>
+      <label title="аукционы просроченных доменов NameSilo (typeId=3): дата создания сохраняется; нужен NAMESILO_API_KEY"><input type="checkbox" name="namesilo_auction" {{ 'checked' if s.sources_enabled.namesilo_auction }}> NameSilo · аукционы <span class="hint">(нужен ключ NameSilo; ставка — только через гейт выкупа)</span></label>
       <label title="генератор EMD по наборам ключей ниже"><input type="checkbox" name="emd" {{ 'checked' if s.sources_enabled.emd }}> EMD</label>
     </div>
   </div>

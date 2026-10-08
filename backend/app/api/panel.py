@@ -1433,7 +1433,7 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                   tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
                   emd_sets: str | None = Form(None), v2_lists: str = Form(""),
                   dropcatch: str = Form(""), nominet: str = Form(""),
-                  mx: str = Form(""), emd: str = Form(""),
+                  mx: str = Form(""), emd: str = Form(""), namesilo_auction: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
                   w_topical_fit: float | None = Form(None), w_age: float | None = Form(None),
                   w_rd: float | None = Form(None), w_authority: float | None = Form(None),
@@ -1460,7 +1460,8 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                            units_daily_cap=units_daily_cap,
                            spam_anchor_max=spam_anchor_max, tld_allowlist=tld_allowlist,
                            brand_tokens=brand_tokens, emd_sets=emd_sets,
-                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
+                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd),
+                                            "namesilo_auction": bool(namesilo_auction)},
                            weights=weights or None)
     except ValueError as e:
         # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
@@ -1472,7 +1473,8 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                           "units_floor": units_floor, "spam_anchor_max": spam_anchor_max},
                  "weights": weights,
                  "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
-                             "mx": bool(mx), "emd": bool(emd)},
+                             "mx": bool(mx), "emd": bool(emd),
+                             "namesilo_auction": bool(namesilo_auction)},
                  # без маркера v2_lists этих полей в форме не было — не подменяем их пустотой
                  "tld_allowlist": tld_allowlist if v2_lists else None,
                  "brand_tokens": brand_tokens if v2_lists else None}

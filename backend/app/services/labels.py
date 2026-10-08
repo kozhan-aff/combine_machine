@@ -35,10 +35,10 @@ REJECT_RU = {
 
 # Источник домена (Domain.source). Легаси v1 — для старых строк реестра.
 SOURCE_RU = {"dropcatch": "DropCatch", "nominet": "Nominet", "mx": "registry.mx", "emd": "EMD",
-             "list": "вручную", "backorder": "backorder (v1)", "cctld": "cctld (v1)",
+             "namesilo_auction": "NameSilo (аукцион)", "list": "вручную", "backorder": "backorder (v1)", "cctld": "cctld (v1)",
              "reg_ru": "reg.ru (v1)", "sweb": "sweb (v1)"}
 # Бейдж в строке — явная карта, не срез подписи: [:3] давал «вру» и «reg» (путался с reg.ru).
-SOURCE_BADGE = {"dropcatch": "dc", "nominet": "uk", "mx": "mx", "emd": "emd", "list": "руч",
+SOURCE_BADGE = {"dropcatch": "dc", "nominet": "uk", "mx": "mx", "emd": "emd", "namesilo_auction": "ns", "list": "руч",
                 "backorder": "bo", "cctld": "cc", "reg_ru": "rg", "sweb": "sw"}
 
 LANE_RU = {"bid": "ставка", "free": "свободный"}

@@ -43,7 +43,15 @@ class Registrar(Protocol):
     configured: bool
 
     def check_available(self, domain: str) -> bool: ...
-    def price(self, domain: str) -> Money: ...
+    def price(self, domain: str, auction: bool = False) -> Money:
+        """Свежая котировка в ЯВНОЙ валюте. auction=True — лот аукциона: котировка = текущая ставка."""
+        ...
+    def bid(self, domain: str, max_bid: float) -> dict:
+        """Ставка на аукционе (ДЕНЬГИ, за тем же гейтом confirmed_by_human; max_bid — потолок человека)."""
+        ...
+    def reconcile(self, domain: str, since, balance_before: float | None) -> tuple[str, str]:
+        """Сверка неизвестного исхода: ("registered"|"not_registered"|"unknown", пояснение). Только чтение."""
+        ...
     def register(self, domain: str, period: int = 1) -> dict:
         """ИДЕМПОТЕНТНО: домен уже наш -> успех без второго списания. Платный вызов — без ретрая
         транспорта; неизвестный исход -> RegistrarAmbiguous. Успех = dict с подтверждённой формой."""
@@ -62,12 +70,15 @@ class NotConfiguredRegistrar:
             "международный регистратор не настроен: провайдер выбирает оператор "
             "(пока домен покупается руками — «купил руками» на экране Домены)")
 
-    check_available = price = register = set_nameservers = balance = _no
+    check_available = price = bid = reconcile = register = set_nameservers = balance = _no
 
 
 def get_registrar() -> Registrar:
-    """Текущий реализованный регистратор. Пока провайдер не выбран — заглушка. Подключение
-    реального клиента = вернуть его здесь (и ничего больше не менять в acquisition)."""
+    """Текущий регистратор: NameSilo, если задан NAMESILO_API_KEY (в т.ч. из панели), иначе заглушка.
+    Денежный гейт от клиента не зависит — он в acquisition и общий для всех каналов."""
+    if settings.NAMESILO_API_KEY:
+        from app.integrations.namesilo import NameSiloClient
+        return NameSiloClient()
     return NotConfiguredRegistrar()
 
 

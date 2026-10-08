@@ -77,6 +77,20 @@ GROUPS = [
       Field("OPTIMIZATOR_API_KEY", "optimizator.ru · ключ API", "Ключ API из личного кабинета optimizator.ru.",
             secret=True),
       Field("OPTIMIZATOR_NICD", "optimizator.ru · анкета (nic-d)", "Номер анкеты nic.ru вида 5014480/NIC-D."),
+      Field("NAMESILO_API_KEY", "NameSilo · ключ API", "namesilo.com → Account → API Manager → Generate. "
+            "Ключ привязывается к IP бокса (до 5 IP), показывается один раз. Ходит только в query и "
+            "маскируется в логах, ошибках и БД. Пинг на /diag — getAccountBalance, денег не тратит.",
+            secret=True),
+      Field("NAMESILO_BASE_URL", "NameSilo · адрес API", "По умолчанию https://www.namesilo.com/apibatch "
+            "(автоматизация обязана ходить на /apibatch). Менять не нужно.", kind="url"),
+      Field("NAMESILO_SANDBOX", "NameSilo · песочница", "true — sandbox.namesilo.com/api (ключ песочницы "
+            "выдают отдельно, письмом в поддержку). По умолчанию false.", kind="choice",
+            choices=("false", "true")),
+      Field("NAMESILO_CONTACT_ID", "NameSilo · ID контакта", "contact_id профиля регистранта (создаётся на "
+            "сайте NameSilo: Account → Contact Profiles). Пусто — профиль по умолчанию."),
+      Field("NAMESILO_ALLOW_PREMIUM", "NameSilo · премиум-домены", "true — разрешить покупку доменов с "
+            "premium=1 (цена в десятки раз выше обычной). По умолчанию false: такой домен — отказ.",
+            kind="choice", choices=("false", "true")),
       Field("REGRU_USERNAME", "reg.ru · логин", "Логин API reg.ru (для смены NS у регистратора)."),
       Field("REGRU_PASSWORD", "reg.ru · пароль", "Пароль API reg.ru.", secret=True)]),
     ("m3", "M3 · Cloudflare и aaPanel",
