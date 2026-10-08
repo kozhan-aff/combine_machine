@@ -21,6 +21,9 @@ from app.integrations import backorder
 from app.models.domain import AcquisitionOrder, Domain
 from app.services import acquisition, transitions
 
+from datetime import datetime as _dt, timezone as _tz
+_NOW = _dt.now(_tz.utc)   # подтверждение свежее: TTL (S3-07) не должен мешать тестам не про TTL
+
 
 def _approved(name="drop.ru") -> int:
     with db.SessionLocal() as s:
@@ -60,10 +63,10 @@ def _collapsed_pair(name="dup.ru") -> tuple[int, int, int]:
         s.refresh(d)
         tier = {"price_id": "4769", "period_id": "3442"}
         winner = AcquisitionOrder(domain_id=d.id, provider="backorder", status="ordered",
-                                  provider_order_id="111", confirmed_by_human=True, result=tier)
+                                  provider_order_id="111", confirmed_by_human=True, confirmed_at=_NOW, result=tier)
         loser = AcquisitionOrder(  # ровно то, что пишет 0010: status=failed + note + maybe_sent
             domain_id=d.id, provider="backorder", status="failed", provider_order_id="222",
-            confirmed_by_human=True,
+            confirmed_by_human=True, confirmed_at=_NOW,
             result={**tier, "error": "исход неизвестен: ReadTimeout",   # пережил схлопывание
                     "maybe_sent": True, "note": "дубль открытого заказа на домен, "
                                                 "закрыт миграцией 0010"})
@@ -186,7 +189,8 @@ def test_poll_does_not_raise_a_duplicate_into_ordered(sqlite_db, monkeypatch):
     with db.SessionLocal() as s:
         s.get(Domain, other).status = "purchasing"
         s.add(AcquisitionOrder(domain_id=other, provider="backorder", status="ordered",
-                               provider_order_id="333", confirmed_by_human=True))
+                               provider_order_id="333", confirmed_by_human=True,
+                               confirmed_at=_NOW))
         s.commit()
 
     monkeypatch.setattr(backorder.BackorderClient, "client_orders", lambda self: [

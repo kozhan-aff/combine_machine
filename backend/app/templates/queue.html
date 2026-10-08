@@ -27,6 +27,21 @@
       {% if balance <= 0 %}<b style="color:var(--bad)">{{ '%.0f'|format(balance) }} ₽ — заказ повиснет «Не оплачен», пополни счёт</b>
       {% else %}<b style="color:var(--ok)">{{ '%.0f'|format(balance) }} ₽</b>{% endif %}</span>
   {% endif %}
+  {# Каналы кроме backorder: баланс видно ДО подтверждения (S3-09), сбой — словами, не молчанием (S3-04) #}
+  {% for name, ch in channels.items() %}
+    {% if name == 'registrar' %}
+      {% if not ch.configured %}<span class="hint" title="шов под международный выкуп: провайдера регистратора выбирает оператор">регистратор (международный): не настроен — .com/.net/… пока «купил руками»</span>
+      {% elif ch.error %}<span class="hint" style="color:var(--bad)">регистратор: {{ ch.error }}</span>
+      {% elif ch.balance is not none %}<span class="hint">баланс регистратора: <b>{{ '%.2f'|format(ch.balance) }} {{ ch.currency }}</b></span>{% endif %}
+    {% else %}
+      {% if ch.error %}<span class="hint" style="color:var(--bad)">{{ name }}: баланс недоступен — {{ ch.error }}</span>
+      {% elif ch.balance is not none %}
+        <span class="hint">баланс {{ name }}:
+          {% if ch.balance <= 0 %}<b style="color:var(--bad)">{{ '%.0f'|format(ch.balance) }} {{ ch.currency }} — заказ не пройдёт, пополни счёт</b>
+          {% else %}<b style="color:var(--ok)">{{ '%.0f'|format(ch.balance) }} {{ ch.currency }}</b>{% endif %}</span>
+      {% endif %}
+    {% endif %}
+  {% endfor %}
 </div>
 
 <details class="what" style="max-width:820px; margin:0 0 14px">
@@ -61,8 +76,9 @@
       <td><span class="badge {{ _b.get(o.status, 'b-default') }}"
             title="{{ {'pending_confirm':'ждёт подтверждения человеком','ordering':'заказ отправляется провайдеру — исход пока неизвестен','ordered':'отправлен провайдеру','caught':'домен пойман','failed':'ошибка/провайдер не готов','cancelled':'заявка снята'}.get(o.status, o.status) }}{% if o.result and o.result.clear_status %} · у провайдера: {{ o.result.clear_status }}{% endif %}">{{ o.status|status_ru }}</span></td>
       <td>{% if o.confirmed %}<span class="led led-ok"></span>подтверждён
+          {% elif o.confirm_expired %}<span class="led led-todo"></span><span class="hint" style="color:var(--bad)" title="подтверждению больше суток (config ACQ_CONFIRM_TTL_HOURS): цена и тариф могли измениться — реши заново">просрочено</span>
           {% else %}<span class="led led-todo"></span><span class="hint">ждёт</span>{% endif %}</td>
-      <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} ₽{% else %}<span class="hint">—</span>{% endif %}</td>
+      <td class="num">{% if o.bid %}{{ '%.0f'|format(o.bid) }} {{ {'RUB':'₽'}.get(o.currency, o.currency) }}{% else %}<span class="hint">—</span>{% endif %}</td>
       <td>
         {% if o.dirty and o.status in ['pending_confirm', 'failed'] %}
           {# ни ставки, ни отправки. Отказ держит СЕРВИС: confirm_order и execute_confirmed_order
@@ -75,7 +91,7 @@
           <div class="deny"
                title="домен отклонён воронкой по объективному признаку (грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ; легаси v1 — реестр РКН, Safe Browsing). Портфель держится на чистой истории — этот домен не покупаем ни по какой ставке.">
             ⛔ выкуп запрещён — грязь ({{ o.dirty|reject_ru }})</div>
-        {% elif o.status == 'pending_confirm' and not o.confirmed %}
+        {% elif o.status in ['pending_confirm', 'failed'] and not o.confirmed %}
           {% if o.provider == 'backorder' %}
           {% set grid = grids.get(o.zone) %}
           {% if grid %}
@@ -98,7 +114,7 @@
              здесь было бы бессмысленным выбором. Точную сумму узнаёт и замораживает confirm_order
              (у провайдера), панель на этом шаге её ещё не знает. #}
           <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
-                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }} через optimizator? Цена фиксированная — сумму узнаем у провайдера прямо сейчас и спишем с баланса. Это денежный гейт.')">
+                onsubmit="return confirm('Подтвердить выкуп {{ o.domain }} через {{ o.provider }}? Цена фиксированная — сумму узнаем у провайдера прямо сейчас и спишем с баланса. Это денежный гейт.')">
             <button class="btn-sm btn-buy" title="optimizator: цена фиксированная — подтверждение поднимает денежный гейт, точную сумму зафиксирует confirm_order">✓ подтвердить (фикс. цена)</button></form>
           {% endif %}
         {% elif o.status == 'pending_confirm' and o.confirmed %}

@@ -217,6 +217,18 @@ def _no_live_publish_verify(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _acq_zones_open(monkeypatch):
+    """Кассовый гард зоны (S3-06) судит по белому списку v2 — а старые тесты денежного пути живут на
+    .ru-доменах v1. Для них список расширен; тесты самого гарда возвращают реальный
+    (`monkeypatch.setattr(acquisition, "_zone_allowlist", ...)`)."""
+    from app.services import acquisition
+    monkeypatch.setattr(acquisition, "_zone_allowlist",
+                        lambda: ["com", "net", "org", "co.uk", "ru", "рф", "xn--p1ai"])
+    # баланс провайдера перед отправкой (S3-09) — сеть; тесты проверки баланса подменяют её сами
+    monkeypatch.setattr(acquisition, "_balance_of", lambda client: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_paid_keys(monkeypatch):
     """Тесты герметичны к .env оператора и к сети реестров.
 
@@ -287,6 +299,8 @@ def client(monkeypatch):
     monkeypatch.setattr(BackorderClient, "client_orders", lambda self: [])
     monkeypatch.setattr(BackorderClient, "find_order", lambda self, domain: None)
     monkeypatch.setattr(BackorderClient, "order", _no_live_order)
+    from app.integrations.optimizator import OptimizatorClient
+    monkeypatch.setattr(OptimizatorClient, "balance", lambda self: 0.0)   # шапка /queue (S3-09)
     return TestClient(app)
 
 

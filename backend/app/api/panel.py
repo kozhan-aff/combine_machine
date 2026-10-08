@@ -673,7 +673,8 @@ def queue_view(request: Request):
     grids, balance, bo_err = {}, None, ""
     for o in orders:                          # зона — до похода в сеть: иначе сбой на первой
         o["zone"] = zone_of(o["domain"])      # заявке оставил бы остальные строки без зоны
-    if any(o["status"] == "pending_confirm" for o in orders):
+    if any(o["provider"] == "backorder" and o["status"] in ("pending_confirm", "failed")
+           and not o["confirmed"] for o in orders):
         c = BackorderClient()
         # Сетка и баланс — независимые сбои: упавший баланс не должен писать «подтверждать
         # нечем» над рабочим селектором ставки, и наоборот. Панель не падает ни от одного.
@@ -689,6 +690,7 @@ def queue_view(request: Request):
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
         "balance": balance, "bo_err": bo_err,
+        "channels": acquisition.channel_status(orders),
         # Сколько машина ЖДЁТ, прежде чем счесть отправку оборвавшейся. Из константы, а не числом
         # в шаблоне: очередь обязана называть оператору тот же срок, по которому судит сверка
         # (ревью Задачи 8, минор 3) — разъедься они, и человек в промежутке решит, что кнопка
@@ -987,10 +989,10 @@ def make_site_action(domain_id: int):
 
 # --- M2 очередь выкупа (структурный путь: очередь + подтверждение + отправка) ------
 @router.post("/domains/{domain_id}/queue")
-def queue_add_action(domain_id: int, provider: str = Form("backorder")):
+def queue_add_action(domain_id: int, provider: str = Form("")):
     from app.services import acquisition
     try:
-        oid = acquisition.create_order(domain_id, provider)
+        oid = acquisition.create_order(domain_id, provider or None)
         return _back("/queue", msg=f"Домен в очереди выкупа (заказ #{oid}). Подтверди — тогда уйдёт провайдеру.")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"в очередь: {e}")
@@ -1053,9 +1055,15 @@ def queue_poll_action():
                  f"заказа нет, деньги не ушли; можно повторить или снять)") if r.get("lost") else ""
         live = (f" · отправок в полёте {r['sending']} — не трогали: их прямо сейчас шлёт провайдеру "
                 f"живая отправка, вердикт за неё выносить нельзя") if r.get("sending") else ""
-        return _back("/queue", msg=f"Сверено с провайдером: {checked} · "
-                                   f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                                   f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
+        # Сбой ОДНОГО провайдера (капча backorder, таймаут) не прячем за «сверено»: он назван в ответе (S3-04)
+        errs = r.get("errors") or {}
+        bad = "".join(f" · {name}: {msg}" for name, msg in errs.items())
+        text = (f"Сверено с провайдером: {checked} · "
+                f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
+                f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
+        if errs:
+            return _back("/queue", err=f"Сверка прошла не полностью{bad}. {text}")
+        return _back("/queue", msg=text)
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"опрос статусов: {e}")
 
