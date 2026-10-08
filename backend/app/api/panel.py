@@ -51,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -161,12 +161,16 @@ def _pool_counts(db: Session, s: dict) -> dict:
 
 def _lists_view(db: Session) -> dict:
     """Блок «Списки чистоты» на /settings: что загружено + сколько кандидатов пула попало бы под отказ."""
-    from app.services import domain_lists
+    from app.services import domain_lists, jobs
     try:
-        return {"overview": domain_lists.overview(db), **domain_lists.pool_counts(db)}
+        last = jobs.last("domain_lists")      # итог последней загрузки: ошибку разбора видно не только в логе воркера
+    except Exception:  # noqa: BLE001
+        last = None
+    try:
+        return {"overview": domain_lists.overview(db), **domain_lists.pool_counts(db), "last": last}
     except Exception:  # noqa: BLE001 — таблицы нет (миграция не накачена) не должно ронять /settings
         db.rollback()
-        return {"overview": [], "hard": 0, "any": 0}
+        return {"overview": [], "hard": 0, "any": 0, "last": last}
 
 
 def _gates(db: Session) -> dict:
@@ -832,6 +836,14 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     from app.services import jobs, scoring
     ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
     return _back_here(request, err=None if ok else jobs.busy_msg("Перепроверка уже идёт"))
+
+
+@router.post("/settings/lists/refresh")
+def lists_refresh(request: Request):
+    """Ручная загрузка списков чистоты (не ждать ночи 03:30 UTC): первый прогон надо увидеть глазами."""
+    from app.services import domain_lists, jobs
+    ok = jobs.spawn("domain_lists", domain_lists.refresh)
+    return _back_here(request, err=None if ok else jobs.busy_msg("Загрузка списков уже идёт"))
 
 
 @router.post("/settings/cloudflare/sync")

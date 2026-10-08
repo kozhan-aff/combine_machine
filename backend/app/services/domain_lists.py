@@ -93,16 +93,18 @@ def _allow_sig(allow) -> str:
     return ",".join(sorted(allow))
 
 
-def load_list(db, source: str, category: str, lines, now=None) -> dict:
+def load_list(db, source: str, category: str, lines, now=None, allow_shrink: bool = False) -> dict:
     """Применить новый набор доменов категории (diff с прошлым, ОДНА транзакция — коммитит вызывающий).
-    -> {added, removed, total}. Бросает ValueError на пустой/усохший вдвое список (БД не тронута)."""
+    -> {added, removed, total}. Бросает ValueError на пустой/усохший вдвое список (БД не тронута).
+    allow_shrink — белый список зон сменился: срез файла законно сжался (убрали .com), а не отдача битая;
+    проверка на усыхание пропускается (пустой список всё равно отказ)."""
     from app.models.domain_list import DomainList
     new = set(lines)
     if not new:
         raise ValueError(f"{source}/{category}: список пуст после разбора — не применяем")
     cond = (DomainList.source == source, DomainList.category == category)
     old = set(db.scalars(select(DomainList.domain).where(*cond)))
-    if len(old) >= SHRINK_MIN and len(new) < len(old) * SHRINK_GUARD:
+    if not allow_shrink and len(old) >= SHRINK_MIN and len(new) < len(old) * SHRINK_GUARD:
         raise ValueError(f"{source}/{category}: список усох с {len(old)} до {len(new)} — похоже на "
                          "битую отдачу, прошлый набор оставлен")
     gone, fresh = sorted(old - new), sorted(new - old)
@@ -142,12 +144,14 @@ def refresh(client=None, lists=None) -> list[dict]:
             try:
                 prev = state.get(key) or {}
                 # другой белый список зон — другой срез файла: старые валидаторы не годятся
-                validators = prev if prev.get("allow") == sig else None
+                zones_changed = bool(prev) and prev.get("allow") != sig
+                validators = None if zones_changed or not prev else prev
                 path, new_v = client.download(list_url(source, remote), validators)
                 it = iter_ut1(path) if source == "ut1" else iter_plain(path)
                 names = (n for n in (normalize(x, allow) for x in it) if n)
                 with SessionLocal() as db:
-                    res.update(load_list(db, source, cat, names, now=datetime.now(timezone.utc)))
+                    res.update(load_list(db, source, cat, names, now=datetime.now(timezone.utc),
+                                           allow_shrink=zones_changed))
                     db.commit()
                 state[key] = {**new_v, "allow": sig}
                 st_mod.set_list_state(state)
@@ -167,7 +171,7 @@ def refresh(client=None, lists=None) -> list[dict]:
             jobs.report(run, done=i + 1, total=len(todo), current=key)
         bad = [r for r in results if r["status"] == "error"]
         jobs.report(run, message=f"списки чистоты: {len(results) - len(bad)} из {len(results)} ок"
-                                 + (f", ошибки: {', '.join(r['list'] for r in bad)}" if bad else ""))
+                                 + (f", ошибки: {'; '.join(r['list'] + ' — ' + r.get('error', '') for r in bad)}"[:600] if bad else ""))
     return results
 
 

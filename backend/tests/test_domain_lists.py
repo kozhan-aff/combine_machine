@@ -394,3 +394,55 @@ def test_scheduler_job_swallows_already_running(monkeypatch):
         raise jobs.AlreadyRunning("domain_lists")
     monkeypatch.setattr(domain_lists, "refresh", busy)
     scheduler.refresh_domain_lists()                                   # не падает
+
+
+# --------------------------------------------------------------- фикс-раунд 1 (ut1)
+def test_load_list_allow_shrink_skips_only_the_shrink_guard(monkeypatch):
+    monkeypatch.setattr(domain_lists, "SHRINK_MIN", 4)
+    _fill("ut1", "adult", [f"d{i}.com" for i in range(10)])
+    with db.SessionLocal() as s:
+        r = domain_lists.load_list(s, "ut1", "adult", ["d0.com", "d1.com"], allow_shrink=True)
+        s.commit()
+        with pytest.raises(ValueError, match="пуст"):
+            domain_lists.load_list(s, "ut1", "adult", [], allow_shrink=True)
+    assert r["removed"] == 8 and _count(source="ut1", category="adult") == 2
+
+
+def test_refresh_after_narrowing_zone_allowlist_applies_shrunk_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(domain_lists, "SHRINK_MIN", 4)
+    rows = [f"a{i}.com" for i in range(6)] + [f"b{i}.net" for i in range(2)]
+    domain_lists.refresh(_FakeClient(tmp_path, lambda u: rows), ONE_LIST)
+    assert _count() == 8
+    st.update_settings(tld_allowlist=["net"])                          # оператор убрал com
+    r = domain_lists.refresh(_FakeClient(tmp_path, lambda u: rows + ["new.net"]), ONE_LIST)
+    assert r[0]["status"] == "updated" and _count() == 3               # усохло 8 -> 3, но это не битая отдача
+
+
+def test_refresh_same_zones_still_guards_against_shrink(tmp_path, monkeypatch):
+    monkeypatch.setattr(domain_lists, "SHRINK_MIN", 4)
+    domain_lists.refresh(_FakeClient(tmp_path, lambda u: [f"a{i}.com" for i in range(10)]), ONE_LIST)
+    r = domain_lists.refresh(_FakeClient(tmp_path, lambda u: ["a0.com"]), ONE_LIST)
+    assert r[0]["status"] == "error" and _count() == 10
+
+
+def test_refresh_error_text_lands_in_job_message(tmp_path):
+    from app.services import jobs
+    domain_lists.refresh(_FakeClient(tmp_path, lambda u: "boom"), ONE_LIST)
+    assert "blp:gambling" in jobs.last("domain_lists")["message"] and "ошибки" in jobs.last("domain_lists")["message"]
+
+
+def test_settings_page_shows_last_list_refresh_error(client, tmp_path):
+    assert "загрузок ещё не было" in client.get("/settings").text
+    domain_lists.refresh(_FakeClient(tmp_path, lambda u: "boom"), ONE_LIST)
+    html = client.get("/settings").text
+    assert "последняя загрузка" in html and "blp:gambling" in html
+    assert 'action="/settings/lists/refresh"' in html
+
+
+def test_lists_refresh_button_spawns_domain_lists_job(client, monkeypatch):
+    from app.services import jobs
+    seen = []
+    monkeypatch.setattr(jobs, "spawn", lambda name, target: seen.append((name, target)) or True)
+    r = client.post("/settings/lists/refresh", follow_redirects=False)
+    assert r.status_code in (302, 303) and seen[0][0] == "domain_lists"
+    assert seen[0][1] is domain_lists.refresh

@@ -228,7 +228,11 @@
     <div class="go">
       {% if lists.overview %}
         {% for o in lists.overview %}<span class="hint" title="обновлено {{ o.updated_at }}">{{ o.source }}/{{ o.category }}: <b>{{ o.n }}</b></span> {% endfor %}
-      {% else %}<span class="hint">списки ещё не загружены — первая загрузка ночью (03:30 UTC) после запуска воркера; пока сигнал не пишется («не знаем» ≠ «чисто»)</span>{% endif %}
+      {% else %}<span class="hint">списки ещё не загружены — первая загрузка ночью (03:30 UTC) после запуска воркера или нажми «загрузить сейчас»; пока сигнал не пишется («не знаем» ≠ «чисто»)</span>{% endif %}
+    </div>
+    <div class="go">
+      {% if lists.last %}<span class="hint" title="{{ lists.last.status }}">последняя загрузка: <b>{{ lists.last.status }}</b> — {{ lists.last.message or lists.last.error or '' }}</span>{% else %}<span class="hint">загрузок ещё не было</span>{% endif %}
+      <button class="btn" type="submit" form="lists-refresh" title="скачать списки сейчас, не дожидаясь ночи">Загрузить сейчас</button>
     </div>
   </div>
   <div class="station">
@@ -246,6 +250,7 @@
 </form>
 <form id="settings-reset" method="post" action="/settings/reset"
       onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
+<form id="lists-refresh" method="post" action="/settings/lists/refresh"></form>
 
 <script>
 const W_KEYS = ['history_cleanliness','topical_fit','age','rd','authority','anchor_quality','traffic_history'];
