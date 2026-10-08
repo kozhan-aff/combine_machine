@@ -12,6 +12,7 @@
 Санитайзер тела страницы (content._sanitize) сюда не входит: builder получает УЖЕ чистый HTML.
 """
 import hashlib
+import hmac
 import html
 import re
 from dataclasses import dataclass, field
@@ -285,10 +286,25 @@ def build_assets(domain: str, lang: str, brand: str = "", home_title: str = "",
     return files
 
 
+def indexnow_key(domain: str) -> str | None:
+    """Ключ IndexNow сайта: 32 hex = HMAC-SHA256(INDEXNOW_SECRET, сид домена). Детерминирован без БД
+    и без общего ключа на портфель (ключ-на-всех связал бы сайты). Сам ключ публичен (протокол требует
+    файл `/<key>.txt`), но без секрета установки схему не угадать и по чужому ключу не сопоставить
+    сайты портфеля (инвариант независимости). Секрет пуст -> None: файла-ключа и пинга нет."""
+    from app.config import settings
+    secret = (settings.INDEXNOW_SECRET or "").strip()
+    if not secret:
+        return None
+    return hmac.new(secret.encode(), _seed(domain).encode(), hashlib.sha256).hexdigest()[:32]
+
+
 def build_site_files(domain: str, url_paths: list) -> dict:
-    """robots.txt (со ссылкой на sitemap) и sitemap.xml по ОПУБЛИКОВАННЫМ страницам."""
+    """robots.txt (со ссылкой на sitemap), sitemap.xml по ОПУБЛИКОВАННЫМ страницам и файл-ключ IndexNow."""
     d = _seed(domain)
+    key = indexnow_key(domain)
     out = {"robots.txt": f"User-agent: *\nAllow: /\n\nSitemap: https://{d}/sitemap.xml\n"}
+    if key:
+        out[f"{key}.txt"] = key
     if url_paths:
         locs = "".join(f"<url><loc>{_e(f'https://{d}{page_href(p)}')}</loc></url>"
                        for p in sorted(set(url_paths), key=lambda x: (x != "/", x)))

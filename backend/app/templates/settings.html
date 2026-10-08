@@ -208,7 +208,57 @@
       <label title="pending delete .com/.net/.org — ~134 тыс. строк в день"><input type="checkbox" name="dropcatch" {{ 'checked' if s.sources_enabled.dropcatch }}> DropCatch <span class="hint">(включать после проверки ToS)</span></label>
       <label title="официальный список дропов .uk/.co.uk"><input type="checkbox" name="nominet" {{ 'checked' if s.sources_enabled.nominet }}> Nominet</label>
       <label title="удалённые .mx — свободны к регистрации"><input type="checkbox" name="mx" {{ 'checked' if s.sources_enabled.mx }}> registry.mx</label>
+      <label title="аукционы просроченных доменов NameSilo (typeId=3): дата создания сохраняется; нужен NAMESILO_API_KEY"><input type="checkbox" name="namesilo_auction" {{ 'checked' if s.sources_enabled.namesilo_auction }}> NameSilo · аукционы <span class="hint">(нужен ключ NameSilo; ставка — только через гейт выкупа)</span></label>
       <label title="генератор EMD по наборам ключей ниже"><input type="checkbox" name="emd" {{ 'checked' if s.sources_enabled.emd }}> EMD</label>
+    </div>
+  </div>
+  <div class="station">
+    <div class="plate">Списки чистоты — <b>UT1 и blocklistproject</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Раз в сутки воркер скачивает списки доменов по категориям (казино, adult, фишинг,
+      малварь, наркотики) и хранит только зоны из белого списка. Домен кандидата, найденный в списке, получает
+      мягкий сигнал: в инбоксе — пометка с категорией, пакетное одобрение его не берёт (решаешь ты).
+      Жёсткий отказ (<code>list_hit</code>) — только по казино и adult и только если включить ниже: сначала
+      посмотри счётчик и первые попадания руками, recall списков на реальных дропах не измерен.
+      Источники: UT1 blacklists (© Université Toulouse 1 Capitole, CC BY-SA 4.0), blocklistproject (Unlicense).</div></details>
+    <div class="go">
+      <label title="по умолчанию выкл: сначала проверь попадания глазами"><input type="checkbox" name="hard_reject_lists" {{ 'checked' if s.hard_reject_lists }}> жёсткий отказ по казино / adult</label>
+      <span class="hint">под отказ попало бы кандидатов пула: <b>{{ lists.hard }}</b>; в любых списках: <b>{{ lists.any }}</b> / {{ counts.total }}</span>
+    </div>
+    <div class="go">
+      {% if lists.overview %}
+        {% for o in lists.overview %}<span class="hint" title="обновлено {{ o.updated_at }}">{{ o.source }}/{{ o.category }}: <b>{{ o.n }}</b></span> {% endfor %}
+      {% else %}<span class="hint">списки ещё не загружены — первая загрузка ночью (03:30 UTC) после запуска воркера или нажми «загрузить сейчас»; пока сигнал не пишется («не знаем» ≠ «чисто»)</span>{% endif %}
+    </div>
+    <div class="go">
+      {% if lists.last %}<span class="hint" title="{{ lists.last.status }}">последняя загрузка: <b>{{ lists.last.status }}</b> — {{ lists.last.message or lists.last.error or '' }}</span>{% else %}<span class="hint">загрузок ещё не было</span>{% endif %}
+      <button class="btn" type="submit" form="lists-refresh" title="скачать списки сейчас, не дожидаясь ночи">Загрузить сейчас</button>
+    </div>
+  </div>
+  <div class="station">
+    <div class="plate">Ранги доменов — <b>авторитетность без Ahrefs</b></div>
+    <details class="what"><summary>зачем это</summary>
+      <div class="what-body">Раз в месяц воркер читает потоком файл рангов Common Crawl (web graph) и сохраняет
+      ранги только кандидатов пула. Перцентиль pagerank домена нормируется между двумя порогами ниже и становится
+      компонентом «авторитетность» вместо Ahrefs DR. «Нет в графе» — это данные (авторитетность 0); «ещё не
+      загружено» — нет данных (нейтральные 0.5, DR Ahrefs подставляется, если он есть). Majestic Million — только
+      положительный бонус: нет в топ-1M ничего не значит. Источники: Common Crawl (Terms of Use Common Crawl),
+      Majestic Million (CC BY 3.0, majestic.com).</div></details>
+    <div class="go">
+      <label title="перцентиль pagerank, с которого авторитетность больше 0"><span class="hint">ноль при перцентиле ≤</span>
+        <input type="number" name="rank_pct_low" step="0.01" min="0" max="1" value="{{ s.rank_pct_low }}" style="width:5em"></label>
+      <label title="перцентиль pagerank, с которого авторитетность = 1"><span class="hint">максимум при перцентиле ≥</span>
+        <input type="number" name="rank_pct_full" step="0.01" min="0" max="1" value="{{ s.rank_pct_full }}" style="width:5em"></label>
+      <label title="по умолчанию выкл"><input type="checkbox" name="rank_majestic" {{ 'checked' if s.rank_majestic }}> бонус Majestic Million</label>
+    </div>
+    <div class="go">
+      {% if ranks.overview %}
+        {% for o in ranks.overview %}<span class="hint" title="срез {{ o.release }}, обновлено {{ o.updated_at }}">{{ o.source }}: <b>{{ o.n }}</b>{% if o.source == 'cc' %} (с рангом {{ o.ranked }}){% endif %}</span> {% endfor %}
+      {% else %}<span class="hint">ранги не загружены — первая загрузка по кнопке или ночью 2-го числа (04:30 UTC); пока авторитетность — «нет данных»</span>{% endif %}
+    </div>
+    <div class="go">
+      {% if ranks.last %}<span class="hint" title="{{ ranks.last.status }}">последняя загрузка: <b>{{ ranks.last.status }}</b> — {{ ranks.last.message or ranks.last.error or '' }}</span>{% else %}<span class="hint">загрузок ещё не было</span>{% endif %}
+      <button class="btn" type="submit" form="ranks-refresh" title="прочитать файл рангов сейчас (гигабайты, идёт минуты)">Загрузить сейчас</button>
     </div>
   </div>
   <div class="station">
@@ -226,6 +276,8 @@
 </form>
 <form id="settings-reset" method="post" action="/settings/reset"
       onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
+<form id="lists-refresh" method="post" action="/settings/lists/refresh"></form>
+<form id="ranks-refresh" method="post" action="/settings/ranks/refresh"></form>
 
 <script>
 const W_KEYS = ['history_cleanliness','topical_fit','age','rd','authority','anchor_quality','traffic_history'];

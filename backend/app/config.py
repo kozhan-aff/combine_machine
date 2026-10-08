@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # на https://optimizator.ru без правки кода.
     OPTIMIZATOR_BASE_URL: str = "http://optimizator.ru"
 
+    # NameSilo (международный регистратор, канал «registrar»). Ключ ходит ТОЛЬКО в query и маскируется
+    # везде (diagnostics._scrub, log_scrub). BASE_URL по умолчанию — /apibatch: автоматизация на /api
+    # нарушает ToS (docs/v2/research/namesilo-api-spec.md §1). SANDBOX=true -> sandbox.namesilo.com/api.
+    NAMESILO_API_KEY: str = ""
+    NAMESILO_BASE_URL: str = "https://www.namesilo.com/apibatch"
+    NAMESILO_SANDBOX: bool = False
+    NAMESILO_CONTACT_ID: str = ""                     # contact_id профиля регистранта (contactAdd на сайте)
+    NAMESILO_ALLOW_PREMIUM: bool = False              # премиум-домены (premium=1) — только по явному флагу оператора
+
     # M2: сколько часов живёт подтверждение выкупа (S3-07). Дальше исполнить старый confirm нельзя —
     # человек подтверждает заново (и цена/тариф перезамораживаются).
     ACQ_CONFIRM_TTL_HOURS: int = 24
@@ -90,6 +99,10 @@ class Settings(BaseSettings):
     # Optional path to the panel's cert (/www/server/panel/ssl/certificate.pem copied
     # locally) to pin TLS instead of verify=False. Recommended for remote panels.
     AAPANEL_CA_BUNDLE: str = ""
+    # Режим «через SSH-туннель» (сайдкар aapanel-tunnel в docker-compose, профиль tunnel): панель
+    # видит запросы с 127.0.0.1 VPS, whitelist по публичному IP бокса не нужен. Значение с экрана
+    # «Ключи и сервисы» приходит строкой ("true"/"false") — разбирает integrations.aapanel.tunnel_mode().
+    AAPANEL_TUNNEL: str = ""
     VPS_ORIGIN_IP: str = ""
     # M3: выпускать Cloudflare Origin CA на каждый домен и ставить его в aaPanel (SetSSL), чтобы
     # перевести зону в Full(strict). ВЫКЛ по умолчанию: ручка SetSSL и права токена («SSL and
@@ -104,13 +117,23 @@ class Settings(BaseSettings):
         # pydantic на пустом bool падает ValidationError и роняет backend/worker/alembic при импорте.
         return False if isinstance(v, str) and not v.strip() else v
 
-    # gsc
+    # Индексация (M5). GSC URL Inspection — основной источник «в индексе ли страница» (service account:
+    # JSON ключа целиком; аккаунт добавлен в свойство GSC сайта). GSC_API_URL — хост Search Console API.
     GSC_SERVICE_ACCOUNT_JSON: str = ""
+    GSC_API_URL: str = "https://searchconsole.googleapis.com"
+    # IndexNow — бесплатный пинг Bing/Yandex/др. о новых страницах. Ключа-секрета нет: ключ сайта
+    # выводится из домена и лежит в корне сайта файлом <key>.txt (так задумано протоколом).
+    # INDEXNOW_SECRET — секрет установки: ключ сайта = HMAC(секрет, домен). Пусто — IndexNow выключен
+    # (ни файла-ключа, ни пинга): ключ без секрета угадывается и сцепляет сайты портфеля.
+    INDEXNOW_SECRET: str = ""
+    INDEXNOW_ENABLED: bool = True
+    INDEXNOW_URL: str = "https://api.indexnow.org/indexnow"
 
     # llm — LiteLLM (локальный бокс, OpenAI-совместимый, без ключа)
     LLM_BASE_URL: str = "http://192.168.1.77:4000"   # ponytail: dev-box default, override via .env
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "mistral"                        # mistral(=mistral-large) | mistral-small | ollama/<m>
+    LLM_THINK: bool = False                           # ollama/*: False -> шлём "think": false (без рассуждений); True -> модель думает как задумано
     LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
     LLM_CLASSIFY_FALLBACK_MODEL: str = ""             # W5: запасная модель при 401/403/404/429/5xx основной; пусто -> без запасной
 
@@ -132,6 +155,17 @@ class Settings(BaseSettings):
     DNS_RESOLVER: str = ""
     SPAMHAUS_DQS_KEY: str = ""
     WEBRISK_API_KEY: str = ""          # Google Web Risk (замена Safe Browsing); пусто -> W3 «не настроено»
+    # Списки чистоты доменов (services/domain_lists.py): базовые адреса скачивания. Менять нужно, только
+    # если оператор завёл свой зеркальный сервер; ключей у обоих источников нет.
+    DOMAIN_LISTS_UT1_URL: str = "https://dsi.ut-capitole.fr/blacklists/download"
+    DOMAIN_LISTS_BLP_URL: str = "https://blocklistproject.github.io/Lists/alt-version"
+    # Ранги доменов (services/domain_ranks.py): бесплатный заменитель Ahrefs DR. CC_RANKS_URL — прямой адрес
+    # файла domain-ranks.txt.gz; пусто — свежий срез определяется по CC_GRAPHINFO_URL (список срезов
+    # Common Crawl). Срез НЕ зашит в код: он устаревает каждые три месяца. MAJESTIC_URL — Majestic Million.
+    CC_RANKS_URL: str = ""
+    CC_GRAPHINFO_URL: str = "https://index.commoncrawl.org/graphinfo.json"
+    CC_GRAPH_BASE_URL: str = "https://data.commoncrawl.org/projects/hyperlinkgraph"
+    MAJESTIC_URL: str = "https://downloads.majestic.com/majestic_million.csv"
 
     # опц. локальные сервисы (тот же бокс)
     BROWSERLESS_URL: str = ""

@@ -325,7 +325,7 @@ def _stage_publish(cap):
 
 
 def _stage_check_index(cap):
-    """Сайты с published-страницами -> check_index (site: через SearXNG).
+    """Сайты с published-страницами -> check_index (GSC URL Inspection; без него — site: через SearXNG).
 
     Страницы, про которые проверка ничего не выяснила (движки SearXNG не ответили — CAPTCHA/
     лимит), считаем ОТДЕЛЬНО: сайт тут ни при чём, сломан поисковик, и молчаливое «сделано N»
@@ -337,7 +337,7 @@ def _stage_check_index(cap):
     from app.services import publish
     from datetime import datetime, timezone
 
-    done, errs, blind = 0, [], 0
+    done, errs, blind, gsc_fb = 0, [], 0, 0
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         # Ротация (S7-16): раньше `ORDER BY Site.id LIMIT cap` брал одни и те же первые сайты, а
@@ -354,6 +354,11 @@ def _stage_check_index(cap):
             out = publish.check_index(sid, only_due=True)
             done += 1
             blind += sum(1 for st in (out.get("pages") or {}).values() if st == "unknown")
+            if out.get("gsc_note"):
+                # GSC отвалился (нет доступа к свойству/квота/битый ключ) и проверка ушла в SearXNG:
+                # без отметки оператор думал бы, что основной источник работает. Причину — в errs.
+                gsc_fb += 1
+                errs.append(f"site#{sid}: GSC недоступен, проверено через SearXNG — {out['gsc_note']}")
             if out.get("all_unknown"):
                 # движки молчат (CAPTCHA/лимит): дальнейшие запросы только раздражают поисковики —
                 # стадию откладываем до следующего свипа, страницы вернутся по cooldown
@@ -361,7 +366,12 @@ def _stage_check_index(cap):
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
     # engines_down уже виден оператору через index_unknown («индекс не выяснен»)
-    return done, errs, {"index_unknown": blind} if blind else {}
+    counts = {}
+    if blind:
+        counts["index_unknown"] = blind
+    if gsc_fb:
+        counts["gsc_fallback"] = gsc_fb
+    return done, errs, counts
 
 
 # порядок конвейера — единственный источник истины оркестратора
@@ -385,7 +395,7 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
 # `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат),
 # `provision_awaiting` — сколько сайтов ждут смены NS у регистратора (не успех, не отказ — F19).
 COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
-            "index_unknown": "индекс не выяснен", "provision_awaiting": "провижн: ждёт NS"}
+            "index_unknown": "индекс не выяснен", "gsc_fallback": "GSC недоступен", "provision_awaiting": "провижн: ждёт NS"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:

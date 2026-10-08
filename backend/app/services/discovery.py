@@ -29,8 +29,9 @@ from app.services.domain_filters import (canonical_domain, emd_candidates, name_
 
 logger = logging.getLogger(__name__)
 
-AUTO_SOURCES = ("dropcatch", "nominet", "mx")
-_SOURCE_RU = {"dropcatch": "DropCatch", "nominet": "Nominet (.uk)", "mx": "registry.mx", "emd": "EMD"}
+AUTO_SOURCES = ("dropcatch", "nominet", "mx", "namesilo_auction")
+_SOURCE_RU = {"dropcatch": "DropCatch", "nominet": "Nominet (.uk)", "mx": "registry.mx", "emd": "EMD",
+              "namesilo_auction": "NameSilo (аукционы)"}
 _CHUNK = 5000        # psycopg: не больше 65 535 параметров на запрос — IN и вставку режем чанками
 _DR_BATCH = 1000     # public/domain-rating-free: до 1000 целей за запрос
 _DR_PAUSE = 1.0      # с между пачками DR: лимит Ahrefs — 60 запросов в минуту
@@ -47,7 +48,9 @@ def _clients() -> dict:
     from app.integrations.dropcatch import DropCatchClient
     from app.integrations.nominet import NominetClient
     from app.integrations.registry_mx import RegistryMxClient
-    return {"dropcatch": DropCatchClient, "nominet": NominetClient, "mx": RegistryMxClient}
+    from app.integrations.namesilo import NameSiloClient
+    return {"dropcatch": DropCatchClient, "nominet": NominetClient, "mx": RegistryMxClient,
+            "namesilo_auction": NameSiloClient}
 
 
 def _collect(enabled: dict, st: dict, run=None, state: dict | None = None) -> tuple[dict, dict, dict, list]:
@@ -246,6 +249,8 @@ def _new_domain(name: str, c: dict, dr):
     from app.models.domain import Domain
     return Domain(domain=name, source=c.get("source"), lane=c.get("lane"),
                   acquire_deadline=c.get("acquire_deadline"), market_lang=c.get("market_lang"),
+                  # лот аукциона: дата создания (возраст) и текущая ставка; у прочих источников их нет
+                  whois_created=c.get("created"), acquire_price=c.get("bid"),
                   dr=dr)
 
 

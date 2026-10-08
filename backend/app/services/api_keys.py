@@ -61,6 +61,24 @@ GROUPS = [
             secret=True),
       Field("DNS_RESOLVER", "DNS-резолвер для Spamhaus", "IP своего резолвера: публичные 8.8.8.8/1.1.1.1 "
             "Spamhaus блокирует. Пусто — системный резолвер.", kind="ip"),
+      Field("DOMAIN_LISTS_UT1_URL", "Списки чистоты · UT1 (адрес)", "Базовый адрес скачивания UT1 blacklists "
+            "(CC BY-SA 4.0), по умолчанию https://dsi.ut-capitole.fr/blacklists/download. Ключа нет. "
+            "Менять только для своего зеркала.", kind="url"),
+      Field("DOMAIN_LISTS_BLP_URL", "Списки чистоты · blocklistproject (адрес)", "Базовый адрес "
+            "blocklistproject (Unlicense), по умолчанию https://blocklistproject.github.io/Lists/alt-version. "
+            "Ключа нет. Менять только для своего зеркала.", kind="url"),
+      Field("CC_RANKS_URL", "Ранги доменов · Common Crawl (адрес файла)", "Прямой адрес файла "
+            "…-domain-ranks.txt.gz нужного среза Common Crawl. Пусто — свежий срез берётся автоматически из "
+            "списка срезов. Ключа нет. Файл читается потоком, на диск не пишется.", kind="url"),
+      Field("CC_GRAPHINFO_URL", "Ранги доменов · список срезов Common Crawl", "Адрес graphinfo.json со "
+            "списком срезов web graph, по умолчанию https://index.commoncrawl.org/graphinfo.json. Менять "
+            "только для своего зеркала.", kind="url"),
+      Field("CC_GRAPH_BASE_URL", "Ранги доменов · база файлов графа", "Базовый адрес файлов web graph, по "
+            "умолчанию https://data.commoncrawl.org/projects/hyperlinkgraph. Менять только для зеркала.",
+            kind="url"),
+      Field("MAJESTIC_URL", "Ранги доменов · Majestic Million (адрес)", "Список топ-1M Majestic "
+            "(CC BY 3.0), по умолчанию https://downloads.majestic.com/majestic_million.csv. Ключа нет. "
+            "Нужен только для необязательного бонуса к авторитетности.", kind="url"),
       Field("APARSER_URL", "A-Parser · адрес", "Адрес A-Parser, например http://192.168.1.77:9091.",
             kind="url"),
       Field("APARSER_API_KEY", "A-Parser · пароль API", "Пароль API из настроек A-Parser.", secret=True)]),
@@ -77,6 +95,20 @@ GROUPS = [
       Field("OPTIMIZATOR_API_KEY", "optimizator.ru · ключ API", "Ключ API из личного кабинета optimizator.ru.",
             secret=True),
       Field("OPTIMIZATOR_NICD", "optimizator.ru · анкета (nic-d)", "Номер анкеты nic.ru вида 5014480/NIC-D."),
+      Field("NAMESILO_API_KEY", "NameSilo · ключ API", "namesilo.com → Account → API Manager → Generate. "
+            "Ключ привязывается к IP бокса (до 5 IP), показывается один раз. Ходит только в query и "
+            "маскируется в логах, ошибках и БД. Пинг на /diag — getAccountBalance, денег не тратит.",
+            secret=True),
+      Field("NAMESILO_BASE_URL", "NameSilo · адрес API", "По умолчанию https://www.namesilo.com/apibatch "
+            "(автоматизация обязана ходить на /apibatch). Менять не нужно.", kind="url"),
+      Field("NAMESILO_SANDBOX", "NameSilo · песочница", "true — sandbox.namesilo.com/api (ключ песочницы "
+            "выдают отдельно, письмом в поддержку). По умолчанию false.", kind="choice",
+            choices=("false", "true")),
+      Field("NAMESILO_CONTACT_ID", "NameSilo · ID контакта", "contact_id профиля регистранта (создаётся на "
+            "сайте NameSilo: Account → Contact Profiles). Пусто — профиль по умолчанию."),
+      Field("NAMESILO_ALLOW_PREMIUM", "NameSilo · премиум-домены", "true — разрешить покупку доменов с "
+            "premium=1 (цена в десятки раз выше обычной). По умолчанию false: такой домен — отказ.",
+            kind="choice", choices=("false", "true")),
       Field("REGRU_USERNAME", "reg.ru · логин", "Логин API reg.ru (для смены NS у регистратора)."),
       Field("REGRU_PASSWORD", "reg.ru · пароль", "Пароль API reg.ru.", secret=True)]),
     ("m3", "M3 · Cloudflare и aaPanel",
@@ -91,6 +123,10 @@ GROUPS = [
             "на VPS, НЕ поле token. IP бокса должен быть в whitelist API aaPanel.", secret=True),
       Field("AAPANEL_CA_BUNDLE", "aaPanel · сертификат (путь)", "Путь к certificate.pem панели внутри "
             "контейнера: пиннинг TLS вместо verify=False. Пусто — без пиннинга."),
+      Field("AAPANEL_TUNNEL", "aaPanel · через SSH-туннель", "true — панель доступна через сайдкар "
+            "aapanel-tunnel (docker compose --profile tunnel up -d), AAPANEL_URL = https://aapanel-tunnel:18839, "
+            "whitelist по IP бокса не нужен (в панели достаточно 127.0.0.1). Требует AAPANEL_CA_BUNDLE. "
+            "Инструкция: docs/v2/aapanel-tunnel-runbook.md.", kind="choice", choices=("false", "true")),
       Field("VPS_ORIGIN_IP", "IP origin-сервера (VPS)", "IPv4 VPS с aaPanel: на него смотрит proxied A-запись "
             "в Cloudflare.", kind="ip")]),
     ("m45", "M4/M5 · контент, SERP, индексация",
@@ -99,9 +135,13 @@ GROUPS = [
             "http://192.168.1.77:4000.", kind="url"),
       Field("LLM_API_KEY", "LLM · ключ", "Ключ LiteLLM/провайдера. На локальном боксе ключ не нужен.",
             secret=True),
-      Field("LLM_MODEL", "LLM · модель для текстов", "Имя модели в LiteLLM: mistral, mistral-small, ollama/…"),
+      Field("LLM_MODEL", "LLM · модель для текстов", "Имя модели в LiteLLM: mistral, mistral-small, ollama/…. "
+            "Рекомендуется ollama/qwen3.5:9b-q8_0 (на боксе есть и ollama/hf.co/unsloth/Qwen3.8-27B-GGUF:Q3_K_M — имя сверь по /v1/models LiteLLM)."),
+      Field("LLM_THINK", "LLM · режим рассуждений (ollama)", "Выкл (по умолчанию) — для ollama/* шлётся "
+            "think:false: ответ за ~1 с вместо ~30 с и пустого текста. Вкл — модель рассуждает.",
+            kind="choice", choices=("false", "true")),
       Field("LLM_CLASSIFY_MODEL", "LLM · модель-классификатор", "Модель для темы/языка снимков истории. "
-            "Пусто — берётся модель для текстов."),
+            "Пусто — берётся модель для текстов. Рекомендуется тот же ollama/qwen3.5:9b-q8_0."),
       Field("SEARXNG_URL", "SearXNG · адрес", "Локальный мета-поиск, например http://192.168.1.77:8080. "
             "Нужен для проверки индексации (site:).", kind="url"),
       Field("SEO_DATA_PROVIDER", "Провайдер SERP/ключевых слов", "Какой платный провайдер использовать, "
@@ -115,8 +155,21 @@ GROUPS = [
             secret=True),
       Field("GSC_SERVICE_ACCOUNT_JSON", "Google Search Console · JSON сервис-аккаунта",
             "Содержимое JSON-ключа сервис-аккаунта целиком (Google Cloud → IAM → Service accounts → Keys). "
-            "Аккаунт нужно добавить в свойство GSC. Вставь JSON целиком; в Firefox текст виден при вводе.",
-            secret=True, kind="json", max_len=MAX_LEN_JSON)]),
+            "Аккаунт нужно добавить в свойство GSC каждого сайта (доменное sc-domain: или префикс URL). "
+            "Вставь JSON целиком; в Firefox текст виден при вводе. Основной источник проверки индексации "
+            "(URL Inspection, 2000 запросов/сут на сайт); пусто — проверка идёт через SearXNG.",
+            secret=True, kind="json", max_len=MAX_LEN_JSON),
+      Field("GSC_API_URL", "Google Search Console · адрес API", "По умолчанию "
+            "https://searchconsole.googleapis.com. Менять не нужно.", kind="url"),
+      Field("INDEXNOW_ENABLED", "IndexNow · пинг после публикации", "true (по умолчанию) — после публикации "
+            "сообщать поисковикам о новых страницах. Ключ сайта выводится из домена, лежит в корне сайта "
+            "файлом <ключ>.txt и деплоится вместе с ним.", kind="choice", choices=("true", "false")),
+      Field("INDEXNOW_SECRET", "IndexNow · секрет установки", "Любая длинная случайная строка "
+            "(например openssl rand -hex 32). Ключ каждого сайта = HMAC от неё и домена, поэтому по "
+            "публичному файлу-ключу нельзя вычислить схему и связать сайты портфеля. Не менять после "
+            "запуска: ключи сайтов сменятся. Пусто — IndexNow выключен.", secret=True),
+      Field("INDEXNOW_URL", "IndexNow · адрес API", "По умолчанию https://api.indexnow.org/indexnow. "
+            "Менять не нужно.", kind="url")]),
     ("infra", "Инфраструктура",
      "Самообновление из git и опциональные локальные сервисы.",
      [Field("GITHUB_TOKEN", "GitHub · токен", "Fine-grained PAT с правом чтения Contents (Settings → "

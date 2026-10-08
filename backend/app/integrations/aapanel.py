@@ -157,6 +157,25 @@ def _ok(res, what: str, also: str | None = None):
     raise RuntimeError(f"aaPanel {what}: {msg}" + (f" [{also}]" if also else ""))
 
 
+def tunnel_mode() -> bool:
+    """AAPANEL_TUNNEL=1|true|yes|on. Значение с экрана ключей — СТРОКА, `bool("false")` было бы True."""
+    return str(settings.AAPANEL_TUNNEL or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tunnel_host_ok(host: str) -> bool:
+    """В туннельном режиме AAPANEL_URL обязан вести на ВНУТРЕННИЙ адрес (имя сервиса compose,
+    loopback, частный IP, host.docker.internal). Публичный адрес = оператор включил флаг, но
+    запросы пойдут в обход туннеля прямо в интернет и снова упрутся в whitelist (и копят бан)."""
+    import ipaddress
+    if host in {"localhost", "host.docker.internal"} or "." not in host:   # одно слово = имя сервиса
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 class AaPanelClient(BaseClient):
     def __init__(self):
         if not settings.AAPANEL_URL:
@@ -173,6 +192,19 @@ class AaPanelClient(BaseClient):
         from urllib.parse import urlparse
         host = (urlparse(settings.AAPANEL_URL).hostname or "").lower()
         ca = getattr(settings, "AAPANEL_CA_BUNDLE", "") or ""
+        self.tunnel = tunnel_mode()
+        if self.tunnel:
+            # Через туннель серт панели (CN=*.aapanel.com) не совпадёт с именем сервиса, поэтому
+            # hostname-проверка выключена (см. ниже), и ЕДИНСТВЕННАЯ защита от подмены — пиннинг
+            # по CA-файлу. Значит verify=False здесь недопустим даже для 127.0.0.1.
+            if not _tunnel_host_ok(host):
+                raise RuntimeError(
+                    f"AAPANEL_TUNNEL=1, но AAPANEL_URL ведёт на внешний адрес {host!r} — туннель обойдён. "
+                    "Укажи https://aapanel-tunnel:18839 (имя сервиса compose) или выключи AAPANEL_TUNNEL.")
+            if not ca:
+                raise RuntimeError(
+                    "AAPANEL_TUNNEL=1 требует AAPANEL_CA_BUNDLE (certificate.pem панели) — без пиннинга "
+                    "TLS через туннель не проверяется вовсе; verify=False в этом режиме запрещён.")
         if ca:
             # Fail fast with a readable error: load_verify_locations raises a bare
             # FileNotFoundError without the path, useless in the /diag banner.
@@ -190,7 +222,7 @@ class AaPanelClient(BaseClient):
             ctx = ssl.create_default_context(cafile=ca)
             ctx.check_hostname = False
             verify: object = ctx
-        elif host in {"127.0.0.1", "localhost", "::1"}:
+        elif host in {"127.0.0.1", "localhost", "::1"} and not self.tunnel:
             verify = False
         else:
             raise RuntimeError(
@@ -265,7 +297,13 @@ class AaPanelClient(BaseClient):
         try:
             res = self._post("/ajax?action=GetTaskCount")
         except httpx.HTTPError as e:
-            raise RuntimeError(f"aaPanel недоступна: {type(e).__name__} {e}".strip()) from e
+            hint = ""
+            if getattr(self, "tunnel", False) and _connect_only(e):
+                # туннель не поднят: нет ключа/known_hosts (сайдкар вышел сам) либо VPS не отвечает по SSH
+                hint = (" — SSH-туннель не отвечает: проверь `docker compose --profile tunnel ps` и "
+                        "`docker compose logs aapanel-tunnel` (ключ, known_hosts, доступ к VPS), "
+                        "см. docs/v2/aapanel-tunnel-runbook.md")
+            raise RuntimeError(f"aaPanel недоступна: {type(e).__name__} {e}".strip() + hint) from e
         if isinstance(res, dict):
             _ok(res, "GetTaskCount")
             return True

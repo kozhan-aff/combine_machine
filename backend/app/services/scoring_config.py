@@ -44,12 +44,23 @@ DECISION = {
 
 # Дефолты для рантайм-настроек (services/settings.py сидит из них при первом обращении).
 MIN_AGE_YEARS = 3.0                                          # W5: возраст по старшей дате; моложе — too_young
-SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True}  # dropcatch — после проверки ToS оператором
+SOURCES_ENABLED = {"dropcatch": False, "nominet": True, "mx": True, "emd": True, "namesilo_auction": False}  # dropcatch — после проверки ToS оператором
 MAX_WHOIS_PER_RUN = 200        # кап whois:43 через A-Parser за прогон (зоны без RDAP; RDAP не капается)
 
 # ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
 MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом
 TLD_ALLOWLIST = ["com", "net", "org", "online", "xyz", "site", "co.uk", "mx", "co", "si", "nl", "in"]
+# ---- списки чистоты доменов (services/domain_lists.py, W2c-ut1) ----
+# Категории, по которым попадание в список даёт ЖЁСТКИЙ отказ, когда включён `hard_reject_lists`
+# (по умолчанию выключен: recall списков на прошлых казино не измерен, первые 50 попаданий оператор
+# сначала смотрит глазами — docs/v2/research/open-source-2026-10-07.md §4). Остальные категории
+# (phishing, malware, drugs) шумные — только мягкий сигнал и закрытый пакет одобрения.
+HARD_LIST_CATEGORIES = ("gambling", "adult")
+# ---- ранги доменов (services/domain_ranks.py, W2d-cc-ranks): authority вместо Ahrefs DR ----
+# Перцентиль pagerank в графе Common Crawl, линейно: ниже RANK_PCT_LOW -> 0, от RANK_PCT_FULL -> 1.
+# ponytail: стартовые пороги; калибровать на ~200 доменах с известным Ahrefs DR (open-source-2026-10-07 §3).
+RANK_PCT_LOW = 0.60
+RANK_PCT_FULL = 0.95
 # M2: зона -> канал выкупа (S3-01). Ключ — зона как у белого списка (`com`, `co.uk`), значение — один из
 # ACQ_CHANNELS. Нет записи -> «registrar» (международный шов; пока провайдер не выбран — «не настроен»).
 # Наследие v1 оставлено явно: backorder продаёт только .ru/.рф (а они вне белого списка v2 и закрыты гардом зоны).

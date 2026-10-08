@@ -20,8 +20,9 @@ def test_weights_actually_move_the_score(sqlite_db):
     """Ползунок обязан менять РЕЗУЛЬТАТ, а не только показания на экране: ровно этим болели
     пороги до фикса 2026-07 (двигали превью-счётчики, но не статус)."""
     base = scoring.compute_score(SIG)["score"]
-    dr_only = scoring.compute_score(SIG, {**ZERO, "authority": 1.0})["score"]
-    assert dr_only == 0.0                   # DR не дан, а он теперь ЕДИНСТВЕННЫЙ критерий
+    dr_only = scoring.compute_score({**SIG, "dr": 0.0}, {**ZERO, "authority": 1.0})["score"]
+    assert dr_only == 0.0                   # DR=0 известен, а он теперь ЕДИНСТВЕННЫЙ критерий
+    assert scoring.compute_score(SIG, {**ZERO, "authority": 1.0})["score"] == 0.5   # DR не дан — «нет данных'
     assert base > 0.5                       # с дефолтными весами тот же домен — сильный
     rd_only = scoring.compute_score(SIG, {**ZERO, "rd": 1.0})["score"]
     assert rd_only > 0.9                    # RD=3000 = RD_FULL -> почти полный балл

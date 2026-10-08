@@ -119,3 +119,82 @@ def test_thinking_only_answer_falls_back(monkeypatch):
     c, seen = _client(monkeypatch, [_ok("", reasoning_content="..."), _ok("json")],
                       model="ollama/q", fallback="mistral-small")
     assert c.complete("s", "p") == "json" and len(seen) == 2
+
+
+# --- W2a: think:false для ollama/* ---
+
+def _plain(monkeypatch, model, think=False):
+    monkeypatch.setattr(settings, "LLM_THINK", think)
+    c = LlmClient()
+    seen = []
+
+    def once(method, url, **kw):
+        seen.append(kw["json"])
+        return _ok("ok")
+    c.request = once
+    c._request_once = once
+    return c, seen
+
+
+def test_think_false_sent_for_ollama(monkeypatch):
+    c, seen = _plain(monkeypatch, "x")
+    c.complete("s", "p", model="ollama/qwen3.5:9b-q8_0")
+    assert seen[0]["think"] is False
+
+
+def test_no_think_for_mistral(monkeypatch):
+    c, seen = _plain(monkeypatch, "x")
+    c.complete("s", "p", model="mistral")
+    assert "think" not in seen[0]
+
+
+def test_llm_think_setting_disables_override(monkeypatch):
+    c, seen = _plain(monkeypatch, "x", think=True)
+    c.complete("s", "p", model="ollama/qwen3.5:9b-q8_0")
+    assert "think" not in seen[0]
+
+
+def test_probe_uses_think_false(monkeypatch):
+    c, seen = _plain(monkeypatch, "x")
+    c.model = "ollama/qwen3.5:9b-q8_0"
+    c._request_once = lambda m, u, **kw: (seen.append(kw["json"]), _ok("ok"))[1]
+    assert c.probe() is True and seen[0]["think"] is False
+
+
+def test_classify_client_ollama_gets_think_false(monkeypatch):
+    c, seen = _client(monkeypatch, [_ok("{}")], model="ollama/qwen3.5:9b-q8_0")
+    c.complete("s", "p")
+    assert seen[0]["think"] is False and seen[0]["reasoning_effort"] == "none"
+
+
+def test_empty_content_with_reasoning_is_clear_error(monkeypatch):
+    c, _ = _plain(monkeypatch, "x")
+    c.request = lambda *a, **kw: _ok("", reasoning_content="думаю")
+    with pytest.raises(LlmEmptyContent):
+        c.complete("s", "p", model="ollama/q")
+
+
+# --- переопределение с экрана ключей приходит строкой ---
+
+@pytest.mark.parametrize("raw,expect_think", [("false", False), ("False", False), ("true", True)])
+def test_think_override_string_from_panel(monkeypatch, key_overrides, raw, expect_think):
+    api_keys = key_overrides
+    # без _plain: он выставляет settings.LLM_THINK напрямую и заглушил бы переопределение;
+    # monkeypatch.undo() тут нельзя — он откатил бы и autouse-рубильники сети/ключей
+    c = LlmClient()
+    seen = []
+
+    def once(method, url, **kw):
+        seen.append(kw["json"])
+        return _ok("ok")
+    c.request = once
+    c._request_once = once
+    monkeypatch.setattr(api_keys, "_snapshot", lambda: {"LLM_THINK": raw})
+    c.complete("s", "p", model="ollama/qwen3.5:9b-q8_0")
+    assert ("think" in seen[0]) is (not expect_think)
+
+
+def test_think_false_sent_for_hf_model(monkeypatch):
+    c, seen = _plain(monkeypatch, "x")
+    c.complete("s", "p", model="hf.co/unsloth/Qwen3.8-27B-GGUF:Q3_K_M")
+    assert seen[0]["think"] is False

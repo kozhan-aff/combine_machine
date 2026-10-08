@@ -51,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists", "domain_ranks")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -159,6 +159,34 @@ def _pool_counts(db: Session, s: dict) -> dict:
             "manual": n(Domain.score >= s["manual_review_at"], Domain.score < s["approve_at"])}
 
 
+def _ranks_view(db: Session) -> dict:
+    """Блок «Ранги доменов» на /settings: что загружено + итог последней загрузки (ошибку разбора видно в панели)."""
+    from app.services import domain_ranks, jobs
+    try:
+        last = jobs.last("domain_ranks")
+    except Exception:  # noqa: BLE001
+        last = None
+    try:
+        return {"overview": domain_ranks.overview(db), "last": last}
+    except Exception:  # noqa: BLE001 — таблицы нет (миграция не накачена) не должно ронять /settings
+        db.rollback()
+        return {"overview": [], "last": last}
+
+
+def _lists_view(db: Session) -> dict:
+    """Блок «Списки чистоты» на /settings: что загружено + сколько кандидатов пула попало бы под отказ."""
+    from app.services import domain_lists, jobs
+    try:
+        last = jobs.last("domain_lists")      # итог последней загрузки: ошибку разбора видно не только в логе воркера
+    except Exception:  # noqa: BLE001
+        last = None
+    try:
+        return {"overview": domain_lists.overview(db), **domain_lists.pool_counts(db), "last": last}
+    except Exception:  # noqa: BLE001 — таблицы нет (миграция не накачена) не должно ронять /settings
+        db.rollback()
+        return {"overview": [], "hard": 0, "any": 0, "last": last}
+
+
 def _gates(db: Session) -> dict:
     """Счётчики «ждёт тебя» у трёх человеческих гейтов (для экрана Автопилот + Пульта)."""
     from app.models.domain import AcquisitionOrder
@@ -252,7 +280,7 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
     from sqlalchemy import case
     from app.services import jobs
     from app.services.scoring import (blind_reason, emd_newreg, history_evidence,
-                                      history_note, history_verdict, stale_donors, topic_far,
+                                      history_note, history_verdict, list_hits, stale_donors, topic_far,
                                       DROP_GRACE)
     from app.services.settings import get_settings
     from app.services.transitions import dirty_reason, zone_closed
@@ -316,6 +344,8 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
         "page_size": INBOX_PAGE, "langs": langs, "f_lang": lang or "",
         # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
+        # попадание в списки чистоты UT1/blocklistproject (мягкий сигнал): id -> категории
+        "list_hit_cats": {d.id: list_hits(d) for d in inbox + ready if list_hits(d)},
         # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
         "newreg_ids": {d.id for d in inbox if emd_newreg(d)},
         # Р2: «пакет от скора» по умолчанию = «порог сильного кандидата» из /settings
@@ -544,7 +574,7 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
     tld_text = draft.get("tld_allowlist")
     brand_text = draft.get("brand_tokens")
     return templates.TemplateResponse(request, "settings.html", {
-        "active": "settings", "s": s, "counts": _pool_counts(db, s),
+        "active": "settings", "s": s, "counts": _pool_counts(db, s), "lists": _lists_view(db), "ranks": _ranks_view(db),
         "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
         "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
         "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
@@ -822,6 +852,23 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     return _back_here(request, err=None if ok else jobs.busy_msg("Перепроверка уже идёт"))
 
 
+@router.post("/settings/lists/refresh")
+def lists_refresh(request: Request):
+    """Ручная загрузка списков чистоты (не ждать ночи 03:30 UTC): первый прогон надо увидеть глазами."""
+    from app.services import domain_lists, jobs
+    ok = jobs.spawn("domain_lists", domain_lists.refresh)
+    return _back_here(request, err=None if ok else jobs.busy_msg("Загрузка списков уже идёт"))
+
+
+@router.post("/settings/ranks/refresh")
+def ranks_refresh(request: Request):
+    """Ручная загрузка рангов (Common Crawl + Majestic, если включён): файл читается потоком и может идти
+    долго — фоновая задача с прогрессом, не ждём ночи/месяца."""
+    from app.services import domain_ranks, jobs
+    ok = jobs.spawn("domain_ranks", domain_ranks.refresh)
+    return _back_here(request, err=None if ok else jobs.busy_msg("Загрузка рангов уже идёт"))
+
+
 @router.post("/settings/cloudflare/sync")
 def cloudflare_sync(request: Request):
     """Ручной запуск read-only Cloudflare sync (P0 — НИ ОДНОЙ CF-мутации, только наблюдение
@@ -1037,9 +1084,14 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
     from app.services import acquisition
     try:
         r = acquisition.confirm_order(order_id, bid_rub or None)
-        bid = r.get("bid_rub")
-        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт)"
-                                   f"{f', ставка {bid:.0f} ₽' if bid else ''}. Можно отправлять.")
+        bid, cur = r.get("bid_rub"), r.get("currency")
+        if not bid:
+            tail = ""
+        elif cur in (None, "RUB"):
+            tail = f", ставка {bid:.0f} ₽"
+        else:      # аукцион NameSilo: полное списание (потолок + продление) в валюте котировки
+            tail = f", к списанию до {bid:.2f} {cur} (потолок + продление)"
+        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт){tail}. Можно отправлять.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
 
@@ -1340,7 +1392,11 @@ def check_index_action(site_id: int):
             return _back(f"/sites/{site_id}", msg="Нет опубликованных страниц для проверки.")
         # Вердикт — через labels.index_ru: сырое `unknown` во флеше оператор прочтёт как «нет».
         s = ", ".join(f"{k}: {_index_ru(v)}" for k, v in pages.items())
-        return _back(f"/sites/{site_id}", msg=f"Индексация — {s}")
+        src = sorted(set((r.get("sources") or {}).values()))
+        tail = f" (источник: {', '.join(src)})" if src else ""
+        if r.get("gsc_note"):   # GSC отвалился -> проверка ушла в SearXNG; причину показываем, не глотаем
+            tail += f". GSC недоступен: {r['gsc_note']}"
+        return _back(f"/sites/{site_id}", msg=f"Индексация — {s}{tail}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"индексация: {e}")
 
@@ -1432,8 +1488,11 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                   spam_anchor_max: float | None = Form(None),
                   tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
                   emd_sets: str | None = Form(None), v2_lists: str = Form(""),
+                  hard_reject_lists: str = Form(""),
+                  rank_pct_low: float | None = Form(None), rank_pct_full: float | None = Form(None),
+                  rank_majestic: str = Form(""),
                   dropcatch: str = Form(""), nominet: str = Form(""),
-                  mx: str = Form(""), emd: str = Form(""),
+                  mx: str = Form(""), emd: str = Form(""), namesilo_auction: str = Form(""),
                   w_history_cleanliness: float | None = Form(None),
                   w_topical_fit: float | None = Form(None), w_age: float | None = Form(None),
                   w_rd: float | None = Form(None), w_authority: float | None = Form(None),
@@ -1460,8 +1519,13 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                            units_daily_cap=units_daily_cap,
                            spam_anchor_max=spam_anchor_max, tld_allowlist=tld_allowlist,
                            brand_tokens=brand_tokens, emd_sets=emd_sets,
-                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
-                           weights=weights or None)
+                           sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd),
+                                            "namesilo_auction": bool(namesilo_auction)},
+                           weights=weights or None,
+                           # чекбокс без маркера v2_lists (старый шаблон, curl) настройку не трогает
+                           hard_reject_lists=bool(hard_reject_lists) if v2_lists else None,
+                           rank_pct_low=rank_pct_low, rank_pct_full=rank_pct_full,
+                           rank_majestic=bool(rank_majestic) if v2_lists else None)
     except ValueError as e:
         # Ничего не сохранено (update_settings падает до commit). Ввод оператора не теряем: редирект
         # унёс бы его JSON в никуда — отдаём форму заново с его текстом и причиной.
@@ -1469,10 +1533,14 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                           "approve_at": approve_at, "manual_review_at": manual_review_at,
                           "max_whois_per_run": max_whois_per_run, "min_dr": min_dr,
                           "max_links_per_run": max_links_per_run, "max_deep_per_run": max_deep_per_run,
-                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max},
+                          "units_floor": units_floor, "spam_anchor_max": spam_anchor_max,
+                          "hard_reject_lists": bool(hard_reject_lists) if v2_lists else None,
+                          "rank_pct_low": rank_pct_low, "rank_pct_full": rank_pct_full,
+                          "rank_majestic": bool(rank_majestic) if v2_lists else None},
                  "weights": weights,
                  "sources": {"dropcatch": bool(dropcatch), "nominet": bool(nominet),
-                             "mx": bool(mx), "emd": bool(emd)},
+                             "mx": bool(mx), "emd": bool(emd),
+                             "namesilo_auction": bool(namesilo_auction)},
                  # без маркера v2_lists этих полей в форме не было — не подменяем их пустотой
                  "tld_allowlist": tld_allowlist if v2_lists else None,
                  "brand_tokens": brand_tokens if v2_lists else None}

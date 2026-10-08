@@ -17,6 +17,7 @@ backorder заказывается живьём (uniservice.order). execute ид
 Денежный гейт (confirm → TTL → execute, баланс, maybe_sent) ОДИН на все каналы.
 """
 _PROVIDERS = {"backorder", "optimizator", "registrar"}
+AUCTION_SOURCE = "namesilo_auction"     # Domain.source: лот аукциона просроченных NameSilo (ставка, не регистрация)
 # Открытые статусы заказа — `OPEN_ORDER_STATUSES` в app/models/domain.py (оттуда же собран
 # предикат уникального индекса: код и БД обязаны говорить об одном и том же).
 
@@ -365,6 +366,7 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         provider = o.provider
         d = db.get(Domain, o.domain_id)
         domain = d.domain if d else None
+        source = d.source if d else None
         # ГРЯЗЬ НЕ ПОКУПАЕМ — и на самом гейте тоже, не только на входе в очередь (create_order).
         # Заявка на грязный домен могла быть заведена ДО этого фикса: тогда она уже лежит в
         # /queue, и именно ЗДЕСЬ, на кнопке «✓ подтвердить выкуп», человек тратит деньги.
@@ -418,13 +420,32 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         if domain is None:
             raise ValueError(f"order {order_id}: домен не найден")
         try:
-            q = get_registrar().price(domain)
+            # аукцион просроченных NameSilo: котировка = текущая ставка (регистрация там недоступна)
+            q = (get_registrar().price(domain, auction=True) if source == AUCTION_SOURCE
+                 else get_registrar().price(domain))
         except (RegistrarError, RegistrarAmbiguous) as e:
             raise ValueError(f"registrar: {e}"[:200]) from None
         if not q.currency:
             raise ValueError(f"registrar: в котировке «{domain}» не указана валюта — "
                              f"сумму заказа заморозить нельзя")
         tier = {"price": q.amount, "price_id": None, "period_id": None, "currency": q.currency}
+        if source == AUCTION_SOURCE:
+            # Лот аукциона: списание = ПОТОЛОК ставки (решение человека, bid_rub; не ниже текущей) + год
+            # продления (спека §6). Замораживаем ИМЕННО эту сумму, чтобы гейт, баланс и экран считали
+            # полное списание, а не текущую ставку. Потолок и продление — в result (для execute).
+            try:
+                renew = get_registrar().renew_price(domain)
+            except (RegistrarError, RegistrarAmbiguous) as e:
+                raise ValueError(f"registrar: {e}"[:200]) from None
+            if renew.currency != q.currency:
+                raise ValueError(f"registrar: валюта продления ({renew.currency}) не совпала с валютой ставки "
+                                 f"({q.currency}) — сумму списания не посчитать")
+            ceiling = float(bid_rub) if bid_rub else float(q.amount)
+            if ceiling < float(q.amount):
+                raise ValueError(f"registrar: потолок ставки {ceiling:.2f} {q.currency} ниже текущей "
+                                 f"{float(q.amount):.2f} — подними потолок")
+            tier["price"] = ceiling + float(renew.amount)
+            tier["auction"] = {"auction_ceiling": ceiling, "renew": float(renew.amount)}
 
     from datetime import datetime, timezone
     with SessionLocal() as db:
@@ -436,7 +457,8 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
             o.cost = tier["price"]                   # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
             o.cost_currency = tier.get("currency") or "RUB"   # тиры backorder — рубли
             o.result = {**(o.result or {}),
-                        "price_id": tier["price_id"], "period_id": tier["period_id"]}
+                        "price_id": tier["price_id"], "period_id": tier["period_id"],
+                        **(tier.get("auction") or {})}
         elif bid_rub is not None:
             o.cost = bid_rub
             o.cost_currency = o.cost_currency or "RUB"
@@ -563,7 +585,8 @@ def execute_confirmed_order(order_id: int) -> dict:
         #    разблокируется и реально оплаченный заказ можно спрятать. Снимает флаг только
         #    правда провайдера — успешный find_order/order или poll_orders.
         saved = {k: v for k, v in (o.result or {}).items()
-                 if k in ("price_id", "period_id", "maybe_sent")}
+                 if k in ("price_id", "period_id", "maybe_sent", "registrar_ctx",
+                                    "auction_ceiling", "renew")}
         try:
             if o.provider == "backorder":
                 from app.integrations.backorder import AmbiguousSend, BackorderClient
@@ -681,7 +704,8 @@ def execute_confirmed_order(order_id: int) -> dict:
                 # (Registrar.register: домен уже наш -> успех без второго списания).
                 from app.integrations.registrar import RegistrarAmbiguous, get_registrar
                 r = get_registrar()
-                q = r.price(d.domain)
+                is_auction = d.source == AUCTION_SOURCE
+                q = r.price(d.domain, auction=True) if is_auction else r.price(d.domain)
                 if o.cost is not None and (not q.currency or q.currency != (o.cost_currency or "RUB")):
                     # валюта котировки не совпала с подтверждённой (или не указана): потолок цены
                     # проверить нечем — НЕ молчим, отказ ДО отправки
@@ -691,10 +715,26 @@ def execute_confirmed_order(order_id: int) -> dict:
                                                   f"потолок цены не проверить; подтверди заказ заново"}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
-                if o.cost is not None and float(q.amount) > float(o.cost):
+                # лот аукциона: o.cost = потолок + продление, а сравнивать текущую ставку надо с ПОТОЛКОМ
+                ceiling = float(saved["auction_ceiling"]) if is_auction and saved.get("auction_ceiling") is not None else None
+                if is_auction and ceiling is None:
+                    o.status = "failed"
+                    o.result = {**saved, "error": "в заказе нет замороженного потолка ставки — подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                if is_auction:
+                    rn = r.renew_price(d.domain)
+                    if rn.currency != q.currency or float(rn.amount) > float(saved.get("renew") or 0):
+                        o.status = "failed"
+                        o.result = {**saved, "error": f"цена продления у регистратора изменилась "
+                                                      f"({float(rn.amount):.2f} {rn.currency}) — подтверди заказ заново"}
+                        db.commit()
+                        return {"order_id": order_id, "status": "failed", **o.result}
+                limit = ceiling if is_auction else (float(o.cost) if o.cost is not None else None)
+                if limit is not None and float(q.amount) > limit:
                     o.status = "failed"
                     o.result = {**saved, "error": f"цена у регистратора выросла: {float(q.amount):.2f} "
-                                                  f"{q.currency} > подтверждённых {float(o.cost):.2f} — "
+                                                  f"{q.currency} > подтверждённых {limit:.2f} — "
                                                   f"подтверди заказ заново"}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
@@ -705,11 +745,19 @@ def execute_confirmed_order(order_id: int) -> dict:
                     o.result = {**saved, "error": short}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
+                # контекст для сверки неизвестного исхода (баланс ДО и момент отправки) — пишется
+                # вместе с maybe_sent; _poll_registrar судит по нему правдой регистратора
+                ctx = {"balance_before": float(bal.amount) if bal is not None else None,
+                       "sent_at": datetime.now(timezone.utc).isoformat()}
                 try:
-                    res = r.register(d.domain, 1)
+                    if is_auction:       # ставка на аукционе: потолок — подтверждённая человеком сумма
+                        res = r.bid(d.domain, ceiling)
+                    else:
+                        res = r.register(d.domain, 1)
                 except RegistrarAmbiguous as e:
                     o.status = "failed"
-                    o.result = {**saved, "error": f"исход неизвестен: {_scrub_text(e)}", "maybe_sent": True}
+                    o.result = {**saved, "error": f"исход неизвестен: {_scrub_text(e)}", "maybe_sent": True,
+                                "registrar_ctx": {**ctx, "auction": is_auction}}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
                 saved.pop("maybe_sent", None)     # регистратор ответил успехом: неопределённости нет
@@ -1010,6 +1058,78 @@ def _poll_optimizator(deadline: float) -> dict:
     return {"checked": matched, "conflicts": conflicts, "sending": sending}
 
 
+def _poll_registrar(deadline: float) -> dict:
+    """Сверка неизвестного исхода канала «registrar» (NameSilo) правдой регистратора: строки `failed` с
+    `maybe_sent` и застрявшие `ordering` с протухшим claim. Только ЧТЕНИЕ (getDomainInfo -> listOrders ->
+    баланс), ничего не отправляет. registered -> `ordered`; «не зарегистрирован (выверено)» -> флаг
+    maybe_sent снят, но подтверждение ЧЕЛОВЕКА сброшено (повтор — только новым confirm); иначе строка
+    остаётся как есть (отмена заблокирована). Записываем ТОЛЬКО через `_settle` (ABA-гард)."""
+    import time
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.integrations.registrar import get_registrar
+    from app.models.domain import Domain, AcquisitionOrder
+
+    out = {"checked": 0, "conflicts": 0, "sending": 0, "lost": 0, "pending": 0}
+    with SessionLocal() as db:
+        rows = db.execute(select(AcquisitionOrder).where(
+            AcquisitionOrder.provider == "registrar",
+            AcquisitionOrder.status.in_(("failed", "ordering")))).scalars().all()
+        rows = [o for o in rows if o.status == "ordering" or (o.result or {}).get("maybe_sent")]
+        if not rows:
+            return out
+        r = get_registrar()
+        if not getattr(r, "configured", False) or not hasattr(r, "reconcile"):
+            return out
+        for o in rows:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"общий дедлайн опроса ({POLL_DEADLINE_SEC:.0f} с) вышел — остальные "
+                                   f"строки разберёт следующая сверка")
+            if o.status == "ordering" and not _claim_expired(o):
+                out["sending"] += 1                       # живой execute в полёте — не трогаем
+                continue
+            d = db.get(Domain, o.domain_id)
+            if d is None:
+                continue
+            ctx = (o.result or {}).get("registrar_ctx") or {}
+            if ctx.get("auction"):
+                # итог ставки на аукционе машина не выверяет (домен не «регистрируется» сразу) — только вручную
+                verdict, note = "unknown", "ставка на аукционе: итог проверь на сайте NameSilo"
+            else:
+                try:
+                    since = datetime.fromisoformat(ctx["sent_at"])
+                except (KeyError, ValueError, TypeError):
+                    since = o.claimed_at or datetime.now(timezone.utc)
+                if since.tzinfo is None:
+                    since = since.replace(tzinfo=timezone.utc)
+                verdict, note = r.reconcile(d.domain, since, ctx.get("balance_before"))
+            base = {k: v for k, v in (o.result or {}).items() if k != "maybe_sent"}
+            if verdict == "registered":
+                values = {"status": "ordered", "claimed_at": None,
+                          "ordered_at": o.ordered_at or datetime.now(timezone.utc),
+                          "result": {**base, "note": f"восстановлено сверкой: {note}"}}
+            elif verdict == "not_registered":
+                values = {"status": "failed", "claimed_at": None, "confirmed_by_human": False,
+                          "result": {**base, "error": note}}
+                out["lost"] += 1
+            else:
+                if o.status == "ordering":                # труп без вердикта: деньги могли уйти — отмена заперта
+                    values = {"status": "failed", "claimed_at": None,
+                              "result": {**base, "maybe_sent": True,
+                                         "error": f"отправка оборвалась, исход не выяснен: {note}"}}
+                else:
+                    out["pending"] += 1
+                    continue
+            if not _settle(db, o, **values):
+                db.rollback()
+                out["conflicts"] += 1
+                continue
+            db.commit()
+            out["checked"] += 1
+    return out
+
+
 def poll_orders() -> dict:
     """Синхронизировать отправленные заказы с правдой провайдера (по кнопке, не автопилотом).
 
@@ -1041,7 +1161,8 @@ def poll_orders() -> dict:
     # Провайдеры НЕЗАВИСИМЫ (S3-04): лежащий backorder (капча, 404 тарифов) не должен ни ронять опрос,
     # ни держать восстановление optimizator; сбой каждого — в `errors`, и оператор видит его в UI.
     for name, fn in (("backorder", _poll_backorder),
-                     ("optimizator", lambda: _poll_optimizator(deadline))):
+                     ("optimizator", lambda: _poll_optimizator(deadline)),
+                     ("registrar", lambda: _poll_registrar(deadline))):
         try:
             part = fn()
         except Exception as e:  # noqa: BLE001 — сбой одного провайдера не топит опрос второго
@@ -1190,6 +1311,9 @@ def list_orders() -> list[dict]:
                         "result": ({k: (_scrub_text(v) if isinstance(v, str) else v)
                                     for k, v in o.result.items()} if isinstance(o.result, dict) else o.result),
                         "domain_id": o.domain_id,
+                        # источник и текущая ставка лота — для формы потолка аукциона в очереди
+                        "source": d.source if d is not None else None,
+                        "ask": float(d.acquire_price) if d is not None and d.acquire_price is not None else None,
                         "dirty": dirty_reason(d) if d is not None else None,
                         "stuck": o.status == "ordering" and _claim_expired(o)})
     return out

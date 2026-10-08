@@ -1,7 +1,7 @@
 """M5 — Publish & Monitor. Deploy ONLY 'edited' pages -> docroot (aaPanel file API).
 
 Hard gate: a page publishes ONLY from status 'edited' (never 'draft'). Then index
-monitoring via SearXNG `site:` (GSC excluded from v1 — manual/free check). See PLAN §2.
+monitoring: GSC URL Inspection -> SearXNG `site:` как вспомогательный; IndexNow-пинг после публикации. See PLAN §2.
 """
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, unquote
@@ -281,6 +281,7 @@ def publish_site(site_id: int) -> dict:
         db.commit()
         if blocked is not None:
             raise blocked
+        _indexnow_ping(domain, published, written_files, warnings)
         out = {"domain": domain, "pages": published, "written": written,
                "failed": failed, "unverified": unverified, "warnings": warnings,
                "files": written_files}
@@ -289,6 +290,33 @@ def publish_site(site_id: int) -> dict:
         else:
             out["status"] = "partial" if published else "failed"
         return out
+
+
+def _indexnow_ping(domain: str, published: list, written_files: list, warnings: list) -> None:
+    """Пинг IndexNow о только что вышедших страницах. Best-effort: сбой — предупреждение, публикацию
+    не откатывает и не меняет ни статус страницы, ни сайта. Не пингуем, если файл-ключ не лёг на
+    сайт (поисковик не сможет подтвердить владение) или функция выключена."""
+    from app.config import settings
+    from app.integrations.indexnow import IndexNowClient, IndexNowError
+    from app.services import site_builder
+
+    if not published or not settings.INDEXNOW_ENABLED:
+        return
+    key = site_builder.indexnow_key(domain)
+    if not key:
+        warnings.append("IndexNow: не задан INDEXNOW_SECRET — пинг пропущен")
+        return
+    if f"{key}.txt" not in written_files:
+        warnings.append("IndexNow: файл-ключ не записан на сайт — пинг пропущен")
+        return
+    host = site_builder._seed(domain)
+    urls = [f"https://{host}{site_builder.page_href(p)}" for p in published]
+    try:
+        IndexNowClient().submit(host, key, urls)
+    except IndexNowError as e:
+        warnings.append(str(e)[:200])
+    except Exception as e:  # noqa: BLE001 — пинг не имеет права ронять уже состоявшуюся публикацию
+        warnings.append(f"IndexNow: {type(e).__name__}: {e}"[:200])
 
 
 # Перепроверка индексации (S7-16): ждать нечего у только что опубликованной, а вот страница,
@@ -310,35 +338,72 @@ def index_due(page, now) -> bool:
     return now - ck >= (INDEX_RECHECK_INDEXED if page.index_status == "indexed" else INDEX_RECHECK)
 
 
+# Суточная квота GSC URL Inspection на свойство — 2000; оставляем запас на ручные проверки в консоли.
+GSC_SITE_DAILY_CAP = 1900
+
+
+def _gsc_used_today(db, site_id: int, now) -> int:
+    """Сколько GSC-вопросов по сайту задано с UTC-полуночи. Строки GSC отличает непустой
+    coverage_state (SearXNG его не пишет) — отдельная таблица счётчика ради этого не нужна."""
+    from sqlalchemy import select, func
+    from app.models.site import Page
+    from app.models.monitoring import IndexHistory
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return db.execute(select(func.count(IndexHistory.id)).join(Page, Page.id == IndexHistory.page_id)
+                      .where(Page.site_id == site_id, IndexHistory.coverage_state.is_not(None),
+                             IndexHistory.checked_at >= midnight)).scalar_one()
+
+
+def _searxng_verdict(sx, domain: str, url_path: str) -> str:
+    """`site:`-проверка через SearXNG -> indexed | not_indexed | unknown (правила — в check_index)."""
+    q = f"site:{domain}{url_path if url_path != '/' else ''}"
+    data = sx.search_full(q)                # результаты и здоровье движков — из ОДНОГО ответа
+    results = data.get("results") or []
+    dead = data.get("unresponsive_engines") or []
+    if any(_same_page(r.get("url"), domain, url_path) for r in results):
+        return "indexed"
+    if not results and dead:
+        return "unknown"
+    return "not_indexed"
+
+
 def check_index(site_id: int, only_due: bool = False) -> dict:
-    """SearXNG `site:` check for each published page -> pages.index_status + index_history.
+    """Проверка индексации каждой published-страницы -> pages.index_status + index_history.
+
+    Источники по порядку: Google Search Console URL Inspection (если задан ключ сервис-аккаунта и
+    свойство сайта доступно) -> SearXNG `site:` как вспомогательный (GSC не настроен / нет доступа к
+    свойству / исчерпана квота / сбой). Ничего не отвечает — `unknown`, а не выдуманное «нет».
 
     Стадия крутится АВТОПИЛОТОМ (orchestrator._stage_check_index), поэтому каждая её неточность
     — не единичная ошибка, а вымысел, который машина регулярно и молча пишет в IndexHistory.
-    Три исхода, и «не знаю» больше не притворяется «нет» (аудит F15):
+    Три исхода, и «не знаю» не притворяется «нет» (аудит F15):
 
-      indexed     — в выдаче есть ИМЕННО эта страница (хост И путь, см. _same_page).
-      not_indexed — поисковик по этому запросу ОТВЕТИЛ (выдача непустая, либо пустая при живых
-                    движках), и нашей страницы у него нет. Это знание.
-      unknown     — выдача пуста И хоть один движок не ответил (CAPTCHA/лимит). Спросить не
-                    удалось; «не нашли» и «не спросили» — разные вещи.
+      indexed     — GSC: вердикт PASS; SearXNG: в выдаче ИМЕННО эта страница (хост И путь, _same_page).
+      not_indexed — источник ОТВЕТИЛ и страницы в индексе нет (GSC: NEUTRAL/FAIL; SearXNG: выдача
+                    непустая либо пустая при живых движках). Это знание.
+      unknown     — спросить не удалось: GSC без вердикта (PARTIAL/пусто); SearXNG — пустая выдача
+                    И хоть один движок не ответил (CAPTCHA/лимит).
 
-    Почему `unknown` только при ПУСТОЙ выдаче, а не при любом мёртвом движке: на живом боксе часть
-    движков лежит ПОСТОЯННО (сверка 2026-07-14: brave — «too many requests», startpage — CAPTCHA),
-    и правило «умер любой → не знаю» означало бы, что машина не скажет `not_indexed` НИКОГДА —
-    та же ложь, вид сбоку. Непустая выдача доказывает, что запрос обслужен: движок ответил и
-    нашей страницы не показал.
+    Почему у SearXNG `unknown` только при ПУСТОЙ выдаче, а не при любом мёртвом движке: часть движков
+    лежит ПОСТОЯННО (brave — «too many requests», startpage — CAPTCHA), и правило «умер любой → не
+    знаю» означало бы, что `not_indexed` не прозвучит НИКОГДА. Непустая выдача доказывает, что запрос
+    обслужен.
 
-    Застрять в `unknown` навсегда страница не может: выборка ниже берёт ВСЕ published-страницы
-    независимо от index_status — следующая проверка переспросит. Мёртвый SearXNG — беда
-    поисковика, а не приговор сайту.
+    GSC-строка истории несёт coverage_state (текст Google) — по ней же считается суточная квота.
+    Статус сайта: published -> monitoring только когда страница реально `indexed`; больше ничего
+    check_index не двигает (ни страниц, ни домена).
+
+    Застрять в `unknown` навсегда страница не может: выборка берёт ВСЕ published-страницы независимо
+    от index_status — следующая проверка (по cooldown) переспросит.
     """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.domain import Domain
     from app.models.monitoring import IndexHistory
+    from app.integrations import gsc as gsc_mod
     from app.integrations.searxng import SearxngClient
+    from app.services.site_builder import page_href
 
     with SessionLocal() as db:
         site = db.get(Site, site_id)
@@ -352,30 +417,44 @@ def check_index(site_id: int, only_due: bool = False) -> dict:
         now = datetime.now(timezone.utc)
         if only_due:                      # автопилот: только те, у кого вышел cooldown (S7-16)
             pages = [p for p in pages if index_due(p, now)]
-        out = {}
+        gsc_on = gsc_mod.configured()
+        gsc = gsc_mod.GscClient() if gsc_on else None
+        gsc_left = GSC_SITE_DAILY_CAP - _gsc_used_today(db, site_id, now) if gsc_on else 0
+        out, sources, details, gsc_why = {}, {}, {}, None
         for p in pages:
-            q = f"site:{domain}{p.url_path if p.url_path != '/' else ''}"
-            data = sx.search_full(q)            # результаты и здоровье движков — из ОДНОГО ответа
-            results = data.get("results") or []
-            dead = data.get("unresponsive_engines") or []
-            if any(_same_page(r.get("url"), domain, p.url_path) for r in results):
-                p.index_status = "indexed"
-            elif not results and dead:
-                p.index_status = "unknown"
-            else:
-                p.index_status = "not_indexed"
+            status, cov, src = None, None, "searxng"
+            if gsc is not None and gsc_left > 0:
+                try:
+                    r = gsc.inspect(domain, f"https://{domain}{page_href(p.url_path)}")
+                    gsc_left -= 1
+                    cov = r["coverage_state"] or r["verdict"] or "?"
+                    status = {True: "indexed", False: "not_indexed", None: "unknown"}[r["indexed"]]
+                    src = "gsc"
+                    details[p.url_path] = {"coverage_state": r["coverage_state"], "last_crawl": r["last_crawl"]}
+                except gsc_mod.GscQuota:
+                    gsc_left, gsc_why = 0, "квота GSC исчерпана"
+                except gsc_mod.GscNoAccess:
+                    gsc, gsc_why = None, "аккаунт не добавлен в свойство GSC этого сайта"
+                except gsc_mod.GscError as e:
+                    gsc, gsc_why = None, str(e)[:120]
+            if status is None:
+                status = _searxng_verdict(sx, domain, p.url_path)
+            p.index_status = status
             # время ставим и у `unknown`: попытка БЫЛА. Пустой index_checked_at остаётся
             # значить ровно одно — «не проверялось ни разу» (панель их и различает).
             p.index_checked_at = now
-            db.add(IndexHistory(page_id=p.id, checked_at=now, index_status=p.index_status))
-            out[p.url_path] = p.index_status
+            db.add(IndexHistory(page_id=p.id, checked_at=now, index_status=status, coverage_state=cov))
+            out[p.url_path], sources[p.url_path] = status, src
         # S7-10: первая страница в индексе -> сайт под мониторингом (published -> monitoring)
         if site.status == "published" and any(v == "indexed" for v in out.values()):
             site.status = "monitoring"
         db.commit()
-        return {"domain": domain, "pages": out,
-                # все проверенные страницы `unknown` -> движки молчат; автопилот не долбит дальше
-                "all_unknown": bool(out) and all(v == "unknown" for v in out.values())}
+        res = {"domain": domain, "pages": out, "sources": sources, "details": details,
+               # все проверенные страницы `unknown` -> источники молчат; автопилот не долбит дальше
+               "all_unknown": bool(out) and all(v == "unknown" for v in out.values())}
+        if gsc_why:
+            res["gsc_note"] = gsc_why
+        return res
 
 
 if __name__ == "__main__":  # pure path helper self-check

@@ -178,6 +178,9 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.id in far_ids %}
           <div class="hint" style="color:var(--acc2)" title="близость прошлой темы к VPN ниже 30%: такой домен одобряют только руками, глядя на тему — пакет его не берёт">⚠ прошлая тема далека от VPN</div>
         {% endif %}
+        {% if d.id in list_hit_cats %}
+          <div class="hint" style="color:var(--acc2)" title="домен числится в списках UT1 / blocklistproject. Мягкий сигнал: пакет такой домен не берёт, решаешь ты — посмотри, что за сайт там был">⚠ в списках чистоты: {{ list_hit_cats[d.id]|join(', ') }}</div>
+        {% endif %}
         {# «история чистая» — заявление о ФАКТЕ, а не отсутствие ошибок: его вправе нести только
            домен, для которого пакетное одобрение реально сработает. `ok` — это bulk_ok(d),
            СЧИТАННЫЙ в Python (panel.py) тем же кодом, что решает _bulk_candidates — строка НЕ
@@ -294,6 +297,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.topic %}<div class="hint" title="{{ d.topic }}">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
         {% elif (d.score_breakdown or {}).get('emd') %}<div class="hint">EMD — новорег под ключ</div>{% endif %}
         {% if d.id in far_ids %}<div class="hint" style="color:var(--acc2)">⚠ прошлая тема далека от VPN</div>{% endif %}
+        {% if d.id in list_hit_cats %}<div class="hint" style="color:var(--acc2)">⚠ в списках чистоты: {{ list_hit_cats[d.id]|join(', ') }}</div>{% endif %}
         {# ГРЯЗЬ — прямо в строке, с которой идут покупать. Отмытый домен (approved с живым
            reject_reason) выглядел здесь обычным кандидатом: причина отказа лежала в базе, но
            её не показывал НИКТО из тех экранов, где решают о деньгах. #}
@@ -344,7 +348,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
              'low_score': ('Низкий скор', 'thr'), 'history_dirty': ('Грязная история', 'dirt'),
              'blacklist': ('Блэклист / Web Risk', 'dirt'), 'spam_anchors': ('Спам-анкоры', 'dirt'),
              'feed_flag': ('Флаг источника', 'dirt'), 'rkn': ('РКН (v1)', 'dirt'),
-             'safebrowsing': ('Safe Browsing (v1)', 'dirt'),
+             'safebrowsing': ('Safe Browsing (v1)', 'dirt'), 'list_hit': ('В списке чистоты', 'dirt'),
              'not_acquirable': ('Занят', 'taken'), 'tld_closed': ('Зона не наша', 'taken'),
              'trademark': ('Чужой бренд', 'taken'), 'legacy_ru': ('РФ (архив v1)', 'taken')} %}
 <dialog id="why" class="modal">

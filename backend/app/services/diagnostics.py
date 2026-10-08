@@ -20,7 +20,7 @@ PING_TIMEOUT = 20.0  # сек на один пинг; Wayback стабильно
 _SECRET_FIELDS = (
     "AHREFS_API_KEY", "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
     "SERPAPI_KEY", "YANDEX_WORDSTAT_TOKEN", "BACKORDER_LOGIN", "BACKORDER_PASSWORD",
-    "OPTIMIZATOR_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
+    "OPTIMIZATOR_API_KEY", "NAMESILO_API_KEY", "REGRU_PASSWORD", "CLOUDFLARE_API_TOKEN", "AAPANEL_API_KEY",
     "LLM_API_KEY", "APARSER_API_KEY", "GITHUB_TOKEN", "PANEL_PASS", "SPAMHAUS_DQS_KEY",
     "WEBRISK_API_KEY", "GSC_SERVICE_ACCOUNT_JSON",
 )
@@ -35,7 +35,10 @@ def _secret_fields() -> tuple:
 def _scrub(s: str) -> str:
     """Затереть любое непустое значение секрета из настроек, встретившееся в тексте. getattr
     видит и переопределения из панели (БД), и .env: затираем оба — старый .env-ключ мог быть
-    в запросе, ушедшем до смены."""
+    в запросе, ушедшем до смены. Плюс шаблон `key=…` в URL (NameSilo кладёт ключ в query:
+    сменённый ключ значением уже не найти)."""
+    from app.log_scrub import mask_key_param
+    s = mask_key_param(s)
     for name in _secret_fields():
         env = settings.env_value(name) if name in type(settings).model_fields else ""
         for val in (getattr(settings, name, ""), env):
@@ -126,6 +129,9 @@ def _spec():
          _searxng_probe),
         ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M2", False,
          lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
+        # NameSilo: getAccountBalance — чтение, денег не тратит; без ключа — skip. Не критичен.
+        ("namesilo", "NameSilo", "M2 · выкуп (международные зоны)", settings.NAMESILO_API_KEY, "M2", False,
+         lambda: __import__("app.integrations.namesilo", fromlist=["x"]).NameSiloClient().ping()),
         # S3-03: канал выкупа v1 не должен молча дрейфовать — капча Yandex / 404 видны здесь словами.
         ("backorder", "Backorder", "M2 · выкуп (ставка, .RU/.РФ)", settings.BACKORDER_LOGIN, "M2", False,
          lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
