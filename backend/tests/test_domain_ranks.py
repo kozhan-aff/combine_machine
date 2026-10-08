@@ -93,6 +93,37 @@ def test_pick_release_takes_latest_regardless_of_list_order():
     assert pick_release([]) is None and pick_release(None) is None
 
 
+def test_release_key_year_boundary_slices_with_two_digit_end_year():
+    # реальные id CC на стыке годов: «2024-25-dec-jan-feb» (старт декабрь 2024, конец февраль 2025)
+    assert release_key("cc-main-2024-25-dec-jan-feb") == (2025, 2)
+    assert release_key("cc-main-2022-23-nov-dec-jan") == (2023, 1)
+    assert release_key("cc-main-2024-25-dec-jan-feb") > release_key("cc-main-2024-aug-sep-oct")
+    # такой срез — самый свежий, пока нет следующего: pick_release его не пропускает
+    assert pick_release(["cc-main-2024-aug-sep-oct", "cc-main-2024-25-dec-jan-feb",
+                         "cc-main-2024-may-jun-jul"]) == "cc-main-2024-25-dec-jan-feb"
+
+
+def test_refresh_closes_transaction_before_streaming(monkeypatch):
+    # idle-in-transaction на время многогигабайтного стрима держал бы локи на domains/domain_ranks
+    _add("mid.com")
+    seen = {}
+    real = domain_ranks.pool_domains
+
+    def spy(dbs):
+        seen["db"] = dbs
+        return real(dbs)
+    monkeypatch.setattr(domain_ranks, "pool_domains", spy)
+
+    class Probe(_Fake):
+        def iter_gz_lines(self, url):
+            seen["in_tx"] = seen["db"].in_transaction()
+            return super().iter_gz_lines(url)
+    domain_ranks.refresh(Probe())
+    assert seen["in_tx"] is False
+    domain_ranks.refresh(Probe(), force=False)                            # ветка с проверкой покрытия
+    assert seen["in_tx"] is False
+
+
 def test_latest_ranks_url_from_graphinfo_not_hardcoded(monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "CC_RANKS_URL", "")
@@ -405,7 +436,41 @@ def test_rescore_without_ranks_keeps_previous_rank_summary():
         s.query(DomainRank).delete(); s.get(Domain, did).status = "discovered"; s.commit()
     scoring.score_domain(did, clients=_funnel_clients())
     with db.SessionLocal() as s:
-        assert s.get(Domain, did).score_breakdown["rank"]["source"] == "cc"   # улика прошлого прогона жива
+        bd = s.get(Domain, did).score_breakdown
+    assert bd["rank"]["source"] == "cc"                                   # улика прошлого прогона жива
+    # и authority считается ПО НЕЙ, а не молча падает в нейтральные 0.5 (breakdown не противоречит себе)
+    assert bd["authority_source"] == "rank"
+    assert bd["components"]["authority"] == pytest.approx((0.7 - 0.6) / 0.35, abs=1e-3)
+
+
+def test_blind_retry_state_keeps_rank_authority():
+    # «вслепую»-повтор (retry_blind_history) гоняет только W5: authority не должна сдвигаться на 0.5
+    did = _mk("example.co.uk")
+    domain_ranks.refresh(_Fake())
+    scoring.score_domain(did, clients=_funnel_clients())
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        before = d.score_breakdown["components"]["authority"]
+        state = scoring._blind_state(d)
+    scoring._commit_result(state, None, st.get_settings())
+    with db.SessionLocal() as s:
+        bd = s.get(Domain, did).score_breakdown
+    assert bd["components"]["authority"] == before
+    assert bd["authority_source"] == "rank" and bd["rank"]["source"] == "cc"
+
+
+def test_cc_absent_authority_zero_survives_blind_retry():
+    did = _mk("nobody.com")
+    domain_ranks.refresh(_Fake())                                         # проверили: в графе нет -> 0.0
+    scoring.score_domain(did, clients=_funnel_clients())
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        assert d.score_breakdown["components"]["authority"] == 0.0
+        state = scoring._blind_state(d)
+    scoring._commit_result(state, None, st.get_settings())
+    with db.SessionLocal() as s:
+        bd = s.get(Domain, did).score_breakdown
+    assert bd["components"]["authority"] == 0.0 and bd["rank"]["source"] == "cc_absent"
 
 
 # ------------------------------------------------------------------ настройки, панель, воркер

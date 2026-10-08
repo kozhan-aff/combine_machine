@@ -28,15 +28,17 @@ _MONTHS = {m: i for i, m in enumerate(
 def release_key(rel_id: str) -> tuple | None:
     """Ключ порядка среза по идентификатору `cc-main-2026-jul-aug-sep` -> (2026, 7). Берётся ПОСЛЕДНИЙ
     месяц среза с учётом перехода года; нераспознанный id -> None (вызывающий откатится на порядок списка)."""
-    m = re.search(r"(\d{4})((?:-[a-z]{3})+)", rel_id.lower())
+    m = re.search(r"(\d{4})(?:-(\d{2}))?((?:-[a-z]{3})+)", rel_id.lower())
     if not m:
         return None
-    months = [_MONTHS[x] for x in m.group(2).strip("-").split("-") if x in _MONTHS]
+    months = [_MONTHS[x] for x in m.group(3).strip("-").split("-") if x in _MONTHS]
     if not months:
         return None
     year = int(m.group(1))
     # срез dec-jan-feb стартует в декабре year и заканчивается в феврале year+1
     end_year = year + (1 if months[-1] < months[0] else 0)
+    if m.group(2) and months[-1] < months[0]:
+        end_year = year // 100 * 100 + int(m.group(2))      # «2024-25-dec-jan-feb»: год конца дан явно
     return (end_year, months[-1])
 
 

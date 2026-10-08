@@ -1718,6 +1718,13 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
             # float в compute_score роняет TypeError.
             sig.setdefault("referring_domains", d.referring_domains)
             sig.setdefault("dr", float(d.dr) if d.dr is not None else None)
+            # ранг этого прогона не получен (W-ranks не шла: «вслепую»-повтор, сбой/пустые ранги) — а
+            # сводка прошлого прогона в breakdown остаётся (_kept): authority берём из неё же, иначе
+            # балл сдвинется на 0.5·w без новых данных и breakdown противоречит сам себе
+            if sig.get("rank_authority") is None:
+                prev_av = ((d.score_breakdown or {}).get("rank") or {}).get("authority")
+                if prev_av is not None:
+                    sig["rank_authority"] = float(prev_av)
             result = compute_score(sig, st.get("weights"))
             if "hard_reject" not in result["breakdown"]:
                 result = {**result, "status": _decide(result["score"], sig, st["manual_review_at"])}

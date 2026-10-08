@@ -164,6 +164,11 @@ def refresh(client=None, force: bool = True) -> dict:
     with jobs.track("domain_ranks", trigger="cron" if not force else "manual") as run:
         with SessionLocal() as db:
             pool = pool_domains(db)
+            # покрытие читаем ДО стрима, а транзакцию закрываем: многогигабайтный gz качается минутами,
+            # и idle-in-transaction держал бы ACCESS SHARE на domains/domain_ranks — ALTER из миграции
+            # встал бы в очередь, а за ним вся панель
+            uncovered = _uncovered(db, pool) if (pool and not force) else None
+            db.commit()
             # CC
             res = {}
             try:
@@ -173,7 +178,7 @@ def refresh(client=None, force: bool = True) -> dict:
                 else:
                     url, release = client.latest_ranks_url()
                     prev = state.get("ranks:cc") or {}
-                    if not force and prev.get("release") == release and _uncovered(db, pool) == 0:
+                    if not force and prev.get("release") == release and uncovered == 0:
                         res.update(status="not_modified", release=release)
                     else:
                         jobs.report(run, done=0, total=2, current=f"Common Crawl {release}")
@@ -253,7 +258,7 @@ def authority_from_rank(info: dict, low: float, full: float, majestic_on: bool) 
             val, src = 0.0, "cc_absent"         # проверили: в графе краулинга домена нет
     if majestic_on and info.get("majestic"):
         val, src = min(1.0, (val or 0.0) + MAJESTIC_BONUS), (f"{src}+majestic" if src else "majestic")
-    summary = {"source": src, "pct": info.get("pct"), "pagerank": info.get("pagerank"),
+    summary = {"source": src, "authority": val, "pct": info.get("pct"), "pagerank": info.get("pagerank"),
                "n_hosts": info.get("n_hosts"), "majestic": info.get("majestic"), "release": info.get("release")}
     return val, summary
 
