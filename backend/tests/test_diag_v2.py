@@ -9,9 +9,11 @@ def _row(key):
 
 def test_spec_keys_v2():
     keys = [s[0] for s in diagnostics._spec()]
-    for k in ("ahrefs", "rdap", "webrisk", "dropcatch", "nominet", "registry_mx", "wayback", "aparser", "llm"):
+    # backorder вернулся как ПАСПОРТ канала выкупа v1 (S3-03): капча/недоступность видны словами
+    for k in ("ahrefs", "rdap", "webrisk", "dropcatch", "nominet", "registry_mx", "wayback", "aparser", "llm",
+              "backorder"):
         assert k in keys, k
-    for k in ("rkn", "tci", "backorder"):
+    for k in ("rkn", "tci"):
         assert k not in keys, k
 
 

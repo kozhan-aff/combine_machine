@@ -126,6 +126,9 @@ def _spec():
          _searxng_probe),
         ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M2", False,
          lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
+        # S3-03: канал выкупа v1 не должен молча дрейфовать — капча Yandex / 404 видны здесь словами.
+        ("backorder", "Backorder", "M2 · выкуп (ставка, .RU/.РФ)", settings.BACKORDER_LOGIN, "M2", False,
+         lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
         ("wayback", "Wayback", "M1 · история", "1", "M1", True,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,

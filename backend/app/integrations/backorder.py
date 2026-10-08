@@ -66,6 +66,22 @@ def norm_domain(domain: str) -> str:
         return d
 
 
+CAPTCHA_MSG = ("backorder.ru закрыт капчей Yandex SmartCaptcha — запросы с этого IP не проходят "
+               "(нужен whitelist IP у провайдера или прокси)")
+
+
+def is_captcha(resp) -> bool:
+    """Ответ — страница капчи Yandex (S3-03): редирект на /showcaptcha либо заголовок x-yandex-captcha.
+    Без этого httpx молча идёт по редиректу, а .json() падает невнятным «Expecting value»."""
+    try:
+        if isinstance(resp.headers.get("x-yandex-captcha"), str):
+            return True
+        urls = [str(resp.url)] + [str(h.url) for h in getattr(resp, "history", None) or []]
+    except Exception:  # noqa: BLE001 — нестандартный ответ (мок/прокси): не капча
+        return False
+    return any("showcaptcha" in u for u in urls)
+
+
 def zone_of(domain: str) -> str | None:
     """Зона тарифной сетки домена, или None для незнакомой зоны.
 
@@ -127,6 +143,8 @@ class BackorderClient(BaseClient):
             else:
                 resp = self._client.request("GET", _BILLMGR, **kw)
                 resp.raise_for_status()
+            if is_captcha(resp):
+                raise RuntimeError(f"backorder {func}: {CAPTCHA_MSG}")
             data = resp.json()
         except httpx.HTTPStatusError as e:
             # 4xx = сервер ОБРАБОТАЛ этот же GET и отказал -> заказа точно нет, повтор безопасен.
@@ -190,7 +208,9 @@ class BackorderClient(BaseClient):
     def client_orders(self) -> list[dict]:
         """Мои backorder-заказы + их статусы (источник правды для поллинга M2)."""
         out = []
-        for e in self._billmgr("clientbackorder"):
+        # Один запрос, 8 с, без ретраев: клиент зовут из синхронного /queue/poll и из execute (find_order);
+        # 3 ретрая x 30 с держали поток ~93 с, когда backorder лежит (S3-03/S3-04).
+        for e in self._billmgr("clientbackorder", retry=False, timeout=8.0):
             out.append({
                 "elid": str(e.get("id") or ""),
                 "domain": e.get("domainname") or "",
@@ -334,4 +354,6 @@ class BackorderClient(BaseClient):
         r = self.request("GET", f"{self.base_url}/json/",
                          params={"ext": "1", "disp": "1", "tomorrow": "1",
                                  "links": "1", "by": "links", "order": "desc"})
+        if is_captcha(r):
+            raise RuntimeError(CAPTCHA_MSG)
         return isinstance(r.json(), list)

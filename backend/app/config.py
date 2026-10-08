@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # optimizator.ru
     OPTIMIZATOR_API_KEY: str = ""
     OPTIMIZATOR_NICD: str = ""
+    # http: документация провайдера канонична только для http, https у него не подтверждён живьём
+    # (S3-05 — живых вызовов без разрешения не делаем). Когда оператор проверит 443 — меняет здесь
+    # на https://optimizator.ru без правки кода.
+    OPTIMIZATOR_BASE_URL: str = "http://optimizator.ru"
+
+    # M2: сколько часов живёт подтверждение выкупа (S3-07). Дальше исполнить старый confirm нельзя —
+    # человек подтверждает заново (и цена/тариф перезамораживаются).
+    ACQ_CONFIRM_TTL_HOURS: int = 24
 
     # registrar NS (.ru)
     REGRU_USERNAME: str = ""

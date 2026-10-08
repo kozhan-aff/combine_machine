@@ -43,7 +43,7 @@ def test_balance_returns_none_when_field_missing(monkeypatch):
 def test_prices_parses_real_live_format(monkeypatch):
     c = _client(monkeypatch, [{"domain": "RU", "price_registration": 179, "price_renewal": 199}])
     out = c.prices("ru")
-    assert out == {"domain": "RU", "price_registration": 179, "price_renewal": 199}
+    assert out == {"domain": "RU", "price_registration": 179, "price_renewal": 199, "currency": "RUB"}
 
 
 def test_ping_true_on_success(monkeypatch):
