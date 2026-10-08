@@ -35,6 +35,33 @@ def _start_run(trigger: str) -> int:
         return r.id
 
 
+def reap_orphan_runs(keep_id: int | None = None) -> int:
+    """Закрыть журнальные строки AutonomyRun, оставшиеся 'running' после убитого процесса (S7-20).
+
+    Журнал сам по себе замка не держит (замок — job_run 'sweep'), поэтому SIGKILL/watchfiles-
+    рестарт воркера посреди свипа оставлял строку 'running' навсегда — на /autopilot она
+    выглядела идущей вечно. Звать МОЖНО только держа замок свипа (внутри jobs.track("sweep")) или
+    когда живого sweep в job_run нет (старт воркера): тогда любая 'running'-строка — труп.
+    Возвращает число погашенных."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.autonomy import AutonomyRun
+
+    with SessionLocal() as db:
+        rows = db.execute(select(AutonomyRun).where(AutonomyRun.status == "running")).scalars().all()
+        n = 0
+        for r in rows:
+            if r.id == keep_id:
+                continue
+            r.status = "failed"
+            r.finished_at = datetime.now(timezone.utc)
+            r.errors = list(r.errors or []) + ["оборвался: процесс перезапустили"]
+            n += 1
+        if n:
+            db.commit()
+        return n
+
+
 def _finish_run(run_id: int, status: str, counts: dict, errors: list) -> None:
     from app.db import SessionLocal
     from app.models.autonomy import AutonomyRun
@@ -393,6 +420,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
         # СЛЕДУЮЩИЙ свип, приняв несостоявшийся за только что отработавший.
         with jobs.track("sweep", trigger="auto" if trigger == "cron" else "manual",
                         stages=stages) as run:
+            reap_orphan_runs()          # замок свипа у нас: прочие 'running' в журнале — трупы (S7-20)
             run_id = _start_run(trigger)
             try:
                 for i, (key, _flag, cap_attr, handler) in enumerate(enabled):

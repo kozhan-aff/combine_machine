@@ -7,6 +7,9 @@
     {% if crit_down %}<b style="color:var(--bad)">критичные: {{ crit_down|join(', ') }} ✗</b>{% else %}<b style="color:var(--ok)">критичные: все ✓</b>{% endif %}</span></h2>
 
 <div class="card" style="max-width:920px; margin-bottom:14px">
+  <b>Воркер автопилота:</b> {% if worker.age_sec is none %}<span class="hint" title="воркер ни разу не бил сердце: контейнер worker не запущен или обновление ещё не накатано">воркер: нет сигнала</span>
+  {% elif worker.alive %}<span class="hint" style="color:var(--ok)">воркер: жив, последний удар {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
+  {% else %}<span class="hint" style="color:var(--bad)" title="проверь контейнер worker: docker compose ps / logs worker">воркер: НЕ отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}<br>
   <b>Версия кода:</b>
   {% if status.error %}<span style="color:var(--bad)">git недоступен — {{ status.error }}</span>
   {% else %}<code>{{ status.hash }}</code> · {{ status.subject }} · <span class="hint">{{ status.date }}</span>

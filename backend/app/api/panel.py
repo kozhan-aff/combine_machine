@@ -171,6 +171,15 @@ def _gates(db: Session) -> dict:
 # ============================================================================
 # ЭКРАНЫ
 # ============================================================================
+def _worker_status() -> dict:
+    """Сердцебиение воркера для /diag и Пульта (F8-11). Сбой чтения БД — «неизвестно», не 500."""
+    from app.services import heartbeat
+    try:
+        return heartbeat.status()
+    except Exception:  # noqa: BLE001
+        return {"alive": False, "age_sec": None, "note": ""}
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_session)):
     from app.services import jobs
@@ -187,6 +196,7 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
         "steps": _next_steps(db),
         "autopilot": get_autonomy(), "gates": _gates(db), "last_sweep": last_finished_sweep_at(),
         "last_runs": {name: jobs.last(name) for name in _JOBS},
+        "worker": _worker_status(),
     })
 
 
@@ -483,7 +493,7 @@ def diag_view(request: Request):
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
         "crit_down": crit_down, "timeout": PING_TIMEOUT, "checked_at": checked_at,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
-        "status": _deploy.deploy_status(),
+        "status": _deploy.deploy_status(), "worker": _worker_status(),
     })
 
 
