@@ -717,12 +717,18 @@ def test_retry_after_ambiguity_adopts_instead_of_double_ordering(monkeypatch, ma
     assert len(srv.n("registerDomain")) == sent_before
 
 
+PRICES = ok(com={"registration": "9.0", "transfer": "9.0", "renew": "11.50"})
+
+
 def test_auction_lot_goes_through_gate_and_bids_with_confirmed_ceiling(monkeypatch, make):
     lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
-    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=100.0))
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=100.0),
+                   getPrices=PRICES)
     oid = _flow("lot.com", source="namesilo_auction")
     o = _order(oid)
-    assert float(o.cost) == 20.0 and o.cost_currency == "USD"
+    # замораживается ПОЛНОЕ списание: потолок (= текущая ставка) + год продления
+    assert float(o.cost) == 31.5 and o.cost_currency == "USD"
+    assert o.result["auction_ceiling"] == 20.0 and o.result["renew"] == 11.5
     assert srv.n("bidAuction") == [] and srv.n("registerDomain") == []        # до исполнения ничего не ушло
     assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
     assert len(srv.n("bidAuction")) == 1 and srv.n("registerDomain") == []
@@ -739,7 +745,7 @@ def test_auction_unconfirmed_never_bids(monkeypatch, make):
 def test_auction_ambiguous_bid_sets_maybe_sent_and_poll_does_not_guess(monkeypatch, make):
     lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
     c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=httpx.ReadTimeout("t"),
-                   getAccountBalance=ok(balance=100.0))
+                   getAccountBalance=ok(balance=100.0), getPrices=PRICES)
     oid = _flow("lot.com", source="namesilo_auction")
     assert acquisition.execute_confirmed_order(oid)["maybe_sent"] is True
     _age_ctx(oid, 60)
@@ -756,3 +762,63 @@ def test_reconcile_context_survives_a_failed_retry(monkeypatch, make):
     o = _order(oid)
     assert r["status"] == "failed" and o.result["maybe_sent"] is True
     assert o.result["registrar_ctx"]["balance_before"] == 100.0
+
+
+def test_auction_operator_ceiling_is_frozen_with_renewal(monkeypatch, make):
+    """Потолок задаёт человек (bid_rub): гейт замораживает потолок + продление, bid уходит с потолком."""
+    lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=100.0),
+                   getPrices=PRICES)
+    oid = acquisition.create_order(_approved("lot.com", "namesilo_auction"))
+    r = acquisition.confirm_order(oid, 40.0)
+    assert r["bid_rub"] == 51.5 and r["currency"] == "USD"
+    assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
+    assert srv.n("bidAuction")[0][1]["bid"] == "40.00"
+
+
+def test_auction_ceiling_below_current_bid_is_refused_at_gate(monkeypatch, make):
+    lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getPrices=PRICES)
+    oid = acquisition.create_order(_approved("lot.com", "namesilo_auction"))
+    with pytest.raises(ValueError, match="ниже текущей"):
+        acquisition.confirm_order(oid, 10.0)
+    assert _order(oid).confirmed_by_human is False
+
+
+def test_auction_balance_must_cover_ceiling_plus_renewal(monkeypatch, make):
+    """Баланса хватает на ставку (20), но не на ставку + продление (31.5): ставка не уходит."""
+    lots = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=lots, bidAuction=ok(), getAccountBalance=ok(balance=25.0),
+                   getPrices=PRICES)
+    oid = _flow("lot.com", source="namesilo_auction")
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and srv.n("bidAuction") == []
+
+
+def test_auction_current_bid_above_frozen_ceiling_refuses_before_sending(monkeypatch, make):
+    lots_now = ok(auctions=[_lot("lot.com", bid=50.0, aid=5)])
+    lots_then = ok(auctions=[_lot("lot.com", bid=20.0, aid=5)])
+    c, srv = _wire(monkeypatch, make, listAuctions=[lots_then, lots_now], bidAuction=ok(),
+                   getAccountBalance=ok(balance=500.0), getPrices=PRICES)
+    oid = _flow("lot.com", source="namesilo_auction")
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "выросла" in r["error"] and srv.n("bidAuction") == []
+
+
+def test_renew_price_missing_is_clean_refusal(make):
+    c, _ = make(getPrices=ok(net={"renew": "10"}))
+    with pytest.raises(NameSiloError, match="продления"):
+        c.renew_price("a.com")
+
+
+def test_list_dropping_carries_created_and_bid(make):
+    c, _ = make(listAuctions=ok(auctions=[_lot("a.com", bid=33.5)]))
+    row = c.list_dropping()[0]
+    assert row["bid"] == 33.5 and row["created"] == datetime(2015, 3, 1, tzinfo=timezone.utc)
+
+
+def test_discovery_writes_auction_created_and_bid_to_domain():
+    from app.services.discovery import _new_domain
+    created = datetime(2015, 3, 1, tzinfo=timezone.utc)
+    d = _new_domain("a.com", {"source": "namesilo_auction", "lane": "bid", "created": created, "bid": 33.5}, None)
+    assert d.whois_created == created and d.acquire_price == 33.5

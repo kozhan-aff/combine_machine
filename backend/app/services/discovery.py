@@ -249,6 +249,8 @@ def _new_domain(name: str, c: dict, dr):
     from app.models.domain import Domain
     return Domain(domain=name, source=c.get("source"), lane=c.get("lane"),
                   acquire_deadline=c.get("acquire_deadline"), market_lang=c.get("market_lang"),
+                  # лот аукциона: дата создания (возраст) и текущая ставка; у прочих источников их нет
+                  whois_created=c.get("created"), acquire_price=c.get("bid"),
                   dr=dr)
 
 

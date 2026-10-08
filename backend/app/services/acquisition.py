@@ -429,6 +429,23 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
             raise ValueError(f"registrar: в котировке «{domain}» не указана валюта — "
                              f"сумму заказа заморозить нельзя")
         tier = {"price": q.amount, "price_id": None, "period_id": None, "currency": q.currency}
+        if source == AUCTION_SOURCE:
+            # Лот аукциона: списание = ПОТОЛОК ставки (решение человека, bid_rub; не ниже текущей) + год
+            # продления (спека §6). Замораживаем ИМЕННО эту сумму, чтобы гейт, баланс и экран считали
+            # полное списание, а не текущую ставку. Потолок и продление — в result (для execute).
+            try:
+                renew = get_registrar().renew_price(domain)
+            except (RegistrarError, RegistrarAmbiguous) as e:
+                raise ValueError(f"registrar: {e}"[:200]) from None
+            if renew.currency != q.currency:
+                raise ValueError(f"registrar: валюта продления ({renew.currency}) не совпала с валютой ставки "
+                                 f"({q.currency}) — сумму списания не посчитать")
+            ceiling = float(bid_rub) if bid_rub else float(q.amount)
+            if ceiling < float(q.amount):
+                raise ValueError(f"registrar: потолок ставки {ceiling:.2f} {q.currency} ниже текущей "
+                                 f"{float(q.amount):.2f} — подними потолок")
+            tier["price"] = ceiling + float(renew.amount)
+            tier["auction"] = {"auction_ceiling": ceiling, "renew": float(renew.amount)}
 
     from datetime import datetime, timezone
     with SessionLocal() as db:
@@ -440,7 +457,8 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
             o.cost = tier["price"]                   # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
             o.cost_currency = tier.get("currency") or "RUB"   # тиры backorder — рубли
             o.result = {**(o.result or {}),
-                        "price_id": tier["price_id"], "period_id": tier["period_id"]}
+                        "price_id": tier["price_id"], "period_id": tier["period_id"],
+                        **(tier.get("auction") or {})}
         elif bid_rub is not None:
             o.cost = bid_rub
             o.cost_currency = o.cost_currency or "RUB"
@@ -567,7 +585,8 @@ def execute_confirmed_order(order_id: int) -> dict:
         #    разблокируется и реально оплаченный заказ можно спрятать. Снимает флаг только
         #    правда провайдера — успешный find_order/order или poll_orders.
         saved = {k: v for k, v in (o.result or {}).items()
-                 if k in ("price_id", "period_id", "maybe_sent", "registrar_ctx")}
+                 if k in ("price_id", "period_id", "maybe_sent", "registrar_ctx",
+                                    "auction_ceiling", "renew")}
         try:
             if o.provider == "backorder":
                 from app.integrations.backorder import AmbiguousSend, BackorderClient
@@ -696,10 +715,26 @@ def execute_confirmed_order(order_id: int) -> dict:
                                                   f"потолок цены не проверить; подтверди заказ заново"}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
-                if o.cost is not None and float(q.amount) > float(o.cost):
+                # лот аукциона: o.cost = потолок + продление, а сравнивать текущую ставку надо с ПОТОЛКОМ
+                ceiling = float(saved["auction_ceiling"]) if is_auction and saved.get("auction_ceiling") is not None else None
+                if is_auction and ceiling is None:
+                    o.status = "failed"
+                    o.result = {**saved, "error": "в заказе нет замороженного потолка ставки — подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                if is_auction:
+                    rn = r.renew_price(d.domain)
+                    if rn.currency != q.currency or float(rn.amount) > float(saved.get("renew") or 0):
+                        o.status = "failed"
+                        o.result = {**saved, "error": f"цена продления у регистратора изменилась "
+                                                      f"({float(rn.amount):.2f} {rn.currency}) — подтверди заказ заново"}
+                        db.commit()
+                        return {"order_id": order_id, "status": "failed", **o.result}
+                limit = ceiling if is_auction else (float(o.cost) if o.cost is not None else None)
+                if limit is not None and float(q.amount) > limit:
                     o.status = "failed"
                     o.result = {**saved, "error": f"цена у регистратора выросла: {float(q.amount):.2f} "
-                                                  f"{q.currency} > подтверждённых {float(o.cost):.2f} — "
+                                                  f"{q.currency} > подтверждённых {limit:.2f} — "
                                                   f"подтверди заказ заново"}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
@@ -716,7 +751,7 @@ def execute_confirmed_order(order_id: int) -> dict:
                        "sent_at": datetime.now(timezone.utc).isoformat()}
                 try:
                     if is_auction:       # ставка на аукционе: потолок — подтверждённая человеком сумма
-                        res = r.bid(d.domain, float(o.cost))
+                        res = r.bid(d.domain, ceiling)
                     else:
                         res = r.register(d.domain, 1)
                 except RegistrarAmbiguous as e:

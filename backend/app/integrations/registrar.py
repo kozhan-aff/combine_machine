@@ -46,6 +46,9 @@ class Registrar(Protocol):
     def price(self, domain: str, auction: bool = False) -> Money:
         """Свежая котировка в ЯВНОЙ валюте. auction=True — лот аукциона: котировка = текущая ставка."""
         ...
+    def renew_price(self, domain: str) -> Money:
+        """Цена продления на год: победитель аукциона платит ставку + год продления."""
+        ...
     def bid(self, domain: str, max_bid: float) -> dict:
         """Ставка на аукционе (ДЕНЬГИ, за тем же гейтом confirmed_by_human; max_bid — потолок человека)."""
         ...
@@ -70,7 +73,7 @@ class NotConfiguredRegistrar:
             "международный регистратор не настроен: провайдер выбирает оператор "
             "(пока домен покупается руками — «купил руками» на экране Домены)")
 
-    check_available = price = bid = reconcile = register = set_nameservers = balance = _no
+    check_available = price = renew_price = bid = reconcile = register = set_nameservers = balance = _no
 
 
 def get_registrar() -> Registrar:

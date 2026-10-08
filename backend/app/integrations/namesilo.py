@@ -277,6 +277,18 @@ class NameSiloClient:
             raise NameSiloError(f"{d}: цена дана за {row['duration']} лет, а регистрируем на 1 год — не сверить")
         return Money(row["price"], CURRENCY)
 
+    def renew_price(self, domain: str) -> Money:
+        """Цена продления зоны на 1 год (getPrices, чтение). Победитель аукциона платит ставку И год
+        продления (спека §6), поэтому гейт обязан показать человеку сумму с ним. Нет цены — отказ."""
+        from app.services.domain_filters import zone_of
+        d = domain.strip().lower()
+        zone = zone_of(d)
+        row = self._call("getPrices").get(zone)       # [?] ключ составных зон (co.uk) не сверен — тогда отказ
+        v = _f(row.get("renew")) if isinstance(row, dict) else None
+        if v is None or v <= 0:
+            raise NameSiloError(f"{d}: в getPrices нет цены продления зоны .{zone} — сумму списания не посчитать")
+        return Money(v, CURRENCY)
+
     def domain_info(self, domain: str) -> dict | None:
         """reply getDomainInfo; None — код 200 (домен не наш / неактивен: нормальный ответ)."""
         try:
@@ -406,8 +418,11 @@ class NameSiloClient:
         rows: list[dict] = []
         for page in range(1, AUCTION_MAX_PAGES + 1):
             part = self.list_auctions(page)
+            # created -> Domain.whois_created (возраст сохраняется — главное преимущество лота),
+            # bid -> Domain.acquire_price (текущая ставка на момент discovery)
             rows += [{"domain": a["domain"], "source": "namesilo_auction", "lane": "bid",
-                      "acquire_deadline": a["end"]} for a in part]
+                      "acquire_deadline": a["end"], "created": a.get("created"),
+                      "bid": a.get("bid")} for a in part]
             if len(part) < AUCTION_PAGE_SIZE:
                 break
         return rows
