@@ -32,6 +32,10 @@ _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.mo
 
 from app.integrations.rdap import RdapClient
 
+# iCloud-дубли («test_x 2.py», «fixture 2.json») — мусор синхронизации Documents на Mac; без этого
+# сьют собирает их как лишние тесты и считает 955 вместо 944 passed (S7-21).
+collect_ignore_glob = ["* 2.py", "* 2.json", "* 2.csv"]
+
 # настоящий бутстрап — для фикстуры real_rdap_bootstrap (autouse _no_paid_keys его подменяет)
 _REAL_RDAP_BOOTSTRAP = RdapClient._bootstrap
 
