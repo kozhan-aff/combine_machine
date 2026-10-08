@@ -172,3 +172,23 @@ def test_empty_content_with_reasoning_is_clear_error(monkeypatch):
     c.request = lambda *a, **kw: _ok("", reasoning_content="думаю")
     with pytest.raises(LlmEmptyContent):
         c.complete("s", "p", model="ollama/q")
+
+
+# --- переопределение с экрана ключей приходит строкой ---
+
+@pytest.mark.parametrize("raw,expect_think", [("false", False), ("False", False), ("true", True)])
+def test_think_override_string_from_panel(monkeypatch, raw, expect_think):
+    from app.services import api_keys
+    c, seen = _plain(monkeypatch, "x")
+    # _plain выставил settings.LLM_THINK=False напрямую; снимаем, чтобы читалось переопределение
+    monkeypatch.undo()
+    monkeypatch.setattr(api_keys, "ENABLED", True)
+    monkeypatch.setattr(api_keys, "_snapshot", lambda: {"LLM_THINK": raw})
+    c.complete("s", "p", model="ollama/qwen3.5:9b-q8_0")
+    assert ("think" in seen[0]) is (not expect_think)
+
+
+def test_think_false_sent_for_hf_model(monkeypatch):
+    c, seen = _plain(monkeypatch, "x")
+    c.complete("s", "p", model="hf.co/unsloth/Qwen3.8-27B-GGUF:Q3_K_M")
+    assert seen[0]["think"] is False

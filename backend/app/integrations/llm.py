@@ -18,7 +18,12 @@ def _apply_think(body: dict) -> dict:
     """Для ollama/* шлём "think": false (если не включено LLM_THINK): thinking-модели (qwen3.x)
     без него отдают пустой content и только reasoning (~31 с на 300 ток. против ~1 с). Для
     остальных моделей (mistral и т.п.) поле не добавляется. Явный think в body не перетирается."""
-    if str(body.get("model", "")).startswith("ollama/") and not settings.LLM_THINK:
+    model = str(body.get("model", ""))
+    # hf.co/... — GGUF-модель, прописанная в LiteLLM без префикса ollama/ (тот же thinking-режим)
+    local = model.startswith(("ollama/", "hf.co/"))
+    # переопределение с экрана ключей приходит СТРОКОЙ ("false"/"true"), не bool: парсим явно
+    think_on = str(settings.LLM_THINK).strip().lower() in ("1", "true", "yes", "on")
+    if local and not think_on:
         body.setdefault("think", False)
     return body
 
