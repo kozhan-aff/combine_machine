@@ -171,3 +171,29 @@ def test_single_flight(creds, monkeypatch):
         assert out["ok"] is False and "уже идёт" in out["error"]
     finally:
         deploy._LOCK.release()
+
+
+def test_pull_refused_while_paid_job_runs(creds, monkeypatch):
+    """F8-16: pull/force-pull перезапускают процессы (--reload/watchfiles) и обрывают идущую
+    платную волну — пока задача жива, git не трогаем вовсе."""
+    from app.services import jobs
+    r = _patch(monkeypatch, Router(pull_rc=0))
+    with jobs.track("score"):
+        for fn in (deploy.git_pull, deploy.git_force_pull):
+            out = fn()
+            assert out["ok"] is False and "score" in out["error"] and "old" not in out
+    assert r.calls == []                      # ни одной git/alembic-команды
+    assert deploy.git_pull()["ok"]            # задача закончилась — обновление проходит
+
+
+def test_stale_job_does_not_block_deploy(creds, monkeypatch):
+    """Труп (контейнер убит, сердцебиения нет) не запирает деплой навсегда."""
+    from datetime import datetime, timedelta, timezone
+    import app.db as db
+    from app.models.job import JobRun
+    with db.SessionLocal() as s:
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        s.add(JobRun(name="score", status="running", started_at=old, updated_at=old))
+        s.commit()
+    _patch(monkeypatch, Router(pull_rc=0))
+    assert deploy.git_pull()["ok"]
