@@ -354,6 +354,6 @@ def test_theme_salt_is_full_digest_not_16_bit_prefix():
             break
         seen[key] = d
     assert pair, "коллизия 16 бит находится за ~300 доменов"
-    a, b = theme_for(pair[0]), theme_for(pair[1])
+    a, b = sb.theme_for(pair[0]), sb.theme_for(pair[1])
     assert a.k("hd") != b.k("hd") and a.asset("site.css") != b.asset("site.css")
     assert len(a.prefix) == 64
