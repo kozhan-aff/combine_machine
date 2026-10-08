@@ -78,7 +78,8 @@ def theme_for(domain: str) -> Theme:
     font, head = FONTS[h[2] % len(FONTS)]
     return Theme(pal=PALETTES[h[0] % len(PALETTES)], font=font, head_font=head,
                  layout=LAYOUTS[h[1] % len(LAYOUTS)], radius=RADII[h[3] % len(RADII)],
-                 prefix="k" + h[4:6].hex(), hero_first=bool(h[6] & 1), benefits_first=bool(h[7] & 1))
+                 prefix=h.hex(),   # ПОЛНЫЙ дайджест сида (соль имён), не 16 бит — коллизии префикса исключены
+                  hero_first=bool(h[6] & 1), benefits_first=bool(h[7] & 1))
 
 
 @dataclass

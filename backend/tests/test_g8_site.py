@@ -339,3 +339,21 @@ def test_published_page_body_not_changed_when_republishing_siblings(writes):
     assert "Body of the page that is long enough." in home and "href='/vs/'" in home
     sm = dict(writes)["/www/wwwroot/g8.com/sitemap.xml"]
     assert "g8.com/</loc>" in sm and "g8.com/vs/</loc>" in sm                # ранее опубликованная — в sitemap
+
+
+def test_theme_salt_is_full_digest_not_16_bit_prefix():
+    """Minor: два домена с совпавшими 16 битами старого префикса не должны делить имена классов/ассетов."""
+    import hashlib
+    seen = {}
+    pair = None
+    for i in range(5000):
+        d = f"collide{i}.com"
+        key = hashlib.sha256(d.encode()).digest()[4:6]
+        if key in seen:
+            pair = (seen[key], d)
+            break
+        seen[key] = d
+    assert pair, "коллизия 16 бит находится за ~300 доменов"
+    a, b = theme_for(pair[0]), theme_for(pair[1])
+    assert a.k("hd") != b.k("hd") and a.asset("site.css") != b.asset("site.css")
+    assert len(a.prefix) == 64
