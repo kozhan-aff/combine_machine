@@ -303,6 +303,9 @@ def _indexnow_ping(domain: str, published: list, written_files: list, warnings: 
     if not published or not settings.INDEXNOW_ENABLED:
         return
     key = site_builder.indexnow_key(domain)
+    if not key:
+        warnings.append("IndexNow: не задан INDEXNOW_SECRET — пинг пропущен")
+        return
     if f"{key}.txt" not in written_files:
         warnings.append("IndexNow: файл-ключ не записан на сайт — пинг пропущен")
         return

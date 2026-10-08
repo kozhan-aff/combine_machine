@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     GSC_API_URL: str = "https://searchconsole.googleapis.com"
     # IndexNow — бесплатный пинг Bing/Yandex/др. о новых страницах. Ключа-секрета нет: ключ сайта
     # выводится из домена и лежит в корне сайта файлом <key>.txt (так задумано протоколом).
+    # INDEXNOW_SECRET — секрет установки: ключ сайта = HMAC(секрет, домен). Пусто — IndexNow выключен
+    # (ни файла-ключа, ни пинга): ключ без секрета угадывается и сцепляет сайты портфеля.
+    INDEXNOW_SECRET: str = ""
     INDEXNOW_ENABLED: bool = True
     INDEXNOW_URL: str = "https://api.indexnow.org/indexnow"
 

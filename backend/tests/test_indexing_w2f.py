@@ -383,3 +383,51 @@ def test_gsc_and_indexnow_fields_are_on_keys_screen():
     assert EDITABLE["GSC_SERVICE_ACCOUNT_JSON"].secret
     for k in ("GSC_API_URL", "INDEXNOW_ENABLED", "INDEXNOW_URL"):
         assert k in EDITABLE and hasattr(settings, k)
+
+
+# ── фикс-раунд 1: секрет IndexNow, видимость отката GSC ──────────────────────────────────────
+
+def test_indexnow_key_is_hmac_not_plain_hash_and_depends_on_secret(monkeypatch):
+    import hashlib
+    k = sb.indexnow_key("alpha.com")
+    # не голый sha256 от сида, ни с «солью», ни без — иначе схему угадают и сцепят сайты портфеля
+    for seed in ("alpha.com", "indexnow:alpha.com"):
+        assert k != hashlib.sha256(seed.encode()).hexdigest()[:32]
+    monkeypatch.setattr(settings, "INDEXNOW_SECRET", "другой-секрет")
+    assert sb.indexnow_key("alpha.com") != k
+
+
+def test_no_secret_means_no_key_file_and_no_ping(deploy, monkeypatch):
+    seen = _indexnow_on(monkeypatch)
+    monkeypatch.setattr(settings, "INDEXNOW_SECRET", "")
+    assert sb.indexnow_key("pub.com") is None
+    assert set(sb.build_site_files("pub.com", ["/"])) == {"robots.txt", "sitemap.xml"}
+    out = publish.publish_site(_edited_site())
+    assert out["status"] == "published" and seen == []
+    assert any("INDEXNOW_SECRET" in w for w in out["warnings"])
+
+
+def test_stage_surfaces_gsc_fallback(gsc_on, monkeypatch):
+    from app.services import orchestrator as orch
+    gsc_on(lambda s, u: (403, {}))
+    _searx(monkeypatch, results=[{"url": "https://idx.com/"}])
+    sid = _site()
+    done, errs, counts = orch._stage_check_index(5)
+    assert done == 1 and counts.get("gsc_fallback") == 1
+    assert any(f"site#{sid}" in e and "GSC" in e for e in errs)
+    assert "gsc_fallback" in orch.COUNT_RU
+
+
+def test_panel_check_index_flash_shows_source_and_gsc_reason(gsc_on, monkeypatch, client):
+    from urllib.parse import unquote
+    gsc_on(lambda s, u: (403, {}))
+    _searx(monkeypatch, results=[{"url": "https://idx.com/"}])
+    sid = _site()
+    r = client.post(f"/sites/{sid}/check-index", follow_redirects=False)
+    loc = unquote(r.headers["location"])
+    assert "searxng" in loc and "GSC недоступен" in loc and "свойств" in loc
+
+
+def test_indexnow_secret_is_on_keys_screen():
+    from app.services.api_keys import EDITABLE
+    assert EDITABLE["INDEXNOW_SECRET"].secret and hasattr(settings, "INDEXNOW_SECRET")

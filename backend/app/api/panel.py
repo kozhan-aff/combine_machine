@@ -1392,7 +1392,11 @@ def check_index_action(site_id: int):
             return _back(f"/sites/{site_id}", msg="Нет опубликованных страниц для проверки.")
         # Вердикт — через labels.index_ru: сырое `unknown` во флеше оператор прочтёт как «нет».
         s = ", ".join(f"{k}: {_index_ru(v)}" for k, v in pages.items())
-        return _back(f"/sites/{site_id}", msg=f"Индексация — {s}")
+        src = sorted(set((r.get("sources") or {}).values()))
+        tail = f" (источник: {', '.join(src)})" if src else ""
+        if r.get("gsc_note"):   # GSC отвалился -> проверка ушла в SearXNG; причину показываем, не глотаем
+            tail += f". GSC недоступен: {r['gsc_note']}"
+        return _back(f"/sites/{site_id}", msg=f"Индексация — {s}{tail}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"индексация: {e}")
 
