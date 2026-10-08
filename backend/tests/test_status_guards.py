@@ -96,7 +96,8 @@ def test_publish_edit_gate_still_answers_first(no_panel_writes):
 
 def test_publish_works_for_provisioned_site(no_panel_writes):
     sid = _site("content", name="g.com", pages=("edited",))
-    assert publish.publish_site(sid)["status"] == "published" and len(no_panel_writes) == 1
+    assert publish.publish_site(sid)["status"] == "published" and \
+        len([w for w in no_panel_writes if w.endswith("/index.html")]) == 1
 
 
 def test_sweep_publish_stage_reports_unprovisioned_as_error(no_panel_writes):

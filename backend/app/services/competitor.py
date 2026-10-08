@@ -76,7 +76,8 @@ def outline_for(brand: str, lang: str = "ru", cap: int = 12) -> dict | None:
     from urllib.parse import urlparse
     from app.integrations.aparser import AParserClient
 
-    query = f"{brand} обзор" if lang == "ru" else f"{brand} review"
+    from app.services.locales import t
+    query = f"{brand} {t(lang, 'review_word')}"      # «Test» для de, «avis» для fr… (S6-08)
     brand_key = _norm(brand)
     try:
         ap = AParserClient()

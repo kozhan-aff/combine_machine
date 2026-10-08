@@ -562,7 +562,8 @@ def test_publish_partial_failure_reports_written_and_publishes_only_those(monkey
 
     out = publish.publish_site(sid)
 
-    assert written == ["/www/wwwroot/ex.ru/index.html"]        # первая реально записана
+    # первая страница реально записана (ассеты/sitemap/robots идут отдельными файлами)
+    assert [w for w in written if w.endswith("/index.html")] == ["/www/wwwroot/ex.ru/index.html"]
     assert out["status"] == "partial" and out["pages"] == ["/"] and "/p1" in out["failed"]
     with db.SessionLocal() as s:
         assert [p.status for p in s.query(Page).filter_by(site_id=sid).order_by(Page.id)] \

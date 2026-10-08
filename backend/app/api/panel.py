@@ -31,7 +31,7 @@ from app.models.cloudflare import (
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
-from app.services import cf_sync, diag_cache
+from app.services import cf_sync, diag_cache, locales
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
@@ -43,6 +43,7 @@ templates.env.filters["source_badge"] = _source_badge
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
 templates.env.filters["index_ru"] = _index_ru
+templates.env.globals["site_langs"] = sorted(locales.TEXTS)   # языки шаблона сайта (select «Генерация»)
 templates.env.globals["diag_alert"] = diag_cache.alert   # баннер в base.html читает кэш
 router = APIRouter()
 
@@ -1245,7 +1246,7 @@ def provision_action(site_id: int, request: Request):
 
 
 @router.post("/sites/{site_id}/generate")
-def generate_action(site_id: int, lang: str = Form("ru"), db: Session = Depends(get_session)):
+def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(get_session)):
     """Генерация — фоновая задача `generate` (S6-11/S7-14): LLM пишет минуты, держать ради этого
     HTTP-запрос нельзя. Явный отказ (нет сайта/оффера) отдаём сразу, а не потом в карточке задачи."""
     from app.services import content, jobs
@@ -1260,7 +1261,7 @@ def generate_action(site_id: int, lang: str = Form("ru"), db: Session = Depends(
         return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
                      "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
     # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
-    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang, use_competitor=True))
+    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None, use_competitor=True))
     if not ok:
         return _back(f"/sites/{site_id}", err="Генерация уже идёт — дождись её на Пульте")
     return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "

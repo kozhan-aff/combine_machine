@@ -104,7 +104,7 @@
           не попадают до твоей редактуры. Идёт в фоне (≈1–2 мин): прогресс по страницам — на Пульте.{% endif %}</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px; align-items:center">
-          <select name="lang" title="язык, на котором LLM напишет черновики"><option value="ru">ru</option><option value="en">en</option></select>
+          <select name="lang" title="язык сайта; «авто» — рынок домена, затем язык оффера, иначе en"><option value="">авто</option>{% for l in site_langs %}<option value="{{ l }}">{{ l }}</option>{% endfor %}</select>
           <button class="btn-sm {{ '' if has_pages else 'btn-acc' }}" {{ 'disabled' if not prov_done }}
                   title="сгенерировать AI-черновики страниц (публиковаться не будут до редактуры){{ '' if prov_done else ' — сначала шаг 3: провижн' }}">▶ Сгенерировать черновики</button>
         </form>

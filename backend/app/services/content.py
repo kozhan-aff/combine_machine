@@ -11,7 +11,7 @@ import hashlib
 
 import nh3
 
-from app.services.locales import t
+from app.services.locales import LANG_NAMES, norm_lang, resolve_lang, t
 
 # Русская редакция раскрытия — для обратной совместимости; страницы берут текст по своему языку
 # из services/locales (t(lang, "disclosure")).
@@ -27,13 +27,33 @@ LINK_REL = "sponsored nofollow noopener"
 # (<script>/<iframe>/on*/style) must never reach the DB. Tags match what M4 emits.
 _ALLOWED_TAGS = {"h2", "h3", "h4", "p", "ul", "ol", "li", "a", "strong", "em", "b", "i",
                  "br", "blockquote", "table", "thead", "tbody", "tr", "th", "td",
-                 "code", "pre", "figure", "figcaption"}
-_ALLOWED_ATTRS = {"a": {"href", "title"}}
+                 "code", "pre", "figure", "figcaption", "img"}
+_ALLOWED_ATTRS = {"a": {"href", "title"}, "img": {"src", "alt", "width", "height"}}
+
+# <img> (S6-04/F8-10): ТОЛЬКО локальные картинки сайта assets/<имя>.svg. Внешний src, data:,
+# javascript:, протокол-относительный //host — вырезаются. Относительный путь нормализуется к
+# корневому (/assets/x.svg): на странице /vs/ относительный assets/x.svg указал бы в /vs/assets/.
+_IMG_SRC = re.compile(r"^/?assets/([A-Za-z0-9][A-Za-z0-9._-]*)\.svg$")
+
+
+def _attr_filter(tag: str, attr: str, value: str):
+    if tag != "img":
+        return value
+    if attr == "src":
+        m = _IMG_SRC.match((value or "").strip())
+        return f"/assets/{m.group(1)}.svg" if m else None
+    if attr in ("width", "height"):
+        return value if re.fullmatch(r"\d{1,4}", value or "") else None
+    return value
 
 
 def _sanitize(body: str | None) -> str:
     """Strip everything outside the allowlist (script/iframe/event-handlers/style)."""
-    return nh3.clean(body or "", tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS, link_rel=LINK_REL)
+    out = nh3.clean(body or "", tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS, link_rel=LINK_REL,
+                    attribute_filter=_attr_filter,
+                    set_tag_attribute_values={"img": {"loading": "lazy"}})
+    # <img> без (прошедшего фильтр) src — мусор: убираем целиком
+    return re.sub(r"<img(?![^>]*\ssrc=)[^>]*>", "", out)
 
 
 # F28 (аудит 2026-07-14): affiliate_link идёт прямо в href через html.escape(), а html.escape
@@ -57,40 +77,46 @@ def is_safe_url(url: str | None) -> bool:
         return False
 
 
-def scaffold(brand: str, niche: str | None = None) -> list[dict]:
-    """Minimal site structure (page specs). Tune per niche/SERP later."""
+def scaffold(brand: str, niche: str | None = None, lang: str = "en") -> list[dict]:
+    """Minimal site structure (page specs). Заголовки — на языке сайта (services/locales).
+    Tune per niche/SERP later."""
     return [
-        {"url_path": "/", "title": f"{brand}: обзор и честный тест", "kind": "review"},
-        {"url_path": "/vs", "title": f"{brand} против конкурентов", "kind": "comparison"},
-        {"url_path": "/setup", "title": f"Как настроить {brand}", "kind": "howto"},
+        {"url_path": "/", "title": t(lang, "title_review", brand=brand), "kind": "review"},
+        {"url_path": "/vs", "title": t(lang, "title_comparison", brand=brand), "kind": "comparison"},
+        {"url_path": "/setup", "title": t(lang, "title_howto", brand=brand), "kind": "howto"},
     ]
 
 
-def _system_prompt(lang: str) -> str:
+def _system_prompt(lang: str, country: str | None = None) -> str:
     # F27 (аудит 2026-07-14): раньше здесь стояло "замеры скорости" — а vertical_data.py не
     # содержит ни одного реального измерения скорости ни по одному бренду. Промпт прямо
     # ПРОВОЦИРОВАЛ модель выдумывать конкретные цифры (Mbps/пинги), а гейт редактуры вместо
     # проверки реальных данных превращался в "поймай галлюцинацию". Формулировка ниже просит
     # то, что реально ЕСТЬ в vertical_data (обход гео-блоков, юзкейсы, устройства/протоколы),
     # и явно требует не придумывать числа, которых не давали.
-    return (f"Ты опытный редактор VPN-обзоров. Пиши на языке '{lang}', по делу, с реальной "
-            "пользой (обход гео-блоков, юзкейсы, поддерживаемые устройства и протоколы), без "
-            "воды и маркетингового мусора. Не выдумывай конкретные цифры (скорость, пинг, "
-            "проценты), которых нет в переданных данных — если измерений не дали, пиши без них. "
-            "Верни HTML-ФРАГМЕНT (только <h2>/<h3>/<p>/<ul>, без <html>/<body>). "
-            "Это ЧЕРНОВИК для последующей человеческой редактуры.")
+    # G8 (S6-03/S7-06): промпт английский, язык вывода и рынок — параметры, а не зашитый русский.
+    name = LANG_NAMES[norm_lang(lang)]
+    market = f" for readers in {country}" if country else ""
+    return (f"You are an experienced VPN review editor. Write in {name}{market}: natural, native-level "
+            f"{name}, to the point, genuinely useful (bypassing geo-blocks, use cases, supported devices "
+            "and protocols), no filler or marketing fluff. Do not invent specific numbers (speed, "
+            "ping, percentages) that are not in the supplied data — if no measurements are given, "
+            "write without them. Return an HTML FRAGMENT only (<h2>/<h3>/<p>/<ul>, no <html>/<body>, "
+            "no <h1>, no images). This is a DRAFT for later human editing.")
 
 
 def _page_prompt(spec: dict, brand: str, vertical_data: str | None,
-                 competitor: list[str] | None = None) -> str:
-    data = f"\n\nРеальные данные вертикали (использовать):\n{vertical_data}" if vertical_data else ""
+                 competitor: list[str] | None = None, lang: str = "en") -> str:
+    # блок фактов приходит на русском (vertical_data) — модель переводит его в язык вывода
+    data = ("\n\nReal vertical data (use it as facts; it is written in Russian — translate it into "
+            f"the output language, keep numbers and dates exact):\n{vertical_data}") if vertical_data else ""
     comp = ""
     if competitor:
         topics = "\n".join(f"- {h}" for h in competitor)
-        comp = ("\n\nТемы, которые покрывает топ-конкурент (для полноты охвата; НЕ копировать "
-                f"формулировки дословно, отбирай релевантное теме страницы):\n{topics}")
-    return (f"Тема: {spec['title']} (тип: {spec['kind']}). Бренд: {brand}. "
-            f"Сделай связный черновик со структурой заголовков.{data}{comp}")
+        comp = ("\n\nTopics covered by the top competitor (for completeness; do NOT copy the wording, "
+                f"pick what is relevant to this page):\n{topics}")
+    return (f"Topic: {spec['title']} (type: {spec['kind']}). Brand: {brand}. Output language: "
+            f"{LANG_NAMES[norm_lang(lang)]}. Make a coherent draft with a heading structure.{data}{comp}")
 
 
 def _clean(body: str) -> str:
@@ -132,9 +158,13 @@ def status_refusal(site) -> str | None:
     return None
 
 
-def generate_site(site_id: int, lang: str = "ru", vertical_data: str | None = None,
+def generate_site(site_id: int, lang: str | None = None, vertical_data: str | None = None,
                   use_competitor: bool = False) -> int:
     """Generate draft pages for a site via LiteLLM. Returns count created. status stays 'draft'.
+
+    lang: язык сайта. None -> берётся сам (S6-02/S7-06): язык уже написанных страниц сайта,
+    иначе рынок домена (Domain.market_lang), иначе язык оффера, иначе en — НЕ 'ru' по умолчанию.
+    Язык без словаря шаблона (pl, ja…) -> ValueError, а не молча английский.
 
     use_competitor: подмешать структуру тем от топ-конкурента (A-Parser, best-effort).
     По умолчанию off — сеть не дёргается в тестах/скриптах; панель включает явно.
@@ -154,6 +184,7 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run) -> int:
     from app.db import SessionLocal
     from app.models.site import Site, Page
     from app.models.offer import Offer
+    from app.models.domain import Domain
     from app.integrations.llm import LlmClient
     from app.services import jobs
 
@@ -191,6 +222,9 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run) -> int:
                 f"сайт #{site_id}: оффер не привязан (или выключен) — сначала привяжи активный "
                 "оффер на карточке сайта: без него страницы получились бы про чужой бренд")
         brand, offer_id, niche = offer.brand, offer.id, site.niche
+        dom = db.get(Domain, site.domain_id)
+        lang = resolve_lang(lang, dom.market_lang if dom else None, offer.language)
+        country = offer.country
 
     # information gain (PLAN §2): подмешиваем реальные факты вертикали, если бренд знаком.
     # Явно переданный vertical_data приоритетнее (напр. свежий фид). Неизвестный бренд -> None.
@@ -206,15 +240,15 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run) -> int:
         competitor = got["headings"] if got else None
 
     llm = LlmClient()
-    todo = [sp for sp in scaffold(brand, niche) if sp["url_path"] not in existing_paths]
+    todo = [sp for sp in scaffold(brand, niche, lang) if sp["url_path"] not in existing_paths]
     created = 0
     jobs.report(run, done=0, total=len(todo))
     for i, spec in enumerate(todo):
         if jobs.cancelled(run):
             raise jobs.Cancelled()           # уже записанные страницы остаются (коммит по странице)
         jobs.report(run, done=i, total=len(todo), current=spec["title"])
-        body = _sanitize(_clean(llm.complete(_system_prompt(lang),
-                                             _page_prompt(spec, brand, vertical_data, competitor))))
+        body = _sanitize(_clean(llm.complete(_system_prompt(lang, country),
+                                             _page_prompt(spec, brand, vertical_data, competitor, lang))))
         if not body.strip():
             continue  # empty LLM output (null/blocked): skip page, don't crash the batch
         # ФАЗА 2 — коммит КАЖДОЙ страницы сразу: осечка на 3-й не выбрасывает оплаченные токены
@@ -309,13 +343,17 @@ def cta_link(offer, reserve_url: str | None = None) -> str | None:
     return link if is_safe_url(link) else None
 
 
-def render_html(page, offer=None, lang: str = "ru", reserve_url: str | None = None,
-                build_id: str | None = None) -> str:
+def render_html(page, offer=None, lang: str = "en", reserve_url: str | None = None,
+                build_id: str | None = None, ctx=None) -> str:
     """Wrap an edited page into a full HTML doc with offer link (sponsored) + disclosure. For M5.
 
     lang: <html lang=...> for the generation language (publish passes it down). Body is
     re-sanitized here (egress) so any writer that skipped _sanitize can't leak hostile HTML.
-    Служебные строки (CTA, промокод, раскрытие) — на этом же языке (services/locales).
+    Служебные строки (CTA, промокод, раскрытие, меню) — на этом же языке (services/locales).
+
+    ctx: site_builder.SiteContext — контекст сайта (домен, тема по сиду домена, навигация, файлы
+    assets). Без него — одиночный документ с inline-CSS, без шапки/canonical/картинок (тесты,
+    предпросмотр). Вёрстка целиком в services/site_builder.
 
     reserve_url: F3 (аудит 2026-07-15) — если offer.active=False, ссылка подменяется на этот
     общий резервный URL (если задан). offer_id зафиксирован при генерации и остаётся фактом
@@ -324,29 +362,27 @@ def render_html(page, offer=None, lang: str = "ru", reserve_url: str | None = No
     build_id: метка сборки в <meta name="build-id"> — по ней publish сверяет, что по домену
     отдаётся именно записанная версия, а не заглушка панели.
     """
+    from app.services import site_builder as sb
+    ctx = ctx or sb.SiteContext()
+    k = ctx.theme.k
     link = cta_link(offer, reserve_url)
     disc = html.escape(t(lang, "disclosure"))
-    note = "font-size:.95em;border-left:3px solid #999;padding-left:.75em"
     offer_block = ""
     if link:
         promo = (f" {html.escape(t(lang, 'promo'))}: <b>{html.escape(offer.promo_code)}</b>."
                  if offer.promo_code else "")
         cta = html.escape(t(lang, "cta", brand=offer.brand))
         # раскрытие — В блоке оффера, рядом со ссылкой, не только в подвале (S6-07)
-        offer_block = (f'<aside class="offer"><p class="disclosure" style="{note}">{disc}</p>'
+        offer_block = (f'<aside class="{k("off")}"><p class="{k("disc")}">{disc}</p>'
                        f'<p><a href="{html.escape(link)}" rel="sponsored nofollow noopener">'
                        f'{cta}</a>.{promo}</p></aside>')
     body = _sanitize(page.body)
     # и над текстом: ссылки (CTA или партнёрские в теле) видны раньше, чем читатель дойдёт до низа
-    top = f'<p class="disclosure" style="{note}">{disc}</p>' if (link or "<a " in body) else ""
-    meta = f"<meta name='build-id' content='{html.escape(build_id)}'>" if build_id else ""
-    return (
-        f"<!doctype html><html lang='{html.escape(lang or 'ru')}'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"{meta}<title>{html.escape(page.title or '')}</title></head><body>"
-        f"{top}<article>{body}</article>{offer_block}"
-        f"<footer><small>{disc}</small></footer></body></html>"
-    )
+    top = f'<p class="{k("disc")}">{disc}</p>' if (link or "<a " in body) else ""
+    return sb.render_document(
+        ctx, lang, title=page.title or "", description=sb.description_of(body, page.title),
+        url_path=getattr(page, "url_path", None) or "/", body=body, top_note=top,
+        offer_block=offer_block, footer_note=disc, build_id=build_id)
 
 
 def build_id_of(doc: str) -> str:
@@ -359,10 +395,10 @@ if __name__ == "__main__":  # pure checks (no network/DB): disclosure + sponsore
     pg = N(title="Обзор", body="<h2>Тест</h2><p>...</p>")
     off = N(brand="NordVPN", affiliate_link="https://ex.com/aff?x=1", promo_code="SAVE10",
             active=True)
-    out = render_html(pg, off)
+    out = render_html(pg, off, lang="ru")
     assert DISCLOSURE in out and 'rel="sponsored nofollow noopener"' in out and "SAVE10" in out
     assert "<article><h2>Тест</h2>" in out
-    assert render_html(pg, None).count("offer") == 0  # no offer -> no offer block
+    assert render_html(pg, None).count("<aside") == 0  # no offer -> no offer block
     assert _clean("```html\n<h2>x</h2>\n```") == "<h2>x</h2>"  # fence stripped
     assert _clean("<p>plain</p>") == "<p>plain</p>"
     dirty = _sanitize('<h2>ok</h2><script>alert(1)</script><a href="x" onclick="bad()">l</a>')

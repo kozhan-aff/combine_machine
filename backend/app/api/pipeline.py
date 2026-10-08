@@ -111,7 +111,7 @@ def do_provision(site_id: int):
 
 # --- M4 content -------------------------------------------------------------
 @router.post("/sites/{site_id}/generate")
-def do_generate(site_id: int, lang: str = "ru"):
+def do_generate(site_id: int, lang: str | None = None):
     return {"created": _run(content.generate_site, site_id, lang=lang)}
 
 

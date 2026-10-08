@@ -274,14 +274,16 @@ def test_legacy_page_does_not_fall_back_to_foreign_global_offer(monkeypatch):
 def test_disclosure_is_in_offer_block_and_in_page_language():
     off = N(brand="Nord", affiliate_link="https://ex.com/a", promo_code="X1", active=True)
     en = content.render_html(N(title="t", body="<p>x</p>"), off, lang="en")
-    block = en[en.index('<aside class="offer">'):en.index("</aside>")]
+    block = en[en.index('<aside'):en.index("</aside>")]
     assert "affiliate links" in block and "Go to Nord" in block and "Promo code" in block
     assert "Раскрытие" not in en
     assert "affiliate links" in en[:en.index("<article>")]            # и над текстом
     ru = content.render_html(N(title="t", body="<p>x</p>"), off, lang="ru")
     assert "Раскрытие:" in ru[ru.index('<aside'):ru.index("</aside>")] and "Перейти к Nord" in ru
     de = content.render_html(N(title="t", body="<p>x</p>"), off, lang="de-DE")
-    assert "affiliate links" in de                                    # язык без словаря -> en, не ru
+    assert "Affiliate-Links" in de and "Zu Nord" in de and "Gutscheincode" in de   # G8: de есть
+    pl = content.render_html(N(title="t", body="<p>x</p>"), off, lang="pl-PL")
+    assert "affiliate links" in pl and "Раскрытие" not in pl          # язык без словаря -> en, не ru
 
 
 # ── S6-13 / S7-12: оффер сайта — явно ─────────────────────────────────────────

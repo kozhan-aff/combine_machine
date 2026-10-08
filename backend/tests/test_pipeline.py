@@ -194,10 +194,11 @@ def test_edit_gate_and_publish(client, monkeypatch):
 
     # only the edited page went out — the 2 drafts were left untouched
     assert pub["status"] == "published" and pub["pages"] == ["/"]
-    assert len(writes) == 1
-    path, page_html = writes[0]
+    pages_written = [w for w in writes if w[0].endswith("/index.html")]
+    assert len(pages_written) == 1                     # остальное — assets/robots/sitemap (G8)
+    path, page_html = pages_written[0]
     assert path.endswith("/index.html")
-    assert "SAVE10" in page_html and 'rel="sponsored nofollow noopener"' in page_html and "Раскрытие" in page_html
+    assert "SAVE10" in page_html and 'rel="sponsored nofollow noopener"' in page_html and "affiliate links" in page_html
     assert "<script" not in page_html.lower() and "xss" not in page_html   # sanitized on edit
     states = sorted(p["status"] for p in client.get(f"/api/sites/{site_id}/pages").json())
     assert states == ["draft", "draft", "published"]

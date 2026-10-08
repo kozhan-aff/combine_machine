@@ -100,6 +100,8 @@ def publish_site(site_id: int) -> dict:
     from app.models.offer import Offer
     from app.integrations.aapanel import AaPanelClient, AaPanelBlocked
     from app.services.content import render_html, build_id_of, cta_link
+    from app.services import site_builder
+    from app.services.locales import norm_lang
 
     with SessionLocal() as db:
         site = db.get(Site, site_id)
@@ -139,13 +141,15 @@ def publish_site(site_id: int) -> dict:
         now = datetime.now(timezone.utc)
         published, written, failed, unverified, warnings = [], [], {}, {}, []
         blocked = None
+        # ── фаза 1: проверка и отбор. Ничего не пишем, пока не знаем, что публиковать ──────────
+        ready = []                                           # (page, offer, lang)
         for p in pages:
             # Каждая страница несёт СВОЙ offer_id/lang, зафиксированные в момент генерации
             # (content.generate_site) — читаем их, а не «текущее» состояние сайта.
             offer = db.get(Offer, p.offer_id) if p.offer_id is not None else fallback_offer
             # <html lang=...>: приоритет — язык, под который страница реально писалась;
-            # для legacy-страниц без p.lang — язык текущего оффера, дефолт 'ru'.
-            lang = p.lang or (offer.language if offer and offer.language else "ru")
+            # для legacy-страниц без p.lang — язык текущего оффера, иначе en (не ru: S6-02).
+            lang = norm_lang(p.lang or (offer.language if offer and offer.language else None))
             if offer is not None and cta_link(offer, reserve_url) is None:
                 # оффер привязан, а CTA молча не выйдет (пустая/небезопасная ссылка) — страница
                 # без своей единственной ссылки не должна уходить в интернет (S6-07)
@@ -163,8 +167,53 @@ def publish_site(site_id: int) -> dict:
                 failed[p.url_path] = (f"оффер «{offer.brand}» выключен и резервный URL не задан — "
                                       "включи оффер или задай резервный URL")
                 continue
-            bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url))
-            doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid)
+            ready.append((p, offer, lang))
+
+        if not ready:
+            db.commit()
+            return {"domain": domain, "pages": [], "written": [], "failed": failed,
+                    "unverified": {}, "warnings": warnings, "status": "failed"}
+
+        # ── фаза 2: ассеты. Порядок «assets -> страницы -> sitemap»: страница никогда не ссылается
+        # на ещё не лежащий CSS/картинку; провал ассетов = страницы НЕ трогаем (прежняя версия
+        # сайта остаётся целой), оператору — список записанного. Атомарного rename через API
+        # aaPanel не гарантируем (не проверено вживую), поэтому — порядок и честный отчёт.
+        # Прошлые опубликованные страницы сайта (не в этом прогоне) — в навигацию, но их тела
+        # НЕ переписываем: в БД у них мог остаться непросмотренный черновик (гейт редактуры).
+        lang0, brand0 = ready[0][2], ready[0][1].brand
+        live = db.execute(select(Page).where(Page.site_id == site_id, Page.status == "published")
+                          ).scalars().all()
+        run_ids = {p.id for p, _, _ in ready}
+        nav_src = {p.url_path: (p.title, lang) for p, _, lang in ready}
+        for q in live:
+            nav_src.setdefault(q.url_path, (q.title, q.lang or lang0))
+        nav = [(path, site_builder.nav_label(path, ttl, lg))
+               for path, (ttl, lg) in sorted(nav_src.items(), key=lambda kv: (kv[0].strip("/") != "", kv[0]))]
+        ctx = site_builder.make_ctx(domain, nav, lang0, brand0)
+        home_title = next((p.title for p, _, _ in ready if p.url_path.strip("/") == ""), ready[0][0].title)
+        assets = site_builder.build_assets(domain, lang0, brand0, home_title or "")
+        root = site.doc_root.rstrip("/")
+        order = [f for f in assets if f != "assets/.version"] + ["assets/.version"]   # маркер — последним
+        written_files = []
+        try:
+            for rel in order:
+                ap.write_file(f"{root}/{rel}", assets[rel])
+                written_files.append(rel)
+        except AaPanelBlocked as e:
+            db.commit()
+            raise e
+        except Exception as e:  # noqa: BLE001
+            for p, _, _ in ready:
+                failed[p.url_path] = (f"ассеты сайта не записаны ({type(e).__name__}: {e})"[:240]
+                                      + "; страницы не тронуты")
+            db.commit()
+            return {"domain": domain, "pages": [], "written": [], "failed": failed, "unverified": {},
+                    "warnings": warnings, "status": "failed", "assets_written": written_files}
+
+        # ── фаза 3: страницы ──────────────────────────────────────────────────────────────────
+        for p, offer, lang in ready:
+            bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url, ctx=ctx))
+            doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid, ctx=ctx)
             try:
                 ap.write_file(_target_path(site.doc_root, p.url_path), doc)
             except AaPanelBlocked as e:
@@ -184,6 +233,16 @@ def publish_site(site_id: int) -> dict:
             p.published_at = now
             published.append(p.url_path)
 
+        # ── фаза 4: robots.txt + sitemap.xml по ОПУБЛИКОВАННЫМ страницам (не по edited) ────────
+        if blocked is None and (published or live):
+            urls = published + [q.url_path for q in live if q.id not in run_ids]
+            for rel, content in site_builder.build_site_files(domain, urls).items():
+                try:
+                    ap.write_file(f"{root}/{rel}", content)
+                    written_files.append(rel)
+                except Exception as e:  # noqa: BLE001 — не критично для страниц, но видно оператору
+                    warnings.append(f"{rel} не записан: {type(e).__name__}: {e}"[:200])
+
         if published:
             if site.status != "monitoring":
                 site.status = "published"
@@ -194,7 +253,8 @@ def publish_site(site_id: int) -> dict:
         if blocked is not None:
             raise blocked
         out = {"domain": domain, "pages": published, "written": written,
-               "failed": failed, "unverified": unverified, "warnings": warnings}
+               "failed": failed, "unverified": unverified, "warnings": warnings,
+               "files": written_files}
         if published and not failed and not unverified:
             out["status"] = "published"
         else:
