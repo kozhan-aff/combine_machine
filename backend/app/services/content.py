@@ -37,6 +37,9 @@ _IMG_SRC = re.compile(r"^/?assets/([A-Za-z0-9][A-Za-z0-9._-]*)\.svg$")
 
 
 def _attr_filter(tag: str, attr: str, value: str):
+    if tag == "a" and attr == "href":
+        # протокол-относительная «//host/…» — внешний хост без схемы, мимо allowlist http(s)
+        return None if (value or "").strip().startswith("//") else value
     if tag != "img":
         return value
     if attr == "src":
@@ -50,6 +53,7 @@ def _attr_filter(tag: str, attr: str, value: str):
 def _sanitize(body: str | None) -> str:
     """Strip everything outside the allowlist (script/iframe/event-handlers/style)."""
     out = nh3.clean(body or "", tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS, link_rel=LINK_REL,
+                    url_schemes={"http", "https"},        # без mailto:/tel:/data:/javascript:
                     attribute_filter=_attr_filter,
                     set_tag_attribute_values={"img": {"loading": "lazy"}})
     # <img> без (прошедшего фильтр) src — мусор: убираем целиком

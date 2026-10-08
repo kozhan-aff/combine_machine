@@ -427,3 +427,36 @@ def test_site_badge_title_mentions_reserve_when_configured(client, monkeypatch):
 
     r2 = client.get(f"/sites/{site_id}")
     assert "поведёт на резервный URL" in r2.text
+
+
+@pytest.mark.parametrize("vec", [
+    '<a href="javascript:alert(1)">x</a>', '<a href="JaVaScRiPt:alert(1)">x</a>',
+    '<a href="  javascript:alert(1)">x</a>', '<a href="jav&#x09;ascript:alert(1)">x</a>',
+    '<a href="data:text/html;base64,PHNjcmlwdD4=">x</a>', '<a href="vbscript:x">x</a>',
+    '<a href="mailto:a@b.c">x</a>', '<a href="//evil.com/x">x</a>',
+])
+def test_sanitize_strips_dangerous_href(vec):
+    from app.services.content import _sanitize
+    out = _sanitize(vec)
+    assert "href" not in out and "rel=" in out, out
+
+
+@pytest.mark.parametrize("vec", [
+    '<img src="x" onerror="alert(1)">', '<img src="https://evil/x.svg">',
+    '<img src="data:image/svg+xml,<svg onload=alert(1)>">', '<img src="javascript:alert(1)">',
+    '<img src="/assets/../x.svg">', '<img src="//e.com/assets/a.svg">', '<img src="assets/a.png">',
+])
+def test_sanitize_drops_non_local_images(vec):
+    from app.services.content import _sanitize
+    assert "<img" not in _sanitize(vec)
+
+
+def test_sanitize_strips_event_handlers_and_keeps_local_svg_only():
+    from app.services.content import _sanitize
+    out = _sanitize('<p onmouseover="alert(1)" style="x">t</p><script>alert(1)</script>'
+                    '<a href="https://ok.com" onclick="a()" rel="dofollow" target="_blank">ok</a>'
+                    '<img src="assets/a.svg" onerror="x" style="y">')
+    assert "onmouseover" not in out and "onclick" not in out and "onerror" not in out
+    assert "<script" not in out and "style=" not in out and "dofollow" not in out
+    assert 'href="https://ok.com"' in out and "sponsored nofollow noopener" in out
+    assert '<img src="/assets/a.svg"' in out
