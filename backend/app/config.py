@@ -117,8 +117,14 @@ class Settings(BaseSettings):
         # pydantic на пустом bool падает ValidationError и роняет backend/worker/alembic при импорте.
         return False if isinstance(v, str) and not v.strip() else v
 
-    # gsc
+    # Индексация (M5). GSC URL Inspection — основной источник «в индексе ли страница» (service account:
+    # JSON ключа целиком; аккаунт добавлен в свойство GSC сайта). GSC_API_URL — хост Search Console API.
     GSC_SERVICE_ACCOUNT_JSON: str = ""
+    GSC_API_URL: str = "https://searchconsole.googleapis.com"
+    # IndexNow — бесплатный пинг Bing/Yandex/др. о новых страницах. Ключа-секрета нет: ключ сайта
+    # выводится из домена и лежит в корне сайта файлом <key>.txt (так задумано протоколом).
+    INDEXNOW_ENABLED: bool = True
+    INDEXNOW_URL: str = "https://api.indexnow.org/indexnow"
 
     # llm — LiteLLM (локальный бокс, OpenAI-совместимый, без ключа)
     LLM_BASE_URL: str = "http://192.168.1.77:4000"   # ponytail: dev-box default, override via .env

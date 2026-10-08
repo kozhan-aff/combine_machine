@@ -155,8 +155,17 @@ GROUPS = [
             secret=True),
       Field("GSC_SERVICE_ACCOUNT_JSON", "Google Search Console · JSON сервис-аккаунта",
             "Содержимое JSON-ключа сервис-аккаунта целиком (Google Cloud → IAM → Service accounts → Keys). "
-            "Аккаунт нужно добавить в свойство GSC. Вставь JSON целиком; в Firefox текст виден при вводе.",
-            secret=True, kind="json", max_len=MAX_LEN_JSON)]),
+            "Аккаунт нужно добавить в свойство GSC каждого сайта (доменное sc-domain: или префикс URL). "
+            "Вставь JSON целиком; в Firefox текст виден при вводе. Основной источник проверки индексации "
+            "(URL Inspection, 2000 запросов/сут на сайт); пусто — проверка идёт через SearXNG.",
+            secret=True, kind="json", max_len=MAX_LEN_JSON),
+      Field("GSC_API_URL", "Google Search Console · адрес API", "По умолчанию "
+            "https://searchconsole.googleapis.com. Менять не нужно.", kind="url"),
+      Field("INDEXNOW_ENABLED", "IndexNow · пинг после публикации", "true (по умолчанию) — после публикации "
+            "сообщать поисковикам о новых страницах. Ключ сайта выводится из домена, лежит в корне сайта "
+            "файлом <ключ>.txt и деплоится вместе с ним.", kind="choice", choices=("true", "false")),
+      Field("INDEXNOW_URL", "IndexNow · адрес API", "По умолчанию https://api.indexnow.org/indexnow. "
+            "Менять не нужно.", kind="url")]),
     ("infra", "Инфраструктура",
      "Самообновление из git и опциональные локальные сервисы.",
      [Field("GITHUB_TOKEN", "GitHub · токен", "Fine-grained PAT с правом чтения Contents (Settings → "
