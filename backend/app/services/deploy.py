@@ -97,6 +97,28 @@ def _post_update(old: str) -> dict:
             "needs_rebuild": _detect_rebuild(old, new), "alembic_warn": alembic_warn}
 
 
+def _busy_jobs() -> list[str]:
+    """Имена ЖИВЫХ длинных задач (score/discovery/sweep/generate/...), которые pull убьёт.
+
+    Pull меняет *.py в смонтированном каталоге: uvicorn --reload (панель, где крутятся ручные
+    задачи) и watchfiles (воркер, где идёт свип) перезапускают процесс и обрывают поток посреди
+    ПЛАТНОЙ волны (Ahrefs units, A-Parser) — раньше защитой была устная заметка «не жми pull пока
+    идёт score» (F8-16). Протухшие (stale — контейнер уже убит) не считаем: трупы не должны
+    блокировать деплой навсегда. Реестр общий (job_run), так что видны задачи обоих процессов.
+    Сбой чтения реестра — не повод запирать деплой (панель с лежащей БД и так не обновить)."""
+    try:
+        from app.services import jobs
+        return [j["name"] for j in jobs.live() if not j.get("stale")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _busy_error(busy: list[str]) -> dict:
+    return {"ok": False, "error": "идут задачи: " + ", ".join(busy) + " — обновление оборвало бы их "
+                                  "посреди работы (перезапуск процессов). Дождись конца или нажми "
+                                  "«✕ Отменить» на карточке задачи и повтори."}
+
+
 def git_pull() -> dict:
     """Безопасный путь: fetch → pull --ff-only → alembic → детект. needs_force при грязи/расхождении."""
     if not settings.GITHUB_TOKEN:
@@ -104,6 +126,8 @@ def git_pull() -> dict:
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
+        if busy := _busy_jobs():  # под замком: jobs._open не стартует новое, пока замок занят
+            return _busy_error(busy)
         old = deploy_status().get("hash", "")
         try:
             # S21 (аудит 2026-07-18): явный URL (не имя remote'а) + голое имя ветки пишет
@@ -133,6 +157,8 @@ def git_force_pull() -> dict:
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
+        if busy := _busy_jobs():  # под замком: jobs._open не стартует новое, пока замок занят
+            return _busy_error(busy)
         env = _git_env()
         old = deploy_status().get("hash", "")
         try:

@@ -12,11 +12,12 @@
 import logging
 import re
 import threading
+import time
 from datetime import datetime, timezone
 
 import httpx
 
-from app.integrations.base import BaseClient
+from app.integrations.base import BaseClient, retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,22 @@ class NoRdap(Exception):
     """У зоны нет RDAP-сервера в бутстрапе IANA."""
 
 
+class RdapThrottled(RuntimeError):
+    """Сервер зоны ответил 429 (или просит подождать дольше, чем мы стоим в слоте). Это НЕ падение
+    канала: счётчик предохранителя его не считает (services/whois.guarded, soft), домен
+    откладывается до следующего прогона (S1-06)."""
+
+
+# Минимальный интервал между запросами к серверу зоны, с. Живые замеры 2026-10-07: SIDN (.nl)
+# отвечает 429 уже на ВТОРОЙ запрос подряд (Retry-After нет), Nominet RDAP (.uk) держит ~1,7 запр/с
+# на 12 потоков; Verisign (.com) — 68 запр/с без отказов. Остальные зоны не ограничиваем.
+_ZONE_INTERVAL = {"nl": 1.5, "uk": 0.5}
+_COOLDOWN_DEFAULT = 3.0      # пауза зоны после 429 без Retry-After
+_MAX_WAIT = 15.0             # дольше этого поток волны на cooldown зоны не стоит
+_clock = time.monotonic      # тесты подменяют вместе с _sleep
+_sleep = time.sleep
+
+
 _FRACTION = re.compile(r"\.(\d+)")
 
 
@@ -64,10 +81,12 @@ def _iso(s) -> datetime | None:
 
 
 class RdapClient(BaseClient):
+    POOLED = True
     def __init__(self):
         super().__init__("", timeout=20.0)
         self._servers: dict | None = None
         self._lock = threading.Lock()       # волна avail зовёт клиент из 12 потоков
+        self._zone_next: dict = {}          # зона -> не раньше этого момента (интервал + cooldown 429)
 
     def _bootstrap(self) -> dict:
         """{tld: base_url}. В IANA — не больше одного запроса на жизнь клиента: запоминается и
@@ -87,17 +106,55 @@ class RdapClient(BaseClient):
     def has_rdap(self, domain: str) -> bool:
         return domain.rsplit(".", 1)[-1].lower() in self._bootstrap()
 
+    def request(self, method: str, url: str, *, retry: bool | None = None, **kwargs):
+        """4xx (429, 404…) не ретраим на транспортном уровне (SIDN: 1+2 с ретраев вхолостую, Retry-After нет) —
+        его обрабатывает `lookup` по зоне. Транспортные ошибки и 5xx — прежний ретрай BaseClient."""
+        try:
+            return self._request_once(method, url, **kwargs)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:   # 404 (свободен), 429, 4xx: повтор бессмыслен и идёт мимо _slot
+                raise
+        except httpx.TransportError:
+            pass
+        return super().request(method, url, retry=retry, **kwargs)
+
+    def _slot(self, zone: str, pause: float = 0.0) -> None:
+        """Место в очереди зоны: интервал между запросами и cooldown после 429 общие на всех
+        потоков. Ждать дольше `_MAX_WAIT` не станем — отказ (`RdapThrottled`), слот не засыпает."""
+        with self._lock:
+            now = _clock()
+            if pause:
+                self._zone_next[zone] = max(self._zone_next.get(zone, 0.0), now + pause)
+            at = max(self._zone_next.get(zone, 0.0), now)
+            if at - now > _MAX_WAIT:
+                raise RdapThrottled(f"RDAP .{zone}: сервер просит подождать {at - now:.0f} с")
+            self._zone_next[zone] = at + _ZONE_INTERVAL.get(zone, 0.0)
+        if at > now:
+            _sleep(at - now)
+
     def lookup(self, domain: str) -> dict:
-        base = self._bootstrap().get(domain.rsplit(".", 1)[-1].lower())
+        zone = domain.rsplit(".", 1)[-1].lower()
+        base = self._bootstrap().get(zone)
         if base is None:
             raise NoRdap(domain)
-        try:
-            r = self.request("GET", base.rstrip("/") + "/domain/" + domain,
-                             headers={"Accept": "application/rdap+json"})
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return {"exists": False, "status": [], "registered_at": None}
-            raise
+        url, pause = base.rstrip("/") + "/domain/" + domain, 0.0
+        for attempt in range(2):
+            self._slot(zone, pause)
+            try:
+                r = self.request("GET", url, headers={"Accept": "application/rdap+json"})
+                break
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code == 404:
+                    return {"exists": False, "status": [], "registered_at": None}
+                if code != 429:
+                    raise
+                ra = retry_after(e)
+                pause = ra if ra is not None else _COOLDOWN_DEFAULT
+                if attempt == 1 or pause > _MAX_WAIT:
+                    with self._lock:           # соседи по зоне тоже подождут
+                        self._zone_next[zone] = max(self._zone_next.get(zone, 0.0), _clock() + pause)
+                    raise RdapThrottled(f"RDAP .{zone}: 429, повтор через {pause:.0f} с") from e
         d = r.json()
         reg = next((e.get("eventDate") for e in d.get("events") or []
                     if e.get("eventAction") == "registration"), None)

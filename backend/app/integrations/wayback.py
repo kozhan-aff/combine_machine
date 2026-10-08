@@ -6,13 +6,38 @@ Reconstruct what a domain hosted over time -> prior_flags (adult/pharma/casino/g
 Судим по ВИДИМОМУ ТЕКСТУ снимка, а не по его разметке (см. _visible_text).
 """
 import html as html_lib
+import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import nh3
 
-from app.integrations.base import BaseClient
+from app.integrations.base import BaseClient, retry_after
+
+logger = logging.getLogger(__name__)
+
+# Транспортные константы (аудит S2-03/F8-04): живой archive.org отвечает на CDX 5-16 с, 30-40 % —
+# 503/таймаут, а 429 приходит при любой нагрузке. Читаем долго (45 с), соединяемся быстро (5 с);
+# попыток две (не три × 30 с = 93 с на зависший вызов); пауза между запросами — общая на клиента
+# (токен-бакет), а не sleep после каждого снимка внутри потока.
+_TIMEOUT = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
+_ATTEMPTS = 2
+_MIN_INTERVAL = 0.3          # с между стартами запросов (≈3 запр/с на ВЕСЬ клиент, а не на поток)
+_FAIL_LIMIT = 5              # столько запросов подряд, исчерпавших попытки -> архив считается лежащим
+_COOLDOWN_DEFAULT = 20.0     # пауза всех потоков после 429/503 без Retry-After
+_COOLDOWN_MAX = 120.0
+_MAX_WAIT = 30.0             # дольше этого поток в очереди на cooldown не стоит — отказ, не сон
+_clock = time.monotonic      # тесты подменяют вместе с _sleep
+_sleep = time.sleep
+
+
+class WaybackUnavailable(RuntimeError):
+    """archive.org лежит или просит подождать дольше, чем мы готовы стоять в слоте волны.
+    Воронка не судит такой домен «вслепую», а откладывает до следующего прогона (unresolved)."""
 
 # «Опасное окно» — последние N дней ЖИЗНИ домена (не от «сегодня»: дроп мог перестать
 # архивироваться год назад). Именно здесь чистый когда-то сайт становится казино перед сдачей.
@@ -31,33 +56,93 @@ _MID_SPAN_DAYS = 180        # окно «середины жизни» — по 
 # test_domain_window_ceiling_is_higher_but_still_real (test_wayback_window.py).
 _DOMAIN_WINDOW_LIMIT = 1000
 
-# stop-words per category (EN + RU). Coarse but real; tune against data.
-# Высокосигнальные маркеры на категорию (EN + RU, упор на RU — дропы .ru). Держим
-# ДЛИННЫЕ/однозначные токены (фразы, бренды), а не короткие общие слова: список — это
-# hard-reject гейт, ложняк отбраковывает чистый домен. Подстрочный счёт (low.count),
-# порог _MIN_HITS на категорию.
+# stop-words per category (EN + RU + es/de/fr/nl/pt/it/sl/pl/cs). Coarse but real; tune against data.
+# Высокосигнальные маркеры на категорию. Держим ДЛИННЫЕ/однозначные токены (фразы, бренды), а не
+# короткие общие слова: список — это hard-reject гейт, ложняк отбраковывает чистый домен.
+# Подстрочный счёт (low.count), порог _MIN_HITS на категорию.
+#
+# Языки белого списка зон v2 (аудит S1-05): источник `mx` — испанская история, в списке также
+# nl/si/in; словарь только en/ru пропускал испанское казино и нидерландскую фарму как «чистые» —
+# а детерминированный классификатор и есть инвариант 3 (LLM-тема W5 жёстко ничего не режет).
+# Диакритику держим как в языке (lower() её не трогает); слова, общие для языков («casino»,
+# «porno», «poker», «roulette»), уже покрыты базовым англ. набором подстрочно.
 STOPWORDS = {
     "adult": ["porn", "xxx", "escort", "camgirl", "sexcam", "webcam girl", "hentai",
               "adult dating", "sex video", "brazzers",
               "порно", "порнуха", "эротик", "интим услуг", "проститутк", "шлюх",
-              "вебкам", "секс знакомств"],
+              "вебкам", "секс знакомств",
+              # es / pt
+              "sexo gratis", "sexo grátis", "videos de sexo", "vídeos de sexo", "mujeres desnudas",
+              "putas gratis", "acompanhantes", "webcam erótica",
+              # de / nl
+              "sexfilme", "erotikfilme", "sexkontakte", "nacktbilder", "livecam sex",
+              "seksfilm", "sexfilm", "sekscontact", "naaktfoto", "erotische massage",
+              # fr / it
+              "film x gratuit", "sexe gratuit", "rencontre sexe", "escort girl", "sesso gratis",
+              "incontri sesso",
+              # sl / pl / cs
+              "erotične masaže", "spremljevalke", "darmowe porno", "sex kamerki", "erotyczne masaże",
+              "erotické masáže", "sex videa", "eskort"],
     "pharma": ["viagra", "cialis", "tadalafil", "sildenafil", "pharmacy", "tramadol",
                "xanax", "no prescription", "canadian pharmacy",
-               "аптека", "таблетк", "виагра", "сиалис", "дженерик", "без рецепта"],
+               "аптека", "таблетк", "виагра", "сиалис", "дженерик", "без рецепта",
+               # es / pt / it
+               "farmacia en línea", "farmacia online", "farmácia online", "sin receta", "sem receita",
+               "senza ricetta", "farmaci generici", "comprar cialis", "comprar viagra",
+               # de / nl
+               "online apotheke", "rezeptfrei", "ohne rezept", "potenzmittel", "online apotheek",
+               "zonder recept", "potentiemiddel",
+               # fr
+               "pharmacie en ligne", "sans ordonnance", "médicaments sans",
+               # sl / pl / cs
+               "brez recepta", "lekarna online", "spletna lekarna", "bez recepty", "apteka online", "tabletki na potencję",
+               "bez receptu", "lékárna online", "tabletky na potenci"],
     "casino": ["casino", "roulette", "slots", "jackpot", "blackjack", "baccarat",
                "free spins", "casino bonus", "azino", "azino777", "joycasino",
                "vulkan casino", "pin-up casino", "pinup casino",
                "казино", "рулетк", "слот", "игровые автоматы", "джекпот",
                "азартны", "игровой клуб", "азино777", "вулкан казино",
-               "пинап казино", "джойказино"],
+               "пинап казино", "джойказино",
+               # es / pt / it
+               "casino en línea", "tragamonedas", "tragaperras", "ruleta", "juegos de azar",
+               "giros gratis", "cassino online", "caça-níqueis", "caça níquel", "jogos de azar",
+               "rodadas grátis", "casinò", "slot machine", "giochi d'azzardo", "giri gratuiti",
+               # de / nl / fr
+               "spielbank", "spielautomaten", "glücksspiel", "freispiele", "gokkasten",
+               "speelautomaten", "gratis spins", "casino en ligne", "machines à sous",
+               "tours gratuits", "jeux d'argent",
+               # sl / pl / cs
+               "igralnica", "igralni avtomati", "brezplačni vrtljaji", "kasyno",
+               "jednoręki bandyta", "darmowe spiny", "automaty do gier", "kasino",
+               "hrací automaty", "výherní automaty", "zatočení zdarma"],
     "gambling": ["betting", "poker", "bookmaker", "sportsbook", "betting odds", "wager",
                  "1xbet", "melbet",
                  "ставки на спорт", "букмекер", "покер", "тотализатор", "париматч",
-                 "фрибет"],
+                 "фрибет",
+                 # es / pt / it
+                 "apuestas deportivas", "casa de apuestas", "apuestas en línea", "pronósticos deportivos",
+                 "apostas esportivas", "casa de apostas", "apostas online", "scommesse sportive",
+                 "scommesse online", "quote scommesse",
+                 # de / nl / fr
+                 "sportwetten", "wettanbieter", "wettquoten", "buchmacher", "gokken",
+                 "sportwedden", "weddenschap", "wedkantoor", "paris sportifs", "pari en ligne",
+                 "cotes sportives",
+                 # sl / pl / cs
+                 "športne stave", "stavnica", "zakłady sportowe", "bukmacher", "kursy bukmacherskie",
+                 "sázkové kanceláře", "sportovní sázky", "kurzy sázek"],
     "spam": ["buy cheap", "replica watches", "seo backlinks", "payday loan",
              "essay writing", "forex signals", "binary options", "crypto giveaway",
              "займ онлайн", "займы без", "кредит без", "накрутк",
-             "прогон хрумер", "заработок в интернете"],
+             "прогон хрумер", "заработок в интернете",
+             # es / pt / it
+             "préstamos rápidos", "préstamos sin aval", "créditos rápidos", "empréstimo rápido",
+             "empréstimo sem consulta", "prestito immediato", "prestiti veloci", "finanziamenti rapidi",
+             # de / nl / fr
+             "kredit ohne schufa", "schnelle kredite", "sofortkredit", "snel geld lenen",
+             "lening zonder bkr", "crédit rapide", "prêt rapide sans", "prêt immédiat",
+             # sl / pl / cs
+             "hitri krediti", "posojilo brez", "szybka pożyczka", "chwilówki", "pożyczki bez bik",
+             "rychlá půjčka", "půjčky bez registru", "nebankovní půjčky"],
 }
 _MIN_HITS = 2  # stop-word hits in a snapshot to flag its category
 
@@ -173,12 +258,24 @@ def _visible_text(raw_html: str) -> str:
     return " ".join(html_lib.unescape(_TAG.sub(" ", text)).split())
 
 
+# Короткие/двусмысленные фразы считаем по границам слов: «putas gratis» живёт внутри «disputas gratis».
+_WORD_BOUND = frozenset({"putas gratis"})
+
+
+def _count(low: str, w: str) -> int:
+    w = w.replace("-", " ")
+    if w in _WORD_BOUND:
+        return len(re.findall(rf"(?<!\w){re.escape(w)}(?!\w)", low))
+    return low.count(w)
+
+
 def _classify_text(text: str) -> set[str]:
     """Categories whose stop-words appear >= _MIN_HITS times in the text."""
-    low = text.lower()
+    # дефис == пробел («Online-Apotheke» = «online apotheke»); и в тексте, и в словаре
+    low = text.lower().replace("-", " ")
     found = set()
     for cat, words in STOPWORDS.items():
-        if sum(low.count(w) for w in words) >= _MIN_HITS:
+        if sum(_count(low, w) for w in words) >= _MIN_HITS:
             found.add(cat)
     return found
 
@@ -246,8 +343,68 @@ def _pick(snaps: list[dict], sample: int) -> list[dict]:
 
 
 class WaybackClient(BaseClient):
+    POOLED = True
     def __init__(self):
-        super().__init__("http://web.archive.org")
+        super().__init__("https://web.archive.org", timeout=_TIMEOUT)   # https: улики не по голому http (S2-15)
+        self._lock = threading.Lock()
+        self._next_at = 0.0          # токен-бакет: не раньше этого момента стартует следующий запрос
+        self._cool_until = 0.0       # общий cooldown после 429/503
+        self._fails = 0              # запросов подряд, исчерпавших попытки
+        self._cdx_cache: dict = {}   # (параметры CDX) -> строки; живёт один прогон (клиент пересоздаётся)
+
+    # ---- транспорт: общий cooldown, предохранитель, токен-бакет ------------------------------
+    def _gate(self) -> None:
+        """Перед каждым запросом: лежащий архив — сразу отказ; cooldown после 429 — подождать
+        (но не дольше _MAX_WAIT); затем место в токен-бакете."""
+        with self._lock:
+            if self._fails >= _FAIL_LIMIT:
+                raise WaybackUnavailable("archive.org: предохранитель сработал, до конца прогона "
+                                         "канал пропускается")
+            now = _clock()
+            wait = max(self._cool_until - now, 0.0)
+            if wait > _MAX_WAIT:
+                raise WaybackUnavailable(f"archive.org просит подождать {wait:.0f} с")
+            at = max(now + wait, self._next_at)
+            self._next_at = at + _MIN_INTERVAL
+        if at > now:
+            _sleep(at - now)
+
+    def _penalize(self, exc: Exception) -> None:
+        """429/503: пауза для ВСЕХ потоков — Retry-After сервера, иначе стандартная."""
+        ra = retry_after(exc)
+        pause = min(ra if ra is not None else _COOLDOWN_DEFAULT, _COOLDOWN_MAX)
+        with self._lock:
+            self._cool_until = max(self._cool_until, _clock() + pause)
+
+    def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Две попытки (не три × 30 с), общий cooldown по 429/503 и предохранитель «5 запросов
+        подряд упали». 4xx (кроме 429) не ретраим: 404 снимка — не сбой канала."""
+        last: Exception | None = None
+        for attempt in range(_ATTEMPTS):
+            self._gate()
+            try:
+                r = self._request_once(method, url, **kwargs)
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code != 429 and code < 500:
+                    with self._lock:
+                        self._fails = 0            # канал жив, ответ осмысленный (404 и т.п.)
+                    raise
+                self._penalize(e)
+                last = e
+            except httpx.TransportError as e:
+                last = e
+            else:
+                with self._lock:
+                    self._fails = 0
+                return r
+        with self._lock:
+            self._fails += 1
+            tripped = self._fails == _FAIL_LIMIT
+        if tripped:
+            logger.warning("Wayback: %d запросов подряд упали — предохранитель сработал, до конца "
+                           "прогона архив пропускается", _FAIL_LIMIT)
+        raise last
 
     def _cdx(self, domain: str, *, limit: int, frm: str | None = None, to: str | None = None,
              match_type: str | None = None) -> list[dict]:
@@ -280,8 +437,17 @@ class WaybackClient(BaseClient):
             params["from"] = frm
         if to:
             params["to"] = to
+        key = tuple(sorted((k, str(v)) for k, v in params.items()))
+        with self._lock:
+            hit = self._cdx_cache.get(key)
+        if hit is not None:
+            return hit
         rows = self.request("GET", f"{self.base_url}/cdx/search/cdx", params=params).json()
-        return [dict(zip(rows[0], row)) for row in rows[1:]] if rows else []
+        out = [dict(zip(rows[0], row)) for row in rows[1:]] if rows else []
+        if out:                    # пустой ответ НЕ кэшируем: он неотличим от сбоя CDX (S2-14)
+            with self._lock:
+                self._cdx_cache[key] = out
+        return out
 
     def get_snapshots(self, domain: str, per_window: int = 100) -> list[dict]:
         """Снимки ОКНАМИ по времени, а не «первые N». Ascending, без дублей.
@@ -317,11 +483,16 @@ class WaybackClient(BaseClient):
         first, last = _ts(head[0]["timestamp"]), _ts(max(s["timestamp"] for s in (tail or head)))
         if last > first:
             mid = first + (last - first) / 2
-            snaps += self._cdx(domain, limit=per_window,
-                               frm=_day(mid - timedelta(days=_MID_SPAN_DAYS)),
-                               to=_day(mid + timedelta(days=_MID_SPAN_DAYS)))
-            snaps += self._cdx(domain, limit=_DOMAIN_WINDOW_LIMIT, match_type="domain",
-                               frm=_day(last - timedelta(days=_RECENT_DAYS)), to=_day(last))
+            # окна 3 и 4 независимы после head/tail — идут параллельно (F8-04); исключение любого
+            # поднимается из .result(): неполная история не выдаётся за проверенную
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_mid = ex.submit(self._cdx, domain, limit=per_window,
+                                  frm=_day(mid - timedelta(days=_MID_SPAN_DAYS)),
+                                  to=_day(mid + timedelta(days=_MID_SPAN_DAYS)))
+                f_dom = ex.submit(self._cdx, domain, limit=_DOMAIN_WINDOW_LIMIT, match_type="domain",
+                                  frm=_day(last - timedelta(days=_RECENT_DAYS)), to=_day(last))
+                snaps += f_mid.result()
+                snaps += f_dom.result()
         uniq = {(s["timestamp"], s["original"]): s for s in snaps}
         return sorted(uniq.values(), key=lambda s: s["timestamp"])
 
@@ -332,13 +503,37 @@ class WaybackClient(BaseClient):
         # httpx раскодирует их utf-8 в мозаику, убивая весь русский словарь (см. _decode).
         return _decode(r.content, r.charset_encoding)
 
-    def classify_history(self, domain: str, sample: int = 5, polite: float = 1.0) -> dict:
-        """Sample snapshots across the timeline, classify -> prior_flags + age + first_seen."""
+    def probe(self, domain: str, per_window: int = 100) -> dict:
+        """ДЕШЁВЫЙ ранний сигнал до тяжёлого чтения снимков (S2-06/S2-14): одно окно «рождение»
+        (то же, что первое окно get_snapshots — оно кэшируется и второй раз не платится). Даёт
+        первый снимок (возраст) и число записей в окне.
+
+        Пустой ответ CDX неотличим от сбоя (живьём: 200 `[]`, а следом 503), поэтому пустоту
+        подтверждаем вторым, ДРУГИМ запросом (последний capture). `archive_empty=True` — только
+        когда пусты оба; расхождение — «не знаем» (first_seen None, archive_empty False).
+        Исключение транспорта не глушим."""
+        head = self._cdx(domain, limit=per_window)
+        if head:
+            first = _ts(head[0]["timestamp"])
+            return {"first_seen": first, "archive_empty": False, "snapshots": len(head),
+                    "age_years": round((datetime.now(timezone.utc) - first).days / 365.25, 2)}
+        tail = self._cdx(domain, limit=-1)
+        return {"first_seen": None, "age_years": None, "snapshots": 0,
+                "archive_empty": not tail}
+
+    def classify_history(self, domain: str, sample: int = 5, polite: float = 0.0) -> dict:
+        """Sample snapshots across the timeline, classify -> prior_flags + age + first_seen.
+
+        `polite` — легаси-пауза после снимка (по умолчанию 0): вежливость к archive.org теперь
+        общий токен-бакет клиента (`_gate`), а не sleep внутри слота волны (F8-04)."""
         snaps = self.get_snapshots(domain)
         if not snaps:
-            # домен не архивировался — историю подтвердить нечем, НЕ выдаём «проверено»
+            # домен не архивировался — историю подтвердить нечем, НЕ выдаём «проверено».
+            # Пустоту подтверждаем вторым запросом: единичный `[]` мог быть сбоем CDX (S2-14)
+            empty = self.probe(domain)["archive_empty"]
             return {"prior_flags": {}, "first_seen": None, "age_years": None,
-                    "wayback_checked": False, "sampled": 0, "evidence": [], "texts": []}
+                    "wayback_checked": False, "sampled": 0, "evidence": [], "texts": [],
+                    "archive_empty": empty}
 
         first_seen = _ts(snaps[0]["timestamp"])
         age_years = round((datetime.now(timezone.utc) - first_seen).days / 365.25, 2)
@@ -347,12 +542,16 @@ class WaybackClient(BaseClient):
         evidence: list[dict] = []      # ЧТО именно смотрели — куратор обязан мочь перепроверить
         texts: list[dict] = []         # тексты прочитанных снимков — для темы W5 (history_llm)
         ok = 0  # реально ПРОЧИТАННЫЕ снапшоты (скачался И было что классифицировать)
-        for s in _pick(snaps, sample):
+        picked = _pick(snaps, sample)
+        for s in picked:
             try:
                 text = _visible_text(self._fetch_raw(s["timestamp"], s["original"]))
+            except WaybackUnavailable:
+                raise                  # архив лёг посреди домена — это не «один плохой снимок»
             except Exception:  # noqa: BLE001  # one bad snapshot must not sink the check
                 cats_by_time.append(set())
-                time.sleep(polite)
+                if polite:
+                    time.sleep(polite)
                 continue
             # Снимок скачался, но читать нечего (редирект-заглушка/frameset/SPA — см.
             # MIN_TEXT_CHARS): это НЕ «страница без грязи», это ОТСУТСТВИЕ данных. Ведём себя
@@ -366,15 +565,13 @@ class WaybackClient(BaseClient):
             if read:
                 ok += 1
                 texts.append({"timestamp": s["timestamp"], "text": text[:2000]})
-            time.sleep(polite)
+            if polite:
+                time.sleep(polite)
 
-        checked = ok >= (sample // 2 + 1)      # «проверено» только при покрытии большинства
-        if not checked:
-            # мало данных (систематический троттлинг archive.org) — нельзя выдавать чистый
-            # вердикт по паре снапшотов; sig-гард в scoring уведёт в manual
-            return {"prior_flags": {}, "first_seen": first_seen, "age_years": age_years,
-                    "wayback_checked": False, "sampled": ok, "evidence": evidence,
-                    "texts": texts}
+        # Порог от числа РЕАЛЬНО выбранных снимков, а не от sample (S2-05): архив из 1-2 снимков,
+        # прочитанный целиком, — проверен. «Проверено» только при покрытии большинства выборки.
+        need = max(1, min(sample, len(picked)) // 2 + 1)
+        checked = ok >= need
 
         # `topic_switch` здесь БЫЛ и удалён (аудит 2026-07-14, F4). Он считал
         # `(later − early) ∩ {adult,pharma,casino,gambling}` — но `later ⊆ all_cats`, а любая из
@@ -384,15 +581,26 @@ class WaybackClient(BaseClient):
         # Тематическую ПРЕЕМСТВЕННОСТЬ (инвариант 4 v2) судит не флаг категорий, а мягкий сигнал
         # темы W5 — LLM по `texts` ниже (services/history_llm.py).
         all_cats = set().union(*cats_by_time) if cats_by_time else set()
+        if not checked:
+            # Мало данных (троттлинг archive.org): ЧИСТЫЙ вердикт по паре снимков выдать нельзя —
+            # но найденная УЛИКА не выбрасывается (S2-04, инвариант 3 «казино = жёсткий отказ»):
+            # 5 снимков, 2 прочитаны, на одном casino — домен грязный, а не «не проверен». Покрытие
+            # влияет только на право называть историю чистой.
+            return {"prior_flags": {c: True for c in sorted(all_cats)}, "first_seen": first_seen,
+                    "age_years": age_years, "wayback_checked": False, "sampled": ok,
+                    "evidence": evidence, "texts": texts, "archive_empty": False}
         flags = {c: (c in all_cats) for c in STOPWORDS}
         return {"prior_flags": flags, "first_seen": first_seen, "age_years": age_years,
                 "wayback_checked": True, "sampled": ok, "evidence": evidence,
-                "texts": texts}
+                "texts": texts, "archive_empty": False}
 
     def ping(self) -> bool:
-        r = self.request("GET", f"{self.base_url}/cdx/search/cdx",
-                         params={"url": "example.com", "output": "json", "limit": "1"})
-        return isinstance(r.json(), list)
+        """Лёгкий пинг (F8-04): редирект на последний снимок без чтения CDX (CDX limit=1 живьём
+        отвечает 9-16 с и красил /diag). Одна попытка, редирект не преследуем: достаточно, что
+        сервер ответил 2xx/3xx."""
+        r = self._client.get(f"{self.base_url}/web/2/http://example.com", follow_redirects=False,
+                             timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0))
+        return r.status_code < 400
 
 
 if __name__ == "__main__":  # pure classifier self-check (no network)

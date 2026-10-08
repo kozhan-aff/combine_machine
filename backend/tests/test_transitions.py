@@ -402,7 +402,7 @@ def test_execute_refuses_dirty_before_sending_money(monkeypatch):
     did = _add(domain="legacy-rkn.ru", status="purchasing", reject_reason="rkn", rkn_listed=True)
     with db.SessionLocal() as s:
         o = AcquisitionOrder(domain_id=did, provider="backorder", status="pending_confirm",
-                             confirmed_by_human=True, cost=190,      # гейт поднят ДО фикса
+                             confirmed_by_human=True, confirmed_at=datetime.now(timezone.utc), cost=190,      # гейт поднят ДО фикса
                              result={"price_id": 1, "period_id": 2})  # тариф заморожен
         s.add(o)
         s.commit()
@@ -436,7 +436,7 @@ def test_execute_still_sends_clean_confirmed_order(monkeypatch):
     did = _add(domain="clean.ru", status="purchasing", score=0.9, wayback_checked=True)
     with db.SessionLocal() as s:
         o = AcquisitionOrder(domain_id=did, provider="backorder", status="pending_confirm",
-                             confirmed_by_human=True, cost=190,
+                             confirmed_by_human=True, confirmed_at=datetime.now(timezone.utc), cost=190,
                              result={"price_id": 1, "period_id": 2})
         s.add(o)
         s.commit()
@@ -558,9 +558,12 @@ def test_rescore_with_webrisk_failure_does_not_launder_the_threat():
                lane="bid", referring_domains=300, score=0.0,
                score_breakdown={"webrisk_threats": ["MALWARE"], "errors": []})
     out = scoring.score_domain(did, clients=_clients(webrisk=_WRDown()))
-    assert out["reject_reason"] is None and "webrisk:RuntimeError" in out["errors"]
+    # S2-08: упавшая проверка не только не стирает улику, но и не переводит домен rejected -> scored
+    assert out["reject_reason"] == "blacklist" and out["status"] == "rejected"
+    assert "webrisk:RuntimeError" in out["errors"]
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
+        assert d.status == "rejected" and d.reject_reason == "blacklist"
         assert d.score_breakdown["webrisk_threats"] == ["MALWARE"]     # улику не стёрли
         assert transitions.dirty_reason(d) == "blacklist"
         with pytest.raises(transitions.TransitionDenied):

@@ -11,11 +11,14 @@ from app.integrations import blacklist
 @pytest.fixture(autouse=True)
 def _reset_control():
     blacklist.BlacklistClient._control_ok = None
+    blacklist.BlacklistClient._control_failed = None
     yield
     blacklist.BlacklistClient._control_ok = None
+    blacklist.BlacklistClient._control_failed = None
 
 
 def test_negative_control_is_not_cached_and_retries(monkeypatch):
+    monkeypatch.setattr(blacklist, "NEGATIVE_TTL", 0.0)    # окно кэша отказа — в test_g5_transport_whois
     c = blacklist.BlacklistClient()
     calls = {"n": 0}
 

@@ -9,6 +9,7 @@ import time
 
 import app.db as db
 from app.models.domain import Domain
+from app.models.site import Site
 
 
 def _add(obj):
@@ -140,6 +141,15 @@ def test_run_score_double_start_and_jobs_live(client, monkeypatch):
     assert client.post("/run/nope/cancel", follow_redirects=False).status_code == 404   # только известные джобы
 
 
+def _provisioned(site_id: int) -> None:
+    """Провижн (M3) в этих сквозных тестах не гоняем — отмечаем его результат: без него generate и
+    publish честно отказывают (S5-09/S6-12/S7-05)."""
+    with db.SessionLocal() as s:
+        site = s.get(Site, site_id)
+        site.status, site.aapanel_site_name = "content", f"site{site_id}.test"
+        s.commit()
+
+
 def test_edit_gate_and_publish(client, monkeypatch):
     # offer (the machine's input); JSON API lives under /api
     offer_id = client.post("/api/offers", json={
@@ -150,6 +160,9 @@ def test_edit_gate_and_publish(client, monkeypatch):
     did = _add(Domain(domain="review-site.com", source="backorder", status="approved"))
     assert client.post(f"/api/domains/{did}/purchase").json()["status"] == "purchased"
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
+    # оффер привязывается ЯВНО до генерации (S6-13/S7-12): страницы пишутся про него
+    client.post(f"/api/sites/{site_id}/offer", json={"offer_id": offer_id})
 
     # M4 generate (mock LiteLLM) -> 3 DRAFT pages
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
@@ -163,11 +176,11 @@ def test_edit_gate_and_publish(client, monkeypatch):
     pages = client.get(f"/api/sites/{site_id}/pages").json()
     home = next(p for p in pages if p["url_path"] == "/")
     assert client.post(f"/api/pages/{home['id']}/edit",
-                       json={"body": "<h2>Edited</h2><script>alert('xss')</script>"}
+                       json={"body": "<h2>Edited</h2><p>Вычитанный текст обзора для проверки гейта.</p>"
+                                     "<script>alert('xss')</script>"}
                        ).json()["status"] == "edited"
 
-    # attach offer + publish (mock the aaPanel file write)
-    client.post(f"/api/sites/{site_id}/offer", json={"offer_id": offer_id})
+    # publish (mock the aaPanel file write)
     # aaPanel client fails closed for non-loopback URLs w/o a CA bundle — use loopback in the test.
     # CA_BUNDLE тоже зануляем: в локальном .env может лежать контейнерный путь (/app/aapanel.pem),
     # которого нет на этой машине, — тест не должен зависеть от .env.
@@ -181,10 +194,11 @@ def test_edit_gate_and_publish(client, monkeypatch):
 
     # only the edited page went out — the 2 drafts were left untouched
     assert pub["status"] == "published" and pub["pages"] == ["/"]
-    assert len(writes) == 1
-    path, page_html = writes[0]
+    pages_written = [w for w in writes if w[0].endswith("/index.html")]
+    assert len(pages_written) == 1                     # остальное — assets/robots/sitemap (G8)
+    path, page_html = pages_written[0]
     assert path.endswith("/index.html")
-    assert "SAVE10" in page_html and 'rel="sponsored nofollow"' in page_html and "Раскрытие" in page_html
+    assert "SAVE10" in page_html and 'rel="sponsored nofollow noopener"' in page_html and "affiliate links" in page_html
     assert "<script" not in page_html.lower() and "xss" not in page_html   # sanitized on edit
     states = sorted(p["status"] for p in client.get(f"/api/sites/{site_id}/pages").json())
     assert states == ["draft", "draft", "published"]
@@ -288,6 +302,8 @@ def test_panel_screens_render(client, monkeypatch):
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.status == "purchased")).scalar_one()
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
+    client.post(f"/api/sites/{site_id}/offer", json={"offer_id": offer_id})   # без оффера генерации нет
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
                         lambda self, system, prompt, **kw: "<h2>D</h2>")
     client.post(f"/api/sites/{site_id}/generate")
@@ -317,7 +333,7 @@ def test_panel_screens_render(client, monkeypatch):
     assert r.status_code == 200 and "EDITED" in r.text
 
     # form-действия панели: сохранение страницы через гейт + привязка оффера
-    r = client.post(f"/pages/{pid}/save", data={"body": "<h2>ок</h2><script>x</script>"},
+    r = client.post(f"/pages/{pid}/save", data={"body": "<h2>ок</h2><p>Достаточно длинный текст страницы для гейта.</p><script>x</script>"},
                     follow_redirects=False)
     assert r.status_code == 303
     with db.SessionLocal() as s:
@@ -340,6 +356,7 @@ def test_deactivated_offer_shows_badge_on_site_card(client, monkeypatch):
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.domain == "offer-badge.ru")).scalar_one()
     site_id = client.post(f"/api/domains/{did}/site").json()["site_id"]
+    _provisioned(site_id)
     # оффер привязан ДО генерации -> content.generate_site стампует его в p.offer_id
     client.post(f"/sites/{site_id}/attach-offer", data={"offer_id": offer_id},
                 follow_redirects=False)

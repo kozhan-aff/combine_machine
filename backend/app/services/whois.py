@@ -1,8 +1,11 @@
 """Доступность и дата регистрации домена — W2 `avail` воронки и перепроверка занятости.
 
 v2: RDAP по бутстрапу IANA — для зон, где он есть (.com/.net/.org/.uk/.online/.xyz/.site/.si/.nl/
-.in …): бесплатно и структурированно. Зоны без RDAP (.mx/.co/.nz/.de …) — whois:43 через A-Parser
-Net::Whois, как в v1. TCI (.ru) удалён вместе с РФ. Логика выбора канала живёт здесь, а не в
+.in …): бесплатно и структурированно. Зоны без RDAP (.mx/.co/.nz …) — ПРЯМОЙ whois:43
+(integrations/whois43.py: сервер зоны, маркер «свободен», дата создания) первичным каналом, а A-Parser
+Net::Whois — только резервом, когда прямой канал упал или не определился: на этих зонах Net::Whois
+даёт случайные вердикты (S1-03, S2-02, F8-05). .de в таблице прямого whois НЕТ (DENIC не публикует дату регистрации) —
+идёт сразу в A-Parser. TCI (.ru) удалён вместе с РФ. Логика выбора канала живёт здесь, а не в
 транспорте (конвенция проекта: integrations/ = только транспорт).
 
 ПРЕДОХРАНИТЕЛИ (урок v1: TCI и A-Parser в живом инциденте 2026-07-20). Лежащий канал без
@@ -10,13 +13,15 @@ Net::Whois, как в v1. TCI (.ru) удалён вместе с РФ. Логи�
 потоков. После `_FAILURE_LIMIT` сбоев ПОДРЯД канал считается мёртвым до конца прогона и не
 вызывается вовсе: `probe` сразу поднимает `CircuitOpen`, воронка пишет `whois:circuit_open` и
 обрабатывает домен как обычный сбой whois (unresolved для не-bid). Счётчик — атрибут инстанса
-клиента (`rdap.lookup_failures`, `aparser.whois_failures`); клиенты пересоздаются раз в прогон
+клиента (`rdap.lookup_failures_<зона>`, `aparser.whois_failures`); клиенты пересоздаются раз в прогон
 (`scoring._make_clients()`), поэтому сработавший предохранитель не переживает прогон. Под
 конкурентностью волны счётчик меняется под общим локом из `_make_clients` (`_rdap_lock`,
 `_whois_lock`): голый `+= 1` не атомарен.
 """
 import logging
 from contextlib import nullcontext
+
+from app.integrations.whois43 import has_whois43
 
 _log = logging.getLogger(__name__)
 
@@ -28,8 +33,9 @@ class CircuitOpen(RuntimeError):
     """Предохранитель канала сработал — до конца прогона канал не вызывается."""
 
 
-def guarded(client, attr: str, call, name: str, lock=None):
-    """Вызвать `call()` под предохранителем со счётчиком `client.<attr>`. `lock` — общий лок
+def guarded(client, attr: str, call, name: str, lock=None, soft: tuple = ()):
+    """Вызвать `call()` под предохранителем со счётчиком `client.<attr>`. `soft` — классы
+    исключений, которые НЕ считаются падением канала (троттлинг: канал жив, просит подождать). `lock` — общий лок
     волны; гейт-чек и запись счётчика — обе под ним (детерминированно проверяют спай-локом).
     Тем же помощником волна risk защищает Google Web Risk (scoring._risk_one)."""
     cm = lock if lock is not None else nullcontext()
@@ -39,6 +45,8 @@ def guarded(client, attr: str, call, name: str, lock=None):
         raise CircuitOpen(f"{name}: предохранитель сработал, канал пропускается до конца прогона")
     try:
         out = call()
+    except soft:
+        raise
     except Exception:
         with cm:
             setattr(client, attr, getattr(client, attr, 0) + 1)
@@ -52,15 +60,32 @@ def guarded(client, attr: str, call, name: str, lock=None):
     return out
 
 
-def _aparser_whois(ap, domain: str, lock=None) -> dict:
-    """A-Parser whois_probe под предохранителем (счётчик `ap.whois_failures`)."""
-    return guarded(ap, "whois_failures", lambda: ap.whois_probe(domain), "A-Parser whois", lock)
+def _aparser_whois(ap, domain: str, lock=None, sem=None) -> dict:
+    """A-Parser whois_probe под предохранителем (счётчик `ap.whois_failures`). `sem` — семафор
+    конкурентности канала: очередь oneRequest A-Parser параллелизма не даёт (F8-05), лишние потоки
+    только копили бы таймауты."""
+    cm = sem if sem is not None else nullcontext()
+
+    def call():
+        with cm:
+            return ap.whois_probe(domain)
+    return guarded(ap, "whois_failures", call, "A-Parser whois", lock)
+
+
+def _whois43(w43, domain: str, lock=None) -> dict:
+    """Прямой whois:43 под предохранителем (счётчик `w43.whois43_failures`)."""
+    return guarded(w43, "whois43_failures", lambda: w43.whois_probe(domain), "whois:43", lock)
 
 
 def _rdap_lookup(rdap, domain: str, lock=None) -> dict:
-    """RDAP lookup под предохранителем (счётчик `rdap.lookup_failures`). 404 — не сбой: lookup
-    отвечает «домена нет» без исключения."""
-    return guarded(rdap, "lookup_failures", lambda: rdap.lookup(domain), "RDAP", lock)
+    """RDAP lookup под предохранителем ПО ЗОНЕ (счётчик `rdap.lookup_failures_<tld>`): три .nl
+    подряд (SIDN отвечает 429 на второй запрос) не должны отключать RDAP для .com/.co.uk до
+    конца прогона (S1-06). 404 — не сбой: lookup отвечает «домена нет» без исключения; троттлинг
+    (`RdapThrottled`) — тоже не падение канала."""
+    from app.integrations.rdap import RdapThrottled
+    zone = domain.rsplit(".", 1)[-1].lower()
+    return guarded(rdap, f"lookup_failures_{zone}", lambda: rdap.lookup(domain), f"RDAP .{zone}", lock,
+                   soft=(RdapThrottled,))
 
 
 def probe(domain: str, clients: dict) -> dict:
@@ -76,6 +101,15 @@ def probe(domain: str, clients: dict) -> dict:
         return {"available": not r["exists"],
                 "created": r["registered_at"] if r["exists"] else None,
                 "free_date": None, "whois_source": "rdap", "status": list(r.get("status") or [])}
-    pr = _aparser_whois(clients["aparser"], domain, clients.get("_whois_lock"))
+    w43 = clients.get("whois43")
+    if w43 is not None and has_whois43(domain):
+        try:
+            r = _whois43(w43, domain, clients.get("_whois43_lock"))
+            if r.get("available") is not None:
+                return {"available": r["available"], "created": r.get("created"),
+                        "free_date": None, "whois_source": "whois43", "status": []}
+        except Exception as e:  # noqa: BLE001 — сбой/предохранитель прямого канала = резерв, не отказ домена
+            _log.info("whois:43 %s: %s — резерв A-Parser", domain, type(e).__name__)
+    pr = _aparser_whois(clients["aparser"], domain, clients.get("_whois_lock"), clients.get("_whois_sem"))
     return {"available": pr.get("available"), "created": pr.get("created"),
             "free_date": None, "whois_source": "aparser", "status": []}

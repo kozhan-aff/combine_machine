@@ -16,10 +16,35 @@ same wrapper, reasonable to trust the shape.
 
 See docs/superpowers/specs/2026-07-16-optimizator-integration-design.md.
 """
+import re
+
 import httpx
 
 from app.config import settings
 from app.integrations.base import BaseClient
+
+# Цены провайдера — в рублях (док: «регистрация ≈ 179 руб.»). Валюта явная, а не подразумеваемая:
+# у международных каналов она будет другой, и сумма без валюты на денежном экране — ловушка (S3-08).
+CURRENCY = "RUB"
+# Таймаут «быстрых» чтений (баланс, сверка на /queue): без ретрая 3 x 30 с на рендере денежного экрана.
+QUICK_TIMEOUT = 8.0
+
+_KEY_IN_URL = re.compile(r"(api_key=)[^&\s'\"]+", re.I)
+
+
+def scrub(text: str) -> str:
+    """Затереть api_key/nicd в тексте (S3-05). httpx кладёт ПОЛНЫЙ URL с ?api_key=… в текст
+    HTTPStatusError, а текст исключения уезжал в acquisition_orders.result и на /queue.
+    Режем и по значению из настроек, и по шаблону `api_key=…` (ключ могли успеть сменить)."""
+    s = _KEY_IN_URL.sub(r"\1***", str(text))
+    for secret in (settings.OPTIMIZATOR_API_KEY, settings.OPTIMIZATOR_NICD):
+        if secret:
+            s = s.replace(secret, "***")
+    return s
+
+
+def _err_text(e: Exception) -> str:
+    return scrub(f"{type(e).__name__}: {e}")[:200]
 
 
 class OptimizatorError(Exception):
@@ -29,6 +54,11 @@ class OptimizatorError(Exception):
     def __init__(self, message: str, error_id: int | None = None):
         super().__init__(f"{message} (error_id={error_id})" if error_id else message)
         self.error_id = error_id
+
+
+class ZoneNotSold(OptimizatorError):
+    """Провайдер не продаёт эту зону (prices вернул пустой список). ЧИСТЫЙ отказ ДО денег —
+    не «неизвестный исход» (S3-08): оператору надо сказать «зона не поддерживается»."""
 
 
 class OptimizatorAmbiguous(Exception):
@@ -50,20 +80,26 @@ def _unwrap(data) -> dict:
 
 
 class OptimizatorClient(BaseClient):
-    def __init__(self):
-        super().__init__("http://optimizator.ru")
+    def __init__(self, quick: bool = False):
+        super().__init__(settings.OPTIMIZATOR_BASE_URL)
         self.api_key = settings.OPTIMIZATOR_API_KEY
         self.nicd = settings.OPTIMIZATOR_NICD
+        # quick: чтения на путях, где ждёт человек или опрос с дедлайном (баланс /queue, поллинг) —
+        # один запрос с коротким таймаутом, без 3 ретраев x 30 с. Денежный register() от флага не зависит.
+        self.quick = quick
+
+    def _fetch(self, action: str, **params):
+        """GET -> разобранный JSON как есть. Транспорт/JSON-сбой = OptimizatorAmbiguous (текст скрабится)."""
+        p = {"a": "api", "sa": action, "api_key": self.api_key, **params}
+        kw = {"retry": False, "timeout": QUICK_TIMEOUT} if self.quick else {}
+        try:
+            r = self.request("GET", self.base_url + "/", params=p, **kw)
+            return r.json()
+        except Exception as e:  # noqa: BLE001 — транспорт/JSON-сбой, тот же принцип, что в register()
+            raise OptimizatorAmbiguous(_err_text(e)) from e
 
     def _get(self, action: str, **params) -> dict:
-        p = {"a": "api", "sa": action, "api_key": self.api_key, **params}
-        try:
-            r = self.request("GET", self.base_url + "/", params=p)
-            return _unwrap(r.json())
-        except (OptimizatorError, OptimizatorAmbiguous):
-            raise
-        except Exception as e:  # noqa: BLE001 — транспорт/JSON-сбой, тот же принцип, что в register()
-            raise OptimizatorAmbiguous(f"{type(e).__name__}: {e}") from e
+        return _unwrap(self._fetch(action, **params))
 
     def ping(self) -> bool:
         """Живость + auth — balance ничего не стоит (read-only)."""
@@ -78,7 +114,12 @@ class OptimizatorClient(BaseClient):
         return float(b) if b is not None else None
 
     def prices(self, zone: str = "ru") -> dict:
-        return self._get("prices", domain=zone)
+        """Цены зоны + явная валюта. Пустой список = провайдер зону не продаёт (живая проба:
+        uk/co.uk/de/mx -> []) — `ZoneNotSold`, чистый отказ, а не Ambiguous (S3-08)."""
+        data = self._fetch("prices", domain=zone)
+        if isinstance(data, list) and not data:
+            raise ZoneNotSold(f"optimizator не продаёт зону .{zone}")
+        return {**_unwrap(data), "currency": CURRENCY}
 
     def check_nicd(self) -> bool:
         """True — анкета под управлением Optimizator. False — конкретно error_id=411
@@ -110,10 +151,16 @@ class OptimizatorClient(BaseClient):
             with httpx.Client(timeout=30.0) as client:
                 r = client.get(self.base_url + "/", params=p)
                 r.raise_for_status()
-                return _unwrap(r.json())
+                res = _unwrap(r.json())
         except OptimizatorError:
             raise
         except OptimizatorAmbiguous:
             raise
         except Exception as e:  # noqa: BLE001 — транспорт/JSON-сбой ПОСЛЕ отправки денежного запроса
-            raise OptimizatorAmbiguous(f"{type(e).__name__}: {e}") from e
+            raise OptimizatorAmbiguous(_err_text(e)) from e
+        # Подтверждённая форма успеха — [{"order_id": N}] (док. texts/12). Любой другой непустой dict
+        # ('ordered' по нему ставить нельзя, S3-10): деньги могли уйти, а номера заказа у нас нет.
+        if not res.get("order_id"):
+            raise OptimizatorAmbiguous(
+                f"reg_domains: нет order_id в ответе, форма успеха не подтверждена: {scrub(res)!s}"[:200])
+        return res

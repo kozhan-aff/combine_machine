@@ -657,3 +657,24 @@ def test_taken_undated_is_not_reported_as_unparsed_whois(sqlite_db):
                                              wayback=_Wayback()))
     assert out["unresolved"] is True
     assert out["why"] == "taken_undated"      # занят — это УСТАНОВЛЕННЫЙ факт, а не «не разобрали»
+
+
+def test_wayback_down_is_explained_in_job_message(monkeypatch):
+    """archive.org лёг: домены уходят unresolved, а в сообщении задачи — причина (не тишина)."""
+    from types import SimpleNamespace
+    from app.services import jobs, scoring
+    for name in ("_wave_t0", "_paid_gate", "_wave_avail", "_wave_risk", "_wave_probe",
+                 "_wave_links", "_persist_links", "_wave_deep", "_checkpoint"):
+        monkeypatch.setattr(scoring, name, lambda *a, **k: [])
+
+    def _history(states, *a, **k):
+        for s in states:
+            s.unresolved_why, s.alive = "wayback_down", False
+    monkeypatch.setattr(scoring, "_wave_history", _history)
+    monkeypatch.setattr(scoring, "_commit_result", lambda s, run, st: {})
+    monkeypatch.setattr(jobs, "cancelled", lambda run: False)
+    msgs = []
+    monkeypatch.setattr(jobs, "report", lambda run, **kw: msgs.append(kw.get("message")))
+    states = [SimpleNamespace(alive=True, unresolved_why=None) for _ in range(3)]
+    scoring._run_waves(states, {}, {}, None, None, object(), notes=[])
+    assert any(m and "archive.org недоступен — 3 доменов ждут следующего прогона" in m for m in msgs)

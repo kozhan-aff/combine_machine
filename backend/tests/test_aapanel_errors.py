@@ -139,14 +139,14 @@ def test_post_recomputes_signature_on_each_retry_attempt(monkeypatch):
             if len(self.seen_request_times) == 1:
                 return httpx.Response(500, json={"msg": "boom"},
                                       request=httpx.Request(method, url))
-            return httpx.Response(200, json=ADD_OK, request=httpx.Request(method, url))
+            return httpx.Response(200, json=LIST_EMPTY, request=httpx.Request(method, url))
 
         def close(self):
             pass
 
     panel = _FlakyPanel()
     c = _client(panel)
-    c.add_site("ex.ru", "/www/wwwroot/ex.ru")   # первая попытка 500 -> ретрай -> вторая 200
+    c.list_sites()   # чтение: первая попытка 500 -> ретрай -> вторая 200 (записи 5xx не ретраят, S5-10)
     assert len(panel.seen_request_times) == 2
     assert panel.seen_request_times[0] != panel.seen_request_times[1]
 
@@ -251,11 +251,11 @@ def test_write_file_carries_createfile_reason():
     """Настоящий отказ CreateFile (нет прав, диск полон) не проскакивает: файла не появилось,
     SaveFileBody падает «Configuration file not exist» — и оператор должен увидеть ПЕРВОПРИЧИНУ,
     а не только последнее звено цепочки."""
-    c = _client(_Panel(create=AUTH_FAIL, save=NO_SUCH_FILE))
+    c = _client(_Panel(create={"status": False, "msg": "Permission denied"}, save=NO_SUCH_FILE))
     with pytest.raises(RuntimeError) as e:
         c.write_file("/www/wwwroot/ex.ru/vs/index.html", "<h1>hi</h1>")
     assert "Configuration file not exist" in str(e.value)
-    assert "Secret key verification failed" in str(e.value), str(e.value)
+    assert "Permission denied" in str(e.value), str(e.value)
 
 
 # ============================ 2. провижн (M3) ============================
@@ -283,6 +283,7 @@ class _CF:
     def __init__(self, ssl_boom: Exception | None = None, ssl_current_mode: str = "off"):
         self.ssl_boom = ssl_boom
         self.ssl_calls = 0
+        self.ssl_modes = []
         self.ssl_current_mode = ssl_current_mode
 
     def ensure_zone(self, domain):
@@ -299,8 +300,15 @@ class _CF:
 
     def set_ssl(self, zid, mode="full"):
         self.ssl_calls += 1
+        self.ssl_modes.append(mode)
         if self.ssl_boom:
             raise self.ssl_boom
+        return True
+
+    def set_zone_setting(self, zid, sid, value):
+        return True
+
+    def activation_check(self, zid):
         return True
 
 
@@ -310,7 +318,16 @@ def _seed_site(page_statuses=()) -> int:
         s.add(d)
         s.commit()
         s.refresh(d)
-        site = Site(domain_id=d.id, status="provisioning", doc_root="/www/wwwroot/ex.ru")
+        # сайт со страницами — уже провиженный (publish не пишет в сайт без vhost'а, S5-09)
+        # публикация без оффера заблокирована — у сайта со страницами он есть
+        from app.models.offer import Offer
+        off = Offer(brand="B", affiliate_link="https://ex.com/aff", active=True, language="ru")
+        s.add(off)
+        s.commit()
+        site = Site(domain_id=d.id, status="content" if page_statuses else "provisioning",
+                    offer_id=off.id if page_statuses else None,
+                    doc_root="/www/wwwroot/ex.ru",
+                    aapanel_site_name="ex.ru" if page_statuses else None)
         s.add(site)
         s.commit()
         s.refresh(site)
@@ -325,6 +342,8 @@ def _panel_env(monkeypatch, cf=None, **routes):
     monkeypatch.setattr(settings, "VPS_ORIGIN_IP", "185.201.252.187")
     cf = cf or _CF()
     monkeypatch.setattr("app.integrations.cloudflare.CloudflareClient", lambda: cf)
+    # маркер-файл (write_file) и AddDomain — штатные ответы панели, если тест их не переопределил
+    routes = {"CreateFile": {"status": True}, "SaveFileBody": {"status": True}, **routes}
     monkeypatch.setattr(AaPanelClient, "_post", _fake_post(routes))
     return cf
 
@@ -494,7 +513,7 @@ def test_site_card_shows_ssl_error(client, monkeypatch):
         s.commit()
 
     html = client.get(f"/sites/{sid}").text
-    assert "SSL-режим Cloudflare не переключился" in html
+    assert "SSL/настройках зоны Cloudflare" in html
     assert "Cloudflare 403" in html
 
 
@@ -504,14 +523,16 @@ def test_publish_aapanel_refusal_keeps_pages_edited(monkeypatch):
     """РЕГРЕССИЯ, сквозная. Панель отказала на записи файла — в docroot ПУСТО. До фикса
     страница получала `published`, сайт — `published`, и проверка индексации потом искала в
     поисковике страницу, которой нет. Гейт редактуры не сдвинут: статус остаётся `edited`,
-    публикация просто честно не состоялась."""
+    публикация честно не состоялась — и результат несёт причину (S7-18), а не исключение
+    без списка записанного."""
     from app.services import publish
     _panel_env(monkeypatch, CreateFile=CREATE_OK, SaveFileBody=NO_SUCH_FILE)
     sid = _seed_site(page_statuses=("edited",))
 
-    with pytest.raises(RuntimeError, match="Configuration file not exist"):
-        publish.publish_site(sid)
+    out = publish.publish_site(sid)
 
+    assert out["status"] == "failed" and out["pages"] == [] and out["written"] == []
+    assert "Configuration file not exist" in out["failed"]["/"]
     with db.SessionLocal() as s:
         site = s.get(Site, sid)
         page = s.query(Page).filter_by(site_id=sid).one()
@@ -519,11 +540,10 @@ def test_publish_aapanel_refusal_keeps_pages_edited(monkeypatch):
         assert site.status != "published" and site.published_at is None
 
 
-def test_publish_partial_failure_publishes_nothing(monkeypatch):
-    """Отказ на ВТОРОЙ странице: первая уже легла на диск, но в БД `published` не получает
-    никто — транзакция откатывается целиком. Рассинхрона нет: write_file идемпотентен
-    (CreateFile+SaveFileBody перезаписывают тело), повтор просто положит первую страницу снова.
-    Лучше записать дважды, чем соврать один раз."""
+def test_publish_partial_failure_reports_written_and_publishes_only_those(monkeypatch):
+    """Отказ на ВТОРОЙ странице: первая легла на диск и публикуется, вторая остаётся `edited`
+    с причиной в `failed`. Информация о записанном не теряется (S7-18), отказ одной страницы
+    не обрывает остальные. write_file идемпотентен — повтор доложит остаток."""
     from app.services import publish
     written = []
 
@@ -540,14 +560,15 @@ def test_publish_partial_failure_publishes_nothing(monkeypatch):
     monkeypatch.setattr(AaPanelClient, "_post", _post)
     sid = _seed_site(page_statuses=("edited", "edited"))
 
-    with pytest.raises(RuntimeError):
-        publish.publish_site(sid)
+    out = publish.publish_site(sid)
 
-    assert written == ["/www/wwwroot/ex.ru/index.html"]        # первая реально записана
+    # первая страница реально записана (ассеты/sitemap/robots идут отдельными файлами)
+    assert [w for w in written if w.endswith("/index.html")] == ["/www/wwwroot/ex.ru/index.html"]
+    assert out["status"] == "partial" and out["pages"] == ["/"] and "/p1" in out["failed"]
     with db.SessionLocal() as s:
         assert [p.status for p in s.query(Page).filter_by(site_id=sid).order_by(Page.id)] \
-            == ["edited", "edited"]
-        assert s.get(Site, sid).status != "published"
+            == ["published", "edited"]
+        assert s.get(Site, sid).status == "published"
 
 
 def test_publish_still_publishes_when_panel_answers(monkeypatch):
@@ -592,3 +613,22 @@ def test_fake_panel_shape_matches_the_real_client():
     assert _fail_msg(FILE_EXISTS) == "Requested file exists!"
     # и это ровно те поля, по которым клиент достаёт данные из живого ответа
     assert isinstance(LIST_EMPTY["data"], list) and SimpleNamespace(**ADD_OK).siteStatus is True
+
+
+def test_delete_file_read_timeout_is_not_retried():
+    """DeleteFile — запись: после ReadTimeout запрос мог исполниться, второй не шлём."""
+    class _Slow:
+        def __init__(self):
+            self.n = 0
+
+        def request(self, method, url, **kw):
+            self.n += 1
+            raise httpx.ReadTimeout("slow", request=httpx.Request(method, url))
+
+        def close(self):
+            pass
+
+    p = _Slow()
+    with pytest.raises(httpx.ReadTimeout):
+        _client(p).delete_file("/www/wwwroot/ex.com/m.txt")
+    assert p.n == 1

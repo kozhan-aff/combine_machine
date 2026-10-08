@@ -7,6 +7,9 @@
     {% if crit_down %}<b style="color:var(--bad)">критичные: {{ crit_down|join(', ') }} ✗</b>{% else %}<b style="color:var(--ok)">критичные: все ✓</b>{% endif %}</span></h2>
 
 <div class="card" style="max-width:920px; margin-bottom:14px">
+  <b>Воркер автопилота:</b> {% if worker.age_sec is none %}<span class="hint" title="воркер ни разу не бил сердце: контейнер worker не запущен или обновление ещё не накатано">воркер: нет сигнала</span>
+  {% elif worker.alive %}<span class="hint" style="color:var(--ok)">воркер: жив, последний удар {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
+  {% else %}<span class="hint" style="color:var(--bad)" title="проверь контейнер worker: docker compose ps / logs worker">воркер: НЕ отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}<br>
   <b>Версия кода:</b>
   {% if status.error %}<span style="color:var(--bad)">git недоступен — {{ status.error }}</span>
   {% else %}<code>{{ status.hash }}</code> · {{ status.subject }} · <span class="hint">{{ status.date }}</span>
@@ -25,10 +28,10 @@
 </div>
 
 <div class="toolbar">
-  <form method="get" action="/diag">
-    <button class="btn-acc" title="перезагрузить страницу и пропинговать все сервисы ещё раз">↻ Проверить все сервисы снова</button>
+  <form method="post" action="/diag/refresh">
+    <button class="btn-acc" title="пропинговать все сервисы ещё раз (до {{ timeout|int }} с); LLM и SearXNG — заново, не из 10-минутного кэша">↻ Проверить все сервисы снова</button>
   </form>
-  <span class="hint">пинги идут параллельно, ответ ≤ {{ timeout|int }} с (самый медленный — Wayback)</span>
+  <span class="hint">{% if checked_at %}снимок от {{ checked_at.strftime('%H:%M:%S') }} UTC · {% endif %}страница показывает кэш (фон обновляет раз в 5 минут), живой прогон — только кнопкой</span>
 </div>
 
 {% set mod_titles = {'M1':'M1 — поиск и скоринг','M2':'M2 — выкуп','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
@@ -57,7 +60,7 @@
             <span class="meter" style="width:48px" title="доля от таймаута пинга ({{ timeout|int }} с)"><i class="m-mid" style="width:{{ [ (c.ms/(timeout*10))|round|int, 100]|min }}%"></i></span>
           {% else %}<span class="hint">—</span>{% endif %}
         </td>
-        <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or '' }}</td>
+        <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or c.note or '' }}</td>
       </tr>
     {% endfor %}
     </tbody>

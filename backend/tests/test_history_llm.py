@@ -60,11 +60,11 @@ def test_classify_topics_truncates_and_asks_deterministically():
 
 def test_classify_client_one_attempt_short_timeout_and_model_fallback(monkeypatch):
     """3.3: зависший LiteLLM не держит слот волны истории ~6 минут (120 с × 3 попытки): у клиента
-    классификации таймаут 30 с и ОДНА попытка. Р6: модель — LLM_CLASSIFY_MODEL, пусто -> LLM_MODEL."""
+    классификации таймаут 60 с и ОДНА попытка (ReadTimeout у ollama — ещё одна, см. test_llm_g4). Р6: модель — LLM_CLASSIFY_MODEL, пусто -> LLM_MODEL."""
     from app.config import settings
     monkeypatch.setattr(settings, "LLM_CLASSIFY_MODEL", "")
     c = LlmClassifyClient()
-    assert c.model == settings.LLM_MODEL and c._client.timeout.read == 30.0
+    assert c.model == settings.LLM_MODEL and c._client.timeout.read == 60.0
     calls = []
 
     def down(method, url, **kw):

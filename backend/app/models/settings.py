@@ -36,5 +36,9 @@ class ScoringSettings(Base):
     spam_anchor_max: Mapped[float] = mapped_column(Numeric, default=0.2)
     # пол остатка units Ahrefs (решение оператора Р3): ниже — W4/W6 не тратят units
     units_floor: Mapped[int] = mapped_column(Integer, default=300000)
+    # v2 G4 (миграция 0030): {"max_candidates_per_run": int, "name_filters": {...}, "source_state": {...}}.
+    # Один JSONB вместо россыпи колонок: резерв без DR (S1-01), фильтры имени (S1-10), валидаторы
+    # условного GET источников (S1-11 — служебное, оператор не правит).
+    discovery_opts: Mapped[dict] = mapped_column(JSONB, default=dict)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
                                                         server_default=func.now(), onupdate=func.now())

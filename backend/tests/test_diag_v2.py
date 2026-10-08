@@ -9,9 +9,11 @@ def _row(key):
 
 def test_spec_keys_v2():
     keys = [s[0] for s in diagnostics._spec()]
-    for k in ("ahrefs", "rdap", "webrisk", "dropcatch", "nominet", "registry_mx", "wayback", "aparser", "llm"):
+    # backorder вернулся как ПАСПОРТ канала выкупа v1 (S3-03): капча/недоступность видны словами
+    for k in ("ahrefs", "rdap", "webrisk", "dropcatch", "nominet", "registry_mx", "wayback", "aparser", "llm",
+              "backorder"):
         assert k in keys, k
-    for k in ("rkn", "tci", "backorder"):
+    for k in ("rkn", "tci"):
         assert k not in keys, k
 
 
@@ -91,14 +93,17 @@ def test_rdap_down_is_a_row_not_a_banner(monkeypatch):
 def test_critical_flags_follow_the_real_spec():
     """Minor 2: критичность — по настоящей таблице _spec(), не по синтетике. Некритичные источники
     дропов (и RDAP, чей сбой не останавливает воронку) не зажигают баннер; воронка без критичных
-    зависимостей (Wayback, A-Parser, LLM, БД) остановилась бы. Ahrefs — некритичный (финальное
+    зависимостей (A-Parser, LLM, БД) остановилась бы. Wayback — НЕ критичный (Ruling 2026-10-08):
+    медленный archive.org не зажигает красный баннер, но строка и предупреждение остаются. Ahrefs — некритичный (финальное
     ревью, minor «в»): остаток units 0 горел бы баннером на всех экранах до месячного сброса, а
     остаток и так виден на /settings и в сообщении задачи."""
     crit = {s[0]: s[5] for s in diagnostics._spec()}
-    for k in ("nominet", "registry_mx", "dropcatch", "rdap", "webrisk", "ahrefs"):
+    for k in ("nominet", "registry_mx", "dropcatch", "rdap", "webrisk", "ahrefs", "wayback"):
         assert crit[k] is False, k
-    for k in ("wayback", "aparser", "llm", "db"):
+    for k in ("aparser", "llm", "db"):
         assert crit[k] is True, k
+    role = {s[0]: s[2] for s in diagnostics._spec()}["wayback"]
+    assert "воронка может стоять" in role
 
 
 def test_registry_mx_ping_uses_head_not_full_csv(monkeypatch):

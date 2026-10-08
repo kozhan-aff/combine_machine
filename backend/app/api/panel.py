@@ -21,6 +21,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.guards import require_cf_write
 from app.config import settings
 from app.db import get_session, SessionLocal
 from app.models.cloudflare import (
@@ -30,7 +31,7 @@ from app.models.cloudflare import (
 from app.models.domain import Domain
 from app.models.offer import Offer, SiteOffer
 from app.models.site import Site, Page
-from app.services import cf_sync, diag_cache
+from app.services import cf_sync, diag_cache, locales
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
@@ -42,6 +43,7 @@ templates.env.filters["source_badge"] = _source_badge
 templates.env.filters["reject_ru"] = _reject_ru
 templates.env.filters["lane_ru"] = _lane_ru
 templates.env.filters["index_ru"] = _index_ru
+templates.env.globals["site_langs"] = sorted(locales.TEXTS)   # языки шаблона сайта (select «Генерация»)
 templates.env.globals["diag_alert"] = diag_cache.alert   # баннер в base.html читает кэш
 router = APIRouter()
 
@@ -49,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -170,6 +172,15 @@ def _gates(db: Session) -> dict:
 # ============================================================================
 # ЭКРАНЫ
 # ============================================================================
+def _worker_status() -> dict:
+    """Сердцебиение воркера для /diag и Пульта (F8-11). Сбой чтения БД — «неизвестно», не 500."""
+    from app.services import heartbeat
+    try:
+        return heartbeat.status()
+    except Exception:  # noqa: BLE001
+        return {"alive": False, "age_sec": None, "note": ""}
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_session)):
     from app.services import jobs
@@ -186,6 +197,7 @@ def dashboard(request: Request, db: Session = Depends(get_session)):
         "steps": _next_steps(db),
         "autopilot": get_autonomy(), "gates": _gates(db), "last_sweep": last_finished_sweep_at(),
         "last_runs": {name: jobs.last(name) for name in _JOBS},
+        "worker": _worker_status(),
     })
 
 
@@ -225,8 +237,12 @@ def _urgent(d, soon, now) -> bool:
     return dl <= soon
 
 
+INBOX_PAGE = 300   # строк инбокса M1 на страницу (F8-12)
+
+
 @router.get("/domains", response_class=HTMLResponse)
-def domains_view(request: Request, lang: str | None = None, db: Session = Depends(get_session)):
+def domains_view(request: Request, lang: str | None = None, page: int = 1,
+                 db: Session = Depends(get_session)):
     """Инбокс решений: только то, где ждут ТЕБЯ. Полный реестр — /domains/pool.
 
     `?lang=xx` — фильтр по языку прошлого сайта. Счётчик «на решении» и список языков — ДО
@@ -269,6 +285,13 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
     counts = _domain_counts(db)
     soon = now + timedelta(days=_URGENT_DAYS)
     urgent = sum(1 for d in inbox + ready if _urgent(d, soon, now))
+    # Страница инбокса (F8-12): тяжёлый расчёт вердиктов/улик идёт по КАЖДОЙ показанной строке, а при
+    # v2-потоке scored растёт без предела. Счётчики выше (urgent/langs/inbox_total) считаны по ВСЕМУ
+    # списку, режем только отрисовку; порядок уже общий, так что страницы не пересекаются.
+    inbox_n = len(inbox)
+    pages = max(1, -(-inbox_n // INBOX_PAGE))
+    page = max(1, min(page, pages))
+    inbox = inbox[(page - 1) * INBOX_PAGE: page * INBOX_PAGE]
     reasons = dict(db.execute(
         select(Domain.reject_reason, func.count()).where(Domain.status == "rejected")
         .group_by(Domain.reject_reason)).all())
@@ -289,7 +312,8 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
         # разъедутся (см. bulk_ok).
         "inbox": [(d, blind_reason(d), _urgent(d, soon, now), history_verdict(d),
                    history_evidence(d), _bulk_eligible(d, allow), history_note(d)) for d in inbox],
-        "inbox_total": inbox_total, "langs": langs, "f_lang": lang or "",
+        "inbox_total": inbox_total, "inbox_n": inbox_n, "page": page, "pages": pages,
+        "page_size": INBOX_PAGE, "langs": langs, "f_lang": lang or "",
         # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
         # EMD-новорег с пустым архивом (R2-14) — нейтральное «архив пуст», а не «⚠ НЕ проверена»
@@ -332,8 +356,10 @@ def domains_view(request: Request, lang: str | None = None, db: Session = Depend
 
 @router.get("/domains/pool", response_class=HTMLResponse)
 def domains_pool_view(request: Request, status: str | None = None, min_score: float | None = None,
-                      limit: int = 200, show_all: bool = False, db: Session = Depends(get_session)):
-    """Полный реестр — для расследований, а не для ежедневной работы."""
+                      limit: int = 200, page: int = 1, show_all: bool = False,
+                      db: Session = Depends(get_session)):
+    """Полный реестр — для расследований, а не для ежедневной работы. `limit` — размер страницы,
+    `page` — номер (F8-12: раньше строки за топ-1000 по score были недостижимы)."""
     limit = max(1, min(limit, 1000))            # серверный кап: не тянуть всю таблицу в память
     stmt = select(Domain)
     if status:
@@ -346,12 +372,17 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
     from app.services.settings import get_settings
     from app.services.transitions import dirty_reason, zone_closed
     allow = get_settings()["tld_allowlist"]          # одно чтение настроек на страницу
+    matched = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    pages = max(1, -(-matched // limit))
+    page = max(1, min(page, pages))
+    # id в хвосте сортировки — стабильные страницы при равных score/RD (иначе строка могла бы
+    # переехать между страницами или пропасть)
     rows = db.execute(stmt.order_by(Domain.score.desc().nulls_last(),
-                                    Domain.referring_domains.desc().nulls_last())
-                      .limit(limit)).scalars().all()
+                                    Domain.referring_domains.desc().nulls_last(), Domain.id)
+                      .limit(limit).offset((page - 1) * limit)).scalars().all()
     counts = _domain_counts(db)
     return templates.TemplateResponse(request, "pool.html", {
-        "active": "domains", "rows": rows, "counts": counts, "total": sum(counts.values()),
+        "active": "domains", "rows": rows, "page": page, "pages": pages, "matched": matched, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
         # какие строки грязные — решает ПОЛИТИКА, а не шаблон по списку кодов: реестр рисует
         # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.
@@ -362,6 +393,10 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
         "closed_ids": {d.id for d in rows if d.status in ("rejected", "scored") and zone_closed(d, allow)},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
+        # query пейджера: пустые фильтры пропущены (`min_score=` → 422 на float|None)
+        "pager_qs": urlencode({k: v for k, v in (("status", status), ("min_score", min_score),
+                               ("limit", limit), ("show_all", 1 if show_all else None))
+                               if v not in (None, "")}),
     })
 
 
@@ -456,22 +491,22 @@ def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_ses
 def diag_view(request: Request):
     from app.services import deploy as _deploy
     from app.services.diagnostics import PING_TIMEOUT
-    checks = diag_cache.refresh()   # та же цена (живой прогон) + кладём в кэш -> баннер консистентен с /diag
+    checks, checked_at = diag_cache.get()   # кэш мгновенно (живой прогон — только кнопкой и фоном)
     ok = sum(1 for c in checks if c["status"] == "ok")
     crit_down = [c["label"] for c in checks if c.get("critical") and c["status"] == "fail"]
     return templates.TemplateResponse(request, "diag.html", {
         "active": "diag", "checks": checks, "ok": ok, "total": len(checks),
-        "crit_down": crit_down, "timeout": PING_TIMEOUT,
+        "crit_down": crit_down, "timeout": PING_TIMEOUT, "checked_at": checked_at,
         "repo": settings.GITHUB_REPO, "can_pull": bool(settings.GITHUB_TOKEN),
-        "status": _deploy.deploy_status(),
+        "status": _deploy.deploy_status(), "worker": _worker_status(),
     })
 
 
 @router.post("/diag/refresh")
 def diag_refresh(request: Request):
-    """Кнопка «перепроверить» в баннере: синхронный прогон диагностики (≤20с, пинги
-    параллельны), редирект назад — оператор остаётся на своём экране, баннер отражает свежий кэш."""
-    diag_cache.refresh()
+    """Явная «проверить снова» (на /diag и в баннере): синхронный прогон диагностики (≤20с, пинги
+    параллельны, single-flight, TTL-кэш проб сброшен), редирект назад — баннер отражает свежий кэш."""
+    diag_cache.refresh(force=True)
     raw = request.headers.get("referer") or "/"
     p = urlsplit(raw)
     # выбрасываем прежние flash-параметры: иначе старый ?err= подавит «перепроверено», а повторные клики пухнут URL
@@ -481,16 +516,9 @@ def diag_refresh(request: Request):
 
 
 def _require_cf_write(request: Request) -> None:
-    """Hard gate: любой CF-write требует НАСТРОЕННЫЙ panel auth. Same-origin недостаточен
-    (аудит §11/§15) — панель живёт на LAN, а same-origin ничего не доказывает про то, кто
-    физически может достучаться до порта. Транспортная Basic-проверка (если включена) стоит
-    отдельно; здесь проверяется, что auth ВООБЩЕ сконфигурирован — иначе плоская LAN-экспозиция
-    открывает Cloudflare-мутации кому угодно, кто знает IP. `request` не используется сейчас —
-    параметр под будущие роуты-потребители (P1+ мутации), которые зовут этот гейт первой строкой,
-    как и запуск sync (задача 5)."""
-    if not (settings.PANEL_USER and settings.PANEL_PASS):
-        raise HTTPException(status_code=403,
-                            detail="Cloudflare-операции требуют настроенных PANEL_USER/PANEL_PASS")
+    """Тонкая обёртка над app.api.guards.require_cf_write (общий гейт панели и /api).
+    `request` не используется — параметр под роуты-потребители, которые зовут гейт первой строкой."""
+    require_cf_write()
 
 
 def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
@@ -679,7 +707,8 @@ def queue_view(request: Request):
     grids, balance, bo_err = {}, None, ""
     for o in orders:                          # зона — до похода в сеть: иначе сбой на первой
         o["zone"] = zone_of(o["domain"])      # заявке оставил бы остальные строки без зоны
-    if any(o["status"] == "pending_confirm" for o in orders):
+    if any(o["provider"] == "backorder" and o["status"] in ("pending_confirm", "failed")
+           and not o["confirmed"] for o in orders):
         c = BackorderClient()
         # Сетка и баланс — независимые сбои: упавший баланс не должен писать «подтверждать
         # нечем» над рабочим селектором ставки, и наоборот. Панель не падает ни от одного.
@@ -695,6 +724,7 @@ def queue_view(request: Request):
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
         "balance": balance, "bo_err": bo_err,
+        "channels": acquisition.channel_status(orders),
         # Сколько машина ЖДЁТ, прежде чем счесть отправку оборвавшейся. Из константы, а не числом
         # в шаблоне: очередь обязана называть оператору тот же срок, по которому судит сверка
         # (ревью Задачи 8, минор 3) — разъедься они, и человек в промежутке решит, что кнопка
@@ -765,7 +795,7 @@ def run_discovery_action(request: Request):
     from app.services import discovery, jobs
     ok = jobs.spawn("discovery", discovery.run_discovery)
     # запущено — баннера НЕТ: прогресс показывает карточка задачи (спека §8)
-    return _back_here(request, err=None if ok else "Поиск дропов уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Поиск дропов уже идёт"))
 
 
 @router.post("/domains/add-list")
@@ -781,7 +811,7 @@ def domains_add_list(domains: str = Form("")):
 def run_score_action(request: Request, n: int = Form(5)):
     from app.services import jobs, scoring
     ok = jobs.spawn("score", lambda: scoring.score_pending(limit=n))
-    return _back_here(request, err=None if ok else "Проверка уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Проверка уже идёт"))
 
 
 @router.post("/run/recheck")
@@ -789,7 +819,7 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
     from app.services import jobs, scoring
     ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
-    return _back_here(request, err=None if ok else "Перепроверка уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Перепроверка уже идёт"))
 
 
 @router.post("/settings/cloudflare/sync")
@@ -808,7 +838,7 @@ def cloudflare_sync(request: Request):
             with SessionLocal() as db:
                 cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw), run=rid)
     ok = jobs.spawn("cf_sync", _job)
-    return _back_here(request, err=None if ok else "Синхронизация уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Синхронизация уже идёт"))
 
 
 @router.post("/run/{job}/cancel")
@@ -993,10 +1023,10 @@ def make_site_action(domain_id: int):
 
 # --- M2 очередь выкупа (структурный путь: очередь + подтверждение + отправка) ------
 @router.post("/domains/{domain_id}/queue")
-def queue_add_action(domain_id: int, provider: str = Form("backorder")):
+def queue_add_action(domain_id: int, provider: str = Form("")):
     from app.services import acquisition
     try:
-        oid = acquisition.create_order(domain_id, provider)
+        oid = acquisition.create_order(domain_id, provider or None)
         return _back("/queue", msg=f"Домен в очереди выкупа (заказ #{oid}). Подтверди — тогда уйдёт провайдеру.")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"в очередь: {e}")
@@ -1059,9 +1089,15 @@ def queue_poll_action():
                  f"заказа нет, деньги не ушли; можно повторить или снять)") if r.get("lost") else ""
         live = (f" · отправок в полёте {r['sending']} — не трогали: их прямо сейчас шлёт провайдеру "
                 f"живая отправка, вердикт за неё выносить нельзя") if r.get("sending") else ""
-        return _back("/queue", msg=f"Сверено с провайдером: {checked} · "
-                                   f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                                   f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
+        # Сбой ОДНОГО провайдера (капча backorder, таймаут) не прячем за «сверено»: он назван в ответе (S3-04)
+        errs = r.get("errors") or {}
+        bad = "".join(f" · {name}: {msg}" for name, msg in errs.items())
+        text = (f"Сверено с провайдером: {checked} · "
+                f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
+                f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
+        if errs:
+            return _back("/queue", err=f"Сверка прошла не полностью{bad}. {text}")
+        return _back("/queue", msg=text)
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"опрос статусов: {e}")
 
@@ -1151,18 +1187,30 @@ def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depe
 
 @router.post("/sites/{site_id}/attach-offer")
 def attach_offer_action(site_id: int, offer_id: int = Form(...), db: Session = Depends(get_session)):
+    # Явная привязка (S6-13/S7-12): Site.offer_id — оффер, про который пишутся страницы. Уже
+    # сгенерированные страницы свой offer_id сохраняют (F26) — меняется только дальнейшая генерация.
+    site = db.get(Site, site_id)
+    offer = db.get(Offer, offer_id)
+    if site is None or offer is None:
+        return _back(f"/sites/{site_id}" if site else "/", err="сайт или оффер не найден")
+    if not offer.active:
+        return _back(f"/sites/{site_id}", err=f"оффер «{offer.brand}» выключен — привяжи активный")
+    site.offer_id = offer_id
     exists = db.execute(select(SiteOffer).where(
         SiteOffer.site_id == site_id, SiteOffer.offer_id == offer_id)).scalar_one_or_none()
     if not exists:
         db.add(SiteOffer(site_id=site_id, offer_id=offer_id))
-        try:
-            db.commit()
-        except IntegrityError:
-            # TOCTOU на uq_site_offer (F24): под READ COMMITTED оба конкурентных запроса
-            # видят «нет» и оба вставляют — второй коммит бьётся об уникальный индекс.
-            # Дружелюбно, а не голым 500: оффер уже привязан — это и был желаемый исход.
-            db.rollback()
-            return _back(f"/sites/{site_id}", msg="Оффер уже привязан")
+    try:
+        db.commit()
+    except IntegrityError:
+        # TOCTOU на uq_site_offer (F24): под READ COMMITTED оба конкурентных запроса
+        # видят «нет» и оба вставляют — второй коммит бьётся об уникальный индекс.
+        # Дружелюбно, а не голым 500: оффер уже привязан — это и был желаемый исход.
+        # Откат унёс и Site.offer_id — выставляем заново.
+        db.rollback()
+        db.get(Site, site_id).offer_id = offer_id
+        db.commit()
+        return _back(f"/sites/{site_id}", msg="Оффер уже привязан")
     return _back(f"/sites/{site_id}", msg="Оффер привязан")
 
 
@@ -1178,44 +1226,70 @@ def provision_action(site_id: int, request: Request):
     try:
         r = provisioning.provision(site_id)
         if r.get("status") == "awaiting_ns":
-            ns = ", ".join(r.get("name_servers") or [])
-            return _back(f"/sites/{site_id}",
-                         msg=f"Зона создана, ждёт NS. Пропиши у регистратора: {ns} — потом повтори Provision.")
+            return _back(f"/sites/{site_id}", msg=f"Зона создана, ждёт NS: {r.get('hint', '')}")
         if r.get("status") == "error":
             return _back(f"/sites/{site_id}", err=r.get("error", "provision error"))
         if r.get("ssl_error"):
-            # Зелёный баннер «готов: DNS + vhost + SSL» поверх упавшего SSL — это ровно то
-            # враньё, от которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под
-            # вопросом: говорим об этом красным и оставляем след на карточке (site.ssl_error).
+            # Зелёный баннер «готов» поверх упавшего SSL/настроек зоны — ровно то враньё, от
+            # которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под вопросом:
+            # говорим об этом красным и оставляем след на карточке (site.ssl_error).
             return _back(f"/sites/{site_id}", err=(
-                "Provision прошёл (зона + A-запись + vhost), но SSL-режим Cloudflare НЕ "
-                f"переключился: {r['ssl_error']}. HTTPS может не работать — почини причину "
-                "и нажми Provision ещё раз (идемпотентно)."))
-        return _back(f"/sites/{site_id}", msg="Provision готов: DNS proxied + vhost + SSL. Дальше — генерация.")
+                "Provision прошёл (зона + vhost + A-записи), но SSL/настройки зоны Cloudflare встали "
+                f"не полностью: {r['ssl_error']}. Почини причину и нажми Provision ещё раз (идемпотентно)."))
+        tls = {"origin_ca": "свой Origin-сертификат, Cloudflare strict",
+               "ok": "origin отвечает по HTTPS, Cloudflare full"}.get(
+            r.get("origin_https"), "HTTPS на origin нет — Cloudflare flexible")
+        warn = f" ⚠ {'; '.join(r['warnings'])}." if r.get("warnings") else ""
+        return _back(f"/sites/{site_id}", msg=f"Provision готов: vhost + DNS (apex и www) + проверка origin. SSL: {tls}. Дальше — генерация.{warn}")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
 
 
 @router.post("/sites/{site_id}/generate")
-def generate_action(site_id: int, lang: str = Form("ru")):
-    from app.services import content
-    try:
-        # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
-        n = content.generate_site(site_id, lang=lang, use_competitor=True)
-        return _back(f"/sites/{site_id}",
-                     msg=f"Сгенерировано {n} черновиков. Дальше — редактура (гейт: publish берёт только edited).")
-    except Exception as e:  # noqa: BLE001
-        return _back(f"/sites/{site_id}", err=f"генерация: {e}")
+def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(get_session)):
+    """Генерация — фоновая задача `generate` (S6-11/S7-14): LLM пишет минуты, держать ради этого
+    HTTP-запрос нельзя. Явный отказ (нет сайта/оффера) отдаём сразу, а не потом в карточке задачи."""
+    from app.services import content, jobs
+    site = db.get(Site, site_id)
+    if site is None:
+        return _back("/", err=f"сайт #{site_id} не найден")
+    if content.status_refusal(site):
+        return _back(f"/sites/{site_id}", err=f"генерация: {content.status_refusal(site)}")
+    has_offer = content.site_offer(db, site) is not None or db.scalar(
+        select(Page.id).where(Page.site_id == site_id, Page.offer_id.is_not(None)).limit(1))
+    if not has_offer:
+        return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
+                     "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
+    # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
+    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None, use_competitor=True))
+    if not ok:
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Генерация уже идёт — дождись её на Пульте"))
+    return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "
+                 "Дальше — редактура (гейт: publish берёт только edited).")
 
 
 @router.post("/pages/{page_id}/save")
 def page_save_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
+    """ОДОБРИТЬ (гейт): draft -> edited. Тело — ровно то, что редактор видит в форме. Потерянное
+    поле и очищенная textarea для FastAPI неразличимы (пустое значение = «нет поля»), поэтому обе
+    ситуации дают пустое тело, и гейт его не пропускает (S7-11): старый текст молча не одобряется."""
     from app.services import content
     p = db.get(Page, page_id)
     sid = p.site_id if p else None
     try:
         content.mark_edited(page_id, body)   # ЧЕЛОВЕК прошёл гейт: draft -> edited (+ sanitize)
         return _back(f"/sites/{sid}", msg="Страница сохранена как edited — можно публиковать.")
+    except Exception as e:  # noqa: BLE001
+        return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
+
+
+@router.post("/pages/{page_id}/draft")
+def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
+    """Сохранить правку КАК ЧЕРНОВИК, без одобрения (S6-16): статус не edited, публикация не возьмёт."""
+    from app.services import content
+    try:
+        content.save_draft(page_id, body)
+        return _back(f"/pages/{page_id}", msg="Черновик сохранён (не одобрен — публикация его не возьмёт).")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
@@ -1242,7 +1316,16 @@ def publish_action(site_id: int):
         if r.get("status") == "no_edited_pages":
             return _back(f"/sites/{site_id}",
                          err="Гейт редактуры: нет страниц в статусе edited — сначала вычитай черновики.")
-        return _back(f"/sites/{site_id}", msg=f"Опубликовано: {', '.join(r.get('pages', []))}")
+        if r.get("status") == "not_provisioned":
+            return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт не провиженен')}.")
+        warn = (" ⚠ " + "; ".join(r["warnings"])) if r.get("warnings") else ""
+        problems = [f"{k}: не записана — {v}" for k, v in (r.get("failed") or {}).items()] + \
+                   [f"{k}: записана, но домен не подтвердил — {v}" for k, v in (r.get("unverified") or {}).items()]
+        if r.get("status") in ("partial", "failed"):
+            done = f"Опубликовано: {', '.join(r.get('pages', [])) or 'ничего'}. " if r.get("pages") else ""
+            return _back(f"/sites/{site_id}", err=f"{done}Не опубликовано — {'; '.join(problems)}. "
+                         f"Повтор безопасен (идемпотентно).{warn}")
+        return _back(f"/sites/{site_id}", msg=f"Опубликовано и проверено на домене: {', '.join(r.get('pages', []))}.{warn}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"публикация: {e}")
 
@@ -1345,6 +1428,7 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                   max_whois_per_run: int | None = Form(None),
                   min_dr: float | None = Form(None), max_links_per_run: int | None = Form(None),
                   max_deep_per_run: int | None = Form(None), units_floor: int | None = Form(None),
+                  units_daily_cap: int | None = Form(None),
                   spam_anchor_max: float | None = Form(None),
                   tld_allowlist: str | None = Form(None), brand_tokens: str | None = Form(None),
                   emd_sets: str | None = Form(None), v2_lists: str = Form(""),
@@ -1373,6 +1457,7 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                            max_whois_per_run=max_whois_per_run,
                            min_dr=min_dr, max_links_per_run=max_links_per_run,
                            max_deep_per_run=max_deep_per_run, units_floor=units_floor,
+                           units_daily_cap=units_daily_cap,
                            spam_anchor_max=spam_anchor_max, tld_allowlist=tld_allowlist,
                            brand_tokens=brand_tokens, emd_sets=emd_sets,
                            sources_enabled={"dropcatch": bool(dropcatch), "nominet": bool(nominet), "mx": bool(mx), "emd": bool(emd)},
@@ -1428,4 +1513,4 @@ def autopilot_run_action(request: Request):
     from app.services import jobs, orchestrator
     ok = jobs.spawn("sweep", lambda: orchestrator.run_sweep(trigger="manual",
                                                             respect_master=False))
-    return _back_here(request, err=None if ok else "Свип уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Свип уже идёт"))

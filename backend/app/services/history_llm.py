@@ -19,6 +19,7 @@ _SYSTEM = (
     '"topic_summary":"...","vpn_adjacent":0.0}')
 _LANG = re.compile(r"^[a-z]{2}$")
 _MAX_SNAPS, _MAX_CHARS = 5, 2000
+_MAX_TOKENS = 800
 
 
 def _year(x: dict) -> int:
@@ -94,4 +95,6 @@ def classify_topics(domain: str, texts: list, llm) -> dict | None:
     воронки; непригодный ответ — None, не исключение."""
     if not texts:
         return None
-    return parse_answer(llm.complete(_SYSTEM, build_prompt(domain, texts), temperature=0))
+    # max_tokens: ответ — короткий JSON, но «думающая» модель тратит лимит на рассуждение (S6-10)
+    return parse_answer(llm.complete(_SYSTEM, build_prompt(domain, texts), temperature=0,
+                                     max_tokens=_MAX_TOKENS))

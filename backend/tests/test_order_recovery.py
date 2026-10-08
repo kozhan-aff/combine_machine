@@ -570,3 +570,15 @@ def test_cancel_still_works_on_a_pending_order(sqlite_db):
     assert r["status"] == "cancelled" and _orders(did)[0].status == "cancelled"
     with db.SessionLocal() as s:
         assert s.get(Domain, did).status == "approved"
+
+
+def test_failed_order_with_expired_confirmation_keeps_maybe_sent_warning(client):
+    """Minor: подтверждение протухло (confirmed=False), но исход прошлой отправки неизвестен —
+    предупреждение «заказ мог уйти» не должно пропадать из очереди."""
+    did = _approved("unk.ru")
+    with db.SessionLocal() as s:
+        s.add(AcquisitionOrder(domain_id=did, provider="backorder", status="failed",
+                               confirmed_by_human=False,
+                               result={"error": "исход неизвестен: Timeout", "maybe_sent": True}))
+        s.commit()
+    assert "заказ мог уйти" in client.get("/queue").text

@@ -43,6 +43,7 @@ def _defaults() -> dict:
         "max_deep_per_run": cfg.MAX_DEEP_PER_RUN,
         "spam_anchor_max": cfg.SPAM_ANCHOR_MAX,
         "units_floor": cfg.UNITS_FLOOR,
+        "discovery_opts": {},
     }
 
 
@@ -128,6 +129,94 @@ def _clean_emd_sets(raw) -> list[dict]:
     return out
 
 
+def _discovery_view(opts) -> dict:
+    """discovery_opts (JSONB, частично пустой) -> эффективные max_candidates_per_run и name_filters."""
+    o = opts or {}
+    try:
+        cap = int(o.get("max_candidates_per_run", cfg.MAX_CANDIDATES_PER_RUN))
+    except (TypeError, ValueError):
+        cap = cfg.MAX_CANDIDATES_PER_RUN
+    try:
+        daily = int(o.get("units_daily_cap", 0))
+    except (TypeError, ValueError):
+        daily = 0
+    return {"max_candidates_per_run": max(0, min(cap, 50_000)),
+            "units_daily_cap": max(0, min(daily, 2_000_000)),
+            "name_filters": _clean_name_filters(o.get("name_filters")),
+            "zone_channels": _clean_zone_channels(o.get("zone_channels", cfg.ZONE_CHANNELS))}
+
+
+def _clean_zone_channels(raw) -> dict:
+    """Таблица зона -> канал выкупа (M2). Неизвестный канал — ValueError (опечатка в деньгах не должна
+    молча уводить заказ не туда); пустые ключи и не-строки отбрасываем."""
+    if not isinstance(raw, dict):
+        raise ValueError("зона -> канал: ожидается словарь")
+    out = {}
+    for z, ch in raw.items():
+        zone = str(z).strip().strip(".").lower()
+        if not zone:
+            continue
+        if ch not in cfg.ACQ_CHANNELS:
+            raise ValueError(f"зона .{zone}: неизвестный канал {ch!r} (допустимы {cfg.ACQ_CHANNELS})")
+        out[zone] = ch
+    return out
+
+
+def _clean_name_filters(raw) -> dict:
+    """Фильтры имени с UI/API -> валидный словарь поверх дефолтов; мусор в числах -> дефолт."""
+    from app.services.domain_filters import DEFAULT_NAME_FILTERS
+    out = dict(DEFAULT_NAME_FILTERS)
+    out["junk"] = list(DEFAULT_NAME_FILTERS["junk"])
+    if not isinstance(raw, dict):
+        return out
+    for k, cast, lo, hi in (("max_label_len", int, 0, 63), ("max_digit_share", float, 0.0, 1.0),
+                            ("max_hyphens", int, -1, 10)):
+        try:
+            out[k] = max(lo, min(hi, cast(raw[k]))) if k in raw else out[k]
+        except (TypeError, ValueError):
+            pass
+    if "junk" in raw:
+        out["junk"] = _clean_list(raw["junk"])
+    return out
+
+
+def units_spent_today(left: int) -> int:
+    """Сколько units Ahrefs потрачено за текущие сутки UTC по ВИДИМОМУ остатку (S2-11).
+
+    База суток — первый остаток, увиденный сегодня (хранится в discovery_opts["units_day"], без
+    миграции): units, потраченные ДО первого взгляда суток, не считаются — оценка мягкая. Остаток
+    вырос (сброс месяца / докупили лимит) — база поднимается, иначе «потрачено» ушло бы в минус."""
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    today = datetime.now(timezone.utc).date().isoformat()
+    with SessionLocal() as db:
+        r = _row(db)
+        cur = dict(r.discovery_opts or {})
+        day = cur.get("units_day") or {}
+        start = day.get("start")
+        if day.get("date") != today or not isinstance(start, int) or left > start:
+            cur["units_day"] = {"date": today, "start": int(left)}
+            r.discovery_opts = cur
+            db.commit()
+            return 0
+        return max(0, start - int(left))
+
+
+def get_source_state() -> dict:
+    """Валидаторы условного GET источников discovery ({источник: {etag, last_modified}}), S1-11."""
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        return dict((_row(db).discovery_opts or {}).get("source_state") or {})
+
+
+def set_source_state(state: dict) -> None:
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        r = _row(db)
+        r.discovery_opts = {**(r.discovery_opts or {}), "source_state": state}
+        db.commit()
+
+
 def _row(db):
     """Вернуть (создав при отсутствии) строку scoring_settings id=1, засеянную дефолтами."""
     from app.models.settings import ScoringSettings
@@ -164,6 +253,7 @@ def get_settings() -> dict:
             "max_deep_per_run": int(r.max_deep_per_run),
             "spam_anchor_max": float(r.spam_anchor_max),
             "units_floor": int(r.units_floor),
+            **_discovery_view(r.discovery_opts),
         }
 
 
@@ -180,6 +270,18 @@ def update_settings(**kw) -> dict:
         for k in ("tld_allowlist", "brand_tokens"):
             if kw.get(k) is not None:
                 setattr(r, k, _clean_list(kw[k]))
+        if (kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None
+                or kw.get("zone_channels") is not None or kw.get("units_daily_cap") is not None):
+            cur = dict(r.discovery_opts or {})
+            if kw.get("units_daily_cap") is not None:
+                cur["units_daily_cap"] = max(0, min(int(kw["units_daily_cap"]), 2_000_000))
+            if kw.get("zone_channels") is not None:
+                cur["zone_channels"] = _clean_zone_channels(kw["zone_channels"])   # ValueError до commit
+            if kw.get("max_candidates_per_run") is not None:
+                cur["max_candidates_per_run"] = max(0, min(int(kw["max_candidates_per_run"]), 50_000))
+            if kw.get("name_filters") is not None:
+                cur["name_filters"] = _clean_name_filters(kw["name_filters"])
+            r.discovery_opts = cur
         if kw.get("emd_sets") is not None:
             r.emd_sets = _clean_emd_sets(kw["emd_sets"])   # ValueError -> выходим ДО commit
         if "sources_enabled" in kw and isinstance(kw["sources_enabled"], dict):

@@ -14,6 +14,7 @@
 """
 import app.db as db
 from app.models.domain import Domain
+from app.models.offer import Offer
 from app.models.site import Page, Site
 from app.services import autonomy
 from app.services import orchestrator as orch
@@ -41,7 +42,10 @@ def _site_provisioning(name: str) -> int:
 def _site_content(name: str) -> int:
     did = _purchased(name)
     with db.SessionLocal() as s:
-        site = Site(domain_id=did, status="content")
+        off = Offer(brand="NordVPN", affiliate_link="https://ex.com/aff", active=True)
+        s.add(off)
+        s.commit()
+        site = Site(domain_id=did, status="content", offer_id=off.id)   # оффер привязан явно
         s.add(site)
         s.commit()
         s.refresh(site)

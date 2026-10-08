@@ -151,5 +151,9 @@ def test_cf_sync_stops_between_zones_within_one_connection_on_cancel(monkeypatch
             c = db.query(CloudflareConnection).filter_by(label="only").one()
             cf_sync.sync_connection(db, c, run=rid)
 
-    assert fake.zone_calls == ["z1"]                 # вторая зона (z2) не тронута
+    # Сеть читает зоны ПУЛОМ (S4-05) — чтение z2 могло уйти параллельно, но в БД вторая зона
+    # не попадает: запись идёт по порядку в основном потоке, отмена проверяется между зонами (после чтения, до записи).
+    with SessionLocal() as db:
+        from app.models.cloudflare import CloudflareZoneMirror
+        assert "z2" not in {m.cf_zone_id for m in db.query(CloudflareZoneMirror).all()}
     assert jobs.last("cf_sync")["status"] == "cancelled"

@@ -4,6 +4,7 @@
 
 Чисто транспортная проверка: каждый клиент уже умеет ping(). Здесь только оркестрация.
 """
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 
@@ -43,6 +44,48 @@ def _scrub(s: str) -> str:
     return s
 
 
+# TTL-кэш дорогих/«платных» проб (LLM жжёт токены, SearXNG — квоту движков, aaPanel — счётчик бана):
+# фон зовёт run_diagnostics каждые 5 минут, и каждый заход оператора с кнопкой — тоже. Результат
+# (и успех, и сбой) живёт PROBE_TTL; явная «проверить снова» сбрасывает его (reset_probe_cache).
+PROBE_TTL = 600.0
+_probe_lock = threading.Lock()
+_probe_cache: dict[str, tuple[float, bool, object]] = {}   # key -> (когда, ok?, значение|исключение)
+
+
+def reset_probe_cache() -> None:
+    with _probe_lock:
+        _probe_cache.clear()
+
+
+def _cached_probe(key: str, fn, ttl: float = PROBE_TTL):
+    now = time.monotonic()
+    with _probe_lock:
+        hit = _probe_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        if hit[1]:
+            return hit[2]
+        raise hit[2]
+    try:
+        v = fn()
+    except Exception as e:  # noqa: BLE001 — сбой кэшируем так же, как успех: не долбить мёртвый сервис
+        with _probe_lock:
+            _probe_cache[key] = (now, False, e)
+        raise
+    with _probe_lock:
+        _probe_cache[key] = (now, True, v)
+    return v
+
+
+def _llm_probe():
+    from app.integrations.llm import LlmClient
+    return _cached_probe(f"llm|{settings.LLM_BASE_URL}|{settings.LLM_MODEL}", LlmClient().probe)
+
+
+def _searxng_probe():
+    from app.integrations.searxng import SearxngClient
+    return _cached_probe(f"searxng|{settings.SEARXNG_URL}", SearxngClient().health)
+
+
 def _db_ping() -> bool:
     from sqlalchemy import text
     from app.db import SessionLocal
@@ -74,16 +117,21 @@ def _spec():
     """
     return [
         ("cloudflare", "Cloudflare", "M3 · зоны/DNS", settings.CLOUDFLARE_API_TOKEN, "M3", False,
-         lambda: __import__("app.integrations.cloudflare", fromlist=["x"]).CloudflareClient().ping()),
+         lambda: __import__("app.integrations.cloudflare", fromlist=["x"]).CloudflareClient().ping_detail()),
         ("aapanel", "aaPanel", "M3 · vhost/файлы", settings.AAPANEL_API_KEY, "M3", False,
          lambda: __import__("app.integrations.aapanel", fromlist=["x"]).AaPanelClient().ping()),
         ("llm", "LiteLLM", "M4 · контент", settings.LLM_BASE_URL, "M4", True,
-         lambda: __import__("app.integrations.llm", fromlist=["x"]).LlmClient().ping()),
+         _llm_probe),
         ("searxng", "SearXNG", "M1/M5 · SERP/индекс", settings.SEARXNG_URL, "M5", False,
-         lambda: __import__("app.integrations.searxng", fromlist=["x"]).SearxngClient().ping()),
+         _searxng_probe),
         ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M2", False,
          lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
-        ("wayback", "Wayback", "M1 · история", "1", "M1", True,
+        # S3-03: канал выкупа v1 не должен молча дрейфовать — капча Yandex / 404 видны здесь словами.
+        ("backorder", "Backorder", "M2 · выкуп (ставка, .RU/.РФ)", settings.BACKORDER_LOGIN, "M2", False,
+         lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
+        # не критичен (Ruling 2026-10-08): медленный/упавший Wayback не зажигает баннер на всех
+        # экранах; строка на /diag и предупреждение в роли остаются
+        ("wayback", "Wayback", "M1 · история (при сбое воронка может стоять)", "1", "M1", False,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
@@ -125,6 +173,8 @@ def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
         # 0 и отрицательный остаток (перерасход) — «fail»: без units платные волны стоят
         out = {**base, "status": "ok" if (v > 0 if num else v) else "fail",
                "ms": int((time.monotonic() - t0) * 1000), "error": None}
+        if isinstance(v, str):
+            out["note"] = _scrub(v)[:200]   # пометка при OK (Cloudflare: какие права)
         if num:
             out["value"] = v            # число (остаток units Ahrefs) — для экранов без сети
         return out

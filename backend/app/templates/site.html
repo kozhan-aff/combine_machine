@@ -2,7 +2,7 @@
 {% block title %}{{ domain }}{% endblock %}
 {% block content %}
 
-{% set prov_done = site.status in ['content', 'published'] %}
+{% set prov_done = site.status in ['content', 'published', 'monitoring'] %}
 {% set has_pages = pages|length > 0 %}
 {% set n_draft = pc.get('draft', 0) %}
 {% set n_edited = pc.get('edited', 0) %}
@@ -56,11 +56,33 @@
       <span class="st"><span class="led {{ 'led-ok' if prov_done else 'led-todo' }}"></span></span>
       <div class="body"><div class="t">3 · Provision — инфраструктура <small>M3 · Cloudflare + aaPanel</small></div>
         <div class="h">Одна кнопка делает всё по порядку: зона Cloudflare → проверка NS у регистратора →
-          proxied A-запись на VPS → vhost + SSL в aaPanel. Идемпотентно: если зона ждёт NS —
+          vhost (+ www) в aaPanel → режим SSL по состоянию origin → proxied A-записи (apex + www) →
+          финальная проверка, что домен отвечает на сервере. Идемпотентно: если зона ждёт NS —
           баннер покажет, какие NS прописать у регистратора; пропиши и нажми ещё раз.</div>
+        {% set step_ru = {'zone':'зона Cloudflare','await_ns':'ждёт NS у регистратора','vhost':'vhost в aaPanel',
+                          'origin_tls':'HTTPS на origin','dns':'DNS-записи','verify':'финальная проверка origin',
+                          'done':'готово'} %}
+        {% if site.provision_step %}
+        <div class="hint" style="margin-top:6px">Шаг провижна: <b>{{ step_ru.get(site.provision_step, site.provision_step) }}</b></div>
+        {% endif %}
+        {% if site.provision_step == 'await_ns' and site.cf_name_servers %}
+        <div class="blind">Пропиши у регистратора домена NS Cloudflare:
+          <code>{{ site.cf_name_servers|join(', ') }}</code>. Провижн сам заметит активацию зоны
+          (автопилот перепроверяет, а Cloudflare просим перечитать NS не чаще раза в час).
+          {% if site.ns_waiting_since %}Ждёт с {{ site.ns_waiting_since.strftime('%d.%m %H:%M') }}.{% endif %}</div>
+        {% endif %}
+        {% if prov_done %}
+        <div class="hint" style="margin-top:6px"
+             title="origin_https: подтверждено ли HTTPS на самом сервере. Режим SSL Cloudflare выводится из него: без HTTPS на origin — flexible (full/strict дали бы ошибку 525).">
+          HTTPS на origin:
+          {% if site.origin_https == 'origin_ca' %}<span class="led led-ok"></span>свой Origin-сертификат → Cloudflare strict
+          {% elif site.origin_https == 'ok' %}<span class="led led-ok"></span>отвечает (сертификат не наш) → Cloudflare full
+          {% else %}<span class="led led-warn"></span>нет → Cloudflare flexible (посетитель по HTTPS, до сервера — HTTP){% endif %}
+        </div>
+        {% endif %}
         {% if site.ssl_error %}
-        <div class="blind" title="{{ site.ssl_error }}">⚠ SSL-режим Cloudflare не переключился —
-          HTTPS может не работать. Vhost при этом поднят. Причина: {{ site.ssl_error|truncate(120) }}.
+        <div class="blind" title="{{ site.ssl_error }}">⚠ Не всё в SSL/настройках зоны Cloudflare встало —
+          HTTPS может работать не полностью. Vhost при этом поднят. Причина: {{ site.ssl_error|truncate(160) }}.
           Почини и прогони provision заново.</div>
         {% endif %}
       </div>
@@ -79,12 +101,12 @@
         <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит
           недостающие, существующие не тронет.{% else %}Создаст 3 страницы про привязанный бренд:
           обзор (/), сравнение (/vs), настройка (/setup) — все в статусе <b>draft</b>, наружу
-          не попадают до твоей редактуры. Синхронно, ≈1–2 мин.{% endif %}</div></div>
+          не попадают до твоей редактуры. Идёт в фоне (≈1–2 мин): прогресс по страницам — на Пульте.{% endif %}</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/generate" style="display:flex; gap:8px; align-items:center">
-          <select name="lang" title="язык, на котором LLM напишет черновики"><option value="ru">ru</option><option value="en">en</option></select>
-          <button class="btn-sm {{ '' if has_pages else 'btn-acc' }}"
-                  title="сгенерировать AI-черновики страниц (публиковаться не будут до редактуры)">▶ Сгенерировать черновики</button>
+          <select name="lang" title="язык сайта; «авто» — рынок домена, затем язык оффера, иначе en"><option value="">авто</option>{% for l in site_langs %}<option value="{{ l }}">{{ l }}</option>{% endfor %}</select>
+          <button class="btn-sm {{ '' if has_pages else 'btn-acc' }}" {{ 'disabled' if not prov_done }}
+                  title="сгенерировать AI-черновики страниц (публиковаться не будут до редактуры){{ '' if prov_done else ' — сначала шаг 3: провижн' }}">▶ Сгенерировать черновики</button>
         </form>
       </div>
     </li>
@@ -106,7 +128,7 @@
           кнопка не тронет.</div></div>
       <div class="act">
         <form class="inline" method="post" action="/sites/{{ site.id }}/publish">
-          <button class="btn-sm {{ 'btn-acc' if n_edited else '' }}" {{ 'disabled' if not n_edited and not n_published }}
+          <button class="btn-sm {{ 'btn-acc' if n_edited else '' }}" {{ 'disabled' if (not n_edited and not n_published) or not prov_done }}
                   title="задеплоить все edited-страницы на сайт{{ '' if n_edited else ' (нет edited-страниц — сначала шаг 5)' }}">
             ▶ Опубликовать edited-страницы{{ ' (' ~ n_edited ~ ')' if n_edited }}</button>
         </form>

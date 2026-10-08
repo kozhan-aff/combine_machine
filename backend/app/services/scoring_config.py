@@ -50,6 +50,11 @@ MAX_WHOIS_PER_RUN = 200        # кап whois:43 через A-Parser за про
 # ---- v2: международные домены (docs/v2/02-m1-discovery-scoring-spec.md) ----
 MIN_DR = 5.0                 # фильтр по DR на входе discovery: основная масса дропов — DR 0–4 со спамом
 TLD_ALLOWLIST = ["com", "net", "org", "online", "xyz", "site", "co.uk", "mx", "co", "si", "nl", "in"]
+# M2: зона -> канал выкупа (S3-01). Ключ — зона как у белого списка (`com`, `co.uk`), значение — один из
+# ACQ_CHANNELS. Нет записи -> «registrar» (международный шов; пока провайдер не выбран — «не настроен»).
+# Наследие v1 оставлено явно: backorder продаёт только .ru/.рф (а они вне белого списка v2 и закрыты гардом зоны).
+ACQ_CHANNELS = ("backorder", "optimizator", "registrar")
+ZONE_CHANNELS = {"ru": "backorder", "рф": "backorder", "xn--p1ai": "backorder"}
 BRAND_TOKENS = ["nordvpn", "expressvpn", "surfshark", "protonvpn", "cyberghost", "ipvanish",
                 "privateinternetaccess", "mullvad", "windscribe", "hotspotshield", "tunnelbear",
                 "purevpn", "vyprvpn", "hidemyass", "atlasvpn", "privadovpn", "hideme", "strongvpn",
@@ -58,4 +63,5 @@ MAX_LINKS_PER_RUN = 500      # W4 Ahrefs batch-analysis: 25 units/домен
 MAX_DEEP_PER_RUN = 20        # W6 анкоры + история трафика: ~1,1 тыс. units/домен; 0 = выключить
 SPAM_ANCHOR_MAX = 0.2        # доля спам-анкоров (по refdomains), выше — отказ spam_anchors
 TOPIC_FAR_BELOW = 0.3        # близость прошлой темы к VPN ниже — пакет не берёт (инвариант 4, Р2)
+MAX_CANDIDATES_PER_RUN = 2000   # резерв без DR (нет ключа Ahrefs / DR недоступен): сколько сохранить за прогон; 0 — резерва нет
 UNITS_FLOOR = 300_000        # пол остатка units Ahrefs в месяце: ниже — W4/W6 не тратят (автопилот — раз в час)

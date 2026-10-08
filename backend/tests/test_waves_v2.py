@@ -559,10 +559,10 @@ def test_units_floor_message_and_zero_floor_means_no_floor(monkeypatch):
         assert s.get(Domain, did).status == "scored"
 
 
-def test_links_no_key_skips_avail_and_risk_for_non_emd(monkeypatch):
-    """R2-10: платные волны не пойдут (ключа Ahrefs нет) — это известно ДО W2/W3. Не-EMD домен без
-    W4 не решается, и RDAP с Web Risk за него тратились бы впустую на каждом свипе. Решено один раз
-    после W0: домен ждёт следующего прогона без отметки сверки; EMD идёт как обычно (W4 у него нет)."""
+def test_links_no_key_skips_paid_waves_but_domains_go_on(monkeypatch):
+    """S1-01: ключа Ahrefs не будет. Раньше (R2-10) не-EMD домены без ключа замирали в discovered
+    на каждом свипе — цепочка не двигалась. Теперь платные W4/W6 пропускаются, домены идут по
+    бесплатным волнам и доезжают до scored (вне пакета: анкоры не проверены)."""
     from app.integrations.ahrefs import AhrefsClient
     from app.services import jobs
     did = _mk("nokey.com", deadline=NOW + timedelta(days=2))
@@ -571,12 +571,14 @@ def test_links_no_key_skips_avail_and_risk_for_non_emd(monkeypatch):
     clients = {**_full_clients(rdap, AhrefsClient(api_key=""), AgedWB()), "webrisk": wr}
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     scoring.score_pending(limit=10)
-    assert rdap.calls == 1 and wr.calls == 1                # только EMD
+    # решение оператора (ключа не будет): домены идут по бесплатным волнам, W4/W6 пропущены
+    assert rdap.calls == 2 and wr.calls == 2
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
-        assert d.status == "discovered" and d.acquirability_checked_at is None
+        assert d.status == "scored" and d.acquirability_checked_at is not None
+        assert scoring.bulk_ok(d) is False                  # анкоры/ссылки не проверены -> пакет закрыт
     msg = jobs.last("score")["message"]
-    assert "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены" in msg, msg
+    assert "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) пропущены" in msg, msg
 
 
 def test_score_pending_selects_non_emd_up_to_links_cap(monkeypatch):
@@ -709,16 +711,19 @@ def _assert_held_and_emd_scored(ids, emd):
         assert all(d.status == "discovered" and d.acquirability_checked_at is None for d in held)
 
 
-def test_closed_gate_no_key_still_gives_emd_a_slot(monkeypatch):
-    """I1: ключа нет -> не-EMD всё равно ждут (W4 им не светит), и они НЕ должны съедать лимит
-    выборки: иначе каждый свип берёт тот же набор, а EMD (W4 ему не нужна) не доходит никогда."""
+def test_no_key_gate_does_not_hold_domains_and_emd_still_gets_a_slot(monkeypatch):
+    """S1-01 (было I1): ключа нет -> гейт никого не держит, кап W4 не нужен; выборка — по лимиту,
+    EMD по-прежнему получает слот."""
     from app.integrations.ahrefs import AhrefsClient
     from app.services import jobs
     ids, emd, rdap = _closed_gate_pool(monkeypatch, AhrefsClient(api_key=""))
-    scoring.score_pending(limit=20)
-    _assert_held_and_emd_scored(ids, emd)
-    assert rdap.calls == 1                                          # только EMD
-    assert "Ahrefs: ключ AHREFS_API_KEY не задан — платные волны пропущены" in jobs.last("score")["message"]
+    scoring.score_pending(limit=30)
+    with db.SessionLocal() as s:
+        assert s.get(Domain, emd).status != "discovered"            # EMD получил слот
+        # без ключа гейт НЕ держит домены (S1-01): все 25 не-EMD оценены, а не ждут прогона
+        assert all(s.get(Domain, i).status != "discovered" for i in ids)
+    assert "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) пропущены" \
+        in jobs.last("score")["message"]
 
 
 def test_closed_gate_units_floor_still_gives_emd_a_slot_and_asks_units_once(monkeypatch):
@@ -1128,8 +1133,16 @@ def test_rescore_with_ahrefs_down_does_not_launder_spam_anchors():
     class _AnchorsDown(FakeAh):
         def anchors(self, d, limit=50):
             raise RuntimeError("ahrefs down")
+    # S2-07: оплаченные анкоры не покупаются повторно — рескор берёт их из строки домена
+    again = scoring.score_domain(did, clients={**clients, "ahrefs": _AnchorsDown({"spammy.com": STRONG})})
+    assert again["reject_reason"] == "spam_anchors"
+    with db.SessionLocal() as s:
+        d = s.get(Domain, did)
+        d.score_breakdown = {**d.score_breakdown, "deep_checked": False}     # кэша W6 нет -> W6 пойдёт
+        s.commit()
     out = scoring.score_domain(did, clients={**clients, "ahrefs": _AnchorsDown({"spammy.com": STRONG})})
-    assert out["reject_reason"] is None and "deep:RuntimeError" in out["errors"]
+    # S2-08: W6 упала, но грязь осталась — домен НЕ уходит rejected -> scored
+    assert out["reject_reason"] == "spam_anchors" and "deep:RuntimeError" in out["errors"]
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.score_breakdown["spam_anchors"] is True               # улику не стёрли
@@ -1472,7 +1485,8 @@ def test_rescore_with_partial_wayback_does_not_launder_dirty_history():
     out = scoring.score_domain(did, clients=_full_clients(
         FakeRdap(exists=True, registered=NOW - timedelta(days=4000)),
         FakeAh({"casino-once.com": STRONG}, anchors=CLEAN, history=HIST), wb, llm=FakeLLM()))
-    assert wb.calls == 1 and out["status"] == "scored"     # волна истории реально отработала
+    # волна истории реально отработала; S2-08: грязь не отмыта -> остаётся rejected/history_dirty
+    assert wb.calls == 1 and out["status"] == "rejected" and out["reject_reason"] == "history_dirty"
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.prior_flags == {"casino": True}                       # грязь не стёрта
@@ -1498,3 +1512,41 @@ def test_rescore_with_full_clean_wayback_still_rehabilitates_dirty_history():
         assert d.wayback_checked is True and not any((d.prior_flags or {}).values())
         assert scoring.history_verdict(d) == "clean" and transitions.dirty_reason(d) is None
         transitions.check(d, "approved")                    # не бросает: домен чист по новым уликам
+
+
+def test_daily_units_cap_paces_paid_waves_and_is_off_by_default(monkeypatch):
+    """S2-11: суточный лимит units. По умолчанию выключен (0) — старое поведение, units спрашиваются
+    один раз. Включён: первый прогон дня ставит базу и работает, после траты >= лимита платные волны
+    ждут завтра (с понятной причиной), на новых сутках база сбрасывается."""
+    from app.services import jobs, settings as sset
+    from app.services.settings import update_settings
+    assert sset.get_settings()["units_daily_cap"] == 0
+    update_settings(units_daily_cap=20_000)
+    assert sset.get_settings()["units_daily_cap"] == 20_000
+    _mk("pace.com", deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"pace.com": ROW}, units=1_000_000)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)                         # база суток = 1 000 000, потрачено 0
+    assert ah.batches == [["pace.com"]]
+    ah.units = 970_000                                      # за сутки ушло 30 000 >= 20 000
+    ah.batches.clear()
+    did2 = _mk("pace2.com", deadline=NOW + timedelta(days=2))
+    ah.data["pace2.com"] = ROW
+    scoring.score_pending(limit=10)
+    assert ah.batches == []
+    assert "за сутки потрачено 30 000 units >= суточного лимита 20 000" in jobs.last("score")["message"]
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did2).status == "discovered"   # ждёт завтра, не отклонён
+    # новые сутки: вчерашняя база не действует
+    from app.models.settings import ScoringSettings
+    with db.SessionLocal() as s:
+        row = s.get(ScoringSettings, 1)
+        o = dict(row.discovery_opts)
+        o["units_day"] = {"date": "2000-01-01", "start": 1_000_000}
+        row.discovery_opts = o
+        s.commit()
+    scoring.score_pending(limit=10)
+    assert ah.batches == [["pace2.com"]]
+    update_settings(units_daily_cap=0)                      # выкл — лимита нет, при любой трате
+    assert sset.get_settings()["units_daily_cap"] == 0

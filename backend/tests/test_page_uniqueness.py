@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 import app.db as db
 from app.integrations.llm import LlmClient
 from app.models.domain import Domain
+from app.models.offer import Offer
 from app.models.site import Page, Site
 from app.services import content
 
@@ -31,7 +32,10 @@ def _site(niche="VPN") -> int:
         s.add(d)
         s.commit()
         s.refresh(d)
-        site = Site(domain_id=d.id, status="content", niche=niche)
+        off = Offer(brand="NordVPN", affiliate_link="https://ex.com/aff", active=True)
+        s.add(off)
+        s.commit()
+        site = Site(domain_id=d.id, status="content", niche=niche, offer_id=off.id)
         s.add(site)
         s.commit()
         s.refresh(site)

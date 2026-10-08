@@ -20,6 +20,29 @@ from app.integrations.base import BaseClient
 _ZONE_FIELDS = ("id", "status", "name_servers")
 
 
+# CF: connect короткий — лежащий/блокированный CF не должен держать вызов 30 с на попытку (S4-08).
+_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+
+
+class CloudflareError(httpx.HTTPStatusError):
+    """4xx/5xx Cloudflare С ТЕЛОМ (S4-06). Подкласс HTTPStatusError — ретрай-политика BaseClient
+    (`response.status_code`, Retry-After) работает как раньше, но в тексте теперь код и сообщение
+    CF («1061:The zone already exists», «9109:Unauthorized…»), а не безликое «Client error 400»."""
+
+    def __init__(self, response: httpx.Response):
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        self.codes = [e.get("code") for e in (body.get("errors") or []) if isinstance(e, dict)]
+        reason = _safe_errors(body) if body.get("errors") else f"HTTP {response.status_code}"
+        super().__init__(
+            f"Cloudflare {response.status_code} {response.request.method} "
+            f"{response.request.url.path}: {reason}",
+            request=response.request, response=response)
+
+
 def _safe_errors(body: dict) -> str:
     """Форматировать ошибки CF-envelope без утечки Authorization/raw-response (аудит §4)."""
     errs = body.get("errors") or []
@@ -28,8 +51,9 @@ def _safe_errors(body: dict) -> str:
 
 
 class CloudflareClient(BaseClient):
+    POOLED = True
     def __init__(self):
-        super().__init__("https://api.cloudflare.com/client/v4")
+        super().__init__("https://api.cloudflare.com/client/v4", timeout=_TIMEOUT)
         self.token = settings.CLOUDFLARE_API_TOKEN
         self.account_id = settings.CLOUDFLARE_ACCOUNT_ID
 
@@ -48,12 +72,20 @@ class CloudflareClient(BaseClient):
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
+    def _request_once(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Как у BaseClient, но 4xx/5xx сохраняют тело CF в исключении (S4-06): `raise_for_status`
+        выбрасывал его раньше, чем `_result` успевал прочитать envelope."""
+        resp = self._client.request(method, url, **kwargs)
+        if resp.status_code >= 400:
+            raise CloudflareError(resp)
+        return resp
+
     @staticmethod
     def _result(resp: httpx.Response):
         """Unwrap the Cloudflare v4 envelope; raise on success == false."""
         data = resp.json()
         if not data.get("success"):
-            raise RuntimeError(data.get("errors"))
+            raise RuntimeError(_safe_errors(data))
         return data.get("result")
 
     def _paginate(self, path: str, params: dict | None = None) -> list:
@@ -91,15 +123,50 @@ class CloudflareClient(BaseClient):
         result = self._result(resp)
         return result.get("status") == "active"
 
+    def ping_detail(self) -> str:
+        """Активность токена + права, ЕСЛИ токен может прочитать собственные политики (F8-18).
+
+        Возвращает пометку для /diag. Права записи (создать зону, DNS) иначе вскрылись бы только
+        на первом provision. verify отдаёт id токена; GET /user/tokens/{id} читает политики, но
+        сам требует права на чтение токенов — типичный zone-токен его не имеет (403), тогда честно
+        пишем «права записи не проверены». Только чтение; формат policies[].permission_groups[].name
+        — по публичной документации CF, не по живому образцу: разбор защитный."""
+        res = self._result(self.request("GET", f"{self.base_url}/user/tokens/verify",
+                                        headers=self._headers())) or {}
+        if res.get("status") != "active":
+            raise RuntimeError(f"токен не активен: {res.get('status')}")
+        base = "токен активен"
+        try:
+            pol = self._result(self.request(
+                "GET", f"{self.base_url}/user/tokens/{res.get('id')}", headers=self._headers()))
+            names = [str(g.get("name") or "") for p in (pol or {}).get("policies") or []
+                     for g in p.get("permission_groups") or []]
+        except Exception:  # noqa: BLE001 — нет права читать свои политики: не ошибка токена
+            names = []
+        if not names:
+            return f"{base}; права записи не проверены (токен не читает свои политики)"
+        write = [n for n in names if "write" in n.lower() or "edit" in n.lower()]
+        if not write:
+            raise RuntimeError(f"токен активен, но только на чтение: {', '.join(names)[:120]}")
+        missing = [k for k in ("Zone", "DNS") if not any(k.lower() in n.lower() for n in write)]
+        return (f"{base}; права записи: {', '.join(write)[:100]}"
+                + (f"; ⚠ не найдено: {'/'.join(missing)}" if missing else ""))
+
     # --- zones ----------------------------------------------------------
 
     def find_zone(self, domain: str) -> dict | None:
-        """GET /zones?name={domain} (exact match). None if no zone exists."""
+        """GET /zones?name={domain} (exact match). None if no zone exists.
+
+        С заданным аккаунтом ищем ТОЛЬКО в нём: user-токен видит зоны всех аккаунтов, и зона,
+        заведённая в чужом аккаунте, молча переиспользовалась бы (S4-03)."""
+        params = {"name": domain}
+        if self.account_id:
+            params["account.id"] = self.account_id
         resp = self.request(
             "GET",
             f"{self.base_url}/zones",
             headers=self._headers(),
-            params={"name": domain},
+            params=params,
         )
         zones = self._result(resp) or []
         if not zones:
@@ -117,13 +184,34 @@ class CloudflareClient(BaseClient):
         return self._zone(self._result(resp))
 
     def ensure_zone(self, domain: str) -> dict:
-        """Idempotent: return the existing zone or create it."""
-        return self.find_zone(domain) or self.create_zone(domain)
+        """Idempotent: return the existing zone or create it.
+
+        Гонка панель/воркер: между find и create зону успел завести параллельный прогон — CF отвечает
+        1061 «zone already exists». Это достигнутое желаемое состояние: ищем ещё раз (S4-06)."""
+        found = self.find_zone(domain)
+        if found:
+            return found
+        try:
+            return self.create_zone(domain)
+        except CloudflareError as e:
+            if 1061 in e.codes:
+                found = self.find_zone(domain)
+                if found:
+                    return found
+            raise
 
     def get_zone(self, zone_id: str) -> dict:
         """GET /zones/{zone_id} — used to poll status pending -> active."""
         resp = self.request("GET", f"{self.base_url}/zones/{zone_id}", headers=self._headers())
         return self._zone(self._result(resp))
+
+    def activation_check(self, zone_id: str) -> bool:
+        """PUT /zones/{id}/activation_check — просим CF перепроверить NS сейчас, не дожидаясь его
+        планового опроса (S4-04). CF ограничивает частоту (≈ раз в час на free) — троттлит
+        вызывающий (services/provisioning)."""
+        self._result(self.request("PUT", f"{self.base_url}/zones/{zone_id}/activation_check",
+                                  headers=self._headers()))
+        return True
 
     # --- DNS records ------------------------------------------------------
 
@@ -160,6 +248,7 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/dns_records/{record_id}",
             headers=self._headers(),
             json={"type": "A", "name": name, "content": ip, "proxied": proxied, "ttl": 1},
+            retry=True,        # PATCH тем же телом идемпотентен — повтор после обрыва безопасен
         )
         return self._result(resp)
 
@@ -199,9 +288,29 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/settings/ssl",
             headers=self._headers(),
             json={"value": mode},
+            retry=True,
         )
         self._result(resp)
         return True
+
+    def set_zone_setting(self, zone_id: str, setting_id: str, value) -> bool:
+        """PATCH /zones/{id}/settings/{setting_id} — always_use_https, min_tls_version и т.п.
+        Вызывающий сперва читает (`get_zone_setting`) и пишет только при расхождении."""
+        self._result(self.request("PATCH", f"{self.base_url}/zones/{zone_id}/settings/{setting_id}",
+                                  headers=self._headers(), json={"value": value},
+                                  retry=True))
+        return True
+
+    def create_origin_certificate(self, csr_pem: str, hostnames: list[str],
+                                  validity_days: int = 5475) -> dict:
+        """POST /certificates — Cloudflare Origin CA для ОДНОГО домена (инвариант v2 №5: один
+        сертификат на домен, multi-SAN раскрыл бы портфель). Нужны права «SSL and Certificates:
+        Edit» у токена. Возвращает result (certificate = PEM сертификата). Приватный ключ CF не
+        видит: CSR сделан локально."""
+        return self._result(self.request(
+            "POST", f"{self.base_url}/certificates", headers=self._headers(),
+            json={"hostnames": hostnames, "requested_validity": validity_days,
+                  "request_type": "origin-ecc", "csr": csr_pem}))
 
     # --- P0 read-only: account-aware verify/discovery (services/cf_sync.py, задача 4) ---
     #
@@ -219,7 +328,12 @@ class CloudflareClient(BaseClient):
         else:
             path = "/user/tokens/verify"
         resp = self.request("GET", f"{self.base_url}{path}", headers=self._headers())
-        return self._result(resp)
+        result = self._result(resp) or {}
+        if result.get("status") != "active":
+            # просроченный/отключённый токен отвечает 200 и status!='active' (S4-10): без этой
+            # проверки sync рисовал бы зелёное «ok» (ping() выше уже сверяет так же).
+            raise RuntimeError(f"токен не активен: {result.get('status')}")
+        return result
 
     def list_accounts_paginated(self) -> list:
         """GET /accounts — все аккаунты, видимые этому токену, все страницы."""

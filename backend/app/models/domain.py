@@ -105,6 +105,16 @@ class Domain(Base):
 
     orders: Mapped[list["AcquisitionOrder"]] = relationship(back_populates="domain")
 
+    # Индексы под сортировки/фильтры панели и воронки (F8-12). До них были только domain и status:
+    # ORDER BY acquire_deadline / score и фильтры reject_reason / lane шли seq-scan'ом по всей таблице.
+    # market_lang и topic в SQL не фильтруются (инбокс режет язык в Python) — их не индексируем.
+    __table_args__ = (
+        Index("ix_domains_status_deadline", "status", "acquire_deadline"),
+        Index("ix_domains_status_score", "status", "score"),
+        Index("ix_domains_reject_reason", "reject_reason"),
+        Index("ix_domains_lane", "lane"),
+    )
+
 
 class AcquisitionOrder(Base):
     __tablename__ = "acquisition_orders"
@@ -116,7 +126,12 @@ class AcquisitionOrder(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending_confirm")
     # pending_confirm | ordering | ordered | caught | failed | cancelled
     cost: Mapped[float | None] = mapped_column(Numeric)
+    cost_currency: Mapped[str | None] = mapped_column(String(8))     # валюта cost: RUB / USD …
     confirmed_by_human: Mapped[bool] = mapped_column(Boolean, default=False)  # HARD GATE
+    # КОГДА человек поднял гейт. Подтверждение протухает (config.ACQ_CONFIRM_TTL_HOURS): «↻ повторить»
+    # через неделю не должен платить по решению, принятому по тогдашней цене (S3-07). NULL при
+    # confirmed_by_human=true = подтверждение старого кода -> считается просроченным.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # КОГДА execute ЗАБРАЛ строку на отправку (claim `-> ordering`). `ordering` — статус
     # ТРАНЗИЕНТНЫЙ: он живёт секунды между claim'ом и ответом провайдера. Убей процесс в этом

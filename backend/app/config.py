@@ -5,6 +5,7 @@
 .env. Рестарт не нужен, backend и worker (разные процессы) видят правку в пределах TTL кэша.
 Любой сбой БД/нет таблицы -> молча значение из .env.
 """
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД;
@@ -40,6 +41,12 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://portfolio:portfolio@db:5432/portfolio"
     APP_ENV: str = "dev"
 
+    # M5: после записи страниц в docroot публикация проверяет HTTP-ответом самого домена, что
+    # отдаётся именно записанная версия (метка build-id). Выключается только если домен
+    # заведомо недостижим с бокса (закрытая сеть); по умолчанию страница не `published`, пока
+    # не проверена.
+    PUBLISH_VERIFY: bool = True
+
     # Ahrefs API v3 (integrations/ahrefs.py): DR-free, batch-analysis, анкоры, история трафика
     AHREFS_API_KEY: str = ""
 
@@ -59,6 +66,14 @@ class Settings(BaseSettings):
     # optimizator.ru
     OPTIMIZATOR_API_KEY: str = ""
     OPTIMIZATOR_NICD: str = ""
+    # http: документация провайдера канонична только для http, https у него не подтверждён живьём
+    # (S3-05 — живых вызовов без разрешения не делаем). Когда оператор проверит 443 — меняет здесь
+    # на https://optimizator.ru без правки кода.
+    OPTIMIZATOR_BASE_URL: str = "http://optimizator.ru"
+
+    # M2: сколько часов живёт подтверждение выкупа (S3-07). Дальше исполнить старый confirm нельзя —
+    # человек подтверждает заново (и цена/тариф перезамораживаются).
+    ACQ_CONFIRM_TTL_HOURS: int = 24
 
     # registrar NS (.ru)
     REGRU_USERNAME: str = ""
@@ -76,6 +91,18 @@ class Settings(BaseSettings):
     # locally) to pin TLS instead of verify=False. Recommended for remote panels.
     AAPANEL_CA_BUNDLE: str = ""
     VPS_ORIGIN_IP: str = ""
+    # M3: выпускать Cloudflare Origin CA на каждый домен и ставить его в aaPanel (SetSSL), чтобы
+    # перевести зону в Full(strict). ВЫКЛ по умолчанию: ручка SetSSL и права токена («SSL and
+    # Certificates: Edit») ни разу не проверены вживую (инвариант «не гадать форматы») — пока
+    # выключено, провижн держит CF во flexible и честно пишет origin_https='none'.
+    ORIGIN_CA_AUTO: bool = False
+
+    @field_validator("ORIGIN_CA_AUTO", mode="before")
+    @classmethod
+    def _blank_flag_is_off(cls, v):
+        # `ORIGIN_CA_AUTO=` (пустая строка, как велит комментарий в .env.example «пусто/0») —
+        # pydantic на пустом bool падает ValidationError и роняет backend/worker/alembic при импорте.
+        return False if isinstance(v, str) and not v.strip() else v
 
     # gsc
     GSC_SERVICE_ACCOUNT_JSON: str = ""
@@ -85,6 +112,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "mistral"                        # mistral(=mistral-large) | mistral-small | ollama/<m>
     LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
+    LLM_CLASSIFY_FALLBACK_MODEL: str = ""             # W5: запасная модель при 401/403/404/429/5xx основной; пусто -> без запасной
 
     # searxng — free SERP (локальный бокс)
     SEARXNG_URL: str = "http://192.168.1.77:8080"    # ponytail: dev-box default, override via .env
@@ -93,6 +121,12 @@ class Settings(BaseSettings):
     APARSER_URL: str = "http://192.168.1.77:9091"
     APARSER_API_KEY: str = ""
     APARSER_PROXY_CHECKER: str = "ipv6_free"  # имя прокси-чекера в A-Parser UI, box-specific
+    # Сколько A-Parser-whois (зоны без RDAP) идёт одновременно. Замер аудита F8-05: 12 параллельных =
+    # 25,4 с суммарно, то есть ≈0,5 запр/с как последовательно — очередь oneRequest в A-Parser
+    # конкурентности не даёт; 3 — запас на разброс задержек (p50 3,6 с, хвост до 27 с).
+    WHOIS_APARSER_CONCURRENCY: int = 3
+    # Куда писать оператору архивам/реестрам: уходит в User-Agent всех исходящих HTTP-клиентов.
+    CONTACT_EMAIL: str = ""
 
     # spamhaus/surbl — нужен свой резолвер (публичные 8.8.8.8/1.1.1.1 блокируются)
     DNS_RESOLVER: str = ""

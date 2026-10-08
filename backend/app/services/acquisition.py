@@ -11,10 +11,12 @@ confirmed_by_human=True И выбирает СТАВКУ) → execute_confirmed_
 
 backorder заказывается живьём (uniservice.order). execute идемпотентен по деньгам: перед
 отправкой спрашивает провайдера, нет ли уже заказа на этот домен — иначе ambiguous-таймаут
-(заказ ушёл, ответ не дошёл) + кнопка «повторить» = второе списание. optimizator ещё не
-реализован — execute это честно репортит (status='failed'), не делая вид, что купил.
+(заказ ушёл, ответ не дошёл) + кнопка «повторить» = второе списание. Каналов три: backorder (ставка, .RU/.РФ), optimizator (регистрация свободных) и «registrar» —
+ШОВ под международный выкуп (integrations/registrar.py: протокол + заглушка «не настроен»; провайдера
+выбирает оператор). Канал по умолчанию берётся из таблицы зона→канал (/settings, `zone_channels`).
+Денежный гейт (confirm → TTL → execute, баланс, maybe_sent) ОДИН на все каналы.
 """
-_PROVIDERS = {"backorder", "optimizator"}
+_PROVIDERS = {"backorder", "optimizator", "registrar"}
 # Открытые статусы заказа — `OPEN_ORDER_STATUSES` в app/models/domain.py (оттуда же собран
 # предикат уникального индекса: код и БД обязаны говорить об одном и том же).
 
@@ -32,6 +34,9 @@ _PROVIDERS = {"backorder", "optimizator"}
 # значит разобрать строку, которую прямо сейчас держит живой execute: он допишет свой исход
 # поверх, а мы успеем открыть строке путь на повтор. Это прямой путь заплатить дважды.
 STUCK_CLAIM_MIN = 15
+
+# Общий дедлайн ручного опроса /queue/poll (сек): синхронный роут не должен вешать поток на ~93 с (S3-04).
+POLL_DEADLINE_SEC = 20.0
 
 
 def _claim_expired(o) -> bool:
@@ -52,6 +57,103 @@ def _claim_expired(o) -> bool:
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
     return t < datetime.now(timezone.utc) - timedelta(minutes=STUCK_CLAIM_MIN)
+
+
+class ChannelUnavailable(ValueError):
+    """Для домена нет рабочего канала выкупа (зона вне канала / канал не настроен). Отказ ДО денег."""
+
+
+def _zone_allowlist() -> list:
+    from app.services.settings import get_settings
+    return get_settings()["tld_allowlist"]
+
+
+def _zone_channels() -> dict:
+    from app.services.settings import get_settings
+    return get_settings()["zone_channels"]
+
+
+def channel_for(domain: str, provider: str | None = None) -> str:
+    """Канал выкупа домена. `provider=None` — по таблице зона→канал (нет записи -> «registrar»);
+    явный провайдер (кнопка «в очередь») принимается, если он совместим с зоной — это проверяет
+    `check_route`, а не таблица: оператор вправе пустить свободный .com через optimizator."""
+    if provider is not None:
+        if provider not in _PROVIDERS:
+            raise ValueError(f"unknown provider {provider!r} (ожидается {sorted(_PROVIDERS)})")
+        return provider
+    from app.services.domain_filters import zone_of
+    return _zone_channels().get(zone_of(domain.lower())) or "registrar"
+
+
+def check_route(d, provider: str) -> None:
+    """Отказ ДО денег, если домен нельзя купить этим каналом: зона вне белого списка v2 (TransitionDenied)
+    или канал её не продаёт / не настроен (ChannelUnavailable). Зовётся на create, confirm И execute —
+    заказ, подтверждённый до смены правил (.ru после «РФ исключена»), не должен доехать до кассы (S3-06)."""
+    from app.services import transitions
+    transitions.refuse_closed_zone(d, _zone_allowlist())
+    if provider == "backorder":
+        from app.integrations.backorder import zone_of as bo_zone
+        if bo_zone(d.domain) is None:
+            raise ChannelUnavailable(
+                f"«{d.domain}»: backorder продаёт только .RU/.РФ — для этой зоны канал другой "
+                f"(таблица зона→канал в /settings)")
+    elif provider == "registrar":
+        from app.integrations.registrar import get_registrar
+        if not get_registrar().configured:
+            raise ChannelUnavailable(
+                f"«{d.domain}»: канал международного выкупа не настроен (провайдера регистратора "
+                f"выбирает оператор) — пока купить можно руками: «купил руками» на экране Домены")
+
+
+def _scrub_text(s) -> str:
+    """Секреты провайдеров — долой из любого текста, который попадёт в БД или на /queue (S3-05).
+    Применяется и ПРИ ЗАПИСИ, и при показе: старые строки result.error уже могут нести api_key."""
+    from app.integrations.optimizator import scrub
+    from app.services.diagnostics import _scrub
+    return _scrub(scrub(str(s)))
+
+
+def _shortfall(o, bal) -> str | None:
+    """Причина отказа ДО отправки заказа (S3-09). `bal` — (сумма, валюта) или None.
+    Неизвестный баланс (None) — НЕ блокируем: судить нечем, провайдер откажет сам.
+    Известный баланс блокирует: (1) валюта баланса пуста или не совпала с валютой заказа —
+    суммы несравнимы, отказ; (2) сумма на счёте меньше замороженной стоимости — отказ."""
+    if bal is None or o.cost is None:
+        return None
+    amount, cur = bal
+    want = o.cost_currency or "RUB"
+    if not cur or want != cur:
+        # деньги: сравнить суммы в разных/неизвестных валютах нельзя — отказ ДО отправки,
+        # а не молчаливый пропуск проверки
+        return (f"валюта баланса у провайдера ({cur or 'не указана'}) не совпала с валютой заказа "
+                f"({want}) — судить о достаточности средств нельзя; заказ не отправлен (деньги не ушли)")
+    if float(amount) < float(o.cost):
+        return (f"на счёте у провайдера {float(amount):.2f} {cur}, а заказ стоит {float(o.cost):.2f} {cur} — "
+                f"пополни баланс и повтори (деньги не ушли)")
+    return None
+
+
+def _balance_of(client) -> float | None:
+    """Баланс рублёвого канала или None, если провайдер его не отдал (капча, таймаут, нет поля)."""
+    try:
+        b = client.balance()
+    except Exception:  # noqa: BLE001 — баланс информационный: недоступен -> не блокируем, судить нечем
+        return None
+    return float(b) if b is not None else None
+
+
+def _confirm_expired(o) -> bool:
+    """Подтверждение человека протухло (config.ACQ_CONFIRM_TTL_HOURS) или не имеет отметки времени
+    (старый код) — тогда оно НЕ считается решением: цена/тариф устарели, нужно подтвердить заново."""
+    from datetime import datetime, timedelta, timezone
+    from app.config import settings
+
+    t = getattr(o, "confirmed_at", None)
+    if t is None:
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t < datetime.now(timezone.utc) - timedelta(hours=settings.ACQ_CONFIRM_TTL_HOURS)
 
 
 def _open_order_id(db, domain_id: int, except_id: int | None = None) -> int | None:
@@ -175,8 +277,11 @@ def _settle(db, o, **values) -> bool:
     return True
 
 
-def create_order(domain_id: int, provider: str = "backorder") -> int:
+def create_order(domain_id: int, provider: str | None = None) -> int:
     """Поставить approved-домен в очередь выкупа (pending_confirm). Идемпотентно по домену.
+
+    `provider=None` — канал по зоне домена (таблица зона→канал); зона вне белого списка v2 или канал,
+    который её не продаёт / не настроен, — отказ СРАЗУ, а не мёртвый pending_confirm (S3-06).
 
     Возвращает id заказа (существующего открытого или нового). Не тратит денег —
     только заявка, ждущая подтверждения человеком."""
@@ -185,7 +290,7 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
     from app.models.domain import Domain, AcquisitionOrder
     from app.services import transitions
 
-    if provider not in _PROVIDERS:
+    if provider is not None and provider not in _PROVIDERS:
         raise ValueError(f"unknown provider {provider!r} (ожидается {_PROVIDERS})")
     with SessionLocal() as db:
         d = db.get(Domain, domain_id)
@@ -198,6 +303,8 @@ def create_order(domain_id: int, provider: str = "backorder") -> int:
         # лежит РКН-домен (ревью Задачи 6, Important 4). Денег это не тратит — но тихим успехом
         # быть не должно.
         transitions.refuse_dirty(d)
+        provider = channel_for(d.domain, provider)
+        check_route(d, provider)                    # зона/канал — отказ ДО заявки и ДО денег
         existing = _open_order_id(db, domain_id)
         if existing is not None:
             return existing                         # уже в очереди — не дублируем
@@ -237,7 +344,10 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
     тем выше шанс перехвата. «Сколько заплатить» — это решение о деньгах, поэтому его
     принимает человек здесь же, на гейте, а не система. Кладём в AcquisitionOrder.cost.
 
-    Только ставит confirmed_by_human=True; заказ провайдеру НЕ шлёт (это execute)."""
+    Только ставит confirmed_by_human=True (+ confirmed_at — подтверждение ПРОТУХАЕТ через
+    config.ACQ_CONFIRM_TTL_HOURS, S3-07); заказ провайдеру НЕ шлёт (это execute). Подтвердить можно
+    и `failed`-заказ: так человек заново принимает решение после отказа или просрочки (цена и тариф
+    перезамораживаются), а не «↻ повторяет» старое."""
     import math
 
     from app.db import SessionLocal
@@ -249,8 +359,9 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         o = db.get(AcquisitionOrder, order_id)
         if o is None:
             raise ValueError(f"order {order_id} not found")
-        if o.status != "pending_confirm":
-            return {"order_id": order_id, "status": o.status, "note": "не в статусе pending_confirm"}
+        if o.status not in ("pending_confirm", "failed"):
+            return {"order_id": order_id, "status": o.status,
+                    "note": "подтвердить можно заказ в статусе pending_confirm/failed"}
         provider = o.provider
         d = db.get(Domain, o.domain_id)
         domain = d.domain if d else None
@@ -260,6 +371,7 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         # Проверка идёт до pick_tariff: за грязный домен мы даже сетку тарифов не спрашиваем.
         if d is not None:
             transitions.refuse_dirty(d)
+            check_route(d, provider)                 # зона/канал — до сети и до денег (S3-06)
     if provider == "backorder" and not bid_rub:
         raise ValueError("backorder: не выбрана ставка (тариф) — без неё заказ отправить нельзя")
     # `not math.isfinite` ловит nan/inf/-inf: `not bid_rub` их не видит (nan truthy, `nan<=0`
@@ -287,28 +399,53 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
         # backorder-специфичные поля (тир сетки тарифов), у optimizator их нет; ниже
         # существующий код обращается к tier["price_id"]/tier["period_id"]
         # БЕЗУСЛОВНО, когда tier is not None — без этих двух ключей он упал бы KeyError.
-        from app.integrations.optimizator import OptimizatorClient
+        from app.integrations.optimizator import (OptimizatorClient, OptimizatorError,
+                                                  OptimizatorAmbiguous, ZoneNotSold, scrub)
+        from app.services.domain_filters import zone_of
         if domain is None:
             raise ValueError(f"order {order_id}: домен не найден")
-        zone = domain.rsplit(".", 1)[-1]
-        price = OptimizatorClient().prices(zone)
-        tier = {"price": price["price_registration"], "price_id": None, "period_id": None}
+        zone = zone_of(domain)      # co.uk, а не последняя метка (S3-08)
+        try:
+            price = OptimizatorClient().prices(zone)
+        except ZoneNotSold as e:
+            raise ValueError(f"{domain}: {e} — зона не поддерживается этим каналом") from None
+        except (OptimizatorError, OptimizatorAmbiguous) as e:
+            raise ValueError(f"optimizator: цену зоны .{zone} получить не удалось: {scrub(e)}"[:200]) from None
+        tier = {"price": price["price_registration"], "price_id": None, "period_id": None,
+                "currency": price.get("currency") or "RUB"}
+    elif provider == "registrar":
+        from app.integrations.registrar import RegistrarAmbiguous, RegistrarError, get_registrar
+        if domain is None:
+            raise ValueError(f"order {order_id}: домен не найден")
+        try:
+            q = get_registrar().price(domain)
+        except (RegistrarError, RegistrarAmbiguous) as e:
+            raise ValueError(f"registrar: {e}"[:200]) from None
+        if not q.currency:
+            raise ValueError(f"registrar: в котировке «{domain}» не указана валюта — "
+                             f"сумму заказа заморозить нельзя")
+        tier = {"price": q.amount, "price_id": None, "period_id": None, "currency": q.currency}
 
+    from datetime import datetime, timezone
     with SessionLocal() as db:
         o = db.get(AcquisitionOrder, order_id)
-        if o is None or o.status != "pending_confirm":   # состояние сменилось, пока ходили в сеть
+        if o is None or o.status not in ("pending_confirm", "failed"):   # состояние сменилось, пока ходили в сеть
             return {"order_id": order_id, "status": o.status if o else "gone",
-                    "note": "не в статусе pending_confirm"}
+                    "note": "не в статусе pending_confirm/failed"}
         if tier is not None:
             o.cost = tier["price"]                   # ФАКТИЧЕСКИЙ тир, а не желаемая сумма
+            o.cost_currency = tier.get("currency") or "RUB"   # тиры backorder — рубли
             o.result = {**(o.result or {}),
                         "price_id": tier["price_id"], "period_id": tier["period_id"]}
         elif bid_rub is not None:
             o.cost = bid_rub
+            o.cost_currency = o.cost_currency or "RUB"
         o.confirmed_by_human = True                  # HARD GATE поднят человеком
+        o.confirmed_at = datetime.now(timezone.utc)  # …и протухнет через ACQ_CONFIRM_TTL_HOURS
         db.commit()
         return {"order_id": order_id, "status": o.status, "confirmed_by_human": True,
-                "bid_rub": float(o.cost) if o.cost is not None else None}
+                "bid_rub": float(o.cost) if o.cost is not None else None,
+                "currency": o.cost_currency}
 
 
 def execute_confirmed_order(order_id: int) -> dict:
@@ -320,6 +457,8 @@ def execute_confirmed_order(order_id: int) -> dict:
     from sqlalchemy import update
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
+    from datetime import timedelta
+    from app.config import settings
     from app.models.domain import Domain, AcquisitionOrder
     from app.services import transitions
 
@@ -330,6 +469,14 @@ def execute_confirmed_order(order_id: int) -> dict:
         if not o.confirmed_by_human:                 # ЖЁСТКИЙ ГЕЙТ — деньги не на автопилоте
             return {"order_id": order_id, "status": o.status,
                     "error": "gate: заказ не подтверждён человеком (confirmed_by_human=False)"}
+        if _confirm_expired(o):
+            # Подтверждение протухло: опускаем гейт ЯВНО (в UI вернётся «✓ подтвердить»), а не просто
+            # отказываем — иначе «↻ повторить» висела бы рядом с вечным отказом.
+            o.confirmed_by_human = False
+            db.commit()
+            return {"order_id": order_id, "status": o.status,
+                    "error": f"подтверждение просрочено (больше {settings.ACQ_CONFIRM_TTL_HOURS} ч) — цена и "
+                             f"тариф могли измениться; подтверди заказ заново"}
 
         # ЗДЕСЬ И ЕСТЬ КАССА — и грязь про неё не спрашивали вовсе (ревью Задачи 6, Critical 1).
         # Заказ на грязный домен, подтверждённый ДО фикса (confirmed_by_human уже True), уходил
@@ -344,6 +491,7 @@ def execute_confirmed_order(order_id: int) -> dict:
         d = db.get(Domain, o.domain_id)
         if d is not None:
             transitions.refuse_dirty(d)              # TransitionDenied -> роут покажет причину
+            check_route(d, o.provider)               # зона/канал на КАССЕ: подтверждённый до смены правил заказ не уходит
 
         # ОДНА ОТКРЫТАЯ ЗАЯВКА НА ДОМЕН (uq_open_order_per_domain, см. _open_order_id).
         # «↻ повторить» двигает заказ из 'failed' в 'ordering' — ОТКРЫТЫЙ статус. Если домен
@@ -375,8 +523,11 @@ def execute_confirmed_order(order_id: int) -> dict:
                 update(AcquisitionOrder)
                 .where(AcquisitionOrder.id == order_id,
                        AcquisitionOrder.status.in_(("pending_confirm", "failed")),
-                       AcquisitionOrder.confirmed_by_human.is_(True))
+                       AcquisitionOrder.confirmed_by_human.is_(True),
+                       AcquisitionOrder.confirmed_at >= datetime.now(timezone.utc)
+                       - timedelta(hours=settings.ACQ_CONFIRM_TTL_HOURS))
                 .values(status="ordering", claimed_at=datetime.now(timezone.utc))
+                .execution_options(synchronize_session=False)   # WHERE c datetime: ORM-evaluator не сравнивает naive/aware; ниже db.refresh(o)
             )
             db.commit()
         except IntegrityError:
@@ -441,6 +592,13 @@ def execute_confirmed_order(order_id: int) -> dict:
                     db.commit()
                     return {"order_id": order_id, "status": o.status, "result": o.result}
 
+                bal = _balance_of(c)
+                short = _shortfall(o, (bal, "RUB") if bal is not None else None)
+                if short:
+                    o.status = "failed"
+                    o.result = {**saved, "error": short}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
                 try:
                     res = c.order(d.domain, price_id=price_id, period_id=period_id)
                 except AmbiguousSend as e:
@@ -448,10 +606,10 @@ def execute_confirmed_order(order_id: int) -> dict:
                     # списаться. Не предлагаем «повторить» вслепую: сначала опрос провайдера.
                     # Явный отказ провайдера сюда НЕ попадает — он RuntimeError ниже.
                     o.status = "failed"
-                    o.result = {**saved, "error": f"исход неизвестен: {e}", "maybe_sent": True}
+                    o.result = {**saved, "error": f"исход неизвестен: {_scrub_text(e)}", "maybe_sent": True}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
-            else:
+            elif o.provider == "optimizator":
                 from app.integrations.optimizator import OptimizatorClient, OptimizatorError, OptimizatorAmbiguous
                 c = OptimizatorClient()
                 # ИДЕМПОТЕНТНОСТЬ. У API нет «список заказов»/«заказ по домену» (в отличие
@@ -476,7 +634,7 @@ def execute_confirmed_order(order_id: int) -> dict:
                     # была) остаётся вытесненным явным True ниже в любом случае.
                     o.status = "failed"
                     o.result = {**saved, "error": f"не удалось проверить владение доменом "
-                                                  f"(check_domain): {e}", "maybe_sent": True}
+                                                  f"(check_domain): {_scrub_text(e)}", "maybe_sent": True}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
                 # Дошли сюда ТОЛЬКО через успех/OptimizatorError выше — что-то реально узнали
@@ -490,16 +648,71 @@ def execute_confirmed_order(order_id: int) -> dict:
                     o.ordered_at = o.ordered_at or datetime.now(timezone.utc)
                     db.commit()
                     return {"order_id": order_id, "status": o.status, "result": o.result}
+                # ПОТОЛОК ЦЕНЫ (S3-07): register() цены не получает и платит текущую — сверяем с
+                # замороженной на confirm суммой и баланс, всё ДО отправки (чистый отказ, деньги целы).
+                from app.services.domain_filters import zone_of
+                cur_price = c.prices(zone_of(d.domain))["price_registration"]
+                if o.cost is not None and float(cur_price) > float(o.cost):
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"цена у провайдера выросла: {float(cur_price):.2f} > "
+                                                  f"подтверждённых {float(o.cost):.2f} — подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                bal = _balance_of(c)
+                short = _shortfall(o, (bal, "RUB") if bal is not None else None)
+                if short:
+                    o.status = "failed"
+                    o.result = {**saved, "error": short}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
                 try:
                     res = c.register([d.domain])
                 except OptimizatorAmbiguous as e:
                     o.status = "failed"
-                    o.result = {**saved, "error": f"исход неизвестен: {e}", "maybe_sent": True}
+                    o.result = {**saved, "error": f"исход неизвестен: {_scrub_text(e)}", "maybe_sent": True}
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
                 # OptimizatorError (чистый отказ) падает в общий except Exception ниже —
                 # деньги не ушли, "↻ повторить" безопасен, сообщение уже читаемое
                 # (OptimizatorError.__str__ несёт error_id).
+            else:
+                # «registrar» — ШОВ под международный выкуп (integrations/registrar.get_registrar).
+                # Тот же гейт, что выше (confirm → TTL → claim); сам регистратор ИДЕМПОТЕНТЕН
+                # (Registrar.register: домен уже наш -> успех без второго списания).
+                from app.integrations.registrar import RegistrarAmbiguous, get_registrar
+                r = get_registrar()
+                q = r.price(d.domain)
+                if o.cost is not None and (not q.currency or q.currency != (o.cost_currency or "RUB")):
+                    # валюта котировки не совпала с подтверждённой (или не указана): потолок цены
+                    # проверить нечем — НЕ молчим, отказ ДО отправки
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"валюта котировки регистратора ({q.currency or 'не указана'}) "
+                                                  f"не совпала с подтверждённой ({o.cost_currency or 'RUB'}) — "
+                                                  f"потолок цены не проверить; подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                if o.cost is not None and float(q.amount) > float(o.cost):
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"цена у регистратора выросла: {float(q.amount):.2f} "
+                                                  f"{q.currency} > подтверждённых {float(o.cost):.2f} — "
+                                                  f"подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                bal = r.balance()
+                short = _shortfall(o, tuple(bal) if bal is not None else None)
+                if short:
+                    o.status = "failed"
+                    o.result = {**saved, "error": short}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                try:
+                    res = r.register(d.domain, 1)
+                except RegistrarAmbiguous as e:
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"исход неизвестен: {_scrub_text(e)}", "maybe_sent": True}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                saved.pop("maybe_sent", None)     # регистратор ответил успехом: неопределённости нет
             o.status = "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
             o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
@@ -513,7 +726,7 @@ def execute_confirmed_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": "failed", **o.result}
         except Exception as e:  # noqa: BLE001 — сбой провайдера -> failed, не 500
             o.status = "failed"
-            o.result = {**saved, "error": f"{type(e).__name__}: {e}"[:200]}
+            o.result = {**saved, "error": _scrub_text(f"{type(e).__name__}: {e}")[:200]}
             db.commit()
             return {"order_id": order_id, "status": "failed", **o.result}
 
@@ -541,36 +754,21 @@ def mark_caught(order_id: int) -> dict:
         return {"order_id": order_id, "status": "caught", "domain_id": o.domain_id}
 
 
-def poll_orders() -> dict:
-    """Синхронизировать отправленные заказы с правдой провайдера (по кнопке, не автопилотом).
-
-    Читает clientbackorder (денег НЕ тратит) и двигает 'ordered' -> 'caught'/'failed' по
-    id_status. Это НЕ обход денежного гейта: деньги уже потрачены на execute за подтверждением
-    человека, а поимка — факт со стороны провайдера, а не наше решение. Ручной mark_caught
-    остаётся (провайдер может молчать). Оркестратор эту функцию не зовёт.
-
-    ЗДЕСЬ ЖЕ — ЕДИНСТВЕННЫЙ ВЫХОД ИЗ ЗАСТРЯВШЕЙ ОТПРАВКИ (аудит F11). Строка в 'ordering', чей
-    claim протух (процесс убили между claim'ом и ответом провайдера), не видна больше НИКОМУ:
-    execute claim'ит только pending_confirm/failed, cancel снимает только их же. Разбираем её тем
-    же способом, что и фантом-'failed', — ПРАВДОЙ ПРОВАЙДЕРА, а не догадкой: заказ у него есть →
-    усыновляем (домен ловится, деньги не потеряны); заказа нет → 'failed', и человек волен
-    повторить или снять. Свежий claim НЕ ТРОГАЕМ: за ним стоит живой execute, и отобрать у него
-    строку значит открыть ей путь на повторную отправку — второе списание.
-
-    ВЫХОД ИЗ 'ordering' ЕСТЬ И У optimizator (Task 3, второй канал — было ревью Задачи 8, минор 2,
-    отложено до появления транспорта). До Task 1/2 execute для optimizator падал NotImplementedError
-    ДО сети — до claim'а исход был уже известен, окна для застревания не было. Реальный транспорт
-    открыл то же окно, что у backorder: процесс могли убить между claim'ом и ответом провайдера.
-    Ниже — свой цикл по `provider == "optimizator"`: источник правды другой (нет client_orders()/
-    find_order — списка заказов у optimizator нет), только check_domain(domain) по одному домену.
-    Структура та же: снимок SELECT'ом, пропуск свежего claim'а, запись ТОЛЬКО через `_settle`.
-    """
+def _poll_backorder() -> dict:
+    """Сверка заказов backorder с правдой провайдера (см. poll_orders). Сеть — ТОЛЬКО если у нас есть
+    что сверять (S3-04): строки провайдера в ordered/failed/ordering."""
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
     from app.integrations.backorder import BackorderClient, norm_domain
 
+    with SessionLocal() as db:
+        if not db.execute(select(AcquisitionOrder.id).where(
+                AcquisitionOrder.provider == "backorder",
+                AcquisitionOrder.status.in_(("ordered", "failed", "ordering"))).limit(1)).first():
+            return {"checked": 0, "conflicts": 0, "sending": 0, "lost": 0,
+                    "caught": 0, "failed": 0, "pending": 0}
     remote_orders = BackorderClient().client_orders()
     by_elid = {r["elid"]: r for r in remote_orders if r["elid"]}
     # Фолбэк для строк без elid — по нормализованному домену (.РФ: фид кириллица, billmgr
@@ -718,6 +916,21 @@ def poll_orders() -> dict:
             else:
                 matched += 1
                 moved[done] = moved.get(done, 0) + 1
+    return {"checked": matched, "conflicts": conflicts, "sending": sending, "lost": lost, **moved}
+
+
+def _poll_optimizator(deadline: float) -> dict:
+    """Восстановление зависших отправок optimizator (см. poll_orders). Сеть — только на строки
+    `ordering` с протухшим claim; общий дедлайн опроса: не успели — остальное при следующей сверке."""
+    import time
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+    from app.db import SessionLocal
+    from app.models.domain import Domain, AcquisitionOrder
+
+    matched = 0
+    conflicts = 0
+    sending = 0
 
     # --- optimizator: застрявший 'ordering' (тот же F11-класс, второй канал, см. докстринг выше) --
     # ДО транспорта (Task 1/2) execute для optimizator падал ДО сети (NotImplementedError) — окна
@@ -736,8 +949,11 @@ def poll_orders() -> dict:
                 AcquisitionOrder.provider == "optimizator",
                 AcquisitionOrder.status == "ordering")
         ).scalars().all()
-        oc = OptimizatorClient()
+        oc = OptimizatorClient(quick=True)   # один запрос, 8 с: без ретраев 3 x 30 с
         for o in opt_rows:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"общий дедлайн опроса ({POLL_DEADLINE_SEC:.0f} с) вышел — остальные "
+                                   f"строки разберёт следующая сверка")
             # Статус уже 'ordering' у ВСЕХ строк снимка (SQL-фильтр выше) — проверять его здесь
             # незачем, в отличие от backorder-цикла (там снимок смешивает ordered/failed/ordering).
             if not _claim_expired(o):
@@ -791,7 +1007,49 @@ def poll_orders() -> dict:
     # «сверить» ИМЕННО из-за такой строки. `sending` — «не тронули, там живой execute»,
     # `lost` — «разобрали: провайдер про заказ не знает». Без них поллинг отвечал бы «сверено 0»
     # и выглядел сломанным ровно в том случае, ради которого его и позвали.
-    return {"checked": matched, "conflicts": conflicts, "sending": sending, "lost": lost, **moved}
+    return {"checked": matched, "conflicts": conflicts, "sending": sending}
+
+
+def poll_orders() -> dict:
+    """Синхронизировать отправленные заказы с правдой провайдера (по кнопке, не автопилотом).
+
+    Читает clientbackorder (денег НЕ тратит) и двигает 'ordered' -> 'caught'/'failed' по
+    id_status. Это НЕ обход денежного гейта: деньги уже потрачены на execute за подтверждением
+    человека, а поимка — факт со стороны провайдера, а не наше решение. Ручной mark_caught
+    остаётся (провайдер может молчать). Оркестратор эту функцию не зовёт.
+
+    ЗДЕСЬ ЖЕ — ЕДИНСТВЕННЫЙ ВЫХОД ИЗ ЗАСТРЯВШЕЙ ОТПРАВКИ (аудит F11). Строка в 'ordering', чей
+    claim протух (процесс убили между claim'ом и ответом провайдера), не видна больше НИКОМУ:
+    execute claim'ит только pending_confirm/failed, cancel снимает только их же. Разбираем её тем
+    же способом, что и фантом-'failed', — ПРАВДОЙ ПРОВАЙДЕРА, а не догадкой: заказ у него есть →
+    усыновляем (домен ловится, деньги не потеряны); заказа нет → 'failed', и человек волен
+    повторить или снять. Свежий claim НЕ ТРОГАЕМ: за ним стоит живой execute, и отобрать у него
+    строку значит открыть ей путь на повторную отправку — второе списание.
+
+    ВЫХОД ИЗ 'ordering' ЕСТЬ И У optimizator (Task 3, второй канал — было ревью Задачи 8, минор 2,
+    отложено до появления транспорта). До Task 1/2 execute для optimizator падал NotImplementedError
+    ДО сети — до claim'а исход был уже известен, окна для застревания не было. Реальный транспорт
+    открыл то же окно, что у backorder: процесс могли убить между claim'ом и ответом провайдера.
+    Ниже — свой цикл по `provider == "optimizator"`: источник правды другой (нет client_orders()/
+    find_order — списка заказов у optimizator нет), только check_domain(domain) по одному домену.
+    Структура та же: снимок SELECT'ом, пропуск свежего claim'а, запись ТОЛЬКО через `_settle`.
+    """
+    import time
+    deadline = time.monotonic() + POLL_DEADLINE_SEC
+    out = {"checked": 0, "conflicts": 0, "sending": 0, "lost": 0, "caught": 0, "failed": 0, "pending": 0}
+    errors: dict = {}
+    # Провайдеры НЕЗАВИСИМЫ (S3-04): лежащий backorder (капча, 404 тарифов) не должен ни ронять опрос,
+    # ни держать восстановление optimizator; сбой каждого — в `errors`, и оператор видит его в UI.
+    for name, fn in (("backorder", _poll_backorder),
+                     ("optimizator", lambda: _poll_optimizator(deadline))):
+        try:
+            part = fn()
+        except Exception as e:  # noqa: BLE001 — сбой одного провайдера не топит опрос второго
+            errors[name] = _scrub_text(f"{type(e).__name__}: {e}")[:200]
+            continue
+        for k, v in part.items():
+            out[k] = out.get(k, 0) + v
+    return {**out, "errors": errors}
 
 
 def cancel_order(order_id: int) -> dict:
@@ -919,13 +1177,59 @@ def list_orders() -> list[dict]:
         rows = db.execute(select(AcquisitionOrder).order_by(AcquisitionOrder.id.desc())).scalars().all()
         for o in rows:
             d = db.get(Domain, o.domain_id)
+            # Подтверждение, у которого вышел срок, на экране = «не подтверждено»: гейт для исполнения
+            # уже закрыт (execute его не примет), и кнопка обязана вернуться в «✓ подтвердить».
+            expired = bool(o.confirmed_by_human) and _confirm_expired(o)
             out.append({"id": o.id, "domain": d.domain if d else f"#{o.domain_id}",
                         "provider": o.provider, "status": o.status,
-                        "confirmed": o.confirmed_by_human,
+                        "confirmed": bool(o.confirmed_by_human) and not expired,
+                        "confirm_expired": expired,
                         "bid": float(o.cost) if o.cost is not None else None,
-                        "result": o.result, "domain_id": o.domain_id,
+                        "currency": o.cost_currency or ("RUB" if o.cost is not None else None),
+                        # ретроактивный скраб: в старых строках текст исключения мог унести api_key
+                        "result": ({k: (_scrub_text(v) if isinstance(v, str) else v)
+                                    for k, v in o.result.items()} if isinstance(o.result, dict) else o.result),
+                        "domain_id": o.domain_id,
                         "dirty": dirty_reason(d) if d is not None else None,
                         "stuck": o.status == "ordering" and _claim_expired(o)})
+    return out
+
+
+def channel_status(orders: list[dict] | None = None, deadline: float = 10.0) -> dict:
+    """Баланс/доступность каналов, кроме backorder (его грузит сам экран вместе с сеткой тарифов), для
+    шапки /queue (S3-09, S3-04). Сеть — только у настроенного канала (ключ задан или по нему есть заказы),
+    параллельно и под общим дедлайном: лежащий провайдер не вешает денежный экран. Ошибка видна словами."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
+    from app.config import settings
+    from app.integrations.registrar import get_registrar
+
+    used = {o["provider"] for o in orders or ()}
+    out: dict = {"registrar": {"configured": bool(get_registrar().configured)}}
+    jobs: dict = {}
+    if settings.OPTIMIZATOR_API_KEY or "optimizator" in used:
+        def _opt():
+            from app.integrations.optimizator import OptimizatorClient
+            return OptimizatorClient(quick=True).balance()
+        jobs["optimizator"] = (_opt, "RUB")
+    if out["registrar"]["configured"]:
+        jobs["registrar"] = (lambda: get_registrar().balance(), None)
+    ex = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
+    try:
+        futs = {name: ex.submit(fn) for name, (fn, _cur) in jobs.items()}
+        for name, fut in futs.items():
+            cur = jobs[name][1]
+            try:
+                b = fut.result(timeout=deadline)
+                if isinstance(b, tuple):          # Money(amount, currency)
+                    b, cur = b
+                out.setdefault(name, {}).update(balance=b, currency=cur, error=None)
+            except FutTimeout:
+                out.setdefault(name, {}).update(balance=None, currency=cur, error=f"не ответил за {deadline:.0f} с")
+            except Exception as e:  # noqa: BLE001 — баланс информационный: экран живёт и без него
+                out.setdefault(name, {}).update(balance=None, currency=cur,
+                                                error=_scrub_text(f"{type(e).__name__}: {e}")[:160])
+    finally:
+        ex.shutdown(wait=False)
     return out
 
 
@@ -937,5 +1241,5 @@ if __name__ == "__main__":  # гейт-логика без БД: execute отк�
     assert not o.confirmed_by_human, "гейт должен блокировать неподтверждённый заказ"
     o.confirmed_by_human = True
     assert o.confirmed_by_human, "после confirm — гейт открыт"
-    assert _PROVIDERS == {"backorder", "optimizator"}
+    assert _PROVIDERS == {"backorder", "optimizator", "registrar"}
     print("acquisition gate self-check ok")

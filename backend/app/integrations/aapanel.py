@@ -22,10 +22,12 @@ Endpoint styles: legacy `/data?action=...` and current `/v2/data?action=...` —
 """
 import hashlib
 import json
+import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
 from app.integrations.base import BaseClient, _is_retryable
@@ -38,6 +40,86 @@ def _md5(s: str) -> str:
 def _make_token(api_sk: str, request_time: str) -> str:
     """request_token = md5( str(request_time) + md5(api_sk) ) — chained, order matters."""
     return _md5(request_time + _md5(api_sk))
+
+
+# -- предохранитель авторизации (S5-01/S7-02/F8-01) ---------------------------------------
+# aaPanel банит IP на час после 20 неудачных проверок подряд («20 consecutive verification
+# failures, prohibited for 1 hour»). Каждый отказ whitelist/подписи — это очко в этот счётчик,
+# а фоновый /diag (раз в 5 мин), свип провижна и публикации слали новые попытки вслепую и
+# сами вели IP к бану. Поэтому после первого отказа авторизации в панель НЕ ходим до конца
+# паузы: сеть не трогаем вовсе, причину отдаём исключением (её видит /diag).
+# Состояние — в памяти ПРОЦЕССА (панель и воркер — разные процессы, у каждого свой счётчик;
+# общий стор в БД — отдельный шаг, см. отчёт аудита S5-01 п.4).
+BAN_PAUSE_SEC = 61 * 60    # «prohibited for 1 hour» — раньше бесполезно
+AUTH_PAUSE_SEC = 15 * 60   # IP вне whitelist / протухший api_sk: чинит человек, не повторы
+# Маркеры — по тексту msg (локализован, но на ЭТОТ класс отказов другого сигнала у панели нет);
+# ошибка в сторону пропуска безопасна — просто не включится пауза.
+_BAN_MARKERS = ("consecutive verification", "prohibited")
+_AUTH_MARKERS = ("verification failed", "ip validation")
+
+_block_lock = threading.Lock()
+_block: dict = {}   # {"until": monotonic, "reason": str, "fp": str} — пусто = панель открыта
+
+
+class AaPanelBlocked(RuntimeError):
+    """Панель на паузе после отказа авторизации: запрос в сеть НЕ уходил."""
+
+
+def _fingerprint() -> str:
+    """Отпечаток адреса+ключа: сменил ключ/URL на «Ключи и сервисы» — пауза по старым снимается."""
+    return _md5(f"{settings.AAPANEL_URL}|{settings.AAPANEL_API_KEY}")
+
+
+def blocked_reason() -> str | None:
+    """Текст причины паузы (без секретов) или None, если панель открыта. Истёкшую паузу снимает."""
+    with _block_lock:
+        if not _block:
+            return None
+        left = _block["until"] - time.monotonic()
+        if left <= 0 or _block["fp"] != _fingerprint():
+            _block.clear()
+            return None
+        until = datetime.now(timezone.utc) + timedelta(seconds=left)
+        hint = " — добавь IP в whitelist" if "ip validation" in _block["reason"].lower() else ""
+        return f"{_block['reason']}{hint} · пауза до {until:%H:%M} UTC"
+
+
+def require_open() -> None:
+    """Префлайт для вызывающих (provision/publish): панель на паузе — упасть ДО побочных шагов
+    (зона/DNS в Cloudflare), а не после, и без единого запроса в сеть."""
+    why = blocked_reason()
+    if why:
+        raise AaPanelBlocked(f"aaPanel: {why}")
+
+
+def reset_block() -> None:
+    with _block_lock:
+        _block.clear()
+
+
+def _note_failure(msg: str) -> None:
+    """Отказ авторизации в теле ответа -> включить паузу. Прочие отказы (нет прав на файл,
+    «сайт уже есть») паузу не вызывают: они не копят счётчик банов."""
+    low = msg.lower()
+    if any(m in low for m in _BAN_MARKERS):
+        pause = BAN_PAUSE_SEC
+    elif any(m in low for m in _AUTH_MARKERS):
+        pause = AUTH_PAUSE_SEC
+    else:
+        return
+    with _block_lock:
+        _block.update(until=time.monotonic() + pause, reason=msg[:90], fp=_fingerprint())
+
+
+# Записи: повтор после ReadTimeout опасен (запрос мог дойти и исполниться — второй AddSite/
+# DeleteSite/выпуск сертификата); ретраим только сбой СОЕДИНЕНИЯ, когда запрос не уходил.
+# GetTaskCount (ping) — одна попытка: следующий цикл /diag и есть повтор, а 3×connect-таймаут
+# держал бы поток дольше PING_TIMEOUT. Чтения (getData) — по общему правилу _is_retryable.
+_WRITE_ACTIONS = ("AddSite", "DeleteSite", "SetSSL", "apply_cert_api", "CreateFile", "SaveFileBody", "AddDomain", "DeleteFile")
+
+
+def _connect_only(exc: BaseException) -> bool:
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
 def _fail_msg(res) -> str | None:
@@ -77,10 +159,11 @@ def _ok(res, what: str, also: str | None = None):
 
 class AaPanelClient(BaseClient):
     def __init__(self):
-        super().__init__(settings.AAPANEL_URL)
-        # BaseClient just opened a default httpx.Client; we replace it with a pinned one
-        # below, so close the throwaway to avoid leaking an unused connection pool.
-        self._client.close()
+        if not settings.AAPANEL_URL:
+            raise RuntimeError("AAPANEL_URL не задан — укажи адрес панели в .env / «Ключи и сервисы»")
+        # BaseClient.__init__ не зовём: он открыл бы лишний httpx.Client, который сразу
+        # пришлось бы закрывать (S5-11) — нужен только base_url, клиент ставим ниже сами.
+        self.base_url = settings.AAPANEL_URL.rstrip("/")
         self.api_sk = settings.AAPANEL_API_KEY
         # aaPanel serves a self-signed cert on :8888. Pin it via AAPANEL_CA_BUNDLE (copy
         # /www/server/panel/ssl/certificate.pem locally, set its path) to keep MITM
@@ -114,7 +197,9 @@ class AaPanelClient(BaseClient):
                 f"aaPanel {host!r} is not loopback and AAPANEL_CA_BUNDLE is unset — refusing "
                 "verify=False (MITM risk). Set AAPANEL_CA_BUNDLE to the panel's cert path.")
         # follow_redirects=False: never let a redirect carry the auth token to another host.
-        self._client = httpx.Client(timeout=30, follow_redirects=False, verify=verify)
+        # connect отдельно и короткий: лежащий VPS не должен держать вызов 30 с на каждую попытку (S5-10).
+        self._client = httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0),
+                                    follow_redirects=False, verify=verify)
 
     # -- auth / transport ---------------------------------------------------
 
@@ -124,27 +209,45 @@ class AaPanelClient(BaseClient):
         t = str(int(time.time()))
         return {"request_time": t, "request_token": _make_token(self.api_sk, t)}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10),
-           retry=retry_if_exception(_is_retryable), reraise=True)
     def _post(self, path: str, data: dict | None = None) -> dict:
         """POST form fields (endpoint params + auth) to base_url+path, return parsed JSON.
 
         Note: a few endpoints (e.g. /ajax?action=GetTaskCount) return a bare JSON
         scalar, so callers should not assume dict blindly.
 
-        @retry ЗДЕСЬ, а не на BaseClient.request (S16, аудит 2026-07-18): подпись
+        Ретрай ЗДЕСЬ, а не на BaseClient.request (S16, аудит 2026-07-18): подпись
         aaPanel (`_auth()`) живёт короткое окно свежести (clock-skew), а
         wait_exponential-backoff между попытками (до ~10с) мог успеть её состарить,
         если ретрай слал ТОТ ЖЕ payload, собранный один раз до первой попытки —
         транзиентный сетевой сбой тогда отклонялся панелью как auth-fail, и оператор
-        шёл чинить несуществующий протухший api_sk. Каждая попытка этого декоратора
-        заново строит payload -> свежий request_time/request_token. Вызываем
+        шёл чинить несуществующий протухший api_sk. Каждая попытка заново строит
+        payload -> свежий request_time/request_token. Вызываем
         `self._request_once` (БЕЗ собственного ретрая), а не `self.request` — иначе
         ретраи бы удвоились (3 попытки _post x 3 попытки request = 9).
+
+        Перед сетью — предохранитель авторизации (`blocked_reason`): на паузе запрос не уходит.
+        Записи (`_NO_RETRY_ACTIONS`) повторяются только при сбое соединения, не при ReadTimeout.
         """
-        payload = {**(data or {}), **self._auth()}
-        resp = self._request_once("POST", f"{self.base_url}{path}", data=payload)
-        return resp.json()
+        require_open()
+        is_write = any(f"action={a}" in path for a in _WRITE_ACTIONS)
+        attempts = 1 if "action=GetTaskCount" in path else 3
+        for attempt in Retrying(stop=stop_after_attempt(attempts), wait=wait_exponential(multiplier=1, max=10),
+                                retry=retry_if_exception(_connect_only if is_write else _is_retryable),
+                                reraise=True):
+            with attempt:
+                payload = {**(data or {}), **self._auth()}
+                resp = self._request_once("POST", f"{self.base_url}{path}", data=payload)
+        try:
+            res = resp.json()
+        except ValueError:
+            # HTML вместо JSON (security entrance, API выключен, прокси-страница): голый
+            # JSONDecodeError «Expecting value: line 1 column 1» ничего не говорит (S5-17).
+            snippet = " ".join(resp.text.split())[:120]
+            raise RuntimeError(f"aaPanel {path.split('?')[0]}: ответ не JSON (HTTP {resp.status_code}): "
+                               f"{snippet!r}") from None
+        if isinstance(res, dict) and res.get("status") is False:
+            _note_failure(str(res.get("msg") or ""))
+        return res
 
     # -- system -------------------------------------------------------------
 
@@ -153,14 +256,19 @@ class AaPanelClient(BaseClient):
 
         /ajax?action=GetTaskCount is the cheapest endpoint per docs/api/aapanel.md
         (returns a bare JSON integer, e.g. 0). Auth/whitelist failures come back as
-        {"status": false, "msg": "..."} — treat any dict with status=false as failure.
+        {"status": false, "msg": "..."}.
+
+        Отказ НЕ глотается (S5-02/F8-01): причина летит исключением — «IP validation failed»,
+        «prohibited for 1 hour», «Secret key verification failed», пауза предохранителя или
+        «панель недоступна» — и /diag показывает её текстом, а не безликим fail.
         """
         try:
             res = self._post("/ajax?action=GetTaskCount")
-        except (httpx.HTTPError, ValueError):
-            return False
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"aaPanel недоступна: {type(e).__name__} {e}".strip()) from e
         if isinstance(res, dict):
-            return res.get("status") is not False
+            _ok(res, "GetTaskCount")
+            return True
         return isinstance(res, int)  # bare task count => healthy
 
     # -- websites -----------------------------------------------------------
@@ -187,18 +295,24 @@ class AaPanelClient(BaseClient):
     def site_exists(self, name: str) -> bool:
         return any(s.get("name") == name for s in self.list_sites())
 
-    def add_site(self, domain: str, path: str, php_version: str = "00", port: int = 80) -> dict:
+    def add_site(self, domain: str, path: str, php_version: str = "00", port: int = 80,
+                 aliases: list[str] | None = None) -> dict:
         """Create an nginx vhost. version="00" = pure static (no PHP) — our default.
 
         Not idempotent by itself (duplicate => status/msg error); use ensure_site().
         Отказ (нет прав, «сайт уже есть», кончилось место) -> RuntimeError: раньше он
         возвращался обычным словарём, provision его не смотрел и объявлял сайт готовым.
         Успех приходит БЕЗ ключа `status` ({"siteStatus": true, ...}) — _ok его пропускает.
+
+        `aliases` — доп. имена vhost'а (www.<домен>, S5-12): идут в `domainlist` webname. Форма
+        поля `count` для непустого списка по докам не подтверждена живьём — берём число алиасов
+        (так в аудите); пустой список — прежний проверенный вид (`[]`, 0).
         """
+        al = list(aliases or [])
         return _ok(self._post(
             "/site?action=AddSite",
             {
-                "webname": json.dumps({"domain": domain, "domainlist": [], "count": 0}),
+                "webname": json.dumps({"domain": domain, "domainlist": al, "count": len(al)}),
                 "path": path,
                 "type_id": 0,
                 "type": "PHP",  # "PHP" even for static; version "00" disables PHP
@@ -232,10 +346,28 @@ class AaPanelClient(BaseClient):
             return {"exists": True, "name": domain}
         try:
             return self.add_site(domain, path, **kw)
-        except RuntimeError:
+        except (RuntimeError, httpx.TransportError):
+            # TransportError — AddSite не ретраится на ReadTimeout (мог исполниться): панель
+            # решает, есть ли сайт; нет — исходная ошибка летит наверх, следующий тик повторит.
             if not self.site_exists(domain):
                 raise
             return {"exists": True, "name": domain}
+
+    def add_domains(self, site_name: str, domains: list[str]) -> dict:
+        """Дописать алиасы (www.<домен>) в УЖЕ существующий vhost: ensure_site у готового сайта
+        aliases игнорирует. Отказ конверта -> RuntimeError.
+
+        UNVERIFIED вживую (/site?action=AddDomain: id + webname + domain, несколько имён через
+        перевод строки — по исходникам панели). Ответ несёт СПИСОК по каждому домену, а не общий
+        status: «домен уже привязан» там норма, поэтому построчно не судим. Судья — не этот ответ,
+        а проба провижна (маркер-файл по Host=алиас): подтвердила — алиас есть, нет — www без DNS."""
+        site_id = next((s.get("id") for s in self.list_sites() if s.get("name") == site_name), None)
+        if site_id is None:
+            raise RuntimeError(f"aaPanel AddDomain: site not found: {site_name}")
+        return _ok(self._post(
+            "/site?action=AddDomain",
+            {"id": site_id, "webname": site_name, "domain": "\n".join(domains)},
+        ), "AddDomain")
 
     def apply_ssl(self, domain: str, site_name: str) -> dict:
         """Issue + deploy an origin cert. Успех -> dict, ЛЮБОЙ отказ -> RuntimeError.
@@ -276,11 +408,19 @@ class AaPanelClient(BaseClient):
             # сборок другие — UNVERIFIED выше). Ставить в SetSSL пустой сертификат нельзя.
             raise RuntimeError(f"aaPanel apply_cert_api: ответ без key/cert: {str(issued)[:160]}")
 
-        # Step 2 — deploy to the vhost. NB: the cert PEM goes in the field named `csr`
-        # (aaPanel misnomer — it is the full certificate chain, not a signing request).
+        # Step 2 — deploy to the vhost.
+        return self.set_ssl(site_name, key, cert)
+
+    def set_ssl(self, site_name: str, key_pem: str, cert_pem: str) -> dict:
+        """Положить готовый сертификат+ключ на vhost (SetSSL). Используется и ACME-веткой
+        apply_ssl, и выпуском Cloudflare Origin CA (services/provisioning). Отказ -> RuntimeError.
+
+        NB: PEM сертификата/цепочки идёт в поле `csr` (aaPanel misnomer — это сертификат, не запрос).
+        Формат SetSSL по docs/api/aapanel.md ещё НЕ проверен вживую — поэтому выпуск Origin CA
+        в провижне выключен флагом ORIGIN_CA_AUTO."""
         return _ok(self._post(
             "/site?action=SetSSL",
-            {"type": 1, "siteName": site_name, "key": key, "csr": cert},
+            {"type": 1, "siteName": site_name, "key": key_pem, "csr": cert_pem},
         ), "SetSSL")
 
     def delete_site(self, site_name: str, site_id: int, remove_dir: bool = True,
@@ -293,14 +433,27 @@ class AaPanelClient(BaseClient):
         даже на отказ ({"status": false, "msg": ...}), и без _ok() провалившийся teardown
         (протухший api_sk / нет прав / ошибка БД) вернулся бы как успех, а вызывающий M6
         пометил бы сайт снесённым, пока vhost/файлы ещё живы (инвариант файла: «отказ —
-        поднять RuntimeError, глотать его нельзя»)."""
-        return _ok(self._post(
-            "/site?action=DeleteSite",
-            {"id": site_id, "webname": site_name, "path": int(remove_dir),
-             "ftp": int(remove_ftp), "database": int(remove_db)},
-        ), "DeleteSite")
+        поднять RuntimeError, глотать его нельзя»).
+
+        DeleteSite не ретраится на ReadTimeout (S5-10): повтор после реально удалившего первого
+        вызова дал бы ложное «сайт не найден». Таймаут -> спрашиваем панель: сайта нет — удалён."""
+        try:
+            return _ok(self._post(
+                "/site?action=DeleteSite",
+                {"id": site_id, "webname": site_name, "path": int(remove_dir),
+                 "ftp": int(remove_ftp), "database": int(remove_db)},
+            ), "DeleteSite")
+        except httpx.TransportError:
+            if self.site_exists(site_name):
+                raise
+            return {"status": True, "msg": "deleted (подтверждено списком сайтов после таймаута)"}
 
     # -- files (M5 deploy) --------------------------------------------------
+
+    def delete_file(self, path: str) -> dict:
+        """Удалить файл (маркер пробы провижна). UNVERIFIED вживую: /files?action=DeleteFile, поле path
+        (по исходникам панели). Отказ конверта -> RuntimeError; вызывающий ловит его best-effort."""
+        return _ok(self._post("/files?action=DeleteFile", {"path": path}), "DeleteFile")
 
     def write_file(self, path: str, content: str) -> dict:
         """Write a file to the VPS, creating it + parent dirs first. Deploys pages to docroot.

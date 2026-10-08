@@ -250,23 +250,26 @@ def test_queue_add_form_has_provider_select(client):
     assert 'option value="backorder"' in html and 'option value="optimizator"' in html
 
 
-def test_queue_add_preselects_optimizator_for_free_lane(client):
-    """lane='free' -> optimizator предвыбран (CLAUDE.md: «свободные чистые → optimizator»)."""
+def test_queue_add_preselects_auto_channel_for_free_lane(client):
+    """Канал по умолчанию — «авто (по зоне)» (S3-06): лейн больше не навязывает провайдера, его выбирает
+    таблица зона→канал; явный optimizator/backorder остаются опциями."""
     with db.SessionLocal() as s:
         s.add(Domain(domain="free-lane.ru", source="cctld", status="approved", lane="free"))
         s.commit()
     html = client.get("/domains").text
     assert "free-lane.ru" in html
-    assert '<option value="optimizator" selected>' in html
+    assert '<option value="" selected>авто (по зоне)</option>' in html
+    assert '<option value="optimizator">' in html
 
 
-def test_queue_add_preselects_backorder_for_bid_lane(client):
-    """lane='bid' (или неизвестный) -> backorder остаётся предвыбором по умолчанию."""
+def test_queue_add_preselects_auto_channel_for_bid_lane(client):
+    """lane='bid' тоже -> «авто»: backorder.ru не предвыбран (для .com он дал бы мёртвую заявку)."""
     with db.SessionLocal() as s:
         s.add(Domain(domain="bid-lane.ru", source="backorder", status="approved", lane="bid"))
         s.commit()
     html = client.get("/domains").text
-    assert '<option value="backorder" selected>' in html
+    assert '<option value="" selected>авто (по зоне)</option>' in html
+    assert '<option value="backorder" selected>' not in html
     assert '<option value="optimizator" selected>' not in html
 
 
@@ -278,7 +281,7 @@ def test_pool_queue_add_form_has_provider_select(client):
     html = client.get("/domains/pool?status=approved").text
     assert "pool-provider.ru" in html
     assert '<select name="provider"' in html
-    assert '<option value="optimizator" selected>' in html
+    assert '<option value="" selected>авто (по зоне)</option>' in html
 
 
 def test_single_score_unresolved_flash(client, monkeypatch):

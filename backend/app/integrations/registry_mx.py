@@ -5,7 +5,7 @@
 """
 import csv
 
-from app.integrations.base import BaseClient
+from app.integrations.base import BaseClient, conditional_get
 
 URL = "https://www.registry.mx/report/domain_deleted_list.csv"
 
@@ -34,9 +34,10 @@ def parse_deleted(text: str) -> list[dict]:
 class RegistryMxClient(BaseClient):
     def __init__(self):
         super().__init__("", timeout=60.0)
+        self.validators: dict | None = None   # Last-Modified с прошлого забора (S1-11)
 
     def list_dropping(self) -> list[dict]:
-        return parse_deleted(self.request("GET", URL).text)
+        return parse_deleted(conditional_get(self, URL).text)
 
     def ping(self) -> bool:
         # HEAD, а не GET: /diag пингует каждые 5 минут (фон), полный CSV — ~288 скачиваний в сутки

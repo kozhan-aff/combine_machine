@@ -48,6 +48,10 @@ def _parse_whois_available(text: str) -> bool | None:
     low = (text or "").lower()
     m = _RE_SVERTKA_REG.search(low)
     if m:
+        if m.group(1) == "1" and not _RE_SVERTKA_CREATION.search(low):
+            # «registered: 1» без даты создания — не доказательство: Net::Whois лепит его несуществующим
+            # доменам и «мигает» 0/1 на .mx/.co (S2-02, F8-05). «Занят» требует дату; иначе не определено.
+            return None
         return m.group(1) == "0"                     # 0 = свободен, 1 = занят
     if any(w in low for w in _FREE_MARKERS):
         return True
@@ -56,12 +60,16 @@ def _parse_whois_available(text: str) -> bool | None:
     return None
 
 
+WHOIS_TIMEOUT = 60.0     # живой хвост whois — до 27 с при 30-секундном таймауте клиента (S2-12)
+
+
 class AParserClient(BaseClient):
     def __init__(self):
         super().__init__(settings.APARSER_URL)
         self.password = settings.APARSER_API_KEY
 
-    def _call(self, action: str, data: dict | None = None) -> dict:
+    def _call(self, action: str, data: dict | None = None, *, retry: bool = True,
+              timeout: float | None = None) -> dict:
         """Один вызов /API. Отказ A-Parser -> RuntimeError (см. ниже) — глотать его нельзя.
 
         A-Parser отвечает **HTTP 200 даже на отказ**: сбой живёт в КОНВЕРТЕ, а не в статусе
@@ -81,7 +89,14 @@ class AParserClient(BaseClient):
         body: dict = {"password": self.password, "action": action}
         if data is not None:
             body["data"] = data
-        r = self.request("POST", f"{self.base_url}/API", json=body)
+        # retry=False: одна попытка. Ретрай BaseClient после ReadTimeout отправлял oneRequest В
+        # A-PARSER ВТОРОЙ РАЗ (дубль задачи в очереди парсера, расход прокси), пока первая ещё
+        # исполнялась (S2-12). timeout — для медленных парсеров (whois хвост до 27 с).
+        kw = {"timeout": timeout} if timeout is not None else {}
+        if retry:     # oneRequest на чтение (SERP/страница) — повтор безопасен; POST по умолчанию не ретраится
+            r = self.request("POST", f"{self.base_url}/API", json=body, retry=True, **kw)
+        else:
+            r = self._request_once("POST", f"{self.base_url}/API", json=body, **kw)
         res = r.json()
         if not isinstance(res, dict) or res.get("success") != 1:
             # тело без `success` — это не «пустой результат», а НЕ ТОТ ответ (редирект на
@@ -150,7 +165,8 @@ class AParserClient(BaseClient):
         вызывающий код (W2: whois.probe -> sig["errors"] -> метка «вслепую», домен вне пакета).
         None-ы здесь означают ТОЛЬКО «A-Parser ответил, но разобрать нечего», а не «не спросили»."""
         res = self._call("oneRequest", {"query": domain, "parser": "Net::Whois",
-                                        "configPreset": "default", "preset": "default"})
+                                        "configPreset": "default", "preset": "default"},
+                         retry=False, timeout=WHOIS_TIMEOUT)
         text = self._result_string(res)
         return {"available": _parse_whois_available(text), "created": _parse_whois_created(text)}
 

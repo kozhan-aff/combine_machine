@@ -41,6 +41,7 @@ def _host(target) -> str:
 
 
 class AhrefsClient(BaseClient):
+    POOLED = True
     def __init__(self, api_key: str | None = None):
         super().__init__("https://api.ahrefs.com/v3", timeout=60.0)
         self.api_key = settings.AHREFS_API_KEY if api_key is None else api_key
@@ -59,7 +60,8 @@ class AhrefsClient(BaseClient):
         if len(domains) > 1000:
             raise ValueError("dr_free: не больше 1000 доменов за запрос")
         r = self.request("POST", f"{self.base_url}/public/domain-rating-free",
-                         headers=self._headers(), json={"targets": list(domains)})
+                         headers=self._headers(), json={"targets": list(domains)},
+                         retry=True)      # бесплатный запрос на чтение — повтор безопасен
         asked = {_host(d) for d in domains}
         out = {}
         for t in (r.json().get("domain_rating") or {}).get("targets") or []:

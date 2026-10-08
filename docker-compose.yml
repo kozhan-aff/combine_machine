@@ -1,11 +1,21 @@
+# Ротация логов (S7-19): без лимита json-file на Docker Desktop растёт неограниченно. 3x10 МБ на сервис.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   unbound:
     # Собственный рекурсивный резолвер: Spamhaus/SURBL блокируют публичные резолверы
     # (8.8.8.8/1.1.1.1) как shared/anonymous — см. docs/api/blacklist.md. Статический IP
     # в сети combine, т.к. dnspython (DNS_RESOLVER) принимает только IP-литерал, не имя
     # сервиса. Без ports: — нужен только внутри docker-сети, наружу не торчит.
+    # TODO(S7-19): тег :latest не зафиксирован. Подобрать конкретный тег/дайджест нужно на боксе
+    # (`docker image inspect mvance/unbound:latest --format "{{index .RepoDigests 0}}"`), вслепую не пинуем.
     image: mvance/unbound:latest
     restart: unless-stopped
+    logging: *logging
     networks:
       combine:
         ipv4_address: 172.28.0.53
@@ -13,6 +23,7 @@ services:
   db:
     image: postgres:16
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: portfolio
       POSTGRES_PASSWORD: portfolio
@@ -32,6 +43,15 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    logging: *logging
+    # /health открыт даже под Basic-auth. healthy = миграции накатились (alembic идёт в command ДО
+    # uvicorn) и панель отвечает — на это ждёт worker, чтобы не гоняться с миграцией (S7-19).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
     env_file: .env
     depends_on:
       db:
@@ -54,16 +74,31 @@ services:
       # весь репо (с .git) → /repo, чтобы кнопка «Обновить из git» в панели делала
       # git pull прямо в смонтированные файлы (./backend == /app подхватит --reload).
       - .:/repo
-    # auto-migrate on start (alembic upgrade head is idempotent), then serve
+    # auto-migrate on start (alembic upgrade head is idempotent), then serve.
+    # --reload ОСТАВЛЕН сознательно (F8-16): оператор обновляет бокс кнопкой git-pull без консоли, а
+    # без reload код панели не подхватится до ручного рестарта. Убийство идущих задач при pull
+    # закрыто иначе — services/deploy.py отказывает в pull/force-pull, пока в job_run есть живая
+    # задача (score/discovery/sweep/...). Остаточный риск: ручная правка *.py на боксе посреди задачи.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   worker:
     build: ./backend
     restart: unless-stopped
+    logging: *logging
     env_file: .env
     depends_on:
       db:
         condition: service_healthy
+      backend:                                     # миграции делает ТОЛЬКО backend; worker стартует после них
+        condition: service_healthy
+    # живость = свежее сердцебиение воркера в job_run (app/services/heartbeat.py, бьёт раз в минуту).
+    # unhealthy виден в `docker compose ps` и на /diag; сам по себе compose его не перезапускает.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.services.heartbeat"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     networks:
       - combine
     volumes:

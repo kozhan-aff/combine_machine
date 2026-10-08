@@ -35,6 +35,33 @@ def _start_run(trigger: str) -> int:
         return r.id
 
 
+def reap_orphan_runs(keep_id: int | None = None) -> int:
+    """Закрыть журнальные строки AutonomyRun, оставшиеся 'running' после убитого процесса (S7-20).
+
+    Журнал сам по себе замка не держит (замок — job_run 'sweep'), поэтому SIGKILL/watchfiles-
+    рестарт воркера посреди свипа оставлял строку 'running' навсегда — на /autopilot она
+    выглядела идущей вечно. Звать МОЖНО только держа замок свипа (внутри jobs.track("sweep")) или
+    когда живого sweep в job_run нет (старт воркера): тогда любая 'running'-строка — труп.
+    Возвращает число погашенных."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.autonomy import AutonomyRun
+
+    with SessionLocal() as db:
+        rows = db.execute(select(AutonomyRun).where(AutonomyRun.status == "running")).scalars().all()
+        n = 0
+        for r in rows:
+            if r.id == keep_id:
+                continue
+            r.status = "failed"
+            r.finished_at = datetime.now(timezone.utc)
+            r.errors = list(r.errors or []) + ["оборвался: процесс перезапустили"]
+            n += 1
+        if n:
+            db.commit()
+        return n
+
+
 def _finish_run(run_id: int, status: str, counts: dict, errors: list) -> None:
     from app.db import SessionLocal
     from app.models.autonomy import AutonomyRun
@@ -215,7 +242,7 @@ def _stage_generate(cap):
     from sqlalchemy import select, func
     from app.db import SessionLocal
     from app.models.site import Site, Page
-    from app.services import content
+    from app.services import content, jobs
 
     expected = len(content.scaffold(""))   # число страниц/сайт — фиксировано scaffold(), не зависит от бренда
     done, errs = 0, []
@@ -223,16 +250,29 @@ def _stage_generate(cap):
         page_counts = (
             select(Page.site_id, func.count(Page.id).label("n"))
             .group_by(Page.site_id).subquery())
-        ids = [r[0] for r in db.execute(
-            select(Site.id)
+        rows = db.execute(
+            select(Site.id, Site.offer_id)
             .outerjoin(page_counts, page_counts.c.site_id == Site.id)
             .where(Site.status == "content",
                    func.coalesce(page_counts.c.n, 0) < expected)
-            .order_by(Site.id).limit(cap)).all()]
+            .order_by(Site.id).limit(cap)).all()
+        # S6-13/S7-12: без явного оффера (Site.offer_id) сайт не генерируется. Говорим об этом в
+        # ошибках свипа, а не молча перескакиваем — оператор должен привязать оффер на карточке.
+        # Legacy-сайт с SiteOffer, но без offer_id, generate_site сам разрешит через site_offer().
+        ids = []
+        for sid, oid in rows:
+            if oid is None:
+                site = db.get(Site, sid)
+                if content.site_offer(db, site) is None:
+                    errs.append(f"site#{sid}: оффер не привязан — генерация пропущена")
+                    continue
+            ids.append(sid)
     for sid in ids:
         try:
             content.generate_site(sid, use_competitor=True)
             done += 1
+        except jobs.AlreadyRunning:
+            raise                       # ручная генерация идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
     return done, errs
@@ -242,18 +282,42 @@ def _stage_publish(cap):
     """Сайты с ≥1 edited-страницей -> publish_site (публикует все edited; гейт держится в сервисе)."""
     from sqlalchemy import select
     from app.db import SessionLocal
-    from app.models.site import Site, Page
+    from app.models.site import Page
     from app.services import publish
+    from datetime import datetime, timezone
 
     done, errs = 0, []
     with SessionLocal() as db:
-        ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.id.in_(
-                select(Page.site_id).where(Page.status == "edited")))
-            .order_by(Site.id).limit(cap)).all()]
+        # Очередь не должна голодать (G3): сайт, который не публикуется (нет оффера, выключен без
+        # резервного URL, домен не подтверждает запись, не провиженен, сбой панели), навсегда остаётся
+        # edited. При `ORDER BY id LIMIT cap` он с меньшим id занимал бы слот на каждом свипе, и
+        # нормальные сайты не публиковались бы никогда. Ротация по давности последней попытки
+        # (как в _stage_check_index) закрывает все причины разом, без копии блок-правил publish.
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
+        oldest: dict[int, datetime] = {}
+        for sid, at in db.execute(select(Page.site_id, Page.publish_attempted_at)
+                                  .where(Page.status == "edited")).all():
+            at = publish._aware(at) or epoch
+            oldest[sid] = min(at, oldest.get(sid, at))
+        ids = [sid for sid, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))][:cap]
     for sid in ids:
         try:
-            publish.publish_site(sid)
+            out = publish.publish_site(sid)
+            if isinstance(out, dict) and out.get("status") == "not_provisioned":
+                # edited-страницы есть, а сайт не провиженен (S5-09) — это не «сделано», а отказ:
+                # оператор должен увидеть его в ошибках свипа, а не в идеальной сводке.
+                errs.append(f"site#{sid}: {out.get('hint', 'сайт не провиженен')}")
+                continue
+            if isinstance(out, dict):
+                # S7-18: отказ/непроверенная запись/предупреждение по странице — в ошибки свипа
+                for path, why in (out.get("failed") or {}).items():
+                    errs.append(f"site#{sid}{path}: не записана — {why}")
+                for path, why in (out.get("unverified") or {}).items():
+                    errs.append(f"site#{sid}{path}: записана, но не подтверждена доменом — {why}")
+                for w in out.get("warnings") or []:
+                    errs.append(f"site#{sid}{w}")
+                if out.get("status") == "failed":
+                    continue
             done += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
@@ -269,22 +333,34 @@ def _stage_check_index(cap):
     """
     from sqlalchemy import select
     from app.db import SessionLocal
-    from app.models.site import Site, Page
+    from app.models.site import Page
     from app.services import publish
+    from datetime import datetime, timezone
 
     done, errs, blind = 0, [], 0
+    now = datetime.now(timezone.utc)
     with SessionLocal() as db:
-        ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.id.in_(
-                select(Page.site_id).where(Page.status == "published")))
-            .order_by(Site.id).limit(cap)).all()]
+        # Ротация (S7-16): раньше `ORDER BY Site.id LIMIT cap` брал одни и те же первые сайты, а
+        # остальные не проверялись НИКОГДА. Теперь берём только сайты с ПРОСРОЧЕННОЙ страницей
+        # (cooldown, publish.index_due), самые давно не проверявшиеся — первыми.
+        oldest: dict[int, datetime] = {}
+        for sid, pg in db.execute(select(Page.site_id, Page).where(Page.status == "published")).all():
+            if publish.index_due(pg, now):
+                ck = publish._aware(pg.index_checked_at) or datetime.min.replace(tzinfo=timezone.utc)
+                oldest[sid] = min(ck, oldest.get(sid, ck))
+        ids = [sid for sid, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))][:cap]
     for sid in ids:
         try:
-            out = publish.check_index(sid)
+            out = publish.check_index(sid, only_due=True)
             done += 1
             blind += sum(1 for st in (out.get("pages") or {}).values() if st == "unknown")
+            if out.get("all_unknown"):
+                # движки молчат (CAPTCHA/лимит): дальнейшие запросы только раздражают поисковики —
+                # стадию откладываем до следующего свипа, страницы вернутся по cooldown
+                break
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+    # engines_down уже виден оператору через index_unknown («индекс не выяснен»)
     return done, errs, {"index_unknown": blind} if blind else {}
 
 
@@ -344,6 +420,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
         # СЛЕДУЮЩИЙ свип, приняв несостоявшийся за только что отработавший.
         with jobs.track("sweep", trigger="auto" if trigger == "cron" else "manual",
                         stages=stages) as run:
+            reap_orphan_runs()          # замок свипа у нас: прочие 'running' в журнале — трупы (S7-20)
             run_id = _start_run(trigger)
             try:
                 for i, (key, _flag, cap_attr, handler) in enumerate(enabled):

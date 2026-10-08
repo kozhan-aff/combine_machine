@@ -32,6 +32,10 @@ _REGISTER_TABLES = (app.models.domain, app.models.site, app.models.offer, app.mo
 
 from app.integrations.rdap import RdapClient
 
+# iCloud-дубли («test_x 2.py», «fixture 2.json») — мусор синхронизации Documents на Mac; без этого
+# сьют собирает их как лишние тесты и считает 955 вместо 944 passed (S7-21).
+collect_ignore_glob = ["* 2.py", "* 2.json", "* 2.csv"]
+
 # настоящий бутстрап — для фикстуры real_rdap_bootstrap (autouse _no_paid_keys его подменяет)
 _REAL_RDAP_BOOTSTRAP = RdapClient._bootstrap
 
@@ -93,6 +97,34 @@ def _no_live_network(monkeypatch):
     except ImportError:                       # dnspython опционален — этого пути просто нет
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clean_diag_and_panel_state():
+    """Предохранитель aaPanel (пауза после отказа авторизации), кэш /diag и TTL-кэш проб LLM/SearXNG —
+    модульные глобалы процесса: без сброса пауза от одного теста блокировала бы панель в соседнем,
+    а кэш /diag протекал бы в чужой рендер."""
+    from app.integrations import aapanel
+    from app.services import diag_cache, diagnostics
+
+    def _reset():
+        aapanel.reset_block()
+        diagnostics.reset_probe_cache()
+        diag_cache._checks = None
+        diag_cache._checked_at = None
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
+def _close_http_pool():
+    """Пул httpx-клиентов (integrations/base.py) — модульный глобал: без сброса клиент, созданный в
+    одном тесте, жил бы в следующем."""
+    from app.integrations import base
+    base.close_pool()
+    yield
+    base.close_pool()
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +213,26 @@ def _no_panel_auth():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_publish_verify(monkeypatch):
+    """HTTP-проверка опубликованной страницы (publish._verify_live) ходит на сам домен — в тестах
+    по умолчанию выключена; тесты проверки включают её и подменяют siteprobe.fetch."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "PUBLISH_VERIFY", False)
+
+
+@pytest.fixture(autouse=True)
+def _acq_zones_open(monkeypatch):
+    """Кассовый гард зоны (S3-06) судит по белому списку v2 — а старые тесты денежного пути живут на
+    .ru-доменах v1. Для них список расширен; тесты самого гарда возвращают реальный
+    (`monkeypatch.setattr(acquisition, "_zone_allowlist", ...)`)."""
+    from app.services import acquisition
+    monkeypatch.setattr(acquisition, "_zone_allowlist",
+                        lambda: ["com", "net", "org", "co.uk", "ru", "рф", "xn--p1ai"])
+    # баланс провайдера перед отправкой (S3-09) — сеть; тесты проверки баланса подменяют её сами
+    monkeypatch.setattr(acquisition, "_balance_of", lambda client: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_paid_keys(monkeypatch):
     """Тесты герметичны к .env оператора и к сети реестров.
 
@@ -251,4 +303,49 @@ def client(monkeypatch):
     monkeypatch.setattr(BackorderClient, "client_orders", lambda self: [])
     monkeypatch.setattr(BackorderClient, "find_order", lambda self, domain: None)
     monkeypatch.setattr(BackorderClient, "order", _no_live_order)
+    from app.integrations.optimizator import OptimizatorClient
+    monkeypatch.setattr(OptimizatorClient, "balance", lambda self: 0.0)   # шапка /queue (S3-09)
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def origin_probe(monkeypatch):
+    """Пробы origin провижна (services/provisioning.probe_marker) — по умолчанию в MockTransport:
+    http и https отвечают 200, Origin CA выключен. Проба ищет в ТЕЛЕ nonce маркер-файла
+    (`/cm-probe-*`), поэтому «наш vhost» эмулируется выдачей nonce; `_new_nonce` подменён на константу.
+    Тест правит `.http`/`.https` (код ответа или исключение httpx), `.marker_http`/`.marker_https`/`.www`
+    (False = на этот вход отвечает ЧУЖОЙ/дефолтный vhost: 200 без nonce) и читает `.requests`."""
+    import httpx
+    from app.config import settings
+    from app.services import provisioning
+
+    class _Origin:
+        http = 200
+        https = 200
+        marker_http = True      # наш vhost обслуживает apex по HTTP
+        marker_https = True     # ...по HTTPS
+        www = True              # ...и www-алиас
+        nonce = "test-nonce"
+        requests: list = []
+
+    o = _Origin()
+    o.requests = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        o.requests.append(req)
+        https = req.url.scheme == "https"
+        res = o.https if https else o.http
+        if isinstance(res, Exception):
+            raise res
+        ours = o.marker_https if https else o.marker_http
+        if req.headers["host"].startswith("www."):
+            ours = ours and o.www
+        if res == 200 and ours and req.url.path.startswith("/cm-probe-"):
+            return httpx.Response(200, text=o.nonce)
+        return httpx.Response(res, text="ok")
+
+    monkeypatch.setattr(provisioning, "_origin_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(provisioning, "_new_nonce", lambda: o.nonce)
+    monkeypatch.setattr(settings, "ORIGIN_CA_AUTO", False, raising=False)
+    return o

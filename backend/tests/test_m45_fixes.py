@@ -46,7 +46,7 @@ def test_offer_pick_is_consistent_between_generate_and_publish(monkeypatch):
 
     with db.SessionLocal() as s:
         body = s.query(Page).filter(Page.site_id == site_id).first().body
-        picked = _pick_offer(s, site_id).brand
+        picked = _pick_offer(s, s.get(Site, site_id)).brand
     assert "NordVPN" in body and "Surfshark" not in body    # content written about NordVPN
     assert picked == "NordVPN"                               # link will go to NordVPN too
 
@@ -62,7 +62,7 @@ def test_empty_llm_page_is_skipped_not_fatal(monkeypatch):
     # the "/vs" comparison page comes back empty; the other two are fine
     monkeypatch.setattr(
         "app.integrations.llm.LlmClient.complete",
-        lambda self, system, prompt, **kw: "" if "против конкурентов" in prompt else "<h2>ok</h2><p>t</p>")
+        lambda self, system, prompt, **kw: "" if "comparison" in prompt else "<h2>ok</h2><p>t</p>")
 
     created = generate_site(site_id)          # no exception, partial batch commits
     assert created == 2
@@ -86,7 +86,7 @@ def test_dofill_inherits_lang_not_the_second_call_parameter(monkeypatch):
 
     monkeypatch.setattr(
         "app.integrations.llm.LlmClient.complete",
-        lambda self, system, prompt, **kw: "" if "против конкурентов" in prompt else "<h2>ok</h2><p>t</p>")
+        lambda self, system, prompt, **kw: "" if "comparison" in prompt else "<h2>ok</h2><p>t</p>")
     assert generate_site(site_id, lang="ru") == 2       # "/vs" skipped (empty LLM output)
 
     monkeypatch.setattr(
@@ -114,7 +114,7 @@ def test_dofill_inherits_offer_not_the_currently_active_one(monkeypatch):
 
     monkeypatch.setattr(
         "app.integrations.llm.LlmClient.complete",
-        lambda self, system, prompt, **kw: "" if "против конкурентов" in prompt else "<h2>ok</h2><p>t</p>")
+        lambda self, system, prompt, **kw: "" if "comparison" in prompt else "<h2>ok</h2><p>t</p>")
     assert generate_site(site_id, lang="ru") == 2       # "/vs" skipped (empty LLM output)
 
     # оператор переключает активный оффер сайта на другой бренд ПОСЛЕ частичной генерации
@@ -168,8 +168,9 @@ def test_render_html_uses_lang():
     from app.services.content import render_html
     page = SimpleNamespace(title="T", body="<p>x</p>")
     assert "<html lang='en'>" in render_html(page, None, lang="en")
-    assert "<html lang='ru'>" in render_html(page, None)          # default
-    assert "<html lang='ru'>" in render_html(page, None, lang="")  # empty -> default
+    assert "<html lang='ru'>" in render_html(page, None, lang="ru")
+    assert "<html lang='en'>" in render_html(page, None)          # default — международный en, не ru
+    assert "<html lang='en'>" in render_html(page, None, lang="")  # empty -> default
 
 
 # ── (4) index check matches by host, not substring ────────────────────────────
