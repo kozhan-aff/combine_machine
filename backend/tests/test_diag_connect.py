@@ -279,6 +279,19 @@ def test_write_is_retried_on_connect_error_but_read_timeout_of_a_read_is_retried
     assert p.n("getData") == 3
 
 
+def test_add_domain_is_a_write_retried_only_on_connect_failure():
+    """Minor: AddDomain — запись; ReadTimeout не повторяем, сбой соединения — безопасно."""
+    sites = {"status": True, "data": [{"id": 7, "name": "ex.com"}]}
+    p = _Panel(getData=sites, AddDomain=httpx.ReadTimeout("slow"))
+    with pytest.raises(httpx.ReadTimeout):
+        _client(p).add_domains("ex.com", ["www.ex.com"])
+    assert p.n("AddDomain") == 1
+    p = _Panel(getData=sites, AddDomain=httpx.ConnectTimeout("no route"))
+    with pytest.raises(httpx.ConnectTimeout):
+        _client(p).add_domains("ex.com", ["www.ex.com"])
+    assert p.n("AddDomain") == 3
+
+
 def test_ping_is_single_attempt():
     p = _Panel(GetTaskCount=httpx.ConnectTimeout("no route"))
     with pytest.raises(RuntimeError):

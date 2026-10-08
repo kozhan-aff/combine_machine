@@ -115,7 +115,7 @@ def _note_failure(msg: str) -> None:
 # DeleteSite/выпуск сертификата); ретраим только сбой СОЕДИНЕНИЯ, когда запрос не уходил.
 # GetTaskCount (ping) — одна попытка: следующий цикл /diag и есть повтор, а 3×connect-таймаут
 # держал бы поток дольше PING_TIMEOUT. Чтения (getData) — по общему правилу _is_retryable.
-_WRITE_ACTIONS = ("AddSite", "DeleteSite", "SetSSL", "apply_cert_api", "CreateFile", "SaveFileBody")
+_WRITE_ACTIONS = ("AddSite", "DeleteSite", "SetSSL", "apply_cert_api", "CreateFile", "SaveFileBody", "AddDomain")
 
 
 def _connect_only(exc: BaseException) -> bool:
