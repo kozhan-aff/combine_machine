@@ -8,7 +8,7 @@
 CLI для healthcheck контейнера: `python -m app.services.heartbeat` -> exit 0, если сердце свежее.
 """
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 NAME = "worker"
 BEAT_SEC = 60            # как часто воркер бьёт
