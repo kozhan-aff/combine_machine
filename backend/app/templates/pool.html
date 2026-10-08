@@ -1,6 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Пул доменов{% endblock %}
+{% block title %}
+Пул доменов{% endblock %}
 {% block content %}
+{# пейджер: query собирает panel.py (pager_qs) — пустые параметры пропущены, иначе `min_score=` → 422 #}
+{% macro pager() %}{% if pages > 1 %}
+<div class="chips" style="margin:8px 0">
+  <span class="hint">страница {{ page }} из {{ pages }} · найдено {{ matched }}</span>
+  {% if page > 1 %}<a class="chip" href="/domains/pool?{{ pager_qs }}&amp;page={{ page - 1 }}">← назад</a>{% endif %}
+  {% if page < pages %}<a class="chip" href="/domains/pool?{{ pager_qs }}&amp;page={{ page + 1 }}">вперёд →</a>{% endif %}
+</div>
+{% endif %}{% endmacro %}
+
 <h2><span class="idx">02</span> Полный реестр доменов
   <span class="hint">все домены во всех статусах — для расследований;
     ежедневная работа — <a href="/domains">инбокс M1</a></span></h2>
@@ -84,14 +94,7 @@
 <div class="wrap">
 {% if rows %}
 <div class="hint" style="margin-bottom:6px">DR — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
-{% if pages > 1 %}
-{% set qs = 'status=' ~ f_status ~ '&min_score=' ~ f_min_score ~ '&limit=' ~ f_limit ~ ('&show_all=1' if show_all else '') %}
-<div class="chips" style="margin:8px 0">
-  <span class="hint">страница {{ page }} из {{ pages }} · найдено {{ matched }}</span>
-  {% if page > 1 %}<a class="chip" href="/domains/pool?{{ qs }}&amp;page={{ page - 1 }}">← назад</a>{% endif %}
-  {% if page < pages %}<a class="chip" href="/domains/pool?{{ qs }}&amp;page={{ page + 1 }}">вперёд →</a>{% endif %}
-</div>
-{% endif %}
+{{ pager() }}
 <table>
   <thead><tr>
     <th>домен</th><th>статус</th><th>лейн</th><th class="num">цена</th><th>score</th><th class="num">RD</th>
@@ -207,14 +210,7 @@
   {% endfor %}
   </tbody>
 </table>
-{% if pages > 1 %}
-{% set qs = 'status=' ~ f_status ~ '&min_score=' ~ f_min_score ~ '&limit=' ~ f_limit ~ ('&show_all=1' if show_all else '') %}
-<div class="chips" style="margin:8px 0">
-  <span class="hint">страница {{ page }} из {{ pages }} · найдено {{ matched }}</span>
-  {% if page > 1 %}<a class="chip" href="/domains/pool?{{ qs }}&amp;page={{ page - 1 }}">← назад</a>{% endif %}
-  {% if page < pages %}<a class="chip" href="/domains/pool?{{ qs }}&amp;page={{ page + 1 }}">вперёд →</a>{% endif %}
-</div>
-{% endif %}
+{{ pager() }}
 {% else %}
 <div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни с
   «↻ Найти дропы» в <a href="/domains">инбоксе M1</a> (или добавь домены списком выше), затем

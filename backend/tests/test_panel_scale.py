@@ -61,3 +61,24 @@ def test_domain_indexes_declared_and_migration_matches():
     mig = (pathlib.Path(__file__).parents[1] / "alembic/versions/0032_domain_indexes.py").read_text()
     for n in want:
         assert n in mig
+
+
+def test_pool_pager_default_link_is_followable(client):
+    """Дефолтный /domains/pool (без min_score): ссылка «вперёд» не должна нести пустой min_score= (422)."""
+    _bulk(15, status="discovered")
+    html = client.get("/domains/pool?limit=10").text
+    assert "min_score=&" not in html and "status=&" not in html
+    import re
+    href = re.search(r'href="(/domains/pool\\?[^"]*page=2)"', html).group(1).replace("&amp;", "&")
+    r = client.get(href)
+    assert r.status_code == 200 and "страница 2 из 2" in r.text
+
+
+def test_deploy_busy_check_runs_under_lock(monkeypatch):
+    """TOCTOU: проверка живых задач — ПОД _LOCK, иначе задача успевает стартовать между проверкой и захватом."""
+    from app.services import deploy
+    seen = []
+    monkeypatch.setattr(deploy.settings, "GITHUB_TOKEN", "x")
+    monkeypatch.setattr(deploy, "_busy_jobs", lambda: seen.append(deploy._LOCK.locked()) or ["score"])
+    assert deploy.git_pull()["ok"] is False and deploy.git_force_pull()["ok"] is False
+    assert seen == [True, True]

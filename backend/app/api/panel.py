@@ -392,6 +392,10 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
         "closed_ids": {d.id for d in rows if d.status in ("rejected", "scored") and zone_closed(d, allow)},
         "f_status": status or "", "f_min_score": "" if min_score is None else min_score,
         "f_limit": limit, "show_all": show_all,
+        # query пейджера: пустые фильтры пропущены (`min_score=` → 422 на float|None)
+        "pager_qs": urlencode({k: v for k, v in (("status", status), ("min_score", min_score),
+                               ("limit", limit), ("show_all", 1 if show_all else None))
+                               if v not in (None, "")}),
     })
 
 

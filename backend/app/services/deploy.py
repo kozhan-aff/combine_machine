@@ -123,11 +123,11 @@ def git_pull() -> dict:
     """Безопасный путь: fetch → pull --ff-only → alembic → детект. needs_force при грязи/расхождении."""
     if not settings.GITHUB_TOKEN:
         return {"ok": False, "error": "GITHUB_TOKEN не задан в .env — нечем авторизовать git pull"}
-    if busy := _busy_jobs():
-        return _busy_error(busy)
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
+        if busy := _busy_jobs():  # под замком: окно «проверка → захват» закрыто
+            return _busy_error(busy)
         old = deploy_status().get("hash", "")
         try:
             # S21 (аудит 2026-07-18): явный URL (не имя remote'а) + голое имя ветки пишет
@@ -154,11 +154,11 @@ def git_force_pull() -> dict:
     (.env/.pem) выживают. git clean НЕ вызывается."""
     if not settings.GITHUB_TOKEN:
         return {"ok": False, "error": "GITHUB_TOKEN не задан в .env — нечем авторизовать"}
-    if busy := _busy_jobs():
-        return _busy_error(busy)
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
+        if busy := _busy_jobs():  # под замком: окно «проверка → захват» закрыто
+            return _busy_error(busy)
         env = _git_env()
         old = deploy_status().get("hash", "")
         try:
