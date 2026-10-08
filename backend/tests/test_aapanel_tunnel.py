@@ -91,7 +91,7 @@ def test_tunnel_mode_parses_strings(monkeypatch, val, exp):
 def test_tunnel_requires_ca_bundle(monkeypatch):
     monkeypatch.setattr(settings, "AAPANEL_TUNNEL", "1")
     monkeypatch.setattr(settings, "AAPANEL_URL", TUN)
-    with pytest.raises(RuntimeError, match="AAPANEL_CA_BUNDLE"):
+    with pytest.raises(RuntimeError, match="AAPANEL_TUNNEL=1 требует"):
         AaPanelClient()
 
 
@@ -100,7 +100,7 @@ def test_tunnel_forbids_verify_false_even_on_loopback(monkeypatch):
     monkeypatch.setattr(settings, "AAPANEL_URL", "https://127.0.0.1:18839")
     AaPanelClient()
     monkeypatch.setattr(settings, "AAPANEL_TUNNEL", "true")
-    with pytest.raises(RuntimeError, match="AAPANEL_CA_BUNDLE"):
+    with pytest.raises(RuntimeError, match="AAPANEL_TUNNEL=1 требует"):
         AaPanelClient()
 
 
