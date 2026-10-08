@@ -1756,6 +1756,15 @@ def _llm_note(clients: dict, notes: list) -> None:
             notes.append(note)
 
 
+def _wayback_note(states: list, notes: list) -> None:
+    """Видимая причина «ждут следующего прогона», если архив лёг (WaybackUnavailable): иначе
+    домены тихо уходят unresolved без единого слова в сообщении задачи."""
+    n = sum(1 for s in states if s.unresolved_why == "wayback_down")
+    notes[:] = [x for x in notes if not x.startswith("archive.org недоступен")]
+    if n:
+        notes.append(f"archive.org недоступен — {n} доменов ждут следующего прогона")
+
+
 def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget,
                run, notes: list | None = None, deep_budget=None) -> list:
     """Оркестратор: волны по порядку дёшево->дорого, между каждой — checkpoint (коммит
@@ -1790,7 +1799,8 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
         ("links", "ссылки", lambda alive: (_wave_links(alive, clients, st, links_b, run, notes),
                                            _persist_links(alive))),
         ("history", "history", lambda alive: (_wave_history(alive, clients, st, run),
-                                              _llm_note(clients, notes))),
+                                              _llm_note(clients, notes),
+                                              _wayback_note(states, notes))),
         ("deep", "анкоры", lambda alive: _wave_deep(alive, clients, st, deep_b, run, notes)),
     ]
     results, waterfall, alive = [], [], list(states)
