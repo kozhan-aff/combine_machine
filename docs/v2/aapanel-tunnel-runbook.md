@@ -64,10 +64,13 @@ aaPanel: Settings, API, в IP whitelist добавь `127.0.0.1` (старый �
 ## 5. Сертификат панели
 
 Серт самоподписанный (CN=`*.aapanel.com`), проверка идёт по пину файла, а не по имени.
-Скопируй с VPS `/www/server/panel/ssl/certificate.pem` в `secrets\aapanel-certificate.pem`
-(через `scp` или вставкой). В backend `./secrets` не смонтирован, поэтому положи файл туда, где
-он уже лежит для прямого режима, либо смонтируй каталог; путь укажи как `AAPANEL_CA_BUNDLE`
-(путь внутри контейнера).
+Скопируй с VPS `/www/server/panel/ssl/certificate.pem` на бокс в `backend\aapanel.pem`
+(через `scp` или вставкой). Файл уже gitignored (`*.pem`), `git pull` его не трогает. `backend\`
+монтируется как `/app` и в backend, и в worker (провижн идёт из worker), поэтому в `.env`:
+
+```
+AAPANEL_CA_BUNDLE=/app/aapanel.pem
+```
 
 ## 6. Настройки
 
@@ -80,7 +83,7 @@ TUNNEL_VPS_SSH_PORT=22
 TUNNEL_PORT=18839
 AAPANEL_TUNNEL=1
 AAPANEL_URL=https://aapanel-tunnel:18839
-AAPANEL_CA_BUNDLE=путь-к-серту-внутри-контейнера
+AAPANEL_CA_BUNDLE=/app/aapanel.pem
 ```
 
 Порт `TUNNEL_PORT` должен совпадать с портом панели на VPS. `AAPANEL_TUNNEL=1` без

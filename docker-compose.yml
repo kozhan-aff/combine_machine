@@ -116,7 +116,9 @@ services:
     # выходит с кодом 78 и причиной в логах (не стартует тихо). Runbook: docs/v2/aapanel-tunnel-runbook.md
     profiles: ["tunnel"]
     build: ./tunnel
-    restart: on-failure:5
+    # unless-stopped (как у остальных): после ребута бокса сеть/VPS могут быть недоступны, туннель обязан
+    # переподключаться бесконечно, а не сдаваться после 5 рестартов. Код 78 (нет ключа) виден как restarting.
+    restart: unless-stopped
     logging: *logging
     environment:
       TUNNEL_VPS_HOST: ${TUNNEL_VPS_HOST:-}

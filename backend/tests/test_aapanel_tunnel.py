@@ -67,6 +67,22 @@ def test_entrypoint_fails_loud_and_pins_host_key():
     assert "BatchMode=yes" in sh
 
 
+def test_tunnel_restarts_forever_and_autossh_retries_first_connect():
+    # on-failure:5 + GATETIME=30 -> после ночного ребута туннель оставался мёртвым
+    assert _svc()["restart"] == "unless-stopped"
+    sh = (ROOT / "tunnel" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "AUTOSSH_GATETIME=0" in sh
+
+
+def test_runbook_ca_path_visible_to_backend_and_worker():
+    svcs = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+    for name in ("backend", "worker"):
+        assert "./backend:/app" in svcs[name]["volumes"], name
+    md = (ROOT / "docs" / "v2" / "aapanel-tunnel-runbook.md").read_text(encoding="utf-8")
+    assert "AAPANEL_CA_BUNDLE=/app/aapanel.pem" in md
+    assert "смонтируй каталог" not in md
+
+
 def test_env_example_has_tunnel_keys():
     env = (ROOT / ".env.example").read_text(encoding="utf-8")
     for k in ("AAPANEL_TUNNEL", "TUNNEL_VPS_HOST", "TUNNEL_VPS_USER", "TUNNEL_VPS_SSH_PORT", "TUNNEL_PORT"):

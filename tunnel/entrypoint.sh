@@ -24,7 +24,9 @@ chmod 600 /root/.ssh/id_ed25519 /root/.ssh/known_hosts
 echo "aapanel-tunnel: 0.0.0.0:${PORT} -> ${USER_}@${TUNNEL_VPS_HOST}:${SSH_PORT} -> 127.0.0.1:${PORT}"
 # -M 0: автоперезапуск по ServerAlive (без отдельного порта мониторинга); StrictHostKeyChecking=yes:
 # подмена хоста = отказ, а не молчаливое «принять новый ключ»; BatchMode: без интерактивных вопросов.
-export AUTOSSH_GATETIME=30
+# AUTOSSH_GATETIME=0: autossh повторяет попытки и при неудаче ПЕРВОГО соединения (сеть после ребута
+# ещё не поднялась), а не считает её фатальной.
+export AUTOSSH_GATETIME=0
 exec autossh -M 0 -N \
   -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes \
