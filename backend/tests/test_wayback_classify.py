@@ -330,4 +330,5 @@ def test_classify_history_returns_texts_of_read_snapshots(monkeypatch):
     assert out["wayback_checked"] is True and len(out["texts"]) == 5
     assert all(len(t["text"]) <= 2000 for t in out["texts"])
     monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: [])
+    monkeypatch.setattr(wb, "probe", lambda d, **kw: {"archive_empty": True})
     assert wb.classify_history("x.com", sample=5, polite=0)["texts"] == []

@@ -27,8 +27,10 @@ def test_wayback_unchecked_when_no_snapshots(monkeypatch):
     from app.integrations.wayback import WaybackClient
     w = WaybackClient()
     monkeypatch.setattr(w, "get_snapshots", lambda domain, **k: [])
+    monkeypatch.setattr(w, "probe", lambda domain, **k: {"archive_empty": True})
     out = w.classify_history("nosnap.com", polite=0.0)
     assert out["wayback_checked"] is False and out["sampled"] == 0
+    assert out["archive_empty"] is True
 
 
 def test_wayback_unchecked_when_all_fetches_fail(monkeypatch):
