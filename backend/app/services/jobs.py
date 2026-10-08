@@ -60,6 +60,7 @@ HEARTBEAT_SEC трогает `updated_at` СВОЕЙ строки — незав
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -88,7 +89,49 @@ _INFLIGHT_LOCK = threading.RLock()
 # На проде (PostgreSQL, свой пул на подключение) эта гонка невозможна в принципе — лок там
 # не более чем безвредная микро-сериализация редких админ-операций; кросс-процессный замок
 # по-прежнему держит частичный уникальный индекс в БД, этот RLock его не подменяет.
-_DB_LOCK = threading.RLock()
+class _DbLock:
+    """RLock ТОЛЬКО для sqlite (тестовый харнесс, см. выше). На PostgreSQL у каждой сессии своё
+    соединение из пула, и общий лок лишь выстраивал в очередь 12 потоков волны, каждый из которых
+    после КАЖДОГО домена зовёт report()+cancelled() (F8-15). Диалект смотрим при входе: харнесс
+    переподвязывает SessionLocal к sqlite-движку на лету. Реентерабельность и «брали ли мы лок»
+    держим в thread-local стеке — выход обязан отпустить ровно то, что взял вход."""
+
+    def __init__(self):
+        self._rl = threading.RLock()
+        self._tl = threading.local()
+
+    @staticmethod
+    def _sqlite() -> bool:
+        from app.db import SessionLocal
+        bind = SessionLocal.kw.get("bind")
+        return bind is not None and bind.dialect.name == "sqlite"
+
+    def __enter__(self):
+        took = self._sqlite()
+        if took:
+            self._rl.acquire()
+        if not hasattr(self._tl, "stack"):
+            self._tl.stack = []
+        self._tl.stack.append(took)
+        return self
+
+    def __exit__(self, *exc):
+        if self._tl.stack.pop():
+            self._rl.release()
+        return False
+
+
+_DB_LOCK = _DbLock()
+# Троттлинг прогресс-тиков (F8-15): done/total/current чаще раза в _REPORT_EVERY на прогон в БД не
+# пишем — поллинг панели 1,5 с всё равно не увидит разницы, а 12 потоков волны делали бы по 2
+# раундтрипа на каждый домен. НЕ троттлятся: смена стадии, before/after чипа, message, финальный
+# тик done==total — и всё терминальное (_close идёт мимо report, через _own). Отмену (cancelled())
+# кэшируем тем же окном; request_cancel сбрасывает кэш, так что в своём процессе стоп мгновенный.
+_REPORT_EVERY = 0.5
+_clock = time.monotonic
+_last_tick: dict[int, float] = {}
+_cancel_seen: dict[int, float] = {}       # run_id -> момент, когда последний раз видели «не отменён»
+_TICK_LOCK = threading.Lock()
 # ДОПОЛНЕНИЕ ПРОТИВ СПЕКИ (см. выше): Future каждого spawn() — тестовый харнесс дренирует их
 # в _drain() ПЕРЕД тем, как снести SQLite-движок (см. conftest.py::_drain_background_jobs).
 # Без этого фоновый поток теста, который не дождался is_running()==False сам (реальный кейс:
@@ -241,6 +284,9 @@ def _close(run_id: int, status: str, error: str | None = None) -> None:
     from app.db import SessionLocal
     from app.models.job import JobRun
     values: dict = {"status": status, "error": error, "finished_at": _utcnow()}
+    with _TICK_LOCK:                        # прогон закрыт — его троттл-метки больше не нужны
+        _last_tick.pop(run_id, None)
+        _cancel_seen.pop(run_id, None)
     if status in ("done", "done_warn"):     # успех/с замечаниями — стадии отработали, чипы «пройдено»
         with _DB_LOCK, SessionLocal() as db:
             stages = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
@@ -327,6 +373,13 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.job import JobRun
+    if (stage is None and stage_key is None and message is None
+            and not (done is not None and done == total)):
+        now = _clock()
+        with _TICK_LOCK:
+            if now - _last_tick.get(run_id, -1e9) < _REPORT_EVERY:
+                return
+            _last_tick[run_id] = now
     values: dict = {}
     if done is not None:
         values["done"] = done
@@ -359,7 +412,7 @@ def finish(run_id: int | None, status: str) -> None:
     _OUTCOME[run_id] = status
 
 
-def cancelled(run_id: int | None) -> bool:
+def cancelled(run_id: int | None, *, cached: bool = False) -> bool:
     """«Мне пора остановиться?» — сервис спрашивает между элементами.
 
     True в ДВУХ случаях, и второй — не про кнопку:
@@ -368,21 +421,35 @@ def cancelled(run_id: int | None) -> bool:
         работу без замка — значит делать её ВТОРЫМ: два свипа в двух процессах = дубли страниц
         и двойной счёт LLM. Замок потерян -> уходим, а прогресс уже пишет преемник.
     Вне track (run_id=None) отменять нечего.
+
+    `cached=True` — для горячего цикла волны (после КАЖДОГО домена, F8-15): «не отменён» верим
+    _REPORT_EVERY секунд. Обычный вызов (между стадиями/элементами) всегда читает БД — потеря замка
+    должна быть замечена сразу.
     """
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.job import JobRun
     if run_id is None:
         return False
+    now = _clock()
+    with _TICK_LOCK:
+        if cached and now - _cancel_seen.get(run_id, -1e9) < _REPORT_EVERY:
+            return False                    # свежо видели «не отменён» — не бьём БД на каждый домен
     with _DB_LOCK, SessionLocal() as db:
         r = db.execute(select(JobRun).where(JobRun.id == run_id,
                                             JobRun.status == "running")).scalars().first()
-        return r is None or bool(r.cancel_requested)
+        stop = r is None or bool(r.cancel_requested)
+    if not stop:
+        with _TICK_LOCK:
+            _cancel_seen[run_id] = now
+    return stop
 
 
 def request_cancel(name: str) -> bool:
     """Кнопка «стоп»: помечаем прогон; сервис увидит это между элементами."""
     from app.db import SessionLocal
+    with _TICK_LOCK:
+        _cancel_seen.clear()                # стоп виден следующему же cancelled() этого процесса
     with _DB_LOCK, SessionLocal() as db:
         r = _running(db, name)
         if r is None:
@@ -512,6 +579,9 @@ def _reset() -> None:                       # только для тестов
     from app.db import SessionLocal
     from app.models.job import JobRun
     _drain()                                # добить фоновые потоки перед чисткой _INFLIGHT/БД
+    with _TICK_LOCK:
+        _last_tick.clear()
+        _cancel_seen.clear()
     with _INFLIGHT_LOCK:
         _INFLIGHT.clear()                   # иначе имя от прошлого теста блокирует spawn
     with _DB_LOCK, SessionLocal() as db:

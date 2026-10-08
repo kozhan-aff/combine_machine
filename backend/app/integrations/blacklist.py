@@ -29,9 +29,18 @@ case only), or set SPAMHAUS_DQS_KEY (free, lifts both restrictions).
 """
 import socket
 import threading
+import time
 from app.config import settings
 
 _TESTPOINT = "test"     # DBL-домен, всегда листнут (127.0.1.2) — контроль доступности
+# Короткий кэш ОТКАЗА контроля (F8-17): при мёртвом резолвере 12 потоков волны risk стояли в очереди на
+# _control_lock, каждый платя свой таймаут DNS. Теперь первый пострадавший платит, остальные получают
+# тот же отказ мгновенно; через NEGATIVE_TTL пробуем снова (транзиент не вечен — урок S14).
+NEGATIVE_TTL = 30.0
+
+
+_CONTROL_MSG = ("blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
+                "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
 
 
 class BlacklistClient:
@@ -47,6 +56,7 @@ class BlacklistClient:
     # СОСЕДНИЙ поток тем же миллисекундами резолвит тест-поинт успешно — резолвер живой, просто
     # не повезло с таймингом. Лок сериализует контроль: один реальный запрос на всех, детерминированно.
     _control_lock = threading.Lock()
+    _control_failed: tuple | None = None    # (момент отказа monotonic, ключ резолвера) — см. NEGATIVE_TTL
 
     def _resolve(self, host: str) -> str | None:
         """A-запись IP или None на NXDOMAIN. Через свой DNS_RESOLVER, если задан
@@ -78,27 +88,30 @@ class BlacklistClient:
         """Тест-поинт Spamhaus всегда листнут; если наш резолвер его не видит —
         публичный резолвер заблокирован, проверка бессмысленна → RAISE (fail-closed).
 
-        Кэшируем ТОЛЬКО положительный результат (контроль прошёл — на процесс). Отрицательный
-        НЕ кэшируем: транзиентный сбой резолвера сразу после старта воркера иначе навсегда
-        (до рестарта контейнера) загонял бы КАЖДЫЙ последующий домен в путь «история не
-        проверена», хотя Spamhaus восстановился через секунду."""
+        Успех кэшируем на процесс. Отказ — только на NEGATIVE_TTL (30 с): навсегда нельзя —
+        транзиентный сбой резолвера сразу после старта воркера загонял бы КАЖДЫЙ последующий домен
+        в путь «история не проверена» до рестарта контейнера (S14); совсем не кэшировать — тоже
+        нельзя: при мёртвом резолвере потоки волны вставали в очередь на локе по таймауту DNS (F8-17)."""
         with BlacklistClient._control_lock:
             key = (settings.DNS_RESOLVER, settings.SPAMHAUS_DQS_KEY)
             # _control_key None = флаг выставлен напрямую (тесты) — доверяем как раньше
             if BlacklistClient._control_ok and BlacklistClient._control_key in (None, key):
                 return
+            failed = BlacklistClient._control_failed
+            if failed and failed[1] == key and time.monotonic() - failed[0] < NEGATIVE_TTL:
+                raise RuntimeError(_CONTROL_MSG)
             try:
                 ip = self._resolve(self._dbl_host(_TESTPOINT))
             except OSError:
                 ip = None
             ok = bool(ip and ip.startswith("127."))
             if ok:
-                BlacklistClient._control_ok = True     # кэшируем только успех
+                BlacklistClient._control_ok = True     # успех кэшируем надолго, отказ — на NEGATIVE_TTL
+                BlacklistClient._control_failed = None
                 BlacklistClient._control_key = key
                 return
-            raise RuntimeError(
-                "blacklist: резолвер не видит Spamhaus DBL (тест-поинт не листнут) — "
-                "задай DNS_RESOLVER или SPAMHAUS_DQS_KEY")
+            BlacklistClient._control_failed = (time.monotonic(), key)
+            raise RuntimeError(_CONTROL_MSG)
 
     def is_blacklisted(self, domain: str) -> bool | None:
         """True = листнут в Spamhaus DBL, False = чист, None = транзиентный сбой резолвера.
