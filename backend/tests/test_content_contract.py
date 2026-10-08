@@ -434,6 +434,7 @@ def test_site_badge_title_mentions_reserve_when_configured(client, monkeypatch):
     '<a href="  javascript:alert(1)">x</a>', '<a href="jav&#x09;ascript:alert(1)">x</a>',
     '<a href="data:text/html;base64,PHNjcmlwdD4=">x</a>', '<a href="vbscript:x">x</a>',
     '<a href="mailto:a@b.c">x</a>', '<a href="//evil.com/x">x</a>',
+    '<a href="/\\evil.com">x</a>', '<a href="\\\\evil.com">x</a>', '<a href="/&#9;/evil.com">x</a>',
 ])
 def test_sanitize_strips_dangerous_href(vec):
     from app.services.content import _sanitize

@@ -613,3 +613,22 @@ def test_fake_panel_shape_matches_the_real_client():
     assert _fail_msg(FILE_EXISTS) == "Requested file exists!"
     # и это ровно те поля, по которым клиент достаёт данные из живого ответа
     assert isinstance(LIST_EMPTY["data"], list) and SimpleNamespace(**ADD_OK).siteStatus is True
+
+
+def test_delete_file_read_timeout_is_not_retried():
+    """DeleteFile — запись: после ReadTimeout запрос мог исполниться, второй не шлём."""
+    class _Slow:
+        def __init__(self):
+            self.n = 0
+
+        def request(self, method, url, **kw):
+            self.n += 1
+            raise httpx.ReadTimeout("slow", request=httpx.Request(method, url))
+
+        def close(self):
+            pass
+
+    p = _Slow()
+    with pytest.raises(httpx.ReadTimeout):
+        _client(p).delete_file("/www/wwwroot/ex.com/m.txt")
+    assert p.n == 1

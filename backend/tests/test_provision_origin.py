@@ -414,3 +414,18 @@ def test_closed_origin_on_unknown_host_has_no_warning(monkeypatch, origin_probe)
                         lambda: httpx.Client(transport=httpx.MockTransport(handler)))
     _env(monkeypatch)
     assert "warnings" not in provisioning.provision(_seed())
+
+
+def test_delete_file_failure_keeps_provisioned_with_warning(monkeypatch, origin_probe):
+    """Сбой удаления маркера не роняет провижн: provisioned + предупреждение оператору."""
+    class _BadDelete(_Panel):
+        def __call__(self, path, data=None):
+            if "DeleteFile" in path:
+                self.calls.append((path, data))
+                return {"status": False, "msg": "permission denied"}
+            return super().__call__(path, data)
+
+    _env(monkeypatch, panel=_BadDelete())
+    out = provisioning.provision(_seed())
+    assert out["status"] == "provisioned"
+    assert any("не удалён из docroot" in w for w in out["warnings"])

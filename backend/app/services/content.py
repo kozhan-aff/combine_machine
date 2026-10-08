@@ -39,7 +39,10 @@ _IMG_SRC = re.compile(r"^/?assets/([A-Za-z0-9][A-Za-z0-9._-]*)\.svg$")
 def _attr_filter(tag: str, attr: str, value: str):
     if tag == "a" and attr == "href":
         # протокол-относительная «//host/…» — внешний хост без схемы, мимо allowlist http(s)
-        return None if (value or "").strip().startswith("//") else value
+        # браузер выкидывает \t\r\n и трактует «\» как «/»: «/\evil.com», «\\evil.com»,
+        # «/&#9;/evil.com» (после декода «/<tab>/evil.com») — тоже внешний хост
+        norm = re.sub(r"[\t\r\n]", "", (value or "").strip()).replace("\\", "/")
+        return None if norm.startswith("//") else value
     if tag != "img":
         return value
     if attr == "src":
