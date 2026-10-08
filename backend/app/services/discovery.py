@@ -4,6 +4,12 @@
 отсев известных -> бесплатный DR Ahrefs только для НОВЫХ, не спрошенных за 4 суток (`dr_seen`) ->
 вставка тех, у кого DR >= min_dr.
 
+Ключа Ahrefs НЕТ (решение оператора 2026-10: его не будет) — DR не может быть условием входа
+(S1-01). Домены, чей DR получить не удалось (ключ пуст, 401/403, пачка упала), НЕ выбрасываются, а
+сохраняются в резерв (dr=NULL) с капом `max_candidates_per_run` и приоритетом по дешёвым признакам
+имени; цену решает бесплатная часть воронки (RDAP-возраст, архив, риск). Перед DR/резервом — фильтры
+качества имени (`domain_filters.name_reject`), чтобы не гнать мусор ни в лимит DR, ни в базу.
+
 Почему DR-фильтр здесь, а не волной скоринга (живой замер 2026-10-01): Nominet отдаёт всё
 расписание (~266 тыс. строк), DropCatch — ~134 тыс. в день, и почти всё — DR 0, засыпанный
 автоматическим SEO-спамом (RD 700+ из спам-анкоров). Хранить их, чтобы потом отклонить, — раздувать
@@ -18,7 +24,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from app.services.domain_filters import canonical_domain, emd_candidates, tld_match
+from app.services.domain_filters import (canonical_domain, emd_candidates, name_reject, tld_match,
+                                         zone_of)
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +50,20 @@ def _clients() -> dict:
     return {"dropcatch": DropCatchClient, "nominet": NominetClient, "mx": RegistryMxClient}
 
 
-def _collect(enabled: dict, st: dict, run=None) -> tuple[dict, dict]:
-    """({источник: строки}, {упавший источник: имя исключения}). Сбой одного источника не топит
-    остальные, но и не молчит: вызывающий пишет его в сообщение задачи — иначе «все источники
-    упали» неотличимо от пустого дня. Стоп проверяется между источниками."""
+def _collect(enabled: dict, st: dict, run=None, state: dict | None = None) -> tuple[dict, dict, dict, list]:
+    """({источник: строки}, {упавший источник: имя исключения}, {источник: новые валидаторы},
+    [источник, ответивший 304]).
+    Сбой одного источника не топит остальные, но и не молчит: вызывающий пишет его в сообщение
+    задачи — иначе «все источники упали» неотличимо от пустого дня. Стоп проверяется между
+    источниками.
+
+    `state` — валидаторы условного GET с прошлого УСПЕШНОГО прогона (S1-11): 304 -> источник
+    пропущен (ни в `out`, ни в `failed`: вызывающий пишет «не менялся»). Новые валидаторы
+    возвращаются третьим значением и сохраняются только после успешной записи."""
+    from app.integrations.base import NotModified
     from app.services import jobs
-    clients, out, failed = _clients(), {}, {}
+    clients, out, failed, fresh_state, unchanged = _clients(), {}, {}, {}, []
+    state = state or {}
     for name in (*AUTO_SOURCES, "emd"):
         if not enabled.get(name):
             continue
@@ -61,7 +76,15 @@ def _collect(enabled: dict, st: dict, run=None) -> tuple[dict, dict]:
                          "acquire_deadline": None, "market_lang": c["lang"] or None}
                         for c in emd_candidates(st["emd_sets"], st["brand_tokens"])]
             else:
-                rows = clients[name]().list_dropping()
+                cli = clients[name]()
+                if state.get(name):
+                    cli.validators = state[name]
+                rows = cli.list_dropping()
+                if getattr(cli, "validators", None):
+                    fresh_state[name] = cli.validators
+        except NotModified:
+            unchanged.append(name)      # не пустой день и не сбой
+            continue
         except Exception as e:  # noqa: BLE001 — один источник упал, остальные идут
             logger.warning("discovery source %s failed: %s", name, e)
             failed[name] = type(e).__name__
@@ -69,7 +92,7 @@ def _collect(enabled: dict, st: dict, run=None) -> tuple[dict, dict]:
         if not rows:
             logger.warning("discovery source %s дал 0 строк (пусто/сменился формат?)", name)
         out[name] = rows
-    return out, failed
+    return out, failed, fresh_state, unchanged
 
 
 def _known(db, names: list) -> dict:
@@ -143,9 +166,9 @@ def _dr_once(ahrefs, part: list) -> dict:
         return ahrefs.dr_free(part)
 
 
-def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int, set, list]:
+def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int, set, list, set]:
     """({домен: DR} прошедших порог, сколько ПРОПУЩЕНО, имена, взятые из памяти dr_seen, причины
-    пропуска). Причины — для сообщения задачи (финальное ревью, minor «е»): «DR недоступен — N»
+    пропуска, {домены, чей DR получить НЕ удалось} — кандидаты в резерв без DR, S1-01). Причины — для сообщения задачи (финальное ревью, minor «е»): «DR недоступен — N»
     без причины не говорил оператору, что чинить. Только класс исключения / HTTP-код — ни URL, ни
     ключа (httpx кладёт полный URL в текст HTTPStatusError).
 
@@ -174,8 +197,8 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
     ask = [n for n in names if n not in memo]
     if ask and getattr(ahrefs, "api_key", None) == "":     # у фейков тестов атрибута нет
         logger.warning("DR-фильтр: AHREFS_API_KEY пуст — %d доменов без DR пропущены", len(ask))
-        return kept, len(ask), set(memo), ["ключ AHREFS_API_KEY не задан"]
-    skipped, why = 0, []
+        return kept, len(ask), set(memo), ["ключ AHREFS_API_KEY не задан"], set(ask)
+    skipped, why, unknown = 0, [], set()
 
     def _why(reason: str) -> None:
         if reason not in why:                              # одна причина на сотню пачек — один раз
@@ -196,9 +219,11 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
                 logger.warning("DR-фильтр: Ahrefs %s — ключ не принят, остаток %d пропущен",
                                code, len(ask) - i)
                 skipped += len(ask) - i
+                unknown |= set(ask[i:])
                 break
             logger.warning("DR-фильтр: пачка из %d пропущена (%s)", len(part), type(e).__name__)
             skipped += len(part)
+            unknown |= set(part)
             continue
         want = set(part)
         drs = {d: float(dr) for d, dr in got.items() if d in want}
@@ -207,13 +232,14 @@ def _dr_filter(names: list, min_dr: float, ahrefs, run=None) -> tuple[dict, int,
                            len(part))
             _why("ответ Ahrefs без спрошенных доменов")
             skipped += len(part)
+            unknown |= set(part)
             continue
         if want - set(drs):
             _why("доменов нет в ответе Ahrefs")
         skipped += len(want - set(drs))
         kept.update({d: dr for d, dr in drs.items() if dr >= min_dr})
         _dr_remember(part, drs, now)
-    return kept, skipped, set(memo), why
+    return kept, skipped, set(memo), why, unknown
 
 
 def _new_domain(name: str, c: dict, dr):
@@ -270,13 +296,33 @@ def _line(src: str, s: dict, min_dr: float) -> str:
             f" → DR≥{min_dr:g}: {s['saved']}")
 
 
+def _cheap_rank(name: str, c: dict) -> tuple:
+    """Приоритет резерва без DR по дешёвым признакам имени (меньше — раньше): меньше цифр/дефисов,
+    короче метка, ближе дроп. Не оценка ценности, а порядок отбора под кап."""
+    label = name.split(".", 1)[0]
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    dl = c.get("acquire_deadline")
+    return (sum(ch.isdigit() or ch == "-" for ch in label), len(label),
+            (dl if dl and dl.tzinfo else far))
+
+
+_NAME_RU = {"length": "длина", "digits": "цифры", "hyphens": "дефисы", "junk": "мусорное слово"}
+
+
+def _top(counter: dict, n: int = 5) -> str:
+    return ", ".join(f"{k} {v}" for k, v in sorted(counter.items(), key=lambda kv: -kv[1])[:n])
+
+
 def run_discovery() -> int:
     """Собрать включённые источники и записать новых кандидатов. Прогресс — через jobs.track
-    (видно и когда зовёт оркестратор из воркера). Возвращает, сколько доменов вставлено."""
+    (видно и когда зовёт оркестратор из воркера). Возвращает, сколько доменов вставлено.
+
+    Все включённые автоматические источники упали (S1-07) — задача завершается `failed`
+    (RuntimeError), а не «успешным нулём»: оркестратор и Пульт видят отказ."""
     from app.db import SessionLocal
     from app.integrations.ahrefs import AhrefsClient
     from app.services import jobs
-    from app.services.settings import get_settings
+    from app.services.settings import get_settings, get_source_state, set_source_state
 
     st = get_settings()
     enabled, min_dr = st["sources_enabled"], float(st["min_dr"])
@@ -285,23 +331,46 @@ def run_discovery() -> int:
               + [{"key": "dr", "label": "DR-фильтр"}, {"key": "save", "label": "запись"}])
     with jobs.track("discovery", stages=stages) as run:
         _dr_purge()
-        by_src, failed = _collect(enabled, st, run)
+        state = get_source_state()
+        by_src, failed, fresh_state, unchanged = _collect(enabled, st, run, state)
         fails = [f"{_SOURCE_RU[k]}: упал ({v})" for k, v in failed.items()]
+        skip304 = [f"{_SOURCE_RU[k]}: не менялся" for k in unchanged]
         cand, stats, emd = {}, {}, set()
+        zone_cut, name_cut = {}, {}
         for src, rows in by_src.items():
             s = stats.setdefault(src, {"rows": len(rows), "zone": 0, "new": 0, "saved": 0})
             for r in rows:
                 d = canonical_domain(r.get("domain"))
-                if not d or (src in AUTO_SOURCES and not tld_match(d, st["tld_allowlist"])):
+                if not d:
                     continue
+                if src in AUTO_SOURCES:
+                    if not tld_match(d, st["tld_allowlist"]):
+                        z = zone_of(d)                       # S1-08: видно, что отрезала зона
+                        zone_cut[z] = zone_cut.get(z, 0) + 1
+                        continue
+                    why = name_reject(d, st["name_filters"])
+                    if why:                                  # S1-10: до DR — не жжём лимит и базу
+                        s["zone"] += 1
+                        name_cut[_NAME_RU[why]] = name_cut.get(_NAME_RU[why], 0) + 1
+                        continue
                 s["zone"] += 1
                 c = cand.setdefault(d, {**r, "domain": d})
                 if src == "emd":
                     emd.add(d)
                     c.setdefault("market_lang", r.get("market_lang"))
+        extra = []
+        if zone_cut:
+            extra.append(f"вне белого списка зон: {_top(zone_cut)}")
+        if name_cut:
+            extra.append(f"отсечено по имени: {_top(name_cut)}")
         if not cand:
+            if failed and not any(by_src.values()) and not unchanged:
+                # упали ВСЕ (включённые) источники, остальные пусты — это отказ, не «пустой день»
+                raise RuntimeError(" · ".join(["все источники упали", *fails])[:300])
             jobs.report(run, done=0, total=0, current="",
-                        message=" · ".join(["нет кандидатов", *fails]))
+                        message=" · ".join(["нет кандидатов", *skip304, *fails, *extra]))
+            if fresh_state and not failed:
+                set_source_state({**state, **fresh_state})
             return 0
         with SessionLocal() as db:
             known = _known(db, list(cand))
@@ -312,12 +381,18 @@ def run_discovery() -> int:
         # свободного EMD ссылок и не должно быть, DR 0 — не повод его терять
         auto = [n for n in fresh if cand[n]["source"] in AUTO_SOURCES and n not in emd]
         jobs.report(run, stage="dr", current=f"DR для {len(auto)} новых")
-        drs, skipped, remembered, why = (_dr_filter(auto, min_dr, AhrefsClient(), run)
-                                         if auto else ({}, 0, set(), []))
+        drs, skipped, remembered, why, unknown = (_dr_filter(auto, min_dr, AhrefsClient(), run)
+                                                  if auto else ({}, 0, set(), [], set()))
         for n in fresh:
             if n not in remembered:              # «новых» = не известных и не спрошенных за 4 суток
                 stats[cand[n]["source"]]["new"] += 1
-        keep = [n for n in fresh if n not in auto or n in drs]
+        # Резерв без DR (S1-01): домены, чей DR получить не удалось, не пропадают, а входят под кап
+        # по дешёвым признакам имени. Домен с ОТВЕЧЕННЫМ низким DR в резерв не идёт — это не «не знаем».
+        cap = int(st["max_candidates_per_run"])
+        pool = sorted((n for n in auto if n in unknown and n not in drs),
+                      key=lambda n: _cheap_rank(n, cand[n]))
+        reserve = set(pool[:cap]) if cap > 0 else set()
+        keep = [n for n in fresh if n not in auto or n in drs or n in reserve]
         jobs.report(run, stage="save", current=f"запись {len(keep)}")
         inserted = _insert(keep, cand, drs, run)
         for n in keep:
@@ -325,9 +400,16 @@ def run_discovery() -> int:
         msg = " · ".join(_line(src, s, min_dr) for src, s in stats.items())
         if remembered:
             msg += f" · DR из памяти (4 сут) — {len(remembered)}"
+        if reserve or pool:
+            msg += (f" · без DR (резерв): {len(reserve)} из {len(pool)}"
+                    + (f", кап {cap} — отсечено {len(pool) - len(reserve)}" if len(pool) > len(reserve) else ""))
         if skipped:
             msg += f" · DR недоступен — {skipped} пропущено" + (f" ({'; '.join(why)})" if why else "")
-        jobs.report(run, done=1, total=1, current="", message=" · ".join([msg, *fails]))
+        jobs.report(run, done=1, total=1, current="",
+                    message=" · ".join([msg, *skip304, *fails, *extra]))
+        if fresh_state and not failed:
+            # валидаторы условного GET — только после УСПЕШНОЙ записи и если ничего не упало
+            set_source_state({**state, **fresh_state})
         return inserted
 
 

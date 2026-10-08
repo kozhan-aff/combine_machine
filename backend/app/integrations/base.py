@@ -34,6 +34,29 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+class NotModified(Exception):
+    """Источник ответил 304: файл с прошлого забора не менялся (условный GET, S1-11)."""
+
+
+def conditional_get(client, url: str, **kwargs):
+    """GET с If-None-Match/If-Modified-Since по `client.validators` ({etag, last_modified} с прошлого
+    успешного забора, ставит вызывающий). 304 -> NotModified. Новые валидаторы кладёт обратно в
+    `client.validators` — вызывающий сохранит их ПОСЛЕ успешной обработки (иначе упавший прогон
+    «потерял» бы день: следующий получил бы 304 на файл, который так и не разобрали)."""
+    v = getattr(client, "validators", None) or {}
+    headers = dict(kwargs.pop("headers", None) or {})
+    if v.get("etag"):
+        headers["If-None-Match"] = v["etag"]
+    if v.get("last_modified"):
+        headers["If-Modified-Since"] = v["last_modified"]
+    r = client.request("GET", url, headers=headers, **kwargs)
+    if r.status_code == 304:
+        raise NotModified(url)
+    hdr = getattr(r, "headers", None) or {}
+    client.validators = {"etag": hdr.get("ETag"), "last_modified": hdr.get("Last-Modified")}
+    return r
+
+
 _backoff = wait_exponential(multiplier=1, max=10)
 
 

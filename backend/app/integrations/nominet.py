@@ -9,7 +9,7 @@ import gzip
 import io
 from datetime import datetime, timedelta, timezone
 
-from app.integrations.base import BaseClient
+from app.integrations.base import BaseClient, conditional_get
 
 URL = "https://droplists.nominet.uk/current/uk.csv.gz"
 
@@ -40,9 +40,12 @@ class NominetClient(BaseClient):
     def __init__(self, lookahead_days: int = 3):
         super().__init__("", timeout=120.0)
         self.lookahead_days = lookahead_days
+        self.validators: dict | None = None   # ETag/Last-Modified с прошлого забора (S1-11)
 
     def list_dropping(self) -> list[dict]:
-        raw = self.request("GET", URL).content
+        """Файл обновляется раз в сутки (~03:01Z), а автопилот гоняет discovery ежечасно: при
+        заданных `validators` и 304 бросает `base.NotModified` — 4 МБ не качаем."""
+        raw = conditional_get(self, URL).content
         return parse_droplist(gzip.decompress(raw).decode("utf-8", errors="replace"),
                               datetime.now(timezone.utc), self.lookahead_days)
 

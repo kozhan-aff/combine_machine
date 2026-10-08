@@ -5,6 +5,9 @@
 «какая зона наша» разъехались бы молча.
 """
 import re
+import unicodedata
+
+import idna
 
 # Проверяем punycode-форму (ASCII), метка-за-меткой (аудит 2026-07-14, F30): старый
 # `[a-z0-9-]+` пропускал мусор, который потом платно бьётся о whois/Ahrefs —
@@ -20,16 +23,21 @@ _DOMAIN_RE = re.compile(rf"^(?:{_LABEL}\.)+{_TLD}$")
 
 def canonical_domain(raw) -> str | None:
     """Единая канон-форма домена для ВСЕХ источников: lower, без www./точки, IDN→punycode.
-    None если не домен (мусор, e-mail, пустое, недопустимые метки)."""
+    None если не домен (мусор, e-mail, пустое, недопустимые метки).
+
+    IDNA 2008 (пакет `idna`, S1-09), а не кодек `s.encode("idna")` (IDNA 2003): тот молча
+    отображает `straße.com` в `strasse.com` и `faß.de` в `fass.de` — это ДРУГИЕ домены, и купить
+    мы могли бы чужое имя. Спорные (непропускаемые IDNA 2008) символы — явный отказ (None), а не
+    тихое отображение."""
     s = (raw or "").strip().lower().rstrip(".")
     if s.startswith("www."):
         s = s[4:]
     if not s or len(s) > 253 or "@" in s or " " in s:
         return None
     try:
-        puny = s.encode("idna").decode("ascii")
-    except (UnicodeError, ValueError):
-        return None                       # пустая метка, >63, недопустимый символ
+        puny = idna.encode(unicodedata.normalize("NFC", s), uts46=False).decode("ascii")
+    except (idna.IDNAError, UnicodeError, ValueError):
+        return None                       # пустая метка, >63, недопустимый/спорный символ
     return puny if _DOMAIN_RE.match(puny) else None
 
 
@@ -48,6 +56,41 @@ def tld_match(domain: str, allowlist) -> str | None:
         if t and domain.endswith("." + t) and "." not in domain[: -len(t) - 1]:
             return t
     return None
+
+
+# Фильтры качества имени на входе discovery (S1-10). Живая статистика окна Nominet (9 047 co.uk):
+# 2 917 с меткой длиннее 15 символов, 893 с дефисом, 363 с цифрами; без платного DR отсекать спам
+# нечем, кроме признаков самого имени. Дефолты КОНСЕРВАТИВНЫЕ — режут явный мусор, а не «некрасивое»;
+# оператор подкручивает через update_settings(name_filters=…).
+DEFAULT_NAME_FILTERS = {
+    "max_label_len": 30,        # символов в первой метке (0 — не проверять)
+    "max_digit_share": 0.4,     # доля цифр в метке (1.0 — не проверять)
+    "max_hyphens": 2,           # дефисов в метке (-1 — не проверять)
+    "junk": ["xxx", "porn", "casino", "viagra", "escort"],   # подстроки-мусор в имени
+}
+
+
+def name_reject(domain: str, f: dict | None = None) -> str | None:
+    """Почему имя не годится как кандидат ('length' | 'digits' | 'hyphens' | 'junk') или None.
+    Punycode-метки (`xn--…`) длину/цифры/дефисы не судим: они кодируют юникод-имя, а не мусор."""
+    f = {**DEFAULT_NAME_FILTERS, **(f or {})}
+    label = domain.split(".", 1)[0].lower()
+    if not label.startswith("xn--"):
+        if f["max_label_len"] and len(label) > int(f["max_label_len"]):
+            return "length"
+        # доля цифр — только у меток от 6 символов: у «3m»/«a1» она ничего не говорит о мусоре
+        if len(label) >= 6 and sum(c.isdigit() for c in label) / len(label) > float(f["max_digit_share"]):
+            return "digits"
+        if int(f["max_hyphens"]) >= 0 and label.count("-") > int(f["max_hyphens"]):
+            return "hyphens"
+    if any(j and j in label for j in (str(x).lower() for x in f.get("junk") or ())):
+        return "junk"
+    return None
+
+
+def zone_of(domain: str) -> str:
+    """Зона вне белого списка для счётчика «отсечено зоной» (S1-08): всё после первой метки."""
+    return domain.split(".", 1)[1] if "." in domain else domain
 
 
 _SUBSTRING_MIN = 7

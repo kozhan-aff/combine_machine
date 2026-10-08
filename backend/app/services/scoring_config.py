@@ -58,4 +58,5 @@ MAX_LINKS_PER_RUN = 500      # W4 Ahrefs batch-analysis: 25 units/домен
 MAX_DEEP_PER_RUN = 20        # W6 анкоры + история трафика: ~1,1 тыс. units/домен; 0 = выключить
 SPAM_ANCHOR_MAX = 0.2        # доля спам-анкоров (по refdomains), выше — отказ spam_anchors
 TOPIC_FAR_BELOW = 0.3        # близость прошлой темы к VPN ниже — пакет не берёт (инвариант 4, Р2)
+MAX_CANDIDATES_PER_RUN = 2000   # резерв без DR (нет ключа Ahrefs / DR недоступен): сколько сохранить за прогон; 0 — резерва нет
 UNITS_FLOOR = 300_000        # пол остатка units Ahrefs в месяце: ниже — W4/W6 не тратят (автопилот — раз в час)

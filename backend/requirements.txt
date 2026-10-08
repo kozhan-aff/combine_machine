@@ -14,6 +14,7 @@ google-api-python-client>=2.140
 google-auth>=2.34
 jinja2>=3.1
 cryptography>=42          # CSR для Cloudflare Origin CA (services/provisioning._key_and_csr)
+idna>=3.4                  # IDNA 2008 в canonical_domain (straße.com != strasse.com); тянется httpx, фиксируем явно
 nh3>=0.2                   # HTML sanitizer (published pages are public — strip hostile markup)
 python-multipart>=0.0.9   # FastAPI form parsing (panel POST action buttons)
 pytest>=8            # offline test harness (tests/) — runs on SQLite, no PG/Docker needed

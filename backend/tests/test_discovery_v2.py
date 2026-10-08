@@ -21,6 +21,14 @@ def slept(monkeypatch):
     return out
 
 
+@pytest.fixture(autouse=True)
+def classic_dr_gate():
+    """Тесты этого файла описывают «классический» вход: DR — условие появления кандидата. Резерв
+    без DR (S1-01, решение оператора: ключа Ahrefs не будет) выключен кап-0; сам резерв —
+    в tests/test_discovery_g4.py."""
+    update_settings(max_candidates_per_run=0)
+
+
 class _Src:
     rows: list = []
 
@@ -323,7 +331,7 @@ def test_failing_source_does_not_sink_others(monkeypatch, caplog):
 
 
 def test_failed_source_visible_even_when_no_candidates(monkeypatch):
-    # «все источники упали» не должно выглядеть как пустой день
+    # «все источники упали» не должно выглядеть как пустой день (и как успешный done)
     update_settings(sources_enabled={"nominet": True})
 
     class Boom:
@@ -331,8 +339,11 @@ def test_failed_source_visible_even_when_no_candidates(monkeypatch):
             raise RuntimeError("nominet down")
     monkeypatch.setattr(discovery, "_clients", lambda: {"nominet": Boom})
     _ahrefs(monkeypatch, {})
-    assert discovery.run_discovery() == 0
-    assert jobs.last("discovery")["message"] == "нет кандидатов · Nominet (.uk): упал (RuntimeError)"
+    # S1-07: все источники упали — задача FAILED с причиной, а не «успешный ноль»
+    with pytest.raises(RuntimeError, match="Nominet"):
+        discovery.run_discovery()
+    last = jobs.last("discovery")
+    assert last["status"] == "failed" and "Nominet (.uk): упал (RuntimeError)" in last["error"]
 
 
 def test_stale_v1_source_keys_in_db_fall_back_to_code_defaults(monkeypatch):

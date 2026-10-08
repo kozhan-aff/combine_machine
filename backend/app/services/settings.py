@@ -43,6 +43,7 @@ def _defaults() -> dict:
         "max_deep_per_run": cfg.MAX_DEEP_PER_RUN,
         "spam_anchor_max": cfg.SPAM_ANCHOR_MAX,
         "units_floor": cfg.UNITS_FLOOR,
+        "discovery_opts": {},
     }
 
 
@@ -128,6 +129,50 @@ def _clean_emd_sets(raw) -> list[dict]:
     return out
 
 
+def _discovery_view(opts) -> dict:
+    """discovery_opts (JSONB, частично пустой) -> эффективные max_candidates_per_run и name_filters."""
+    o = opts or {}
+    try:
+        cap = int(o.get("max_candidates_per_run", cfg.MAX_CANDIDATES_PER_RUN))
+    except (TypeError, ValueError):
+        cap = cfg.MAX_CANDIDATES_PER_RUN
+    return {"max_candidates_per_run": max(0, min(cap, 50_000)),
+            "name_filters": _clean_name_filters(o.get("name_filters"))}
+
+
+def _clean_name_filters(raw) -> dict:
+    """Фильтры имени с UI/API -> валидный словарь поверх дефолтов; мусор в числах -> дефолт."""
+    from app.services.domain_filters import DEFAULT_NAME_FILTERS
+    out = dict(DEFAULT_NAME_FILTERS)
+    out["junk"] = list(DEFAULT_NAME_FILTERS["junk"])
+    if not isinstance(raw, dict):
+        return out
+    for k, cast, lo, hi in (("max_label_len", int, 0, 63), ("max_digit_share", float, 0.0, 1.0),
+                            ("max_hyphens", int, -1, 10)):
+        try:
+            out[k] = max(lo, min(hi, cast(raw[k]))) if k in raw else out[k]
+        except (TypeError, ValueError):
+            pass
+    if "junk" in raw:
+        out["junk"] = _clean_list(raw["junk"])
+    return out
+
+
+def get_source_state() -> dict:
+    """Валидаторы условного GET источников discovery ({источник: {etag, last_modified}}), S1-11."""
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        return dict((_row(db).discovery_opts or {}).get("source_state") or {})
+
+
+def set_source_state(state: dict) -> None:
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        r = _row(db)
+        r.discovery_opts = {**(r.discovery_opts or {}), "source_state": state}
+        db.commit()
+
+
 def _row(db):
     """Вернуть (создав при отсутствии) строку scoring_settings id=1, засеянную дефолтами."""
     from app.models.settings import ScoringSettings
@@ -164,6 +209,7 @@ def get_settings() -> dict:
             "max_deep_per_run": int(r.max_deep_per_run),
             "spam_anchor_max": float(r.spam_anchor_max),
             "units_floor": int(r.units_floor),
+            **_discovery_view(r.discovery_opts),
         }
 
 
@@ -180,6 +226,13 @@ def update_settings(**kw) -> dict:
         for k in ("tld_allowlist", "brand_tokens"):
             if kw.get(k) is not None:
                 setattr(r, k, _clean_list(kw[k]))
+        if kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None:
+            cur = dict(r.discovery_opts or {})
+            if kw.get("max_candidates_per_run") is not None:
+                cur["max_candidates_per_run"] = max(0, min(int(kw["max_candidates_per_run"]), 50_000))
+            if kw.get("name_filters") is not None:
+                cur["name_filters"] = _clean_name_filters(kw["name_filters"])
+            r.discovery_opts = cur
         if kw.get("emd_sets") is not None:
             r.emd_sets = _clean_emd_sets(kw["emd_sets"])   # ValueError -> выходим ДО commit
         if "sources_enabled" in kw and isinstance(kw["sources_enabled"], dict):
