@@ -144,6 +144,13 @@
       <b id="v_deep">{{ s.max_deep_per_run }}</b>
     </div>
     <div class="go">
+      <span class="f">лимит в сутки</span>
+      <input type="number" name="units_daily_cap" min="0" max="2000000" step="1000" value="{{ s.units_daily_cap }}"
+             style="width:110px; padding:2px 8px"
+             title="сколько units платные волны могут потратить за сутки UTC; 0 — пейсинга нет">
+      <span class="hint">0 — выкл. Месячный пол держит остаток, этот лимит не даёт выжечь его за несколько суток</span>
+    </div>
+    <div class="go">
       <span class="f">пол остатка</span>
       <input type="range" name="units_floor" min="0" max="2000000" step="50000" value="{{ s.units_floor }}"
              oninput="document.getElementById('v_floor').textContent=this.value" style="flex:1 1 160px">

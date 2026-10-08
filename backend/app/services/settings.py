@@ -136,7 +136,12 @@ def _discovery_view(opts) -> dict:
         cap = int(o.get("max_candidates_per_run", cfg.MAX_CANDIDATES_PER_RUN))
     except (TypeError, ValueError):
         cap = cfg.MAX_CANDIDATES_PER_RUN
+    try:
+        daily = int(o.get("units_daily_cap", 0))
+    except (TypeError, ValueError):
+        daily = 0
     return {"max_candidates_per_run": max(0, min(cap, 50_000)),
+            "units_daily_cap": max(0, min(daily, 2_000_000)),
             "name_filters": _clean_name_filters(o.get("name_filters")),
             "zone_channels": _clean_zone_channels(o.get("zone_channels", cfg.ZONE_CHANNELS))}
 
@@ -173,6 +178,28 @@ def _clean_name_filters(raw) -> dict:
     if "junk" in raw:
         out["junk"] = _clean_list(raw["junk"])
     return out
+
+
+def units_spent_today(left: int) -> int:
+    """Сколько units Ahrefs потрачено за текущие сутки UTC по ВИДИМОМУ остатку (S2-11).
+
+    База суток — первый остаток, увиденный сегодня (хранится в discovery_opts["units_day"], без
+    миграции): units, потраченные ДО первого взгляда суток, не считаются — оценка мягкая. Остаток
+    вырос (сброс месяца / докупили лимит) — база поднимается, иначе «потрачено» ушло бы в минус."""
+    from datetime import datetime, timezone
+    from app.db import SessionLocal
+    today = datetime.now(timezone.utc).date().isoformat()
+    with SessionLocal() as db:
+        r = _row(db)
+        cur = dict(r.discovery_opts or {})
+        day = cur.get("units_day") or {}
+        start = day.get("start")
+        if day.get("date") != today or not isinstance(start, int) or left > start:
+            cur["units_day"] = {"date": today, "start": int(left)}
+            r.discovery_opts = cur
+            db.commit()
+            return 0
+        return max(0, start - int(left))
 
 
 def get_source_state() -> dict:
@@ -244,8 +271,10 @@ def update_settings(**kw) -> dict:
             if kw.get(k) is not None:
                 setattr(r, k, _clean_list(kw[k]))
         if (kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None
-                or kw.get("zone_channels") is not None):
+                or kw.get("zone_channels") is not None or kw.get("units_daily_cap") is not None):
             cur = dict(r.discovery_opts or {})
+            if kw.get("units_daily_cap") is not None:
+                cur["units_daily_cap"] = max(0, min(int(kw["units_daily_cap"]), 2_000_000))
             if kw.get("zone_channels") is not None:
                 cur["zone_channels"] = _clean_zone_channels(kw["zone_channels"])   # ValueError до commit
             if kw.get("max_candidates_per_run") is not None:

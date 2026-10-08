@@ -1288,6 +1288,28 @@ def _units_below_floor(clients: dict, st: dict) -> str | None:
     return None
 
 
+def _units_daily_spent(clients: dict, st: dict) -> str | None:
+    """Суточный пейсинг units (S2-11, по умолчанию ВЫКЛ: units_daily_cap=0). Пол остатка держит
+    только месяц целиком — часовой свип выжигал бы лимит за несколько суток. Потрачено за сутки >=
+    лимита -> платные волны ждут завтра. Остаток неизвестен — решает `_units_below_floor` (при
+    ненулевом поле) или тут пропускаем: пейсинг без цифры — не повод блокировать."""
+    cap = int(st.get("units_daily_cap") or 0)
+    if cap <= 0:
+        return None
+    try:
+        left = clients["ahrefs"].units_left()
+    except Exception:  # noqa: BLE001
+        return None
+    if left is None:
+        return None
+    from app.services.settings import units_spent_today
+    spent = units_spent_today(int(left))
+    if spent >= cap:
+        return (f"Ahrefs: за сутки потрачено {spent:,} units >= суточного лимита {cap:,} — платные "
+                f"волны ждут завтра".replace(",", " "))
+    return None
+
+
 def _no_ahrefs_key(clients: dict) -> bool:
     """Ключа Ahrefs нет вовсе: платные волны W4/W6 пропускаются (не ошибка и не «слепой» отказ)."""
     ah = clients.get("ahrefs")
@@ -1305,7 +1327,7 @@ def _paid_gate_closed(clients: dict, st: dict) -> tuple | None:
     if getattr(ah, "api_key", None) == "":             # у фейков тестов атрибута нет
         return ("ahrefs_no_key", "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) "
                                  "пропущены, оценка без RD/DR")
-    note = _units_below_floor(clients, st)
+    note = _units_below_floor(clients, st) or _units_daily_spent(clients, st)
     return ("units_floor", note) if note is not None else None
 
 

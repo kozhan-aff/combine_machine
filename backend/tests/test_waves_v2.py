@@ -1512,3 +1512,41 @@ def test_rescore_with_full_clean_wayback_still_rehabilitates_dirty_history():
         assert d.wayback_checked is True and not any((d.prior_flags or {}).values())
         assert scoring.history_verdict(d) == "clean" and transitions.dirty_reason(d) is None
         transitions.check(d, "approved")                    # не бросает: домен чист по новым уликам
+
+
+def test_daily_units_cap_paces_paid_waves_and_is_off_by_default(monkeypatch):
+    """S2-11: суточный лимит units. По умолчанию выключен (0) — старое поведение, units спрашиваются
+    один раз. Включён: первый прогон дня ставит базу и работает, после траты >= лимита платные волны
+    ждут завтра (с понятной причиной), на новых сутках база сбрасывается."""
+    from app.services import jobs, settings as sset
+    from app.services.settings import update_settings
+    assert sset.get_settings()["units_daily_cap"] == 0
+    update_settings(units_daily_cap=20_000)
+    assert sset.get_settings()["units_daily_cap"] == 20_000
+    _mk("pace.com", deadline=NOW + timedelta(days=2))
+    ah = FakeAh({"pace.com": ROW}, units=1_000_000)
+    clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
+    monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
+    scoring.score_pending(limit=10)                         # база суток = 1 000 000, потрачено 0
+    assert ah.batches == [["pace.com"]]
+    ah.units = 970_000                                      # за сутки ушло 30 000 >= 20 000
+    ah.batches.clear()
+    did2 = _mk("pace2.com", deadline=NOW + timedelta(days=2))
+    ah.data["pace2.com"] = ROW
+    scoring.score_pending(limit=10)
+    assert ah.batches == []
+    assert "за сутки потрачено 30 000 units >= суточного лимита 20 000" in jobs.last("score")["message"]
+    with db.SessionLocal() as s:
+        assert s.get(Domain, did2).status == "discovered"   # ждёт завтра, не отклонён
+    # новые сутки: вчерашняя база не действует
+    from app.models.settings import ScoringSettings
+    with db.SessionLocal() as s:
+        row = s.get(ScoringSettings, 1)
+        o = dict(row.discovery_opts)
+        o["units_day"] = {"date": "2000-01-01", "start": 1_000_000}
+        row.discovery_opts = o
+        s.commit()
+    scoring.score_pending(limit=10)
+    assert ah.batches == [["pace2.com"]]
+    update_settings(units_daily_cap=0)                      # выкл — лимита нет, при любой трате
+    assert sset.get_settings()["units_daily_cap"] == 0
