@@ -178,8 +178,9 @@ def publish_site(site_id: int) -> dict:
         # на ещё не лежащий CSS/картинку; провал ассетов = страницы НЕ трогаем (прежняя версия
         # сайта остаётся целой), оператору — список записанного. Атомарного rename через API
         # aaPanel не гарантируем (не проверено вживую), поэтому — порядок и честный отчёт.
-        # Прошлые опубликованные страницы сайта (не в этом прогоне) — в навигацию, но их тела
-        # НЕ переписываем: в БД у них мог остаться непросмотренный черновик (гейт редактуры).
+        # Прошлые опубликованные страницы сайта (не в этом прогоне) — в навигацию; их файлы
+        # перерисовываем в фазе 3 из того же p.body (у published тело неизменно: save_draft /
+        # mark_edited такие страницы отказывают), чтобы nav не осиротила страницы, вышедшие позже.
         lang0, brand0 = ready[0][2], ready[0][1].brand
         live = db.execute(select(Page).where(Page.site_id == site_id, Page.status == "published")
                           ).scalars().all()
@@ -232,6 +233,30 @@ def publish_site(site_id: int) -> dict:
             p.status = "published"
             p.published_at = now
             published.append(p.url_path)
+
+        # Навигация общая: ранее опубликованным страницам нужна ссылка на только что вышедшие.
+        # Тело/статус/offer не меняем — тот же p.body и тот же offer_id; одинаковые байты при
+        # неизменной nav (идемпотентно). Отказ записи — предупреждение, страница остаётся прежней.
+        if blocked is None and published:
+            for q in live:
+                if q.id in run_ids:
+                    continue
+                q_offer = db.get(Offer, q.offer_id) if q.offer_id is not None else fallback_offer
+                if (q_offer is None or cta_link(q_offer, reserve_url) is None
+                        or (not q_offer.active and not reserve_url)):
+                    warnings.append(f"{q.url_path}: nav не обновлён (нет пригодного оффера)")
+                    continue
+                q_lang = norm_lang(q.lang or (q_offer.language if q_offer.language else None))
+                try:
+                    q_bid = build_id_of(render_html(q, q_offer, lang=q_lang, reserve_url=reserve_url, ctx=ctx))
+                    ap.write_file(_target_path(site.doc_root, q.url_path),
+                                  render_html(q, q_offer, lang=q_lang, reserve_url=reserve_url,
+                                              build_id=q_bid, ctx=ctx))
+                except AaPanelBlocked as e:
+                    blocked = e
+                    break
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"{q.url_path}: nav не обновлён: {type(e).__name__}: {e}"[:200])
 
         # ── фаза 4: robots.txt + sitemap.xml по ОПУБЛИКОВАННЫМ страницам (не по edited) ────────
         if blocked is None and (published or live):

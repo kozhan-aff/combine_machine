@@ -298,9 +298,24 @@ def test_asset_failure_leaves_pages_untouched_and_reports_written(monkeypatch):
         assert s.query(Page).filter_by(site_id=sid).one().status == "edited"
 
 
-def test_published_page_body_not_rewritten_when_republishing_siblings(writes):
+def test_published_home_gets_nav_link_to_later_page(writes):
+    sid = _site(pages=[("/", "edited"), ("/vs", "draft")])
+    publish.publish_site(sid)
+    assert "href='/vs/'" not in dict(writes)["/www/wwwroot/g8.com/index.html"]
+    with db.SessionLocal() as s:                                              # человек вычитал /vs
+        s.query(Page).filter_by(site_id=sid, url_path="/vs").one().status = "edited"
+        s.commit()
+    writes.clear()
+    publish.publish_site(sid)
+    assert "href='/vs/'" in dict(writes)["/www/wwwroot/g8.com/index.html"]   # «/» перерисована
+    with db.SessionLocal() as s:
+        assert s.query(Page).filter_by(site_id=sid, url_path="/").one().status == "published"
+
+
+def test_published_page_body_not_changed_when_republishing_siblings(writes):
     sid = _site(pages=[("/", "published"), ("/vs", "edited")])
     publish.publish_site(sid)
-    assert [p for p, _ in writes if p.endswith("/index.html")] == ["/www/wwwroot/g8.com/vs/index.html"]
+    home = dict(writes)["/www/wwwroot/g8.com/index.html"]
+    assert "Body of the page that is long enough." in home and "href='/vs/'" in home
     sm = dict(writes)["/www/wwwroot/g8.com/sitemap.xml"]
     assert "g8.com/</loc>" in sm and "g8.com/vs/</loc>" in sm                # ранее опубликованная — в sitemap
