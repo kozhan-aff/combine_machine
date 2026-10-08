@@ -95,7 +95,7 @@ STOPWORDS = {
                # fr
                "pharmacie en ligne", "sans ordonnance", "médicaments sans",
                # sl / pl / cs
-               "brez recepta", "lekarna online", "bez recepty", "apteka online", "tabletki na potencję",
+               "brez recepta", "lekarna online", "spletna lekarna", "bez recepty", "apteka online", "tabletki na potencję",
                "bez receptu", "lékárna online", "tabletky na potenci"],
     "casino": ["casino", "roulette", "slots", "jackpot", "blackjack", "baccarat",
                "free spins", "casino bonus", "azino", "azino777", "joycasino",
@@ -258,12 +258,24 @@ def _visible_text(raw_html: str) -> str:
     return " ".join(html_lib.unescape(_TAG.sub(" ", text)).split())
 
 
+# Короткие/двусмысленные фразы считаем по границам слов: «putas gratis» живёт внутри «disputas gratis».
+_WORD_BOUND = frozenset({"putas gratis"})
+
+
+def _count(low: str, w: str) -> int:
+    w = w.replace("-", " ")
+    if w in _WORD_BOUND:
+        return len(re.findall(rf"(?<!\w){re.escape(w)}(?!\w)", low))
+    return low.count(w)
+
+
 def _classify_text(text: str) -> set[str]:
     """Categories whose stop-words appear >= _MIN_HITS times in the text."""
-    low = text.lower()
+    # дефис == пробел («Online-Apotheke» = «online apotheke»); и в тексте, и в словаре
+    low = text.lower().replace("-", " ")
     found = set()
     for cat, words in STOPWORDS.items():
-        if sum(low.count(w) for w in words) >= _MIN_HITS:
+        if sum(_count(low, w) for w in words) >= _MIN_HITS:
             found.add(cat)
     return found
 

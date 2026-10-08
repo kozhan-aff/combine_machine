@@ -332,3 +332,12 @@ def test_classify_history_returns_texts_of_read_snapshots(monkeypatch):
     monkeypatch.setattr(wb, "get_snapshots", lambda d, **kw: [])
     monkeypatch.setattr(wb, "probe", lambda d, **kw: {"archive_empty": True})
     assert wb.classify_history("x.com", sample=5, polite=0)["texts"] == []
+
+
+def test_stopword_boundaries_hyphens_and_slovene_pharmacy():
+    """Minor: «putas gratis» не срабатывает внутри слова; дефисные варианты и словоформа находятся."""
+    from app.integrations.wayback import _classify_text
+    assert "adult" not in _classify_text("disputas gratis y disputas gratis de nuevo")
+    assert "adult" in _classify_text("putas gratis aquí y putas gratis allá")
+    assert "pharma" in _classify_text("Online-Apotheke rezeptfrei kaufen")
+    assert "pharma" in _classify_text("spletna lekarna, spletna lekarna 24")
