@@ -129,7 +129,9 @@ def _spec():
         # S3-03: канал выкупа v1 не должен молча дрейфовать — капча Yandex / 404 видны здесь словами.
         ("backorder", "Backorder", "M2 · выкуп (ставка, .RU/.РФ)", settings.BACKORDER_LOGIN, "M2", False,
          lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
-        ("wayback", "Wayback", "M1 · история", "1", "M1", True,
+        # не критичен (Ruling 2026-10-08): медленный/упавший Wayback не зажигает баннер на всех
+        # экранах; строка на /diag и предупреждение в роли остаются
+        ("wayback", "Wayback", "M1 · история (при сбое воронка может стоять)", "1", "M1", False,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
         ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),

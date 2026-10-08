@@ -77,7 +77,7 @@ def alert() -> dict | None:
     with _LOCK:
         if _checks is None:
             return None
-        # Только КРИТИЧНЫЕ (R2-18): лежащий некритичный источник (Nominet, registry.mx, DropCatch,
+        # Только КРИТИЧНЫЕ (R2-18): лежащий некритичный источник (Wayback, Nominet, registry.mx, DropCatch,
         # Spamhaus, Cloudflare/aaPanel до подпроекта 2, Ahrefs с нулевым остатком units до месячного
         # сброса) — строка на /diag, а не баннер на всех
         # экранах: иначе он горел бы неделями, и его перестали бы читать.
