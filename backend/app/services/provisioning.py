@@ -78,10 +78,15 @@ def _new_nonce() -> str:
     return secrets.token_hex(12)       # шов для тестов: фикстура подменяет на константу
 
 
+# Соль имени — константа, НЕ секрет панели: ключ aaPanel не должен влиять на публичный путь файла
+# (смена ключа меняла бы имя, а производное от секрета в URL — лишняя утечка информации).
+_MARKER_SALT = "cm-probe-v1"
+
+
 def marker_name(domain: str) -> str:
     """Имя маркер-файла в docroot: стабильное для домена (повтор провижна перезаписывает один файл, а
     не копит их) и разное у сайтов (общий путь на весь портфель был бы отпечатком)."""
-    h = hashlib.sha256(f"{domain}|{settings.AAPANEL_API_KEY}".encode()).hexdigest()[:12]
+    h = hashlib.sha256(f"{domain}|{_MARKER_SALT}".encode()).hexdigest()[:12]
     return f"cm-probe-{h}.txt"
 
 
@@ -368,6 +373,14 @@ def provision(site_id: int) -> dict:
             return {"status": "error", "domain": domain, "step": "verify",
                     "error": f"наш vhost не отвечает по HTTP на origin {ip} с Host={domain}: {http_detail} — "
                              "сайт не объявлен готовым, повтор провижна безопасен"}
+
+        # Проба прошла — маркер больше не нужен: публичный файл с nonce в docroot боевого сайта
+        # (отпечаток) удаляем. Best-effort: сбой удаления не роняет провижн (имя стабильно,
+        # повторный провижн перезапишет/удалит тот же файл).
+        try:
+            ap.delete_file(f"{root.rstrip('/')}/{mname}")
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"маркер {mname} не удалён из docroot: {type(e).__name__}: {e}"[:200])
 
         site.provision_step = "done"
         if site.status == "provisioning":     # published/monitoring НЕ откатываем в content (S6-12)

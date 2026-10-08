@@ -77,6 +77,8 @@ class _Panel:
             return {"data": self.sites}
         if "CreateFile" in path or "SaveFileBody" in path:
             return {"status": True}
+        if "DeleteFile" in path:
+            return {"status": True}
         if "AddDomain" in path:
             if self.on_add_domain:
                 self.on_add_domain()
@@ -158,6 +160,18 @@ def test_marker_nonce_is_written_to_docroot_and_probed(monkeypatch, origin_probe
     https = next(r for r in origin_probe.requests if r.url.scheme == "https")
     assert https.url.path == f"/{name}" and https.extensions["sni_hostname"] == "ex.com"
     assert provisioning.marker_name("a.com") != provisioning.marker_name("b.com")   # не общий отпечаток
+
+
+def test_marker_removed_after_verify_and_salt_is_not_the_api_key(monkeypatch, origin_probe):
+    """Minor: после успешной пробы маркер удаляется; имя не зависит от AAPANEL_API_KEY."""
+    _, panel = _env(monkeypatch)
+    out = provisioning.provision(_seed())
+    assert out["status"] == "provisioned"
+    name = provisioning.marker_name("ex.com")
+    dele = [d for p, d in panel.calls if "DeleteFile" in p]
+    assert dele and dele[0]["path"] == f"/www/wwwroot/ex.com/{name}"
+    monkeypatch.setattr(settings, "AAPANEL_API_KEY", "другой-ключ")
+    assert provisioning.marker_name("ex.com") == name
 
 
 def test_default_vhost_answering_200_does_not_pass_verify(monkeypatch, origin_probe):
