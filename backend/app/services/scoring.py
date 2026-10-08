@@ -559,6 +559,11 @@ def score_pending(limit: int = 100) -> int:
                 if held:
                     idle_msg = f"{held} доменов ждут следующего прогона"
     stages = [dict(s) for s in FUNNEL_STAGES]
+    if gate is not None and gate[0] == "ahrefs_no_key":
+        # ключа Ahrefs нет: платные волны честно помечены «пропущена» (не сломана, а отключена)
+        for s in stages:
+            if s["key"] in ("links", "deep"):
+                s["state"] = "skip"
     # Budget, а не [int]: волна avail конкурентная (12 потоков), голый `box[0] -= 1` под ней — гонка
     whois_budget = Budget(int(st["max_whois_per_run"]))
     links_budget = Budget(int(st["max_links_per_run"]))
@@ -1777,7 +1782,9 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
             results += [_commit_result(s, run, st) for s in alive]
             after = sum(1 for s in alive if s.alive)
         # та же подпись и у последней волны: «N решено» считало бы только выживших
-        waterfall.append(f"{label}: {before} → {after}")
+        skipped_paid = key in ("links", "deep") and _no_ahrefs_key(clients)
+        waterfall.append(f"{label}: пропуск (нет ключа Ahrefs)" if skipped_paid
+                         else f"{label}: {before} → {after}")
         jobs.report(run, message=" · ".join(waterfall + notes),
                     stage_key=key, stage_before=before, stage_after=after)
     return results

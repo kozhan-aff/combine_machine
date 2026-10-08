@@ -254,3 +254,18 @@ def test_https_and_split_timeouts():
     assert c.base_url.startswith("https://")
     t = c._client.timeout
     assert t.connect == 5.0 and t.read == 45.0
+
+
+def test_ping_is_light_and_does_not_follow_redirect(monkeypatch):
+    c = WaybackClient()
+    seen = {}
+
+    def get(url, **kw):
+        seen.update(url=url, **kw)
+        return httpx.Response(302)
+    monkeypatch.setattr(c._client, "get", get)
+    assert c.ping() is True
+    assert "/cdx/" not in seen["url"] and seen["follow_redirects"] is False
+    assert seen["timeout"].read <= 10
+    monkeypatch.setattr(c._client, "get", lambda url, **kw: httpx.Response(503))
+    assert c.ping() is False

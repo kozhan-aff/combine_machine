@@ -305,3 +305,22 @@ def test_blind_requeue_still_blind_stays_scored(monkeypatch):
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.status == "scored" and not d.wayback_checked
+
+
+def test_no_key_marks_paid_chips_skipped_and_waterfall(monkeypatch):
+    from app.integrations.ahrefs import AhrefsClient
+    _mk("chips.com", deadline=NOW + timedelta(days=2))
+    monkeypatch.setattr(scoring, "_make_clients", lambda: _full_clients(
+        FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), AhrefsClient(api_key=""), AgedWB()))
+    real, msgs = jobs.report, []
+
+    def spy(run_id, **kw):
+        if kw.get("message"):
+            msgs.append(kw["message"])
+        return real(run_id, **kw)
+    monkeypatch.setattr(jobs, "report", spy)
+    scoring.score_pending(limit=10)
+    last = jobs.last("score")
+    states = {s["key"]: s.get("state") for s in last["stages"]}
+    assert states["links"] == "skip" and states["deep"] == "skip" and states["history"] != "skip"
+    assert any("ссылки: пропуск (нет ключа Ahrefs)" in m for m in msgs)       # водопад живой задачи
