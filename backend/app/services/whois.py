@@ -10,7 +10,7 @@ Net::Whois, как в v1. TCI (.ru) удалён вместе с РФ. Логи�
 потоков. После `_FAILURE_LIMIT` сбоев ПОДРЯД канал считается мёртвым до конца прогона и не
 вызывается вовсе: `probe` сразу поднимает `CircuitOpen`, воронка пишет `whois:circuit_open` и
 обрабатывает домен как обычный сбой whois (unresolved для не-bid). Счётчик — атрибут инстанса
-клиента (`rdap.lookup_failures`, `aparser.whois_failures`); клиенты пересоздаются раз в прогон
+клиента (`rdap.lookup_failures_<зона>`, `aparser.whois_failures`); клиенты пересоздаются раз в прогон
 (`scoring._make_clients()`), поэтому сработавший предохранитель не переживает прогон. Под
 конкурентностью волны счётчик меняется под общим локом из `_make_clients` (`_rdap_lock`,
 `_whois_lock`): голый `+= 1` не атомарен.
@@ -28,8 +28,9 @@ class CircuitOpen(RuntimeError):
     """Предохранитель канала сработал — до конца прогона канал не вызывается."""
 
 
-def guarded(client, attr: str, call, name: str, lock=None):
-    """Вызвать `call()` под предохранителем со счётчиком `client.<attr>`. `lock` — общий лок
+def guarded(client, attr: str, call, name: str, lock=None, soft: tuple = ()):
+    """Вызвать `call()` под предохранителем со счётчиком `client.<attr>`. `soft` — классы
+    исключений, которые НЕ считаются падением канала (троттлинг: канал жив, просит подождать). `lock` — общий лок
     волны; гейт-чек и запись счётчика — обе под ним (детерминированно проверяют спай-локом).
     Тем же помощником волна risk защищает Google Web Risk (scoring._risk_one)."""
     cm = lock if lock is not None else nullcontext()
@@ -39,6 +40,8 @@ def guarded(client, attr: str, call, name: str, lock=None):
         raise CircuitOpen(f"{name}: предохранитель сработал, канал пропускается до конца прогона")
     try:
         out = call()
+    except soft:
+        raise
     except Exception:
         with cm:
             setattr(client, attr, getattr(client, attr, 0) + 1)
@@ -58,9 +61,14 @@ def _aparser_whois(ap, domain: str, lock=None) -> dict:
 
 
 def _rdap_lookup(rdap, domain: str, lock=None) -> dict:
-    """RDAP lookup под предохранителем (счётчик `rdap.lookup_failures`). 404 — не сбой: lookup
-    отвечает «домена нет» без исключения."""
-    return guarded(rdap, "lookup_failures", lambda: rdap.lookup(domain), "RDAP", lock)
+    """RDAP lookup под предохранителем ПО ЗОНЕ (счётчик `rdap.lookup_failures_<tld>`): три .nl
+    подряд (SIDN отвечает 429 на второй запрос) не должны отключать RDAP для .com/.co.uk до
+    конца прогона (S1-06). 404 — не сбой: lookup отвечает «домена нет» без исключения; троттлинг
+    (`RdapThrottled`) — тоже не падение канала."""
+    from app.integrations.rdap import RdapThrottled
+    zone = domain.rsplit(".", 1)[-1].lower()
+    return guarded(rdap, f"lookup_failures_{zone}", lambda: rdap.lookup(domain), f"RDAP .{zone}", lock,
+                   soft=(RdapThrottled,))
 
 
 def probe(domain: str, clients: dict) -> dict:

@@ -43,6 +43,7 @@ def _client(body):
     `request`, а не `_call`: проверяем как раз ТО, что делает `_call` с ответом."""
     c = AParserClient()
     c.request = lambda *a, **k: SimpleNamespace(json=lambda: body)   # noqa: ARG005
+    c._request_once = c.request          # whois_probe идёт одной попыткой, мимо ретрая (S2-12)
     return c
 
 
@@ -337,3 +338,21 @@ def test_funnel_whois_down_not_excluded_from_pool():
         assert d.status == "scored"           # не rejected и не discovered
         assert d.reject_reason is None
         assert d.score and d.score > 0.0
+
+
+# ---------- 3. G4 (S2-12): whois не ретраится и не режется на 30 с ----------
+
+def test_whois_probe_is_single_attempt_with_long_timeout():
+    """ReadTimeout + ретрай BaseClient отправляли бы oneRequest в A-Parser дважды; whois-хвост
+    бывает 27 с — таймаут 30 с впритык. Одна попытка (_request_once), таймаут 60 с."""
+    c = AParserClient()
+    seen = {}
+
+    def once(method, url, **kw):
+        seen.update(kw)
+        return SimpleNamespace(json=lambda: {"success": 1, "data": {"resultString":
+                                                                  "x.mx - registered: 0, creation: none"}})
+    c._request_once = once
+    c.request = lambda *a, **k: pytest.fail("whois_probe не должен идти через ретраящий request")
+    assert c.whois_probe("x.mx")["available"] is True
+    assert seen["timeout"] == 60.0

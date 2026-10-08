@@ -137,7 +137,7 @@ def test_rdap_breaker_locks_both_the_gate_check_and_the_increment():
     for _ in range(3):
         with pytest.raises(OSError):
             whois.probe("x.com", {"rdap": rdap, "aparser": _FlakyAparser(), "_rdap_lock": lock})
-    assert lock.enters == 6 and rdap.lookup_failures == 3
+    assert lock.enters == 6 and rdap.lookup_failures_com == 3
 
 
 def test_make_clients_wires_rdap_and_its_lock():
