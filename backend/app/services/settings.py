@@ -137,7 +137,24 @@ def _discovery_view(opts) -> dict:
     except (TypeError, ValueError):
         cap = cfg.MAX_CANDIDATES_PER_RUN
     return {"max_candidates_per_run": max(0, min(cap, 50_000)),
-            "name_filters": _clean_name_filters(o.get("name_filters"))}
+            "name_filters": _clean_name_filters(o.get("name_filters")),
+            "zone_channels": _clean_zone_channels(o.get("zone_channels", cfg.ZONE_CHANNELS))}
+
+
+def _clean_zone_channels(raw) -> dict:
+    """Таблица зона -> канал выкупа (M2). Неизвестный канал — ValueError (опечатка в деньгах не должна
+    молча уводить заказ не туда); пустые ключи и не-строки отбрасываем."""
+    if not isinstance(raw, dict):
+        raise ValueError("зона -> канал: ожидается словарь")
+    out = {}
+    for z, ch in raw.items():
+        zone = str(z).strip().strip(".").lower()
+        if not zone:
+            continue
+        if ch not in cfg.ACQ_CHANNELS:
+            raise ValueError(f"зона .{zone}: неизвестный канал {ch!r} (допустимы {cfg.ACQ_CHANNELS})")
+        out[zone] = ch
+    return out
 
 
 def _clean_name_filters(raw) -> dict:
@@ -226,8 +243,11 @@ def update_settings(**kw) -> dict:
         for k in ("tld_allowlist", "brand_tokens"):
             if kw.get(k) is not None:
                 setattr(r, k, _clean_list(kw[k]))
-        if kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None:
+        if (kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None
+                or kw.get("zone_channels") is not None):
             cur = dict(r.discovery_opts or {})
+            if kw.get("zone_channels") is not None:
+                cur["zone_channels"] = _clean_zone_channels(kw["zone_channels"])   # ValueError до commit
             if kw.get("max_candidates_per_run") is not None:
                 cur["max_candidates_per_run"] = max(0, min(int(kw["max_candidates_per_run"]), 50_000))
             if kw.get("name_filters") is not None:
