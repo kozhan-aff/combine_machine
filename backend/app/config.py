@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     # Optional path to the panel's cert (/www/server/panel/ssl/certificate.pem copied
     # locally) to pin TLS instead of verify=False. Recommended for remote panels.
     AAPANEL_CA_BUNDLE: str = ""
+    # Режим «через SSH-туннель» (сайдкар aapanel-tunnel в docker-compose, профиль tunnel): панель
+    # видит запросы с 127.0.0.1 VPS, whitelist по публичному IP бокса не нужен. Значение с экрана
+    # «Ключи и сервисы» приходит строкой ("true"/"false") — разбирает integrations.aapanel.tunnel_mode().
+    AAPANEL_TUNNEL: str = ""
     VPS_ORIGIN_IP: str = ""
     # M3: выпускать Cloudflare Origin CA на каждый домен и ставить его в aaPanel (SetSSL), чтобы
     # перевести зону в Full(strict). ВЫКЛ по умолчанию: ручка SetSSL и права токена («SSL and

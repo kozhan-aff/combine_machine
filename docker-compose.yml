@@ -107,6 +107,34 @@ services:
     # код воркера подхватывается после git-pull живьём, без пересборки/рестарта контейнера.
     command: watchfiles 'python -m app.workers.scheduler' /app
 
+  aapanel-tunnel:
+    # SSH-туннель бокс -> VPS: aaPanel видит запросы с 127.0.0.1 и whitelist по публичному IP бокса не
+    # нужен. ОПЦИОНАЛЕН (профиль tunnel): `docker compose --profile tunnel up -d --build aapanel-tunnel`;
+    # backend/worker от него НЕ зависят. В .env: AAPANEL_TUNNEL=1, AAPANEL_URL=https://aapanel-tunnel:18839,
+    # AAPANEL_CA_BUNDLE. Порт наружу НЕ публикуется — слушает только сеть combine.
+    # Ключ и known_hosts — ./secrets/tunnel/ (gitignored), монтируются read-only. Нет ключа — контейнер
+    # выходит с кодом 78 и причиной в логах (не стартует тихо). Runbook: docs/v2/aapanel-tunnel-runbook.md
+    profiles: ["tunnel"]
+    build: ./tunnel
+    restart: on-failure:5
+    logging: *logging
+    environment:
+      TUNNEL_VPS_HOST: ${TUNNEL_VPS_HOST:-}
+      TUNNEL_VPS_USER: ${TUNNEL_VPS_USER:-tunnel}
+      TUNNEL_VPS_SSH_PORT: ${TUNNEL_VPS_SSH_PORT:-22}
+      TUNNEL_PORT: ${TUNNEL_PORT:-18839}
+    volumes:
+      - ./secrets/tunnel:/ssh-src:ro
+    # слушатель появляется только ПОСЛЕ успешной SSH-авторизации -> healthy = туннель реально поднят
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 $${TUNNEL_PORT:-18839}"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+    networks:
+      - combine
+
 networks:
   combine:
     ipam:

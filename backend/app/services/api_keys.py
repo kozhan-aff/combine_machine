@@ -123,6 +123,10 @@ GROUPS = [
             "на VPS, НЕ поле token. IP бокса должен быть в whitelist API aaPanel.", secret=True),
       Field("AAPANEL_CA_BUNDLE", "aaPanel · сертификат (путь)", "Путь к certificate.pem панели внутри "
             "контейнера: пиннинг TLS вместо verify=False. Пусто — без пиннинга."),
+      Field("AAPANEL_TUNNEL", "aaPanel · через SSH-туннель", "true — панель доступна через сайдкар "
+            "aapanel-tunnel (docker compose --profile tunnel up -d), AAPANEL_URL = https://aapanel-tunnel:18839, "
+            "whitelist по IP бокса не нужен (в панели достаточно 127.0.0.1). Требует AAPANEL_CA_BUNDLE. "
+            "Инструкция: docs/v2/aapanel-tunnel-runbook.md.", kind="choice", choices=("false", "true")),
       Field("VPS_ORIGIN_IP", "IP origin-сервера (VPS)", "IPv4 VPS с aaPanel: на него смотрит proxied A-запись "
             "в Cloudflare.", kind="ip")]),
     ("m45", "M4/M5 · контент, SERP, индексация",
