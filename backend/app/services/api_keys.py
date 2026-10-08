@@ -61,6 +61,12 @@ GROUPS = [
             secret=True),
       Field("DNS_RESOLVER", "DNS-резолвер для Spamhaus", "IP своего резолвера: публичные 8.8.8.8/1.1.1.1 "
             "Spamhaus блокирует. Пусто — системный резолвер.", kind="ip"),
+      Field("DOMAIN_LISTS_UT1_URL", "Списки чистоты · UT1 (адрес)", "Базовый адрес скачивания UT1 blacklists "
+            "(CC BY-SA 4.0), по умолчанию https://dsi.ut-capitole.fr/blacklists/download. Ключа нет. "
+            "Менять только для своего зеркала.", kind="url"),
+      Field("DOMAIN_LISTS_BLP_URL", "Списки чистоты · blocklistproject (адрес)", "Базовый адрес "
+            "blocklistproject (Unlicense), по умолчанию https://blocklistproject.github.io/Lists/alt-version. "
+            "Ключа нет. Менять только для своего зеркала.", kind="url"),
       Field("APARSER_URL", "A-Parser · адрес", "Адрес A-Parser, например http://192.168.1.77:9091.",
             kind="url"),
       Field("APARSER_API_KEY", "A-Parser · пароль API", "Пароль API из настроек A-Parser.", secret=True)]),

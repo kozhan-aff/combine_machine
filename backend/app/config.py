@@ -142,6 +142,10 @@ class Settings(BaseSettings):
     DNS_RESOLVER: str = ""
     SPAMHAUS_DQS_KEY: str = ""
     WEBRISK_API_KEY: str = ""          # Google Web Risk (замена Safe Browsing); пусто -> W3 «не настроено»
+    # Списки чистоты доменов (services/domain_lists.py): базовые адреса скачивания. Менять нужно, только
+    # если оператор завёл свой зеркальный сервер; ключей у обоих источников нет.
+    DOMAIN_LISTS_UT1_URL: str = "https://dsi.ut-capitole.fr/blacklists/download"
+    DOMAIN_LISTS_BLP_URL: str = "https://blocklistproject.github.io/Lists/alt-version"
 
     # опц. локальные сервисы (тот же бокс)
     BROWSERLESS_URL: str = ""

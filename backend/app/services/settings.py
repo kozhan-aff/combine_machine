@@ -143,6 +143,9 @@ def _discovery_view(opts) -> dict:
     return {"max_candidates_per_run": max(0, min(cap, 50_000)),
             "units_daily_cap": max(0, min(daily, 2_000_000)),
             "name_filters": _clean_name_filters(o.get("name_filters")),
+            # жёсткий отказ по спискам чистоты (UT1/blocklistproject): ВЫКЛ по умолчанию — recall списков
+            # не измерен, сначала оператор смотрит счётчик на /settings и первые попадания руками
+            "hard_reject_lists": o.get("hard_reject_lists") is True,
             "zone_channels": _clean_zone_channels(o.get("zone_channels", cfg.ZONE_CHANNELS))}
 
 
@@ -217,6 +220,21 @@ def set_source_state(state: dict) -> None:
         db.commit()
 
 
+def get_list_state() -> dict:
+    """Валидаторы условного GET списков чистоты ({источник:категория: {etag, last_modified, allow}})."""
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        return dict((_row(db).discovery_opts or {}).get("list_state") or {})
+
+
+def set_list_state(state: dict) -> None:
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        r = _row(db)
+        r.discovery_opts = {**(r.discovery_opts or {}), "list_state": state}
+        db.commit()
+
+
 def _row(db):
     """Вернуть (создав при отсутствии) строку scoring_settings id=1, засеянную дефолтами."""
     from app.models.settings import ScoringSettings
@@ -271,10 +289,13 @@ def update_settings(**kw) -> dict:
             if kw.get(k) is not None:
                 setattr(r, k, _clean_list(kw[k]))
         if (kw.get("max_candidates_per_run") is not None or kw.get("name_filters") is not None
-                or kw.get("zone_channels") is not None or kw.get("units_daily_cap") is not None):
+                or kw.get("zone_channels") is not None or kw.get("units_daily_cap") is not None
+                or kw.get("hard_reject_lists") is not None):
             cur = dict(r.discovery_opts or {})
             if kw.get("units_daily_cap") is not None:
                 cur["units_daily_cap"] = max(0, min(int(kw["units_daily_cap"]), 2_000_000))
+            if kw.get("hard_reject_lists") is not None:
+                cur["hard_reject_lists"] = bool(kw["hard_reject_lists"])
             if kw.get("zone_channels") is not None:
                 cur["zone_channels"] = _clean_zone_channels(kw["zone_channels"])   # ValueError до commit
             if kw.get("max_candidates_per_run") is not None:
