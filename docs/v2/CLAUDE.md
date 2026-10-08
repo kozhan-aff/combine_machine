@@ -301,3 +301,8 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 - **Локальные сервисы бокса:** LiteLLM `:4000` (mistral + ollama), SearXNG `:8080`, A-Parser `:9091`.
 - **Ahrefs** у оператора доступен и через MCP в Claude: удобно снимать живые образцы ответов для
   фикстур (`subscription-info` бесплатный, `public-domain-rating-free` — 0 units).
+
+## Волна 2 (2026-10-08, влита в main f1a161f, 1675 passed)
+think:false для ollama/* (LLM_THINK); клиент NameSilo (Registrar, аукционы просроченных, регистрация без ретраев, write-ahead, ключ маскируется); списки UT1/blocklistproject (миграция 0033, мягкий сигнал); ранги Common Crawl (0034) вместо DR; SSH-туннель к aaPanel (сайдкар `tunnel/`, `docs/v2/aapanel-tunnel-runbook.md`); индексация GSC + IndexNow.
+Хвосты (minor): домен в JS-атрибуте queue.html; .env.example без NAMESILO_*/LLM_THINK/INDEXNOW_SECRET; без рангов authority=0.5 (может сдвинуть порог approve); bid() шлёт потолок как proxy-ставку — живой bidAuction не проверен; httpx.Client NameSilo не закрывается.
+Бокс НЕ обновлён: дамп БД → стоп автопилота → «Обновить из git» (миграции 0026–0034) → ключи на /settings/keys → `docker compose up -d --build` (туннель).
