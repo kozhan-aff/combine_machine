@@ -114,9 +114,10 @@ def _scrub_text(s) -> str:
 
 
 def _shortfall(o, bal) -> str | None:
-    """Причина отказа, если известный баланс провайдера меньше замороженной суммы заказа (S3-09).
-    `bal` — (сумма, валюта) или None. Неизвестный баланс/валюта не совпала — НЕ блокируем: судить
-    нечем, а провайдер откажет сам; блокируем только то, что знаем наверняка."""
+    """Причина отказа ДО отправки заказа (S3-09). `bal` — (сумма, валюта) или None.
+    Неизвестный баланс (None) — НЕ блокируем: судить нечем, провайдер откажет сам.
+    Известный баланс блокирует: (1) валюта баланса пуста или не совпала с валютой заказа —
+    суммы несравнимы, отказ; (2) сумма на счёте меньше замороженной стоимости — отказ."""
     if bal is None or o.cost is None:
         return None
     amount, cur = bal
@@ -420,6 +421,9 @@ def confirm_order(order_id: int, bid_rub: float | None = None) -> dict:
             q = get_registrar().price(domain)
         except (RegistrarError, RegistrarAmbiguous) as e:
             raise ValueError(f"registrar: {e}"[:200]) from None
+        if not q.currency:
+            raise ValueError(f"registrar: в котировке «{domain}» не указана валюта — "
+                             f"сумму заказа заморозить нельзя")
         tier = {"price": q.amount, "price_id": None, "period_id": None, "currency": q.currency}
 
     from datetime import datetime, timezone

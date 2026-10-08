@@ -470,10 +470,21 @@ class _CurRegistrar(_FakeRegistrar):
 
 @pytest.mark.parametrize("cur", ["EUR", ""])
 def test_registrar_price_currency_mismatch_refuses_before_send(monkeypatch, cur):
-    fake = _CurRegistrar(price_cur=cur)
+    fake = _CurRegistrar()                       # подтверждаем в USD/USD
     oid = _registrar_flow(monkeypatch, fake)
+    fake._pc = cur                               # валюта котировки уплыла после confirm; баланс в USD
     r = acquisition.execute_confirmed_order(oid)
-    assert r["status"] == "failed" and "валюта" in r["error"] and fake.registered == []
+    assert r["status"] == "failed" and "котировки" in r["error"] and fake.registered == []
+
+
+def test_registrar_confirm_refuses_empty_quote_currency(monkeypatch):
+    from app.services.settings import update_settings
+    monkeypatch.setattr(registrar, "get_registrar", lambda: _CurRegistrar(price_cur=""))
+    update_settings(zone_channels={"com": "registrar"})
+    oid = acquisition.create_order(_approved("intl.com", "bid"))
+    with pytest.raises(ValueError, match="валюта"):
+        acquisition.confirm_order(oid)
+    assert not _order(oid).confirmed_by_human
 
 
 @pytest.mark.parametrize("cur", ["EUR", ""])
