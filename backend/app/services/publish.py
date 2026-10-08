@@ -118,6 +118,9 @@ def publish_site(site_id: int) -> dict:
         _attempt = datetime.now(timezone.utc)
         for p in pages:
             p.publish_attempted_at = _attempt
+        # Отметку фиксируем СРАЗУ, отдельной короткой транзакцией: исключение ниже (_pick_offer,
+        # сборка, сеть) откатило бы её, и ротация очереди застряла бы на «сломанном» сайте.
+        db.commit()
         # S5-09/S6-12/S7-05: публиковать можно только в провиженный сайт. Раньше проверки не было —
         # файлы писались в docroot без vhost'а/зоны (CreateFile создаёт каталоги сам), страницы и
         # сайт помечались published; на legacy-строке без doc_root падал AttributeError на rstrip.

@@ -501,3 +501,17 @@ def test_publish_stamps_attempt_even_when_not_provisioned():
     assert publish.publish_site(sid)["status"] == "not_provisioned"
     with db.SessionLocal() as s:
         assert s.get(Page, pid).publish_attempted_at is not None
+
+
+def test_publish_attempt_stamp_survives_exception_after_it(monkeypatch):
+    oid = _offer()
+    sid = _site(domain="boom.com", offer_id=oid)
+    pid = _page(sid, status="edited", offer_id=oid)
+
+    def boom(*a, **k):
+        raise RuntimeError("сломанный сайт")
+    monkeypatch.setattr(publish, "_pick_offer", boom)
+    with pytest.raises(RuntimeError):
+        publish.publish_site(sid)
+    with db.SessionLocal() as s:
+        assert s.get(Page, pid).publish_attempted_at is not None
