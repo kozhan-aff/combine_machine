@@ -197,3 +197,16 @@ def test_stale_job_does_not_block_deploy(creds, monkeypatch):
         s.commit()
     _patch(monkeypatch, Router(pull_rc=0))
     assert deploy.git_pull()["ok"]
+
+
+def test_spawn_refuses_honestly_while_pull_is_running():
+    """Minor: во время pull spawn() не возвращает True при проглоченном AlreadyRunning."""
+    from app.services import jobs
+    ran = []
+    deploy._LOCK.acquire()
+    try:
+        assert jobs.spawn("discovery", lambda: ran.append(1)) is False
+    finally:
+        deploy._LOCK.release()
+    jobs._drain()
+    assert ran == []

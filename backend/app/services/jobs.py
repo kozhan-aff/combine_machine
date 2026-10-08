@@ -530,7 +530,7 @@ def progress(name: str) -> dict:
 
 
 def spawn(name: str, target) -> bool:
-    """Запустить target() в фоне. False — уже идёт.
+    """Запустить target() в фоне. False — уже идёт (или идёт git pull: новые задачи не стартуют).
 
     _INFLIGHT — не дубль замка, а закрытие ГОНКИ СОБСТВЕННОГО ПРОЦЕССА. Строку job_run создаёт
     сам сервис (target -> track -> _open) уже В ПОТОКЕ, а `is_running()` смотрит в БД из потока
@@ -541,6 +541,11 @@ def spawn(name: str, target) -> bool:
 
     Межпроцессную гонку (панель против воркера) по-прежнему судит индекс, а не этот сет.
     """
+    from app.services import deploy
+    if deploy._LOCK.locked():
+        # идёт git pull: _open всё равно отказал бы (AlreadyRunning проглатывается в потоке), и
+        # spawn соврал бы про запуск. Честный отказ — вызывающий скажет «уже идёт».
+        return False
     with _INFLIGHT_LOCK:
         if name in _INFLIGHT or is_running(name):
             return False
