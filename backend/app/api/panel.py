@@ -795,7 +795,7 @@ def run_discovery_action(request: Request):
     from app.services import discovery, jobs
     ok = jobs.spawn("discovery", discovery.run_discovery)
     # запущено — баннера НЕТ: прогресс показывает карточка задачи (спека §8)
-    return _back_here(request, err=None if ok else "Поиск дропов уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Поиск дропов уже идёт"))
 
 
 @router.post("/domains/add-list")
@@ -811,7 +811,7 @@ def domains_add_list(domains: str = Form("")):
 def run_score_action(request: Request, n: int = Form(5)):
     from app.services import jobs, scoring
     ok = jobs.spawn("score", lambda: scoring.score_pending(limit=n))
-    return _back_here(request, err=None if ok else "Проверка уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Проверка уже идёт"))
 
 
 @router.post("/run/recheck")
@@ -819,7 +819,7 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
     from app.services import jobs, scoring
     ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
-    return _back_here(request, err=None if ok else "Перепроверка уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Перепроверка уже идёт"))
 
 
 @router.post("/settings/cloudflare/sync")
@@ -838,7 +838,7 @@ def cloudflare_sync(request: Request):
             with SessionLocal() as db:
                 cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw), run=rid)
     ok = jobs.spawn("cf_sync", _job)
-    return _back_here(request, err=None if ok else "Синхронизация уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Синхронизация уже идёт"))
 
 
 @router.post("/run/{job}/cancel")
@@ -1263,7 +1263,7 @@ def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(ge
     # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
     ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None, use_competitor=True))
     if not ok:
-        return _back(f"/sites/{site_id}", err="Генерация уже идёт — дождись её на Пульте")
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Генерация уже идёт — дождись её на Пульте"))
     return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "
                  "Дальше — редактура (гейт: publish берёт только edited).")
 
@@ -1513,4 +1513,4 @@ def autopilot_run_action(request: Request):
     from app.services import jobs, orchestrator
     ok = jobs.spawn("sweep", lambda: orchestrator.run_sweep(trigger="manual",
                                                             respect_master=False))
-    return _back_here(request, err=None if ok else "Свип уже идёт")
+    return _back_here(request, err=None if ok else jobs.busy_msg("Свип уже идёт"))

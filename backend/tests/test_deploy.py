@@ -210,3 +210,15 @@ def test_spawn_refuses_honestly_while_pull_is_running():
         deploy._LOCK.release()
     jobs._drain()
     assert ran == []
+
+
+def test_run_score_during_pull_names_git_as_the_reason(client):
+    """Идёт git pull: сообщение называет причину, а не лживое «Проверка уже идёт»."""
+    from urllib.parse import unquote_plus
+    deploy._LOCK.acquire()
+    try:
+        r = client.post("/run/score", data={"n": 1}, follow_redirects=False)
+    finally:
+        deploy._LOCK.release()
+    loc = unquote_plus(r.headers["location"])
+    assert "обновление из git" in loc and "уже идёт" not in loc

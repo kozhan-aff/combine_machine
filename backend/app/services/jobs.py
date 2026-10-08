@@ -529,6 +529,12 @@ def progress(name: str) -> dict:
         return last(name) or _blank()
 
 
+def busy_msg(default: str) -> str:
+    """Причина отказа spawn() для оператора: идёт git pull -> так и говорим, а не «уже идёт»."""
+    from app.services import deploy
+    return "Идёт обновление из git — повтори через минуту" if deploy._LOCK.locked() else default
+
+
 def spawn(name: str, target) -> bool:
     """Запустить target() в фоне. False — уже идёт (или идёт git pull: новые задачи не стартуют).
 
