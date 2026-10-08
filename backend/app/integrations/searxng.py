@@ -28,6 +28,7 @@ def host_matches(url: str | None, domain: str) -> bool:
 
 
 class SearxngClient(BaseClient):
+    POOLED = True
     def __init__(self):
         super().__init__(settings.SEARXNG_URL)
 

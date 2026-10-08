@@ -331,6 +331,7 @@ def _pick(snaps: list[dict], sample: int) -> list[dict]:
 
 
 class WaybackClient(BaseClient):
+    POOLED = True
     def __init__(self):
         super().__init__("https://web.archive.org", timeout=_TIMEOUT)   # https: улики не по голому http (S2-15)
         self._lock = threading.Lock()

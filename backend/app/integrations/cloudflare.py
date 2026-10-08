@@ -51,6 +51,7 @@ def _safe_errors(body: dict) -> str:
 
 
 class CloudflareClient(BaseClient):
+    POOLED = True
     def __init__(self):
         super().__init__("https://api.cloudflare.com/client/v4", timeout=_TIMEOUT)
         self.token = settings.CLOUDFLARE_API_TOKEN
@@ -236,6 +237,7 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/dns_records",
             headers=self._headers(),
             json={"type": "A", "name": name, "content": ip, "proxied": proxied, "ttl": 1},
+            retry=True,        # PATCH тем же телом идемпотентен — повтор после обрыва безопасен
         )
         return self._result(resp)
 
@@ -286,6 +288,7 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/settings/ssl",
             headers=self._headers(),
             json={"value": mode},
+            retry=True,
         )
         self._result(resp)
         return True
@@ -294,7 +297,8 @@ class CloudflareClient(BaseClient):
         """PATCH /zones/{id}/settings/{setting_id} — always_use_https, min_tls_version и т.п.
         Вызывающий сперва читает (`get_zone_setting`) и пишет только при расхождении."""
         self._result(self.request("PATCH", f"{self.base_url}/zones/{zone_id}/settings/{setting_id}",
-                                  headers=self._headers(), json={"value": value}))
+                                  headers=self._headers(), json={"value": value},
+                                  retry=True))
         return True
 
     def create_origin_certificate(self, csr_pem: str, hostnames: list[str],

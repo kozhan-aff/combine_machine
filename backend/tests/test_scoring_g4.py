@@ -31,7 +31,7 @@ def test_cancel_does_not_wait_for_running_threads(monkeypatch):
     states = [_state(f"c{i}.com") for i in range(3)]
     flag = {"n": 0}
 
-    def cancelled(run):
+    def cancelled(run, **kw):
         flag["n"] += 1
         return flag["n"] > 1          # первая проверка — «нет», дальше — отмена
 

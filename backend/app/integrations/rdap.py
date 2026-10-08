@@ -81,6 +81,7 @@ def _iso(s) -> datetime | None:
 
 
 class RdapClient(BaseClient):
+    POOLED = True
     def __init__(self):
         super().__init__("", timeout=20.0)
         self._servers: dict | None = None
@@ -105,7 +106,7 @@ class RdapClient(BaseClient):
     def has_rdap(self, domain: str) -> bool:
         return domain.rsplit(".", 1)[-1].lower() in self._bootstrap()
 
-    def request(self, method: str, url: str, **kwargs):
+    def request(self, method: str, url: str, *, retry: bool | None = None, **kwargs):
         """4xx (429, 404…) не ретраим на транспортном уровне (SIDN: 1+2 с ретраев вхолостую, Retry-After нет) —
         его обрабатывает `lookup` по зоне. Транспортные ошибки и 5xx — прежний ретрай BaseClient."""
         try:
@@ -115,7 +116,7 @@ class RdapClient(BaseClient):
                 raise
         except httpx.TransportError:
             pass
-        return super().request(method, url, **kwargs)
+        return super().request(method, url, retry=retry, **kwargs)
 
     def _slot(self, zone: str, pause: float = 0.0) -> None:
         """Место в очереди зоны: интервал между запросами и cooldown после 429 общие на всех

@@ -114,6 +114,16 @@ def _clean_diag_and_panel_state():
 
 
 @pytest.fixture(autouse=True)
+def _close_http_pool():
+    """Пул httpx-клиентов (integrations/base.py) — модульный глобал: без сброса клиент, созданный в
+    одном тесте, жил бы в следующем."""
+    from app.integrations import base
+    base.close_pool()
+    yield
+    base.close_pool()
+
+
+@pytest.fixture(autouse=True)
 def sqlite_db():
     """Fresh in-memory DB per test, bound into app.db. StaticPool = one shared conn."""
     engine = create_engine(

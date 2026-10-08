@@ -15,6 +15,7 @@ class LlmEmptyContent(RuntimeError):
 
 
 class LlmClient(BaseClient):
+    POOLED = True
     def __init__(self, timeout: float = 120.0):
         # mistral-large generation blows past BaseClient's 30s default (ReadTimeout on /generate);
         # a full page can take tens of seconds, cold model more. 120s is a safe ceiling.
@@ -115,7 +116,7 @@ class LlmClassifyClient(LlmClient):
         self.model = settings.LLM_CLASSIFY_MODEL or settings.LLM_MODEL
         self.fallback = settings.LLM_CLASSIFY_FALLBACK_MODEL
 
-    def request(self, method: str, url: str, **kwargs):
+    def request(self, method: str, url: str, *, retry: bool | None = None, **kwargs):
         return self._request_once(method, url, **kwargs)
 
     def complete(self, system: str, prompt: str, **kwargs) -> str:
