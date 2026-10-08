@@ -285,10 +285,19 @@ def build_assets(domain: str, lang: str, brand: str = "", home_title: str = "",
     return files
 
 
+def indexnow_key(domain: str) -> str:
+    """Ключ IndexNow сайта: 32 hex, детерминированно от сида домена (без БД и без общего ключа на
+    портфель — ключ-на-всех стал бы следом, связывающим сайты). Это не секрет: протокол требует
+    держать его открытым файлом `/<key>.txt`. Соль в хэше отделяет ключ от темы/имён ассетов."""
+    return hashlib.sha256(f"indexnow:{_seed(domain)}".encode()).hexdigest()[:32]
+
+
 def build_site_files(domain: str, url_paths: list) -> dict:
-    """robots.txt (со ссылкой на sitemap) и sitemap.xml по ОПУБЛИКОВАННЫМ страницам."""
+    """robots.txt (со ссылкой на sitemap), sitemap.xml по ОПУБЛИКОВАННЫМ страницам и файл-ключ IndexNow."""
     d = _seed(domain)
-    out = {"robots.txt": f"User-agent: *\nAllow: /\n\nSitemap: https://{d}/sitemap.xml\n"}
+    key = indexnow_key(domain)
+    out = {"robots.txt": f"User-agent: *\nAllow: /\n\nSitemap: https://{d}/sitemap.xml\n",
+           f"{key}.txt": key}
     if url_paths:
         locs = "".join(f"<url><loc>{_e(f'https://{d}{page_href(p)}')}</loc></url>"
                        for p in sorted(set(url_paths), key=lambda x: (x != "/", x)))

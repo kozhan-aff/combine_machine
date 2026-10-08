@@ -325,7 +325,7 @@ def _stage_publish(cap):
 
 
 def _stage_check_index(cap):
-    """Сайты с published-страницами -> check_index (site: через SearXNG).
+    """Сайты с published-страницами -> check_index (GSC URL Inspection; без него — site: через SearXNG).
 
     Страницы, про которые проверка ничего не выяснила (движки SearXNG не ответили — CAPTCHA/
     лимит), считаем ОТДЕЛЬНО: сайт тут ни при чём, сломан поисковик, и молчаливое «сделано N»

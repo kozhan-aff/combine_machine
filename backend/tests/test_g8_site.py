@@ -277,7 +277,7 @@ def test_publish_deploys_assets_then_pages_then_sitemap(writes):
     assets = [p for p in paths if p.startswith("assets/")]
     assert paths[:len(assets)] == assets and all(paths.index(a) < first_page for a in assets)
     assert paths.index(sb.marker_path("g8.com")) == len(assets) - 1                 # маркер — последним
-    assert paths[-2:] == ["robots.txt", "sitemap.xml"] or paths[-2:] == ["sitemap.xml", "robots.txt"]
+    assert set(paths[-3:]) == {"robots.txt", "sitemap.xml", f"{sb.indexnow_key('g8.com')}.txt"}
     body = dict(writes)
     sm = body["/www/wwwroot/g8.com/sitemap.xml"]
     assert "/vs/" in sm and "/setup/" not in sm                               # draft не в sitemap

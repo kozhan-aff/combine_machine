@@ -251,8 +251,12 @@ def _no_paid_keys(monkeypatch):
     фонового потока. Тест, которому нужен RDAP в воронке, передаёт фейк через clients["rdap"];
     юнит-тесты самого клиента берут фикстуру real_rdap_bootstrap."""
     from app.config import settings
-    for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY", "NAMESILO_API_KEY"):
+    for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY", "NAMESILO_API_KEY",
+                "GSC_SERVICE_ACCOUNT_JSON"):
         monkeypatch.setattr(settings, key, "")
+    # IndexNow по умолчанию включён и ходит в сеть после публикации; в тестах выключен
+    # (тесты самого пинга включают его и подставляют мок-транспорт).
+    monkeypatch.setattr(settings, "INDEXNOW_ENABLED", False)
     monkeypatch.setattr(RdapClient, "_bootstrap", lambda self: {})
     yield
 
