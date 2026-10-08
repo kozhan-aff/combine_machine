@@ -1,4 +1,4 @@
-"""Прямой whois по TCP:43 для зон без RDAP (.mx/.co/.nz/.de …) — транспорт + разбор ответа.
+"""Прямой whois по TCP:43 для зон без RDAP (.mx/.co/.nz …) — транспорт + разбор ответа.
 
 Зачем (S1-03, S2-02, F8-05): A-Parser Net::Whois для этих зон даёт случайные вердикты — на 16 вызовах
 по заведомо свободным .mx (авторитетный whois.mx: «No_Se_Encontro_El_Objeto») он ответил «занят»
@@ -21,7 +21,8 @@ ZONES: dict[str, tuple[str, str, str]] = {
            r"creation date:\s*(\d{4}-\d{2}-\d{2})"),
     "nz": ("whois.srs.net.nz", r"query_status:\s*220\s+available",
            r"domain_dateregistered:\s*(\d{4}-\d{2}-\d{2})"),
-    "de": ("whois.denic.de", r"status:\s*free\b", r"\bchanged:\s*(\d{4}-\d{2}-\d{2})"),
+    # .de сознательно НЕТ: DENIC не публикует дату регистрации, а `Changed:` — дата последней правки записи
+    # (NS/владелец/продление): возраст вышел бы молча заниженным. Зона идёт в A-Parser, пока нет честной даты.
 }
 MAX_RESPONSE = 64 * 1024          # whois-ответ — килобайты; больше — не наш сервер
 

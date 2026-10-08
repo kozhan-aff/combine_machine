@@ -251,6 +251,19 @@ def test_cf_create_zone_not_retried_but_patch_is(no_sleep):
     with pytest.raises(CloudflareError):
         c.set_ssl("z1")
     assert calls == ["PATCH"] * 3
+    calls.clear()
+    with pytest.raises(CloudflareError):
+        c.add_a_record("z1", "a.com", "1.2.3.4")      # POST создаёт запись — повтор после обрыва не идемпотентен
+    assert calls == ["POST"]
+    calls.clear()
+    with pytest.raises(CloudflareError):
+        c.update_a_record("z1", "r1", "a.com", "1.2.3.4")
+    assert calls == ["PATCH"] * 3
+
+
+def test_whois43_de_not_claimed():
+    """DENIC не отдаёт дату регистрации (`Changed:` — правка записи) — зона не должна давать created."""
+    assert not whois43.has_whois43("example.de")
 
 
 def test_pooled_client_reused_and_reopened_on_url_change():

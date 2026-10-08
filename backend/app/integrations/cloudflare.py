@@ -237,7 +237,6 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/dns_records",
             headers=self._headers(),
             json={"type": "A", "name": name, "content": ip, "proxied": proxied, "ttl": 1},
-            retry=True,        # PATCH тем же телом идемпотентен — повтор после обрыва безопасен
         )
         return self._result(resp)
 
@@ -249,6 +248,7 @@ class CloudflareClient(BaseClient):
             f"{self.base_url}/zones/{zone_id}/dns_records/{record_id}",
             headers=self._headers(),
             json={"type": "A", "name": name, "content": ip, "proxied": proxied, "ttl": 1},
+            retry=True,        # PATCH тем же телом идемпотентен — повтор после обрыва безопасен
         )
         return self._result(resp)
 
