@@ -120,8 +120,12 @@ def _shortfall(o, bal) -> str | None:
     if bal is None or o.cost is None:
         return None
     amount, cur = bal
-    if (o.cost_currency or "RUB") != cur:
-        return None
+    want = o.cost_currency or "RUB"
+    if not cur or want != cur:
+        # деньги: сравнить суммы в разных/неизвестных валютах нельзя — отказ ДО отправки,
+        # а не молчаливый пропуск проверки
+        return (f"валюта баланса у провайдера ({cur or 'не указана'}) не совпала с валютой заказа "
+                f"({want}) — судить о достаточности средств нельзя; заказ не отправлен (деньги не ушли)")
     if float(amount) < float(o.cost):
         return (f"на счёте у провайдера {float(amount):.2f} {cur}, а заказ стоит {float(o.cost):.2f} {cur} — "
                 f"пополни баланс и повтори (деньги не ушли)")
@@ -674,8 +678,16 @@ def execute_confirmed_order(order_id: int) -> dict:
                 from app.integrations.registrar import RegistrarAmbiguous, get_registrar
                 r = get_registrar()
                 q = r.price(d.domain)
-                if o.cost is not None and q.currency == (o.cost_currency or q.currency) \
-                        and float(q.amount) > float(o.cost):
+                if o.cost is not None and (not q.currency or q.currency != (o.cost_currency or "RUB")):
+                    # валюта котировки не совпала с подтверждённой (или не указана): потолок цены
+                    # проверить нечем — НЕ молчим, отказ ДО отправки
+                    o.status = "failed"
+                    o.result = {**saved, "error": f"валюта котировки регистратора ({q.currency or 'не указана'}) "
+                                                  f"не совпала с подтверждённой ({o.cost_currency or 'RUB'}) — "
+                                                  f"потолок цены не проверить; подтверди заказ заново"}
+                    db.commit()
+                    return {"order_id": order_id, "status": "failed", **o.result}
+                if o.cost is not None and float(q.amount) > float(o.cost):
                     o.status = "failed"
                     o.result = {**saved, "error": f"цена у регистратора выросла: {float(q.amount):.2f} "
                                                   f"{q.currency} > подтверждённых {float(o.cost):.2f} — "

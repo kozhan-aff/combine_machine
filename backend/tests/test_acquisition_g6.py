@@ -457,3 +457,28 @@ def test_registrar_ambiguous_sets_maybe_sent_and_balance_guard(monkeypatch):
     acquisition.confirm_order(oid2)
     r = acquisition.execute_confirmed_order(oid2)
     assert r["status"] == "failed" and "пополни" in r["error"] and fake.registered == []
+
+
+class _CurRegistrar(_FakeRegistrar):
+    def __init__(self, price_cur="USD", bal_cur="USD", **kw):
+        super().__init__(**kw)
+        self._pc, self._bc = price_cur, bal_cur
+
+    def price(self, domain): return registrar.Money(self._p, self._pc)
+    def balance(self): return registrar.Money(self._b, self._bc)
+
+
+@pytest.mark.parametrize("cur", ["EUR", ""])
+def test_registrar_price_currency_mismatch_refuses_before_send(monkeypatch, cur):
+    fake = _CurRegistrar(price_cur=cur)
+    oid = _registrar_flow(monkeypatch, fake)
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "валюта" in r["error"] and fake.registered == []
+
+
+@pytest.mark.parametrize("cur", ["EUR", ""])
+def test_registrar_balance_currency_mismatch_refuses_before_send(monkeypatch, cur):
+    fake = _CurRegistrar(bal_cur=cur)
+    oid = _registrar_flow(monkeypatch, fake)
+    r = acquisition.execute_confirmed_order(oid)
+    assert r["status"] == "failed" and "валюта" in r["error"] and fake.registered == []
