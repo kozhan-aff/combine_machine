@@ -340,11 +340,16 @@ def _make_clients() -> dict:
     from app.integrations.webrisk import WebRiskClient
     from app.integrations.ahrefs import AhrefsClient
     from app.integrations.llm import LlmClassifyClient
+    from app.integrations.whois43 import Whois43Client
+    from app.config import settings as env
     return {
         "wayback": WaybackClient(), "blacklist": BlacklistClient(), "webrisk": WebRiskClient(),
         "aparser": AParserClient(), "rdap": RdapClient(), "ahrefs": AhrefsClient(),
         "_whois_lock": threading.Lock(), "_rdap_lock": threading.Lock(),
         "_webrisk_lock": threading.Lock(), "llm": LlmClassifyClient(), "_llm_lock": threading.Lock(),
+        # зоны без RDAP: прямой whois:43 первичен, A-Parser — резерв за семафором (services/whois.py)
+        "whois43": Whois43Client(), "_whois43_lock": threading.Lock(),
+        "_whois_sem": threading.BoundedSemaphore(max(1, int(env.WHOIS_APARSER_CONCURRENCY))),
     }
 
 
@@ -928,7 +933,7 @@ def _run_concurrent(states: list, workers: int, run: "int | None", stage: str, f
                 done += 1
             if finished:
                 jobs.report(run, done=done, total=len(alive))
-            if jobs.cancelled(run):
+            if jobs.cancelled(run, cached=True):
                 raise jobs.Cancelled()
     finally:
         ex.shutdown(wait=False, cancel_futures=True)

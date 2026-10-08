@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     APARSER_URL: str = "http://192.168.1.77:9091"
     APARSER_API_KEY: str = ""
     APARSER_PROXY_CHECKER: str = "ipv6_free"  # имя прокси-чекера в A-Parser UI, box-specific
+    # Сколько A-Parser-whois (зоны без RDAP) идёт одновременно. Замер аудита F8-05: 12 параллельных =
+    # 25,4 с суммарно, то есть ≈0,5 запр/с как последовательно — очередь oneRequest в A-Parser
+    # конкурентности не даёт; 3 — запас на разброс задержек (p50 3,6 с, хвост до 27 с).
+    WHOIS_APARSER_CONCURRENCY: int = 3
+    # Куда писать оператору архивам/реестрам: уходит в User-Agent всех исходящих HTTP-клиентов.
+    CONTACT_EMAIL: str = ""
 
     # spamhaus/surbl — нужен свой резолвер (публичные 8.8.8.8/1.1.1.1 блокируются)
     DNS_RESOLVER: str = ""

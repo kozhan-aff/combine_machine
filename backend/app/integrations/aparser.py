@@ -48,6 +48,10 @@ def _parse_whois_available(text: str) -> bool | None:
     low = (text or "").lower()
     m = _RE_SVERTKA_REG.search(low)
     if m:
+        if m.group(1) == "1" and not _RE_SVERTKA_CREATION.search(low):
+            # «registered: 1» без даты создания — не доказательство: Net::Whois лепит его несуществующим
+            # доменам и «мигает» 0/1 на .mx/.co (S2-02, F8-05). «Занят» требует дату; иначе не определено.
+            return None
         return m.group(1) == "0"                     # 0 = свободен, 1 = занят
     if any(w in low for w in _FREE_MARKERS):
         return True
@@ -89,8 +93,10 @@ class AParserClient(BaseClient):
         # A-PARSER ВТОРОЙ РАЗ (дубль задачи в очереди парсера, расход прокси), пока первая ещё
         # исполнялась (S2-12). timeout — для медленных парсеров (whois хвост до 27 с).
         kw = {"timeout": timeout} if timeout is not None else {}
-        send = self.request if retry else self._request_once
-        r = send("POST", f"{self.base_url}/API", json=body, **kw)
+        if retry:     # oneRequest на чтение (SERP/страница) — повтор безопасен; POST по умолчанию не ретраится
+            r = self.request("POST", f"{self.base_url}/API", json=body, retry=True, **kw)
+        else:
+            r = self._request_once("POST", f"{self.base_url}/API", json=body, **kw)
         res = r.json()
         if not isinstance(res, dict) or res.get("success") != 1:
             # тело без `success` — это не «пустой результат», а НЕ ТОТ ответ (редирект на
