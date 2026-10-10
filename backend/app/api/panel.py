@@ -1471,16 +1471,20 @@ def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(
 
 @router.post("/pages/{page_id}/critique")
 def critique_page_action(page_id: int):
-    """Advisory-оценка черновика вторым LLM-вызовом (Спека 4). НЕ гейт: результат
-    только показывается на экране редактуры, mark_edited им не связан."""
+    """Кнопка «Вычитать»: проверки кодом + вердикт модели по одной странице (план Б). Подсказка человеку:
+    статус страницы не меняется ни при каком вердикте и ни при каком тумблере — одобряет «Одобрить»."""
     from app.services import content_critic
     try:
-        content_critic.critique_page(page_id)
+        v = content_critic.critique_page(page_id)
     except ValueError as e:
         return _back(f"/pages/{page_id}", err=str(e))
-    except Exception as e:  # noqa: BLE001 — критик advisory, сбой не должен ронять UI
+    except Exception as e:  # noqa: BLE001 — сбой критика не должен ронять редактор
         return _back(f"/pages/{page_id}", err=f"критик: {e}")
-    return _back(f"/pages/{page_id}", msg="Черновик оценён")
+    if v["error"]:
+        return _back(f"/pages/{page_id}", err=f"вычитка не состоялась: {v['error']}")
+    if v["pass"]:
+        return _back(f"/pages/{page_id}", msg="Вычитано: замечаний нет. Страница остаётся черновиком — одобряешь ты.")
+    return _back(f"/pages/{page_id}", msg=f"Вычитано: замечаний — {len(v['issues'])}, список — под кнопкой.")
 
 
 @router.post("/sites/{site_id}/publish")

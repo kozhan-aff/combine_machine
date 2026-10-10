@@ -574,7 +574,8 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
 
 
 def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False) -> dict:
-    """Переписать ОДНУ страницу по замечаниям критика, на месте: -> {"page_id", "ok", "error"}.
+    """Переписать ОДНУ страницу по замечаниям критика, на месте: -> {"page_id", "ok", "error"}; если
+    отказ вызван недоступной моделью (WriterDown) — ещё и "down": True.
     Правленую руками (blocks_stale) не трогает, пока оператор явно не разрешил (`overwrite_manual`).
 
     Оффер и язык — те, под которые страница написана (Page.offer_id/lang, F26), тип — по её пути в
@@ -619,7 +620,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
     try:
         doc, err = write_doc(LlmClient(timeout=600), system=system, prompt=prompt, issues=issues)
     except WriterDown as e:
-        doc, err = None, str(e)
+        # модель недоступна: зовущему (круги критика) незачем идти к следующей странице — там тот же таймаут
+        return {**out(str(e)), "down": True}
     if err:
         return out(err)
     with SessionLocal() as db:

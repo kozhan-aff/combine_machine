@@ -431,14 +431,17 @@ def test_check_index_only_due_and_first_indexed_page_starts_monitoring(monkeypat
 
 # ── S6-15: критик не судит о раскрытии ────────────────────────────────────────
 
-def test_critic_prompt_has_no_disclosure_criterion_and_drops_false_issue(monkeypatch):
+def test_critic_prompt_has_no_disclosure_criterion_and_drops_false_issue(monkeypatch, tmp_path):
     from app.services import content_critic
-    assert "disclosure" not in content_critic._SYSTEM_PROMPT.lower().replace("не оценивай", "")
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))   # без правил оператора
     pid = _page(_site())
-    monkeypatch.setattr(LlmClient, "complete", lambda self, sy, pr, **kw:
-                        "БАЛЛ: 70\n- Отсутствует пометка о партнёрской ссылке (disclosure)\n- мало фактов")
-    out = content_critic.critique_page(pid)
-    assert out["issues"] == ["мало фактов"]
+    seen = []
+    monkeypatch.setattr(LlmClient, "complete", lambda self, sy, pr, **kw: seen.append(sy) or (
+        '{"pass": false, "score": 70, "issues": ["Отсутствует пометка о партнёрской ссылке (disclosure)", '
+        '"мало фактов"]}'))
+    out = content_critic.review_page(pid)
+    assert "disclosure" not in seen[0].lower() and "не оценивай" in seen[0]
+    assert out["model"] == ["мало фактов"]
 
 
 def test_sweep_publish_blocked_site_with_lower_id_does_not_starve_queue(monkeypatch):

@@ -100,7 +100,7 @@ class Page(Base):
     # Спека 4 (2026-07-18): advisory-оценка черновика вторым LLM-вызовом, ДО того как
     # человек открыл страницу. НЕ гейт — mark_edited работает независимо от этих полей.
     critic_score: Mapped[float | None] = mapped_column(Float)          # 0.0–1.0
-    critic_notes: Mapped[dict | None] = mapped_column(JSON)            # {"issues": [str]}
+    critic_notes: Mapped[dict | None] = mapped_column(JSON)            # {"pass", "issues", "code", "model", "round"}
     critic_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Спека 2026-10-10 §6.2: структурный ответ писателя (PageDoc как dict); body — его рендер.
     # blocks_stale=True — body правили руками в редакторе, рендер из blocks его не затирает.

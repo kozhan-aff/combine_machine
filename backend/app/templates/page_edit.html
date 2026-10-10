@@ -12,22 +12,39 @@
   останутся только текстовые: h2–h4, p, списки, ссылки, таблицы.</p>
 
 <form method="post" action="/pages/{{ page.id }}/critique" style="margin-bottom:14px">
-  <button class="btn" title="второй LLM-вызов — подсказка человеку, не решение; сохранить как edited можно независимо от балла">🔍 Оценить черновик</button>
+  <button class="btn" title="проверки кодом (копирование источников, числа без источника, объём, язык, бренд) и вердикт редактора-модели. Подсказка: статус страницы не меняется, одобряешь ты">🔍 Вычитать</button>
   {% if page.critic_checked_at %}
+    {% set n = page.critic_notes if page.critic_notes is mapping else {} %}
+    {% if n.get('pass') is sameas true %}
+      <span class="badge b-approved" title="у проверок кодом и у редактора-модели замечаний нет. Страница остаётся черновиком, пока её не одобрят">критик: pass</span>
+    {% elif n %}
+      <span class="badge b-warn" title="страница не прошла вычитку — причины ниже. Одобрить её руками по-прежнему можно">критик: замечания</span>
+    {% else %}
+      <span class="hint">вердикта нет (оценка прежнего формата) — вычитай страницу заново</span>
+    {% endif %}
     {% if page.critic_score is not none %}
-      <span class="badge" title="балл критика: чем выше, тем меньше правок скорее всего нужно — это ПОДСКАЗКА, не гейт">
-        критик: {{ (page.critic_score * 100)|round|int }}/100
-      </span>
-      {% if page.critic_notes and page.critic_notes.issues %}
+      <span class="badge" title="оценка редактора-модели; на вердикт не влияет — решают замечания">{{ (page.critic_score * 100)|round|int }}/100</span>
+    {% endif %}
+    {% if n.get('round') %}
+      <span class="hint" title="сколько раз страницу переписывали по замечаниям; после второго круга её читает человек">круг {{ n.get('round') }} из 2</span>
+    {% endif %}
+    {% for label, items in (('проверки кодом', n.get('code')), ('редактор-модель', n.get('model'))) if items %}
+      <div class="hint" style="margin:8px 0 0">{{ label }}:</div>
+      <ul class="hint" style="margin:2px 0 0">
+        {% for issue in items %}
+          <li>{{ issue }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      {# заметки прежнего формата: один общий список #}
+      {% if n.get('issues') %}
         <ul class="hint" style="margin:6px 0 0">
-          {% for issue in page.critic_notes.issues %}
+          {% for issue in n.get('issues') %}
             <li>{{ issue }}</li>
           {% endfor %}
         </ul>
       {% endif %}
-    {% else %}
-      <span class="hint">критик не смог оценить черновик (сбой LLM) — открой и решай сам</span>
-    {% endif %}
+    {% endfor %}
   {% endif %}
 </form>
 
