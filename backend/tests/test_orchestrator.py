@@ -703,6 +703,7 @@ def model(tmp_path, monkeypatch):
     """Настоящий `content_critic.edit_site`; подменён только `LlmClient.complete`. `model["answer"]` — что
     ответит модель (исключение будет брошено), `model["during"]` — что сделать посреди её ответа."""
     from app.config import settings
+    (tmp_path / "guides").mkdir()       # пустая, но СУЩЕСТВУЮЩАЯ папка правил: невидимая папка — стоп авто-одобрению
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
     state = {"answer": PASSED, "during": None, "calls": 0}
 
