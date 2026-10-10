@@ -297,6 +297,25 @@ def test_small_int_with_magnitude_word_is_a_fact():
     assert nums("В сети 65 тысяч серверов.") == ["числа без источника: 65 тысяч"]
 
 
+def test_english_plural_is_not_a_multiplier():
+    # «millions of users» — «миллионы пользователей», а не множитель при числе перед ним
+    assert nums(f"In {YEAR} millions of users rely on it.") == []
+    assert nums("Over 450 thousands of reviews.") == ["числа без источника: 450"]
+    assert nums("Over 3 billions.", allowed={"3000000000"}) == []          # малое целое, не «3 billion»
+    assert nums("Audience of 450 million.", sources=["In 450 millions of homes"]) == [
+        "числа без источника: 450 million"]
+
+
+def test_magnitude_word_must_be_on_the_same_line():
+    # перевод строки — граница блока: число из одной ячейки и слово из соседней — не «10 млн»
+    cells = "Устройств: 10\nМиллионы пользователей"
+    assert nums("Аудитория 10 млн человек.", sources=[cells]) == ["числа без источника: 10 млн"]
+    assert nums("Аудитория 450 млн человек.", sources=["Серверов: 450\tмлн пользователей"]) == [
+        "числа без источника: 450 млн"]
+    assert nums("Серверов: 450\nмлн пользователей.", allowed={"450"}) == []        # на странице — тоже два блока
+    assert nums("Аудитория 10\u00a0млн человек.", sources=["около 10\u00a0млн человек"]) == []
+
+
 def test_magnitude_in_source_text_legitimises_it_on_the_page():
     # в досье «6 тыс.» лежит как «6»; узаконить множитель может только сам текст источника
     source = "По данным сервиса, у него около 6 тыс. серверов, 2 million users и 5K отзывов в магазине."
@@ -370,6 +389,26 @@ def test_identifier_names_do_not_hide_facts():
     }
     for text, shown in probes.items():
         assert nums(text + ".") == [f"числа без источника: {shown}"], text
+    # идентификатор не съедает старшие разряды числа: «Android 15 000» — это пятнадцать тысяч, а не
+    # версия и безобидные «000» (или «500», которое нашлось бы среди разрешённых)
+    spaced = {
+        "для Android 15 000 отзывов": "15 000",
+        "для Android 14 500 отзывов": "14 500",
+        "На Windows 10 000 серверов": "10 000",
+        "для iOS 17 000 оценок": "17 000",
+        "TLS 12 000 соединений": "12 000",
+        "порт 443 000": "443 000",
+        "AES-256 000": "256 000",
+        "для Android 15\u00a0000 отзывов": "15 000",                     # неразрывный пробел
+        "для iOS 17\u202f000 оценок": "17 000",                          # узкий неразрывный
+        "На Windows 10\u202f000 серверов": "10 000",
+    }
+    for text, shown in spaced.items():
+        assert nums(text + ".", allowed={"500"}) == [f"числа без источника: {shown}"], text
+    # версия и отдельное число после неё — по-прежнему версия и число
+    assert nums("Android 14, 500 серверов.") == ["числа без источника: 500"]
+    assert nums("iOS 17 и 4500 серверов.") == ["числа без источника: 4500"]
+    assert nums("Android 14, 500 серверов.", allowed={"500"}) == []
 
 
 def test_real_identifiers_stay_clean():
