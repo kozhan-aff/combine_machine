@@ -27,6 +27,10 @@ class AutonomySettings(Base):
     auto_generate: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_publish: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_check_index: Mapped[bool] = mapped_column(Boolean, default=False)
+    # спека 2026-10-10 §8: досье конкурентов, дизайн-макет, критик ставит edited сам
+    auto_research: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_design: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_edit: Mapped[bool] = mapped_column(Boolean, default=False)
 
     cap_score: Mapped[int] = mapped_column(Integer, default=20)
     cap_queue: Mapped[int] = mapped_column(Integer, default=10)
@@ -34,6 +38,8 @@ class AutonomySettings(Base):
     cap_generate: Mapped[int] = mapped_column(Integer, default=5)
     cap_publish: Mapped[int] = mapped_column(Integer, default=5)
     cap_check_index: Mapped[int] = mapped_column(Integer, default=20)
+    cap_research: Mapped[int] = mapped_column(Integer, default=5)
+    cap_design: Mapped[int] = mapped_column(Integer, default=3)
     # у discovery капа НЕТ — bulk-pull фида, не по-доменная стадия
 
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),

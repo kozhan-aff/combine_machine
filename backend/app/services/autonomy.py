@@ -4,19 +4,21 @@
 не нужен, YAGNI). update_autonomy валидирует диапазоны, чтобы UI не записал мусор.
 """
 _BOOL_KEYS = ("autopilot_on", "auto_discovery", "auto_score", "auto_queue",
-              "auto_provision", "auto_generate", "auto_publish", "auto_check_index")
+              "auto_provision", "auto_generate", "auto_publish", "auto_check_index",
+              "auto_research", "auto_design", "auto_edit")
 _INT_BOUNDS = {                       # (min, max) для клампа
     "sweep_interval_min": (5, 1440),
     "cap_score": (0, 500), "cap_queue": (0, 500), "cap_provision": (0, 500),
     "cap_generate": (0, 500), "cap_publish": (0, 500), "cap_check_index": (0, 500),
+    "cap_research": (0, 500), "cap_design": (0, 500),
 }
 _DEFAULTS = {
     "autopilot_on": False, "sweep_interval_min": 60,
     "auto_discovery": False, "auto_score": False, "auto_queue": False,
     "auto_provision": False, "auto_generate": False, "auto_publish": False,
-    "auto_check_index": False,
+    "auto_check_index": False, "auto_research": False, "auto_design": False, "auto_edit": False,
     "cap_score": 20, "cap_queue": 10, "cap_provision": 5,
-    "cap_generate": 5, "cap_publish": 5, "cap_check_index": 20,
+    "cap_generate": 5, "cap_publish": 5, "cap_check_index": 20, "cap_research": 5, "cap_design": 3,
 }
 
 
@@ -39,7 +41,8 @@ def get_autonomy() -> dict:
         out = {k: bool(getattr(r, k)) for k in _BOOL_KEYS}
         out["sweep_interval_min"] = int(r.sweep_interval_min)
         for k in ("cap_score", "cap_queue", "cap_provision",
-                  "cap_generate", "cap_publish", "cap_check_index"):
+                  "cap_generate", "cap_publish", "cap_check_index",
+                  "cap_research", "cap_design"):
             out[k] = int(getattr(r, k))
         return out
 

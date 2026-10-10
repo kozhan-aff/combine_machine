@@ -17,11 +17,13 @@ from app.models.domain_score_log import DomainScoreLog
 from app.models.secret import SecretOverride
 from app.models.domain_list import DomainList
 from app.models.domain_rank import DomainRank
+from app.models.research import SiteResearch, SiteTheme
 from app.models import cloudflare  # noqa: F401 — регистрирует 8 mirror-таблиц на Base.metadata
 
 __all__ = [
     "Domain", "AcquisitionOrder", "Site", "Page", "Offer", "SiteOffer", "IndexHistory",
     "ScoringSettings", "AutonomySettings", "AutonomyRun", "JobRun", "DomainScoreLog",
     "SecretOverride", "DomainList", "DomainRank",
+    "SiteResearch", "SiteTheme",
     "cloudflare",
 ]

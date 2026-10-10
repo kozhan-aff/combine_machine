@@ -97,6 +97,10 @@ class Page(Base):
     critic_score: Mapped[float | None] = mapped_column(Float)          # 0.0–1.0
     critic_notes: Mapped[dict | None] = mapped_column(JSON)            # {"issues": [str]}
     critic_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Спека 2026-10-10 §6.2: структурный ответ писателя (PageDoc как dict); body — его рендер.
+    # blocks_stale=True — body правили руками в редакторе, рендер из blocks его не затирает.
+    blocks: Mapped[dict | None] = mapped_column(JSON)
+    blocks_stale: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
