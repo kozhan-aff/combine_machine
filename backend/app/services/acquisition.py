@@ -16,6 +16,10 @@ backorder заказывается живьём (uniservice.order). execute ид
 выбирает оператор). Канал по умолчанию берётся из таблицы зона→канал (/settings, `zone_channels`).
 Денежный гейт (confirm → TTL → execute, баланс, maybe_sent) ОДИН на все каналы.
 """
+import logging
+
+log = logging.getLogger(__name__)
+
 _PROVIDERS = {"backorder", "optimizator", "registrar"}
 AUCTION_SOURCE = "namesilo_auction"     # Domain.source: лот аукциона просроченных NameSilo (ставка, не регистрация)
 # Открытые статусы заказа — `OPEN_ORDER_STATUSES` в app/models/domain.py (оттуда же собран
@@ -587,6 +591,7 @@ def execute_confirmed_order(order_id: int) -> dict:
         saved = {k: v for k, v in (o.result or {}).items()
                  if k in ("price_id", "period_id", "maybe_sent", "registrar_ctx",
                                     "auction_ceiling", "renew")}
+        bought_now = False      # регистратор ответил «зарегистрирован» синхронно: это уже покупка, не заявка
         try:
             if o.provider == "backorder":
                 from app.integrations.backorder import AmbiguousSend, BackorderClient
@@ -761,12 +766,19 @@ def execute_confirmed_order(order_id: int) -> dict:
                     db.commit()
                     return {"order_id": order_id, "status": "failed", **o.result}
                 saved.pop("maybe_sent", None)     # регистратор ответил успехом: неопределённости нет
-            o.status = "ordered"
+                # registerDomain у регистратора СИНХРОННЫЙ: ответ 300 = домен уже наш. Держать его в
+                # `ordered` и ждать ручного «✓ пойман» — лишний клик и лишняя пауза в цикле. Ставка на
+                # аукционе — другое дело: итог известен позже, остаётся `ordered`.
+                bought_now = not is_auction
+            o.status = "caught" if bought_now else "ordered"
             o.provider_order_id = str(res.get("order_id") or "") if isinstance(res, dict) else ""
             o.result = {**saved, **(res if isinstance(res, dict) else {"raw": str(res)})}
             o.ordered_at = datetime.now(timezone.utc)
+            if bought_now:
+                d.status = "purchased"            # запись факта (см. transitions.py): деньги уже списаны
             db.commit()
-            return {"order_id": order_id, "status": o.status, "result": o.result}
+            site_id = _site_after_purchase(o.domain_id) if bought_now else None
+            return {"order_id": order_id, "status": o.status, "result": o.result, "site_id": site_id}
         except NotImplementedError:
             o.status = "failed"
             o.result = {**saved, "error": f"провайдер {o.provider}: транспорт заказа не реализован"}
@@ -779,11 +791,24 @@ def execute_confirmed_order(order_id: int) -> dict:
             return {"order_id": order_id, "status": "failed", **o.result}
 
 
+def _site_after_purchase(domain_id: int) -> int | None:
+    """Домен куплен -> сразу карточка сайта (M3), без отдельного клика «создать сайт». Шов между M2 и
+    M3: раньше `purchased`-домен лежал, пока оператор не найдёт кнопку на /domains/pool или не включит
+    стадию provision автопилота. Сбой здесь НЕ роняет фиксацию покупки (она уже в БД) — сайт создаст
+    стадия provision или кнопка; денег этот шаг не тратит."""
+    try:
+        from app.services import provisioning
+        return provisioning.create_site_for(domain_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("сайт для domain#%s не создан автоматически: %s: %s", domain_id, type(e).__name__, e)
+        return None
+
+
 def mark_caught(order_id: int) -> dict:
     """ЧЕЛОВЕК подтверждает факт поимки: заказ 'ordered' -> 'caught', домен -> 'purchased'.
 
-    Для backorder поимка дропа асинхронна (провайдер ловит домен на удалении), потому
-    факт фиксируем руками. С этого момента домен куплен — дальше M3 (создать сайт)."""
+    Для backorder и аукциона поимка асинхронна (провайдер ловит домен на удалении / торги идут),
+    потому факт фиксируем руками. С этого момента домен куплен — карточка сайта (M3) заводится сразу."""
     from app.db import SessionLocal
     from app.models.domain import Domain, AcquisitionOrder
 
@@ -799,7 +824,9 @@ def mark_caught(order_id: int) -> dict:
         if d is not None:
             d.status = "purchased"                    # домен куплен — путь в M3
         db.commit()
-        return {"order_id": order_id, "status": "caught", "domain_id": o.domain_id}
+        domain_id = o.domain_id
+    site_id = _site_after_purchase(domain_id)
+    return {"order_id": order_id, "status": "caught", "domain_id": domain_id, "site_id": site_id}
 
 
 def _poll_backorder() -> dict:
@@ -828,6 +855,7 @@ def _poll_backorder() -> dict:
         if k not in by_domain or (by_domain[k]["state"] == "failed" and r["state"] != "failed"):
             by_domain[k] = r
     moved = {"caught": 0, "failed": 0, "pending": 0}
+    caught_ids: list[int] = []
     matched = 0
     conflicts = 0
     sending = 0                                       # живые отправки: их пропускаем, см. ниже
@@ -951,6 +979,8 @@ def _poll_backorder() -> dict:
                 # обновлялся, и так на каждом нажатии. Заказов у портфеля десятки, не миллионы;
                 # цена лишних коммитов ничтожна рядом с ценой потерянной сверки.
                 db.commit()
+                if done == "caught" and d is not None:
+                    caught_ids.append(d.id)           # после коммита: откат не оставит ложного id
             except IntegrityError:                    # ремень поверх гарда: гонку он не закрывает
                 db.rollback()                         # (SELECT и UPDATE — разные запросы)
                 matched += 1
@@ -964,6 +994,8 @@ def _poll_backorder() -> dict:
             else:
                 matched += 1
                 moved[done] = moved.get(done, 0) + 1
+    for did in caught_ids:
+        _site_after_purchase(did)                     # пойман -> карточка сайта сразу (шов M2->M3)
     return {"checked": matched, "conflicts": conflicts, "sending": sending, "lost": lost, **moved}
 
 
@@ -1063,15 +1095,15 @@ def _poll_registrar(deadline: float) -> dict:
     `maybe_sent` и застрявшие `ordering` с протухшим claim. Только ЧТЕНИЕ (getDomainInfo -> listOrders ->
     баланс), ничего не отправляет. registered -> `ordered`; «не зарегистрирован (выверено)» -> флаг
     maybe_sent снят, но подтверждение ЧЕЛОВЕКА сброшено (повтор — только новым confirm); иначе строка
-    остаётся как есть (отмена заблокирована). Записываем ТОЛЬКО через `_settle` (ABA-гард)."""
-    import time
-    from datetime import datetime, timezone
+    остаётся как есть (отмена заблокирована). Записываем ТОЛЬКО через `_settle` (ABA-гард).
+    registered -> `caught` + домен `purchased` + карточка сайта (регистрация = покупка)."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.integrations.registrar import get_registrar
-    from app.models.domain import Domain, AcquisitionOrder
+    from app.models.domain import AcquisitionOrder
 
     out = {"checked": 0, "conflicts": 0, "sending": 0, "lost": 0, "pending": 0}
+    bought_ids: list[int] = []
     with SessionLocal() as db:
         rows = db.execute(select(AcquisitionOrder).where(
             AcquisitionOrder.provider == "registrar",
@@ -1082,52 +1114,72 @@ def _poll_registrar(deadline: float) -> dict:
         r = get_registrar()
         if not getattr(r, "configured", False) or not hasattr(r, "reconcile"):
             return out
-        for o in rows:
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"общий дедлайн опроса ({POLL_DEADLINE_SEC:.0f} с) вышел — остальные "
-                                   f"строки разберёт следующая сверка")
-            if o.status == "ordering" and not _claim_expired(o):
-                out["sending"] += 1                       # живой execute в полёте — не трогаем
-                continue
-            d = db.get(Domain, o.domain_id)
-            if d is None:
-                continue
-            ctx = (o.result or {}).get("registrar_ctx") or {}
-            if ctx.get("auction"):
-                # итог ставки на аукционе машина не выверяет (домен не «регистрируется» сразу) — только вручную
-                verdict, note = "unknown", "ставка на аукционе: итог проверь на сайте NameSilo"
-            else:
-                try:
-                    since = datetime.fromisoformat(ctx["sent_at"])
-                except (KeyError, ValueError, TypeError):
-                    since = o.claimed_at or datetime.now(timezone.utc)
-                if since.tzinfo is None:
-                    since = since.replace(tzinfo=timezone.utc)
-                verdict, note = r.reconcile(d.domain, since, ctx.get("balance_before"))
-            base = {k: v for k, v in (o.result or {}).items() if k != "maybe_sent"}
-            if verdict == "registered":
-                values = {"status": "ordered", "claimed_at": None,
-                          "ordered_at": o.ordered_at or datetime.now(timezone.utc),
-                          "result": {**base, "note": f"восстановлено сверкой: {note}"}}
-            elif verdict == "not_registered":
-                values = {"status": "failed", "claimed_at": None, "confirmed_by_human": False,
-                          "result": {**base, "error": note}}
-                out["lost"] += 1
-            else:
-                if o.status == "ordering":                # труп без вердикта: деньги могли уйти — отмена заперта
-                    values = {"status": "failed", "claimed_at": None,
-                              "result": {**base, "maybe_sent": True,
-                                         "error": f"отправка оборвалась, исход не выяснен: {note}"}}
-                else:
-                    out["pending"] += 1
-                    continue
-            if not _settle(db, o, **values):
-                db.rollback()
-                out["conflicts"] += 1
-                continue
-            db.commit()
-            out["checked"] += 1
+        try:
+            _poll_registrar_rows(db, r, rows, deadline, out, bought_ids)
+        finally:
+            for did in bought_ids:                    # покупки уже закоммичены — сайт заводим даже при дедлайне
+                _site_after_purchase(did)
     return out
+
+
+def _poll_registrar_rows(db, r, rows, deadline: float, out: dict, bought_ids: list) -> None:
+    """Тело сверки registrar (вынесено, чтобы `_poll_registrar` довёл bought_ids до сайтов и при дедлайне)."""
+    import time
+    from datetime import datetime, timezone
+    from app.models.domain import Domain
+
+    for o in rows:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"общий дедлайн опроса ({POLL_DEADLINE_SEC:.0f} с) вышел — остальные "
+                               f"строки разберёт следующая сверка")
+        if o.status == "ordering" and not _claim_expired(o):
+            out["sending"] += 1                       # живой execute в полёте — не трогаем
+            continue
+        d = db.get(Domain, o.domain_id)
+        if d is None:
+            continue
+        ctx = (o.result or {}).get("registrar_ctx") or {}
+        if ctx.get("auction"):
+            # итог ставки на аукционе машина не выверяет (домен не «регистрируется» сразу) — только вручную
+            verdict, note = "unknown", "ставка на аукционе: итог проверь на сайте NameSilo"
+        else:
+            try:
+                since = datetime.fromisoformat(ctx["sent_at"])
+            except (KeyError, ValueError, TypeError):
+                since = o.claimed_at or datetime.now(timezone.utc)
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            verdict, note = r.reconcile(d.domain, since, ctx.get("balance_before"))
+        base = {k: v for k, v in (o.result or {}).items() if k != "maybe_sent"}
+        if verdict == "registered":
+            # регистрация подтверждена правдой регистратора (getDomainInfo: наш, Active) — это
+            # уже покупка, как и у синхронного успеха execute: `caught` + домен `purchased`
+            values = {"status": "caught", "claimed_at": None,
+                      "ordered_at": o.ordered_at or datetime.now(timezone.utc),
+                      "result": {**base, "note": f"восстановлено сверкой: {note}"}}
+            bought_ids.append(o.domain_id)
+        elif verdict == "not_registered":
+            values = {"status": "failed", "claimed_at": None, "confirmed_by_human": False,
+                      "result": {**base, "error": note}}
+            out["lost"] += 1
+        else:
+            if o.status == "ordering":                # труп без вердикта: деньги могли уйти — отмена заперта
+                values = {"status": "failed", "claimed_at": None,
+                          "result": {**base, "maybe_sent": True,
+                                     "error": f"отправка оборвалась, исход не выяснен: {note}"}}
+            else:
+                out["pending"] += 1
+                continue
+        if not _settle(db, o, **values):
+            db.rollback()
+            out["conflicts"] += 1
+            if o.domain_id in bought_ids:
+                bought_ids.remove(o.domain_id)
+            continue
+        if o.domain_id in bought_ids:
+            d.status = "purchased"
+        db.commit()
+        out["checked"] += 1
 
 
 def poll_orders() -> dict:

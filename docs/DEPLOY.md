@@ -8,8 +8,12 @@
 ## 1. Docker — поднять стек
 
 Стек в `docker-compose.yml`: `db` (postgres:16) + `backend` (FastAPI :8000) + `worker`
-(шедулер M1). Миграции применяются автоматически при старте backend
+(автопилот APScheduler) + `backup` (ежедневный pg_dump в `./backups`) + опциональный
+`aapanel-tunnel` (профиль `tunnel`). Миграции применяются автоматически при старте backend
 (`alembic upgrade head` идемпотентен), БД гейтится healthcheck'ом.
+
+**Бокс — Windows + Docker Desktop, репо `D:\combine_machine`, команды в PowerShell.** Примеры ниже
+с `ssh box '...'` — для Linux-хоста; на боксе их запускают прямо в PowerShell из `D:\combine_machine`.
 
 ```bash
 cp .env.example .env          # заполнить креды (LLM/searxng уже на дефолтах бокса)
@@ -31,9 +35,9 @@ docker compose down            # стоп (данные в volume pgdata сох�
 **Где поднимать: на боксе `192.168.1.77`.** Там уже LiteLLM/SearXNG → приложение
 ходит к ним по localhost (быстрее, дефолты в `.env` совпадают), бокс всегда включён.
 Панель `:8000` **выставлена на LAN** (`192.168.1.77:8000:8000` — привязка к LAN-интерфейсу
-бокса, не `0.0.0.0`) — открывается с Mac по `http://192.168.1.77:8000/`. Авторизации у
-панели нет, поэтому это ОК только за NAT домашнего роутера: **не пробрасывать `:8000` в
-интернет**. ⚠️ Без авторизации любой в LAN может гонять пайплайн, включая `POST /admin/pull`
+бокса, не `0.0.0.0`) — открывается с Mac по `http://192.168.1.77:8000/`. Панель закрыта
+Basic-auth (`PANEL_USER`/`PANEL_PASS` в `.env`; пусто = без авторизации), и всё равно это ОК только
+за NAT домашнего роутера: **не пробрасывать `:8000` в интернет**. ⚠️ Без авторизации любой в LAN может гонять пайплайн, включая `POST /admin/pull`
 (git-pull + перезагрузка кода). Закрой Basic-auth: задай `PANEL_USER`+`PANEL_PASS` в `.env`
 бокса (см. `backend/app/main.py`) — тогда LAN-экспозиция безопасна; либо ограничь source-IP
 в `DOCKER-USER`. Хочешь
@@ -74,6 +78,26 @@ ssh box 'cd ~/vpn-portfolio && git pull && docker compose up -d --build'
   → backend в цикле перезапусков, кнопка git-pull недоступна). Откат v2 → v1 — только восстановлением
   дампа, снятого до обновления (`docs/v2/03-m1-plan.md`, Задача 17): `downgrade` миграции 0025 теряет
   решения курации v1.
+
+### Бэкап и откат
+
+Сервис `backup` снимает `pg_dump -Fc` раз в сутки (и сразу при старте) в `./backups/portfolio-<UTC>.dump`,
+хранит 14 суток. Упавший дамп файла не оставляет (пишется во временный, затем переименовывается). Перед любым
+обновлением с миграциями — ручной дамп (PowerShell, из `D:\combine_machine`; вложенных кавычек в командах
+нет намеренно — PowerShell 5.1 их ломает):
+```powershell
+docker compose run --rm backup pg_dump -h db -U portfolio -Fc -f /backups/manual-before-update.dump portfolio
+```
+Восстановление из дампа (стоп backend/worker, чтобы никто не писал в БД):
+```powershell
+docker compose stop backend worker
+docker compose run --rm backup dropdb -h db -U portfolio portfolio
+docker compose run --rm backup createdb -h db -U portfolio portfolio
+docker compose run --rm backup pg_restore -h db -U portfolio -d portfolio /backups/manual-before-update.dump
+docker compose start backend worker
+```
+Откат кода без миграций — `git revert` + `up -d --build`. Откат с миграциями — только восстановлением
+дампа, снятого ДО обновления, затем checkout старого кода.
 
 ### Обновление из панели (без консоли)
 Панель → **Диагностика** показывает статус дерева (ветка · чисто/грязно · позади/впереди origin)

@@ -619,7 +619,7 @@ def test_confirmed_order_registers_once_and_freezes_usd_cost(monkeypatch, make):
     oid = _flow("good.com")
     o = _order(oid)
     assert o.provider == "registrar" and o.cost_currency == "USD" and float(o.cost) == 17.29
-    assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
+    assert acquisition.execute_confirmed_order(oid)["status"] == "caught"     # 300 от registerDomain = куплен
     assert len(srv.n("registerDomain")) == 1 and _order(oid).result["order_amount"] == 17.29
 
 
@@ -679,8 +679,12 @@ def test_poll_adopts_order_when_domain_turns_out_registered(monkeypatch, make):
     sent = len(srv.n("registerDomain"))
     out = acquisition.poll_orders()
     o = _order(oid)
-    assert o.status == "ordered" and "maybe_sent" not in o.result and out["errors"] == {}
+    assert o.status == "caught" and "maybe_sent" not in o.result and out["errors"] == {}
     assert len(srv.n("registerDomain")) == sent      # поллинг ничего не отправляет
+    from app.models.site import Site
+    with db.SessionLocal() as s:                     # сверка «зарегистрирован» = куплен + карточка сайта
+        assert s.get(Domain, o.domain_id).status == "purchased"
+        assert s.query(Site).filter_by(domain_id=o.domain_id).count() == 1
 
 
 def test_poll_verified_not_registered_drops_confirmation_and_unlocks_cancel(monkeypatch, make):
@@ -713,7 +717,7 @@ def test_retry_after_ambiguity_adopts_instead_of_double_ordering(monkeypatch, ma
     """«↻ повторить» после обрыва: registerDomain не шлётся второй раз, если домен уже наш."""
     oid, c, srv = _stuck_order(monkeypatch, make, getDomainInfo=ok(status="Active"))
     sent_before = len(srv.n("registerDomain"))
-    assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
+    assert acquisition.execute_confirmed_order(oid)["status"] == "caught"
     assert len(srv.n("registerDomain")) == sent_before
 
 

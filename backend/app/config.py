@@ -50,13 +50,6 @@ class Settings(BaseSettings):
     # Ahrefs API v3 (integrations/ahrefs.py): DR-free, batch-analysis, анкоры, история трафика
     AHREFS_API_KEY: str = ""
 
-    # serp + keywords
-    SEO_DATA_PROVIDER: str = "dataforseo"
-    DATAFORSEO_LOGIN: str = ""
-    DATAFORSEO_PASSWORD: str = ""
-    SERPAPI_KEY: str = ""
-    YANDEX_WORDSTAT_TOKEN: str = ""
-
     # backorder.ru
     BACKORDER_LOGIN: str = ""
     BACKORDER_PASSWORD: str = ""
@@ -83,10 +76,6 @@ class Settings(BaseSettings):
     # M2: сколько часов живёт подтверждение выкупа (S3-07). Дальше исполнить старый confirm нельзя —
     # человек подтверждает заново (и цена/тариф перезамораживаются).
     ACQ_CONFIRM_TTL_HOURS: int = 24
-
-    # registrar NS (.ru)
-    REGRU_USERNAME: str = ""
-    REGRU_PASSWORD: str = ""
 
     # cloudflare
     CLOUDFLARE_API_TOKEN: str = ""
@@ -166,10 +155,6 @@ class Settings(BaseSettings):
     CC_GRAPHINFO_URL: str = "https://index.commoncrawl.org/graphinfo.json"
     CC_GRAPH_BASE_URL: str = "https://data.commoncrawl.org/projects/hyperlinkgraph"
     MAJESTIC_URL: str = "https://downloads.majestic.com/majestic_million.csv"
-
-    # опц. локальные сервисы (тот же бокс)
-    BROWSERLESS_URL: str = ""
-    N8N_URL: str = ""
 
     # self-update (кнопка «Обновить из git» в панели). Токен — fine-grained PAT,
     # read-only Contents; тянем по HTTPS, чтобы не монтировать SSH-ключ в контейнер.

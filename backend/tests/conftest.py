@@ -252,7 +252,11 @@ def _no_paid_keys(monkeypatch):
     юнит-тесты самого клиента берут фикстуру real_rdap_bootstrap."""
     from app.config import settings
     for key in ("AHREFS_API_KEY", "WEBRISK_API_KEY", "SPAMHAUS_DQS_KEY", "NAMESILO_API_KEY",
-                "GSC_SERVICE_ACCOUNT_JSON"):
+                "GSC_SERVICE_ACCOUNT_JSON",
+                # боксовые значения из локального .env (путь к серту панели в контейнере, account_id CF):
+                # с ними 25 тестов провижна/CF краснеют на Mac и зеленеют в контейнере — результат
+                # не должен зависеть от .env оператора
+                "AAPANEL_CA_BUNDLE", "CLOUDFLARE_ACCOUNT_ID"):
         monkeypatch.setattr(settings, key, "")
     # IndexNow по умолчанию включён и ходит в сеть после публикации; в тестах выключен
     # (тесты самого пинга включают его и подставляют мок-транспорт).

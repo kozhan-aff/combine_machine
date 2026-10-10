@@ -1,16 +1,12 @@
-"""Registrar nameserver management (.ru: reg.ru / nic.ru). Transport only.
+"""Шов регистратора для международных зон: протокол Registrar, заглушка «не настроен», выбор клиента.
 
-Needed by M3 provisioning step 2: after creating a Cloudflare zone, point the
-domain's NS to Cloudflare's nameservers, then wait for propagation.
-
-reg.ru API v2: https://api.reg.ru/api/regru2/  (username/password or signature+SSL cert)
-  method for NS update: domain/update_nss (set ns0/ns1 to Cloudflare's)
-nic.ru has its own API. Some resellers expose NS changes too.
+Реализация — integrations/namesilo.py (NameSiloClient). M2 (acquisition) зовёт price/balance/register/bid,
+M3 (provisioning) — set_nameservers после создания зоны Cloudflare. Денежный гейт живёт в acquisition
+и один на все каналы.
 """
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from app.config import settings
-from app.integrations.base import BaseClient
 
 
 # ---- Шов под международный выкуп (S3-01/F8-13) ----------------------------------------------
@@ -83,17 +79,3 @@ def get_registrar() -> Registrar:
         from app.integrations.namesilo import NameSiloClient
         return NameSiloClient()
     return NotConfiguredRegistrar()
-
-
-class RegistrarClient(BaseClient):
-    def __init__(self):
-        super().__init__("https://api.reg.ru/api/regru2")
-        self.username = settings.REGRU_USERNAME
-        self.password = settings.REGRU_PASSWORD
-
-    def set_nameservers(self, domain: str, nameservers: list[str]) -> dict:
-        """Point domain NS to Cloudflare's assigned nameservers. TODO."""
-        raise NotImplementedError
-
-    def ping(self) -> bool:
-        raise NotImplementedError
