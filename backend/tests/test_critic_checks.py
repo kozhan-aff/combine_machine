@@ -297,13 +297,55 @@ def test_small_int_with_magnitude_word_is_a_fact():
     assert nums("В сети 65 тысяч серверов.") == ["числа без источника: 65 тысяч"]
 
 
-def test_english_plural_is_not_a_multiplier():
-    # «millions of users» — «миллионы пользователей», а не множитель при числе перед ним
+def test_year_before_a_plural_is_not_a_multiplier():
+    # «millions of users» после года — «миллионы пользователей», а не «2025 миллионов»
     assert nums(f"In {YEAR} millions of users rely on it.") == []
-    assert nums("Over 450 thousands of reviews.") == ["числа без источника: 450"]
-    assert nums("Over 3 billions.", allowed={"3000000000"}) == []          # малое целое, не «3 billion»
-    assert nums("Audience of 450 million.", sources=["In 450 millions of homes"]) == [
-        "числа без источника: 450 million"]
+    assert nums(f"En {YEAR} millones de usuarios confían en él.") == []
+    assert nums(f"В {YEAR} миллионы людей выбрали его, а тысячи остались.") == []
+    assert nums("In 1999 millions of users came.") == ["числа без источника: 1999"]       # год, но не нынешний
+    # только эта пара: множественное число за обычным числом — множитель (французский иначе не пишет)
+    assert nums("5 millions d'utilisateurs.") == ["числа без источника: 5 millions"]
+    assert nums("10 millions users.") == ["числа без источника: 10 millions"]
+    assert nums("Over 450 thousands of reviews.") == ["числа без источника: 450 thousands"]
+    assert nums("5 millions d'utilisateurs.", allowed={"5000000"}) == []
+    # год в единственном числе множителя — число: «2025 million» так не пишут о годе
+    assert nums(f"{YEAR} million users.") == [f"числа без источника: {YEAR} million"]
+
+
+def test_magnitude_words_of_all_site_languages():
+    cases = {
+        "de": [("6 Tsd.", 3), ("6 Tausend", 3), ("3 Mio.", 6), ("3 Millionen", 6), ("1 Million", 6),
+               ("2 Mrd.", 9), ("2 Milliarden", 9), ("1 Milliarde", 9)],
+        "fr": [("6 mille", 3), ("6 milliers", 3), ("3 millions", 6), ("1 million", 6), ("2 milliards", 9),
+               ("1 milliard", 9)],
+        "es": [("6 mil", 3), ("1 millón", 6), ("3 millones", 6)],
+        "it": [("6 mila", 3), ("1 milione", 6), ("3 milioni", 6), ("1 miliardo", 9), ("2 miliardi", 9)],
+        "pt": [("6 mil", 3), ("1 milhão", 6), ("3 milhões", 6)],
+        "nl": [("6 duizend", 3), ("3 miljoen", 6), ("2 miljard", 9)],
+        "en": [("6 thousand", 3), ("3 million", 6), ("3 millions", 6), ("2 billion", 9), ("2 Billions", 9)],
+    }
+    for lang, pairs in cases.items():
+        for written, power in pairs:
+            digit = written.split()[0]
+            assert nums(f"Total {written} utenti.") == [f"числа без источника: {written}"], (lang, written)
+            assert nums(f"Total {written} utenti.", allowed={digit}) == [f"числа без источника: {written}"], written
+            assert nums(f"Total {written} utenti.", allowed={digit + "0" * power}) == [], (lang, written)
+    # слово — целиком: «mil» внутри «milano», «mille» внутри «millefeuille» — не множитель
+    assert nums("A 6 milano e 5 millefeuille.") == []
+
+
+def test_magnitude_after_narrow_spaces():
+    for space in ("\u202f", "\u2009", "\u00a0", " "):
+        assert nums(f"Аудитория 3{space}млн человек.") == ["числа без источника: 3 млн"], repr(space)
+        assert nums(f"Аудитория 3{space}млн человек.", allowed={"3000000"}) == [], repr(space)
+
+
+def test_invisible_characters_do_not_hide_a_number():
+    # «9000», прошитое пробелами нулевой ширины и мягкими переносами, — всё равно 9000
+    for hidden in ("9\u200b0\u200b0\u200b0", "9\u00ad000", "90\u200d00", "\ufeff9000"):
+        assert nums(f"В сети {hidden} серверов.") == ["числа без источника: 9000"], repr(hidden)
+        assert nums(f"В сети {hidden} серверов.", allowed={"9000"}) == [], repr(hidden)
+    assert nums("В сети 9\u200b000 серверов.", sources=["около 9\u200b тыс. серверов"]) == []
 
 
 def test_magnitude_word_must_be_on_the_same_line():

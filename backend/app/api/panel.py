@@ -883,9 +883,12 @@ def page_edit_view(request: Request, page_id: int, db: Session = Depends(get_ses
         return _back("/", err=f"страница #{page_id} не найдена")
     site = db.get(Site, page.site_id)
     d = db.get(Domain, site.domain_id) if site else None
+    from app.services import content_critic
     return templates.TemplateResponse(request, "page_edit.html", {
         "active": "dash",
         "page": page, "site": site, "domain": d.domain if d else "",
+        # вердикт критика показываем, только если он относится к нынешнему тексту страницы
+        "verdict_fresh": content_critic.verdict_is_fresh(page), "max_rounds": content_critic.MAX_ROUNDS,
     })
 
 

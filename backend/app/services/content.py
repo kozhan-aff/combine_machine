@@ -573,10 +573,15 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
     return written
 
 
-def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False) -> dict:
+def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False,
+                 only_status: str | None = None) -> dict:
     """Переписать ОДНУ страницу по замечаниям критика, на месте: -> {"page_id", "ok", "error"}; если
     отказ вызван недоступной моделью (WriterDown) — ещё и "down": True.
     Правленую руками (blocks_stale) не трогает, пока оператор явно не разрешил (`overwrite_manual`).
+
+    `only_status` — переписать, только если страница в этом статусе и в начале, и в момент записи.
+    Писатель работает минуты: без этого критик затёр бы новым текстом и разжаловал в draft страницу,
+    которую оператор за это время одобрил (или которая ушла на сайт). Запись идёт под блокировкой строки.
 
     Оффер и язык — те, под которые страница написана (Page.offer_id/lang, F26), тип — по её пути в
     scaffold(). Отказ (нет досье, ручная правка, провал писателя) страницу не меняет и возвращается
@@ -600,6 +605,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
             return out("страницу правили вручную — переписывание затёрло бы правку")
         if page.status not in REWRITE_STATUSES:
             return out(f"страница в статусе «{page.status}» — переписывать нельзя")
+        if only_status is not None and page.status != only_status:
+            return out(f"страница уже в статусе «{page.status}» — переписывать её не нам")
         offer = db.get(Offer, page.offer_id) if page.offer_id else None
         if offer is None or not page.lang:
             return out("у страницы не записан оффер или язык — писать не под что")
@@ -625,9 +632,12 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
     if err:
         return out(err)
     with SessionLocal() as db:
-        page = db.get(Page, page_id)
+        # only_status: строка — под блокировкой до коммита, проверка статуса и запись неразрывны
+        page = db.get(Page, page_id, with_for_update=only_status is not None)
         if page is None:
             return out(f"страница #{page_id} исчезла, пока модель писала")
+        if only_status is not None and page.status != only_status:
+            return out("страница изменилась, пока писатель работал")
         if _hand_edited(page, seen_body, overwrite_manual):
             return out("страницу правили вручную, пока модель писала, — правка сохранена, текст модели отброшен")
         _apply_doc(page, doc, spec["kind"], lang)

@@ -13,20 +13,23 @@
 
 <form method="post" action="/pages/{{ page.id }}/critique" style="margin-bottom:14px">
   <button class="btn" title="проверки кодом (копирование источников, числа без источника, объём, язык, бренд) и вердикт редактора-модели. Подсказка: статус страницы не меняется, одобряешь ты">🔍 Вычитать</button>
-  {% if page.critic_checked_at %}
-    {% set n = page.critic_notes if page.critic_notes is mapping else {} %}
+  {% set n = page.critic_notes if page.critic_notes is mapping else {} %}
+  {% if n and not verdict_fresh %}
+    <span class="hint" title="вердикт критика относился к прежнему тексту (или записан в прежнем формате) — нажми «Вычитать», чтобы получить новый">текст изменён после вычитки — вердикт устарел</span>
+  {% elif n %}
     {% if n.get('pass') is sameas true %}
       <span class="badge b-approved" title="у проверок кодом и у редактора-модели замечаний нет. Страница остаётся черновиком, пока её не одобрят">критик: pass</span>
-    {% elif n %}
-      <span class="badge b-warn" title="страница не прошла вычитку — причины ниже. Одобрить её руками по-прежнему можно">критик: замечания</span>
     {% else %}
-      <span class="hint">вердикта нет (оценка прежнего формата) — вычитай страницу заново</span>
+      <span class="badge b-warn" title="страница не прошла вычитку — причины ниже. Одобрить её руками по-прежнему можно">критик: замечания</span>
     {% endif %}
     {% if page.critic_score is not none %}
       <span class="badge" title="оценка редактора-модели; на вердикт не влияет — решают замечания">{{ (page.critic_score * 100)|round|int }}/100</span>
     {% endif %}
     {% if n.get('round') %}
-      <span class="hint" title="сколько раз страницу переписывали по замечаниям; после второго круга её читает человек">круг {{ n.get('round') }} из 2</span>
+      <span class="hint" title="сколько раз страницу переписывали по замечаниям; дальше её читает человек">круг {{ n.get('round') }} из {{ max_rounds }}</span>
+    {% endif %}
+    {% if n.get('note') %}
+      <span class="hint" title="критик сам одобряет только текст, собранный из проверенной структуры страницы; в правленом вручную может стоять то, чего он не видит (адрес ссылки, картинка)">{{ n.get('note') }}</span>
     {% endif %}
     {% for label, items in (('проверки кодом', n.get('code')), ('редактор-модель', n.get('model'))) if items %}
       <div class="hint" style="margin:8px 0 0">{{ label }}:</div>
@@ -35,16 +38,9 @@
           <li>{{ issue }}</li>
         {% endfor %}
       </ul>
-    {% else %}
-      {# заметки прежнего формата: один общий список #}
-      {% if n.get('issues') %}
-        <ul class="hint" style="margin:6px 0 0">
-          {% for issue in n.get('issues') %}
-            <li>{{ issue }}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
     {% endfor %}
+  {% elif page.critic_checked_at %}
+    <span class="hint">вердикта нет (оценка прежнего формата) — вычитай страницу заново</span>
   {% endif %}
 </form>
 
