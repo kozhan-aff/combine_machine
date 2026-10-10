@@ -8,9 +8,9 @@
 > «Швы полного цикла»): регистрация NameSilo = сразу `purchased` + карточка сайта + оффер по умолчанию, NS Cloudflare
 > провижн пишет регистратору сам, кнопка «✓ подтвердить и купить», сервис `backup` (pg_dump) в compose, мёртвые ключи v1
 > убраны. **Где настройки:** `/settings/keys` (ключи, пишет в БД поверх `.env`), `/settings` (пороги, зона→канал),
-> `/autopilot`; `.env` бокса — `D:\combine_machine\.env`. Бокс НЕ обновлён: дамп БД → стоп автопилота →
-> «Обновить из git» (миграции 0026–0034) → `docker compose up -d --build` (появились `backup`, туннель) → ключи на
-> `/settings/keys`. Вход: `docs/v2/CLAUDE.md`; аудит — `docs/v2/audit-2026-10-07.md`; NameSilo —
+> `/autopilot`; `.env` бокса — `D:\combine_machine\.env`. Бокс на 2026-10-10 УЖЕ на `c36b92a`, миграции накачены,
+> веса без Ahrefs обнулены; осталось `docker compose up -d --build` (сервис `backup`) и `OLLAMA_HOST=0.0.0.0` на Windows
+> (LiteLLM не достаёт Ollama — главный блокер контента). Вход: `docs/v2/CLAUDE.md`; аудит — `docs/v2/audit-2026-10-07.md`; NameSilo —
 > `docs/v2/research/namesilo-api-spec.md`. Ключа Ahrefs не будет; LLM — Ollama через LiteLLM с `think:false`.
 
 Стартовый скелет проекта **VPN Affiliate Portfolio** — машины полного цикла для

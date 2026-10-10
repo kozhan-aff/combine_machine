@@ -323,8 +323,20 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
   LLM_CLASSIFY_FALLBACK_MODEL/INDEXNOW_SECRET; тесты герметичны к `AAPANEL_CA_BUNDLE`/`CLOUDFLARE_ACCOUNT_ID`
   из локального `.env`; iCloud-дубль теста и чужие NZ-доки из `docs/` убраны; слитые worktree удалены.
 
+**Живая проверка бокса 2026-10-10 (с Mac, через панель):** бокс УЖЕ на `c36b92a` (main, чисто), воркер жив, автопилот
+выключен, миграции накачены. Веса `rd`/`anchor_quality`/`traffic_history` обнулены на `/settings` (остальные прежние,
+источники nominet/mx/emd как были). `/diag`: aaPanel OK с бокса, Cloudflare OK, Wayback/RDAP/A-Parser OK; **LiteLLM FAIL** —
+`mistral` 403 (тариф), а `ollama/*` не достижим: контейнер LiteLLM не может подключиться к `host.docker.internal:11434`
+(`Connect call failed ('192.168.65.254', 11434)`). Это значит Ollama на Windows слушает только 127.0.0.1: нужно задать
+системную переменную `OLLAMA_HOST=0.0.0.0` и перезапустить Ollama, затем `LLM_MODEL`/`LLM_CLASSIFY_MODEL=ollama/<модель>`
+на `/settings/keys`. SearXNG — 0 результатов (движки suspended/CAPTCHA). NameSilo/Ahrefs/Web Risk — ключей нет.
+`docker compose up -d --build` для сервиса `backup` ещё не выполнялся (compose меняется не кнопкой).
+Сквозной офлайн-прогон M4→M5 по реальному коду (фейковые LLM и aaPanel, es-рынок) даёт 3 страницы + 8 ассетов + robots/
+sitemap/ключ IndexNow; скриншоты смотрели глазами. **Живой провижн/публикация на настоящем домене не выполнялись** — нет
+купленного домена.
+
 **Не сделано (нужен оператор или живой бокс):** ToS DropCatch / включить `namesilo_auction` (иначе .com-потока нет);
-веса `rd`/`anchor_quality`/`traffic_history` → 0 в `/settings`, пока нет Ahrefs; `LLM_CLASSIFY_MODEL`;
+`OLLAMA_HOST=0.0.0.0` на боксе и `LLM_CLASSIFY_MODEL`; `docker compose up -d --build` (сервис backup);
 `WEBRISK_API_KEY`; живая сверка `SetSSL`/`AddDomain`/`DeleteFile` и включение `ORIGIN_CA_AUTO`; ротация CF-аккаунтов;
 очередь `queued` (ручные задачи в воркер); расширение scaffold сайта; онбординг GSC по API. Ни один метод NameSilo
 живьём не снят (инвариант 7) — первый выкуп делать на дешёвом домене и смотреть `/queue`.
@@ -341,4 +353,4 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 ## Волна 2 (2026-10-08, влита в main f1a161f, 1675 passed)
 think:false для ollama/* (LLM_THINK); клиент NameSilo (Registrar, аукционы просроченных, регистрация без ретраев, write-ahead, ключ маскируется); списки UT1/blocklistproject (миграция 0033, мягкий сигнал); ранги Common Crawl (0034) вместо DR; SSH-туннель к aaPanel (сайдкар `tunnel/`, `docs/v2/aapanel-tunnel-runbook.md`); индексация GSC + IndexNow.
 Хвосты (minor): домен в JS-атрибуте queue.html; ~~.env.example без NAMESILO_*/LLM_THINK/INDEXNOW_SECRET~~ (сделано 2026-10-10); без рангов authority=0.5 (может сдвинуть порог approve); bid() шлёт потолок как proxy-ставку — живой bidAuction не проверен; httpx.Client NameSilo не закрывается.
-Бокс НЕ обновлён: дамп БД → стоп автопилота → «Обновить из git» (миграции 0026–0034) → ключи на /settings/keys → `docker compose up -d --build` (туннель).
+~~Бокс НЕ обновлён~~ — на 2026-10-10 бокс на `c36b92a` (см. «Швы полного цикла»); осталось `docker compose up -d --build` (backup, туннель).
