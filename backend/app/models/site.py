@@ -56,6 +56,10 @@ class Site(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # ротация провижна (F2.1)
 
+    # Когда досье конкурентов собирали в последний раз, с любым исходом кроме отмены (миграция 0038).
+    # У пустого досье строк в site_research нет — пауза перед повтором считается от этой отметки.
+    research_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     pages: Mapped[list["Page"]] = relationship(back_populates="site")
 
     # ОДИН САЙТ НА ДОМЕН (миграция 0016). Гонка panel/worker (кнопка провижна против

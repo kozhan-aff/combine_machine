@@ -14,6 +14,7 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 KINDS = ("review", "comparison", "howto", "market")
 PER_QUERY = 5
 MIN_WORDS = 300
+EMPTY_RETRY_HOURS = 24   # пустое досье не пересобираем чаще: свип шёл по такому сайту каждый час впустую
 _EXTRA_NOISE = ("apps.apple.", "play.google.", "chrome.google.", "github.", "amazon.", "aliexpress.")
 
 # Резолвер — функция, а не `_resolve = socket.getaddrinfo`: ссылка, захваченная при импорте, обходила бы
@@ -35,6 +37,8 @@ def _resolve(*a, **kw):
     return socket.getaddrinfo(*a, **kw)
 
 
+_sleep = time.sleep      # шов для тестов: пауза между попытками `_fetch`
+
 _EMPTY_REASON = ("ни одной живой страницы конкурентов ни по одному запросу "
                  "(SERP пуст или страницы не скачались) — генерация без досье не идёт")
 _TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
@@ -42,7 +46,9 @@ _TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
 # `_norm` целиком: «Telegram», «@Telegram», «Яндекс Дзен» -> telegram / яндексдзен.
 _PLATFORMS = frozenset(_norm(x) for x in (
     "telegram", "youtube", "vk", "vkontakte", "reddit", "facebook", "twitter", "x", "tiktok", "instagram",
-    "dzen", "яндекс дзен", "pikabu", "habr"))
+    "dzen", "яндекс дзен", "pikabu", "habr",
+    # те же площадки, как они подписывают себя по-русски (живой прогон 2026-10-10)
+    "телеграм", "ютуб", "вконтакте", "вк", "дзен", "рутуб", "одноклассники"))
 _MAX_HTML = 600_000      # потолок перед extract_all: faq() квадратичен на патологическом HTML (мегабайты без тегов)
 
 
@@ -198,6 +204,22 @@ def _platform_or_brand(names: list[str], brand_key: str) -> bool:
     return False
 
 
+def _fetch(ap, url: str, attempts: int = 3) -> str | None:
+    """Скачать страницу с повтором: прокси A-Parser отдаёт 502 на ~половину goto-ссылок (`fetch_html` -> None),
+    и вторая попытка обычно проходит. Исключение — тоже попытка. Первый непустой ответ возвращается."""
+    for i in range(attempts):
+        if i:
+            _sleep(1)
+        try:
+            html = ap.fetch_html(url)
+        except Exception as e:  # noqa: BLE001
+            log.warning("research: fetch %s (попытка %d/%d): %s", url, i + 1, attempts, e)
+            html = None
+        if html:
+            return html
+    return None
+
+
 def _css_for(ap, html: str, url: str) -> list[str]:
     out = []
     for link in rx.stylesheet_links(html, url):
@@ -237,6 +259,21 @@ def is_fresh(db, site_id: int) -> bool:
     if newest.tzinfo is None:
         newest = newest.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - newest < timedelta(days=settings.RESEARCH_MAX_AGE_DAYS)
+
+
+def recently_empty(db, site_id: int) -> bool:
+    """Досье собирали меньше EMPTY_RETRY_HOURS назад и оно пустое — свипу рано пробовать снова."""
+    from sqlalchemy import select, func
+    from app.models.research import SiteResearch
+    from app.models.site import Site
+    if db.scalar(select(func.count()).select_from(SiteResearch).where(SiteResearch.site_id == site_id)):
+        return False
+    checked = db.scalar(select(Site.research_checked_at).where(Site.id == site_id))
+    if checked is None:
+        return False
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - checked < timedelta(hours=EMPTY_RETRY_HOURS)
 
 
 def dossier(db, site_id: int) -> list:
@@ -307,11 +344,7 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                     if not goto:                       # обычный URL: шум/бренд/дедуп — ДО скачивания
                         if _blocked_host(host, brand_key, own_host) or host in seen_domains:
                             continue
-                    try:
-                        html = ap.fetch_html(url)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("research: fetch %s: %s", url, e)
-                        html = None
+                    html = _fetch(ap, url)
                     if not html:
                         continue
                     final_url, reliable = url, True
@@ -357,10 +390,14 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
     if was_cancelled:        # track глотает Cancelled; прежнее досье не трогаем, недособранное не сохраняем
         return {"status": "empty", "rows": 0, "reason": "сборка досье отменена оператором — прежние данные не тронуты",
                 "warnings": warnings}
+    with SessionLocal() as db:
+        if rows:
+            db.query(SiteResearch).filter(SiteResearch.site_id == site_id).delete()
+            db.add_all(SiteResearch(**r) for r in rows)
+        site = db.get(Site, site_id)
+        if site is not None:     # отметка «проверяли» — и для пустого досье: по ней свип выдерживает паузу
+            site.research_checked_at = datetime.now(timezone.utc)
+        db.commit()
     if not rows:
         return {"status": "empty", "rows": 0, "reason": _EMPTY_REASON, "warnings": warnings}
-    with SessionLocal() as db:
-        db.query(SiteResearch).filter(SiteResearch.site_id == site_id).delete()
-        db.add_all(SiteResearch(**r) for r in rows)
-        db.commit()
     return {"status": "done", "rows": len(rows), "reason": None, "warnings": warnings}

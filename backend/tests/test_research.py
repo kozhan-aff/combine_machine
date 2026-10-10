@@ -70,6 +70,35 @@ def _dns(monkeypatch):
     monkeypatch.setattr(research, "_resolve", fake)
 
 
+@pytest.fixture(autouse=True)
+def pauses(monkeypatch):
+    """Паузы между попытками `_fetch` не спим — собираем: несбывшаяся страница иначе стоит 2 с на тест."""
+    out = []
+    monkeypatch.setattr(research, "_sleep", out.append)
+    return out
+
+
+class SeqAP:
+    """`fetch_html` отдаёт ответы по очереди; исключение в очереди — бросается."""
+    def __init__(self, *answers): self.answers, self.calls = list(answers), 0
+    def fetch_html(self, url):
+        self.calls += 1
+        a = self.answers.pop(0)
+        if isinstance(a, Exception): raise a
+        return a
+
+
+def _checked_at(sid, value=...):
+    """Прочитать (или выставить) Site.research_checked_at; SQLite отдаёт naive — сравниваем без зоны."""
+    with db.SessionLocal() as s:
+        site = s.get(Site, sid)
+        if value is not ...:
+            site.research_checked_at = value
+            s.commit()
+        got = site.research_checked_at
+        return got.replace(tzinfo=None) if got else None
+
+
 @pytest.fixture
 def wire(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "RESEARCH_DIR", str(tmp_path))
@@ -258,3 +287,71 @@ def test_screenshots_when_enabled_and_browserless_down_is_warning(wire, monkeypa
     with db.SessionLocal() as s:
         r = research.dossier(s, sid)[0]
         assert r.screenshot_path is None and "скриншот" in (r.note or "")
+
+
+def test_fetch_retries_none_then_succeeds(pauses):
+    """Живой прогон 2026-10-10: ~половина goto-ссылок падает с 502 от прокси A-Parser (fetch_html -> None)."""
+    ap = SeqAP(None, None, LONG)
+    assert research._fetch(ap, "https://a.com/") == LONG and ap.calls == 3
+    assert pauses == [1, 1]                                # пауза МЕЖДУ попытками, не после последней
+    ap = SeqAP(None, None, None, LONG)
+    assert research._fetch(ap, "https://a.com/") is None and ap.calls == 3      # четвёртой попытки нет
+    assert len(pauses) == 4
+
+
+def test_fetch_retries_exception():
+    ap = SeqAP(RuntimeError("proxy 502"), LONG)
+    assert research._fetch(ap, "https://a.com/") == LONG and ap.calls == 2
+
+
+def test_build_dossier_retries_failed_fetch(wire):
+    """`build_dossier` качает через `_fetch`: страница, не отдавшаяся с первого раза, всё равно попадает в досье."""
+    sid = _site()
+    class Flaky(FakeAP):
+        def fetch_html(self, url):
+            self.fetched.append(url)
+            return self.pages.get(url) if self.fetched.count(url) >= 2 else None
+    ap = Flaky(["https://a.com/1"], {"https://a.com/1": LONG})
+    wire(ap)
+    assert research.build_dossier(sid)["status"] == "done"
+    with db.SessionLocal() as s:
+        assert {r.url for r in research.dossier(s, sid)} == {"https://a.com/1"}
+
+
+def test_cyrillic_platform_names_filtered():
+    for name in ("Телеграм", "Ютуб", "ВКонтакте", "Дзен", "Рутуб"):
+        assert research._platform_or_brand([name], "durevvpn") is True, name
+    assert research._platform_or_brand(["ProPrivacy"], "durevvpn") is False
+
+
+def test_build_dossier_stamps_research_checked_at(wire, monkeypatch):
+    sid = _site()
+    old = datetime(2026, 1, 1)
+    assert _checked_at(sid) is None
+    wire(FakeAP(["https://a.com/1"], {"https://a.com/1": LONG}))
+    _checked_at(sid, old)
+    with monkeypatch.context() as m:                       # отмена: отметка «проверяли» не двигается
+        m.setattr(jobs, "cancelled", lambda run: True)
+        assert "отменена" in research.build_dossier(sid)["reason"]
+    assert _checked_at(sid) == old
+    assert research.build_dossier(sid)["status"] == "done" and _checked_at(sid) > old      # с источниками
+    _checked_at(sid, old)
+    wire(FakeAP(["https://a.com/1"], {}))
+    assert research.build_dossier(sid, force=True)["status"] == "empty" and _checked_at(sid) > old   # пустое
+
+
+def test_recently_empty_needs_no_rows_and_a_recent_check(wire):
+    sid = _site()
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        assert research.recently_empty(s, sid) is False            # ни разу не собирали — брать
+    _checked_at(sid, (now - timedelta(hours=2)).replace(tzinfo=None))        # naive трактуется как UTC
+    with db.SessionLocal() as s:
+        assert research.recently_empty(s, sid) is True
+    _checked_at(sid, now - timedelta(hours=research.EMPTY_RETRY_HOURS + 1))
+    with db.SessionLocal() as s:
+        assert research.recently_empty(s, sid) is False            # пауза вышла
+    wire(FakeAP(["https://a.com/1"], {"https://a.com/1": LONG}))
+    research.build_dossier(sid)
+    with db.SessionLocal() as s:
+        assert research.recently_empty(s, sid) is False            # строки есть — это вопрос свежести, не паузы

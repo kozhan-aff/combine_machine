@@ -207,6 +207,27 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
     assert orchestrator.COUNT_RU["research_empty"] == "досье пустое"
 
 
+def test_stage_research_skips_recently_empty_site(monkeypatch):
+    """Пустое досье свип пересобирал каждый час впустую: сутки после пустой сборки сайт не берётся."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import orchestrator, research
+    sid = _content_site()
+    calls = []
+    monkeypatch.setattr(research, "build_dossier", lambda s, force=False: calls.append(s) or
+                        {"status": "empty", "rows": 0, "reason": "пусто", "warnings": []})
+
+    def checked(hours_ago):
+        with db.SessionLocal() as s:
+            s.get(Site, sid).research_checked_at = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+            s.commit()
+
+    checked(2)
+    assert orchestrator._stage_research(cap=5) == (0, [], {}) and calls == []
+    checked(25)
+    done, errs, extra = orchestrator._stage_research(cap=5)
+    assert calls == [sid] and done == 0 and extra == {"research_empty": 1}
+
+
 def test_research_stage_propagates_already_running(monkeypatch):
     import pytest
     from app.services import jobs, orchestrator, research
