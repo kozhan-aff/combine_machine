@@ -138,9 +138,12 @@ def test_writer_retries_once_with_schema_error(monkeypatch):
     assert content.generate_site(site_id) == 3
     assert len(_pages(site_id)) == 3 and len(calls) == 4
     assert "не прошёл проверку схемы" not in calls[0]["prompt"]
-    retry = calls[1]["prompt"]
-    assert retry.startswith(calls[0]["prompt"]) and "не прошёл проверку схемы: в ответе нет JSON-объекта" in retry
-    assert "ТОЛЬКО" in retry and "без текста до и после" in retry
+    first, retry = calls[0]["prompt"], calls[1]["prompt"]
+    # просьба о повторе — ВЫШЕ брифа: бриф кончается данными конкурентов, после него нашего текста нет
+    assert retry.endswith(first) and retry != first
+    note = retry[: -len(first)]
+    assert note.startswith("## Повтор\nПредыдущий ответ не прошёл проверку схемы: в ответе нет JSON-объекта")
+    assert "ТОЛЬКО" in note and "без текста до и после" in note
     assert "не прошёл проверку схемы" not in calls[2]["prompt"]     # ошибка одной страницы не течёт в следующую
     assert jobs.last("generate")["status"] == "done"
 
@@ -152,8 +155,10 @@ def test_writer_two_failures_creates_no_page_and_warns(monkeypatch):
     assert _pages(site_id) == [] and len(calls) == 6                # по два вызова на страницу, не больше
     last = jobs.last("generate")
     assert last["status"] == "done_warn"
-    assert "не прошёл схему" in last["message"] and "/vs" in last["message"]
     assert "написано 0 из 3" in last["message"]
+    # одна причина на три страницы — одна запись со списком путей, а не три копии текста ошибки
+    assert "/, /vs, /setup — ответ писателя не прошёл схему" in last["message"]
+    assert last["message"].count("не прошёл схему") == 1
 
 
 def test_one_failed_page_does_not_stop_the_batch(monkeypatch):
@@ -167,6 +172,58 @@ def test_one_failed_page_does_not_stop_the_batch(monkeypatch):
     calls = _llm(monkeypatch)
     assert content.generate_site(site_id) == 1 and len(calls) == 1
     assert [p.url_path for p in _pages(site_id)] == ["/", "/setup", "/vs"]
+
+
+def test_client_failure_stops_the_batch_and_keeps_written_pages(monkeypatch):
+    site_id = _site()
+    calls = _llm(monkeypatch, VALID, httpx.ReadTimeout("шлюз молчит"))
+    assert content.generate_site(site_id) == 1
+    assert len(calls) == 2                                          # «/setup» в лежащий шлюз не ходила
+    assert [p.url_path for p in _pages(site_id)] == ["/"]
+    last = jobs.last("generate")
+    assert last["status"] == "done_warn"
+    assert "написано 1 из 3" in last["message"] and "модель недоступна — прогон остановлен" in last["message"]
+    assert "не начато страниц: 1" in last["message"] and "/vs — писатель не ответил: ReadTimeout" in last["message"]
+
+
+def test_reasons_survive_cancel(monkeypatch):
+    site_id = _site()
+    _llm(monkeypatch, "мусор", "мусор",                             # «/» провалена, на «/vs» жмут «стоп»
+         during=lambda n: n == 2 and jobs.request_cancel("generate"))
+    assert content.generate_site(site_id) is None                   # отмена — не ошибка, track её гасит
+    assert [p.url_path for p in _pages(site_id)] == ["/vs"]
+    last = jobs.last("generate")
+    assert last["status"] == "cancelled"
+    assert "написано 1 из 3" in last["message"] and "/ — ответ писателя не прошёл схему" in last["message"]
+
+
+def test_reasons_survive_insert_race(monkeypatch):
+    site_id = _site()
+
+    def other_run_inserts_vs(n):
+        if n == 2:                                                  # пока модель пишет «/vs», её вставил другой прогон
+            with db.SessionLocal() as s:
+                s.add(Page(site_id=site_id, url_path="/vs", title="чужая", status="draft", body=OLD_BODY))
+                s.commit()
+
+    _llm(monkeypatch, "мусор", "мусор", during=other_run_inserts_vs)
+    with pytest.raises(ValueError, match="создаёт другой прогон"):
+        content.generate_site(site_id)
+    last = jobs.last("generate")
+    assert last["status"] == "failed" and "создаёт другой прогон" in last["error"]
+    assert "/ — ответ писателя не прошёл схему" in last["message"]
+
+
+def test_truncated_guides_are_reported(monkeypatch):
+    from app.services import guides
+    monkeypatch.setattr(guides, "load_guides",
+                        lambda lang, kind: {"text": "ПРАВИЛО", "files": ["a.md"], "truncated": kind == "howto"})
+    site_id = _site()
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id) == 3
+    assert all("ПРАВИЛО" in c["system"] for c in calls)
+    last = jobs.last("generate")
+    assert last["status"] == "done" and last["message"] == "написано 3 из 3; правила письма обрезаны по лимиту"
 
 
 def test_generate_without_rewrite_keeps_existing_pages(monkeypatch):
@@ -189,18 +246,34 @@ def _write(monkeypatch, *answers, **kw):
     return content.write_doc(LlmClient(), system="SYS", prompt="PROMPT", **kw), calls
 
 
-def test_write_doc_exception_is_a_failed_attempt(monkeypatch):
-    (doc, err), calls = _write(monkeypatch, httpx.ReadTimeout("шлюз молчит"))
-    assert err is None and doc.meta.title == DOC["meta"]["title"]
-    assert [c["prompt"] for c in calls] == ["PROMPT", "PROMPT"]     # схема не при чём — промпт без добавки
+def test_write_doc_client_failure_is_not_retried(monkeypatch):
+    from app.integrations.llm import LlmClient
+    calls = _llm(monkeypatch, httpx.ReadTimeout("шлюз молчит"))
+    with pytest.raises(content.WriterDown) as e:
+        content.write_doc(LlmClient(), system="SYS", prompt="PROMPT")
+    assert "ReadTimeout" in str(e.value) and "шлюз молчит" in str(e.value)
+    assert len(calls) == 1                                          # второго 600-секундного ожидания нет
 
-    (doc, err), calls = _write(monkeypatch, httpx.ReadTimeout("шлюз молчит"), RuntimeError("шлюз упал"))
-    assert doc is None and "RuntimeError" in err and "шлюз упал" in err and len(calls) == 2
+    calls = _llm(monkeypatch, "мусор", RuntimeError("шлюз упал"))    # схема, затем сбой клиента на повторе
+    with pytest.raises(content.WriterDown, match="шлюз упал"):
+        content.write_doc(LlmClient(), system="SYS", prompt="PROMPT")
+    assert len(calls) == 2
+
+
+def test_write_doc_puts_remarks_and_retry_note_above_the_brief(monkeypatch):
+    (doc, err), calls = _write(monkeypatch, "мусор", issues=["Нет таблицы", "Число 99 без источника"])
+    assert err is None and doc is not None
+    remarks = "## Замечания редактора, которые нужно устранить\n- Нет таблицы\n- Число 99 без источника\n\n"
+    assert calls[0]["prompt"] == remarks + "PROMPT"
+    second = calls[1]["prompt"]
+    assert second.startswith(remarks + "## Повтор\nПредыдущий ответ не прошёл проверку схемы")
+    assert second.endswith("\n\nPROMPT")                            # после брифа — ничего нашего
 
 
 def test_write_doc_empty_answer_is_a_failed_attempt(monkeypatch):
     (doc, err), calls = _write(monkeypatch, "", "   ")
-    assert doc is None and "пустой ответ" in err and len(calls) == 2
+    assert doc is None and "пустой ответ" in err
+    assert [c["prompt"] for c in calls] == ["PROMPT", "PROMPT"]     # схема не при чём — повтор без добавки
 
 
 def test_write_doc_schema_error_names_the_field(monkeypatch):
@@ -294,6 +367,31 @@ def test_rewrite_skips_manually_edited_page(monkeypatch):
     assert last["status"] == "done" and "правлены вручную: 1" in last["message"]
 
 
+def test_rewrite_overwrites_manual_edit_only_on_explicit_request(monkeypatch):
+    site_id = _site()
+    ids = _add_pages(site_id, status="edited")
+    content.save_draft(ids["/vs"], "<p>Оператор переписал сравнение руками — страница без blocks.</p>")
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True) == 2            # по умолчанию правка цела
+    vs = {p.url_path: p for p in _pages(site_id)}["/vs"]
+    assert "руками" in vs.body and vs.blocks_stale is True and len(calls) == 2
+
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True, overwrite_manual=True) == 3 and len(calls) == 3
+    vs = {p.url_path: p for p in _pages(site_id)}["/vs"]
+    assert "<h2>Скорость</h2>" in vs.body and vs.blocks_stale is False and vs.id == ids["/vs"]
+    assert jobs.last("generate")["message"] == ""
+
+
+def test_overwrite_manual_still_spares_edit_made_while_model_wrote(monkeypatch):
+    site_id = _site()
+    ids = _add_pages(site_id, status="draft")
+    edited = "<p>Правка, сохранённая посреди прогона: о ней оператор, ставя галочку, не знал.</p>"
+    _llm(monkeypatch, during=lambda n: n == 0 and content.save_draft(ids["/"], edited))
+    assert content.generate_site(site_id, rewrite=True, overwrite_manual=True) == 2
+    assert _pages(site_id)[0].body == edited
+
+
 def test_rewrite_failure_keeps_old_page_intact(monkeypatch):
     site_id = _site(status="published")
     stamp = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -309,15 +407,14 @@ def test_rewrite_failure_keeps_old_page_intact(monkeypatch):
 
 def test_rewrite_does_not_overwrite_page_edited_while_model_wrote(monkeypatch):
     """Вызов модели идёт минуты, редактор панели всё это время открыт: правка, сохранённая посреди
-    прогона, не затирается. Страницы старого пути (blocks нет) флага blocks_stale не получают —
-    их ловит сравнение тела."""
+    прогона, не затирается."""
     site_id = _site()
     ids = _add_pages(site_id, status="draft")
     edited = "<p>Оператор переписал главную руками, пока модель думала над ней.</p>"
     _llm(monkeypatch, during=lambda n: n == 0 and content.save_draft(ids["/"], edited))
     assert content.generate_site(site_id, rewrite=True) == 2
     home = {p.url_path: p for p in _pages(site_id)}["/"]
-    assert home.body == edited and home.blocks is None
+    assert home.body == edited and home.blocks is None and home.blocks_stale is True
     last = jobs.last("generate")
     assert last["status"] == "done" and "правлены вручную: 1" in last["message"]
 
@@ -339,8 +436,8 @@ def test_rewrite_page_passes_issues_to_prompt(monkeypatch):
     assert out == {"page_id": ids["/vs"], "ok": True, "error": None}
     assert len(calls) == 1
     prompt = calls[0]["prompt"]
-    assert "Замечания редактора, которые нужно устранить" in prompt
-    assert "- Нет таблицы сравнения" in prompt and "- Число 99 без источника" in prompt
+    assert prompt.startswith("## Замечания редактора, которые нужно устранить\n"
+                             "- Нет таблицы сравнения\n- Число 99 без источника\n\n")     # выше брифа
     assert "https://comparison1.example/page" in prompt and "сравнение" in prompt       # тип — по url_path
     by_path = {p.url_path: p for p in _pages(site_id)}
     vs = by_path["/vs"]
@@ -371,6 +468,12 @@ def test_rewrite_page_refuses_without_dossier_or_on_manual_edit(monkeypatch):
     assert content.rewrite_page(10_000, ["x"])["ok"] is False
     assert calls == []                                              # ни один отказ не стоил вызова модели
 
+    out = content.rewrite_page(stale_id, ["x"], overwrite_manual=True)      # явное решение оператора
+    assert out == {"page_id": stale_id, "ok": True, "error": None} and len(calls) == 1
+    with db.SessionLocal() as s:
+        p = s.get(Page, stale_id)
+        assert "<h2>Скорость</h2>" in p.body and p.blocks_stale is False
+
 
 def test_rewrite_page_failure_keeps_page_and_returns_reason(monkeypatch):
     site_id = _site()
@@ -380,6 +483,11 @@ def test_rewrite_page_failure_keeps_page_and_returns_reason(monkeypatch):
     assert out["ok"] is False and "не прошёл схему" in out["error"]
     home = _pages(site_id)[0]
     assert home.body == OLD_BODY and home.status == "edited" and home.critic_score == 0.4
+
+    _llm(monkeypatch, httpx.ConnectError("шлюз лежит"))             # сбой клиента — тот же ответ, не исключение
+    out = content.rewrite_page(ids["/"], ["x"])
+    assert out["ok"] is False and "писатель не ответил: ConnectError" in out["error"]
+    assert _pages(site_id)[0].body == OLD_BODY
 
 
 # --- blocks_stale: ручная правка ---
@@ -400,11 +508,19 @@ def test_save_draft_marks_blocks_stale(monkeypatch):
     assert got.blocks_stale is True and got.blocks == p.blocks and "Дописано руками" in got.body
 
 
-def test_save_draft_on_legacy_page_has_nothing_to_mark(monkeypatch):
+def test_manual_edit_marks_legacy_page_too(monkeypatch):
+    """Флаг значит «тело правили руками», а не «рендер блоков устарел»: у страниц старого пути blocks
+    нет, но правка оператора не должна пропасть при следующем переписывании."""
     ids = _add_pages(_site(dossier=False), status="draft")
-    content.save_draft(ids["/"], "<p>Правка страницы старого пути: блоков у неё нет и не было.</p>")
+    content.save_draft(ids["/"], OLD_BODY)                      # сохранили без изменений — не правка
+    content.mark_edited(ids["/vs"], OLD_BODY)
+    content.save_draft(ids["/setup"], "<p>Правка страницы старого пути: блоков у неё нет и не было.</p>")
     with db.SessionLocal() as s:
-        assert s.get(Page, ids["/"]).blocks_stale is False
+        assert s.get(Page, ids["/"]).blocks_stale is False and s.get(Page, ids["/vs"]).blocks_stale is False
+        assert s.get(Page, ids["/setup"]).blocks_stale is True
+    content.mark_edited(ids["/"], OLD_BODY + "<p>Редактор дописал абзац при одобрении.</p>")
+    with db.SessionLocal() as s:
+        assert s.get(Page, ids["/"]).blocks_stale is True
 
 
 def test_mark_edited_without_body_keeps_blocks_fresh(monkeypatch):

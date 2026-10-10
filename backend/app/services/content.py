@@ -195,26 +195,31 @@ def writer_system(lang: str, country: str | None, guides_text: str | None) -> st
     return "\n\n".join(parts)
 
 
+class WriterDown(RuntimeError):
+    """Клиент модели не ответил: таймаут, HTTP-ошибка шлюза, LlmEmptyContent. Отдельно от «ответ мимо
+    схемы»: тот лечится повтором, а этот — нет (POST к модели ждёт до 10 минут), и следующие страницы
+    пачки упрутся в тот же шлюз. Текст исключения — причина словами для оператора."""
+
+
 def write_doc(llm, *, system: str, prompt: str,
               issues: list[str] | None = None) -> tuple[page_doc.PageDoc | None, str | None]:
     """Страница от модели: `(doc, None)` или `(None, причина словами)`. Не больше двух вызовов.
 
-    Ответ, не прошедший схему (ограду и текст вокруг JSON снимает page_doc.parse), повторяется ОДИН
-    раз с текстом ошибки. Пустой ответ и исключение клиента (таймаут, 5xx шлюза, LlmEmptyContent) —
-    тоже проваленная попытка, а не падение прогона: POST к модели BaseClient сам не повторяет.
-    `issues` — замечания критика при переписывании: уходят в промпт отдельным блоком."""
+    Ответ, не прошедший схему (ограду и текст вокруг JSON снимает page_doc.parse), и пустой ответ
+    повторяются ОДИН раз; после ошибки схемы — с её текстом. Исключение клиента не повторяется:
+    WriterDown, страница провалена сразу.
+    `issues` — замечания критика при переписывании. И они, и просьба о повторе стоят ВЫШЕ брифа:
+    бриф кончается данными конкурентов и закрывающим напоминанием о них — после него нашего текста нет."""
     from app.config import settings
     model = settings.LLM_WRITER_MODEL or settings.LLM_MODEL
-    if issues:
-        prompt += ("\n\n## Замечания редактора, которые нужно устранить\n"
-                   + "\n".join(f"- {x}" for x in issues))
-    ask, reason = prompt, None
+    head = ("## Замечания редактора, которые нужно устранить\n"
+            + "\n".join(f"- {x}" for x in issues) + "\n\n") if issues else ""
+    retry, reason = "", None
     for _ in range(2):
         try:
-            raw = llm.complete(system, ask, model=model)
-        except Exception as e:  # noqa: BLE001 — любая осечка клиента = причина отказа, не трейс в сводке
-            reason = f"писатель не ответил: {type(e).__name__}: {e}"[:300]
-            continue
+            raw = llm.complete(system, head + retry + prompt, model=model)
+        except Exception as e:  # noqa: BLE001 — любая осечка клиента = причина словами, не трейс в сводке
+            raise WriterDown(f"писатель не ответил: {type(e).__name__}: {e}"[:300]) from e
         if not (raw or "").strip():
             reason = "писатель вернул пустой ответ"
             continue
@@ -222,22 +227,22 @@ def write_doc(llm, *, system: str, prompt: str,
             return page_doc.parse(raw), None
         except ValueError as e:
             reason = f"ответ писателя не прошёл схему: {e}"
-            # добавка — только после ошибки схемы: пустой ответ и осечку клиента повторяем тем же промптом
-            ask = (f"{prompt}\n\nПредыдущий ответ не прошёл проверку схемы: {e}. Верни ТОЛЬКО исправленный "
-                   "JSON-объект — без текста до и после него.")
+            retry = (f"## Повтор\nПредыдущий ответ не прошёл проверку схемы: {e}. Верни ТОЛЬКО исправленный "
+                     "JSON-объект — без текста до и после него.\n\n")
     return None, reason
 
 
-def _write_page(llm, rows: list, spec: dict, *, brand: str, lang: str, country: str | None, promo: tuple,
-                vertical: str | None, issues: list[str] | None = None) -> tuple[page_doc.PageDoc | None, str | None]:
-    """Одна страница нового пути: правила оператора + бриф из досье -> write_doc."""
+def _prompts(rows: list, spec: dict, *, brand: str, lang: str, country: str | None, promo: tuple,
+             vertical: str | None) -> tuple[str, str, bool]:
+    """Промпты одной страницы нового пути: (системный с правилами оператора, бриф из досье, «правила
+    письма не влезли в лимит и обрезаны»)."""
     from app.services import brief, guides
     kind = spec["kind"]
-    system = writer_system(lang, country, guides.load_guides(lang, kind)["text"])
+    rules = guides.load_guides(lang, kind)
     prompt = brief.brief_text(brief.build_brief(rows, kind), brand=brand, kind=kind, title=spec["title"],
                               lang_name=LANG_NAMES[norm_lang(lang)], country=country, promo=promo,
                               vertical=vertical)
-    return write_doc(llm, system=system, prompt=prompt, issues=issues)
+    return writer_system(lang, country, rules["text"]), prompt, bool(rules["truncated"])
 
 
 def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
@@ -252,11 +257,11 @@ def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
     page.critic_score = page.critic_notes = page.critic_checked_at = None
 
 
-def _hand_edited(page, seen_body: str | None) -> bool:
+def _hand_edited(page, seen_body: str | None, overwrite_manual: bool = False) -> bool:
     """Страницу правили руками: флаг blocks_stale либо тело не то, что мы видели до вызова модели
-    (модель пишет минуты, редактор панели всё это время открыт; у страниц старого пути blocks нет,
-    и флаг им не ставится — их ловит сравнение тела)."""
-    return bool(page.blocks_stale) or (page.body or "") != (seen_body or "")
+    (модель пишет минуты, редактор панели всё это время открыт). `overwrite_manual` снимает только
+    флаг: оператор разрешил затереть правки, о которых знал, — не ту, что сохранена посреди прогона."""
+    return (bool(page.blocks_stale) and not overwrite_manual) or (page.body or "") != (seen_body or "")
 
 
 # Статусы сайта, в которых можно генерировать контент (инфраструктура уже поднята provision()).
@@ -291,7 +296,7 @@ def status_refusal(site) -> str | None:
 
 
 def generate_site(site_id: int, lang: str | None = None, vertical_data: str | None = None,
-                  use_competitor: bool = False, rewrite: bool = False) -> int:
+                  use_competitor: bool = False, rewrite: bool = False, overwrite_manual: bool = False) -> int:
     """Generate draft pages for a site via LiteLLM. Returns count created (+ rewritten). status stays 'draft'.
 
     Два пути. У сайта есть досье конкурентов (site_research) — пишет ПИСАТЕЛЬ: бриф из досье + правила
@@ -300,6 +305,8 @@ def generate_site(site_id: int, lang: str | None = None, vertical_data: str | No
 
     rewrite: только путь с досье. Кроме недостающих страниц переписывает на месте существующие
     (draft|edited|published -> draft, та же строка), кроме правленых руками (blocks_stale).
+    overwrite_manual: переписать и правленые руками — только по явному решению оператора (галочка
+    в панели); автопилот его не передаёт.
 
     lang: язык сайта. None -> берётся сам (S6-02/S7-06): язык уже написанных страниц сайта,
     иначе рынок домена (Domain.market_lang), иначе язык оффера, иначе en — НЕ 'ru' по умолчанию.
@@ -315,10 +322,10 @@ def generate_site(site_id: int, lang: str | None = None, vertical_data: str | No
     """
     from app.services import jobs
     with jobs.track("generate") as run:
-        return _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite)
+        return _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite, overwrite_manual)
 
 
-def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=False) -> int:
+def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=False, overwrite_manual=False) -> int:
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
@@ -379,8 +386,9 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
         vertical_data = vertical_block(brand)
 
     if rows:
-        return _write_site(site_id, run, rows, existing_pages, rewrite, brand=brand, niche=niche, lang=lang,
-                           country=country, promo=promo, vertical=vertical_data, offer_id=offer_id)
+        return _write_site(site_id, run, rows, existing_pages, rewrite, overwrite_manual, brand=brand,
+                           niche=niche, lang=lang, country=country, promo=promo, vertical=vertical_data,
+                           offer_id=offer_id)
     # Досье пусто -> старый путь, без изменений. Панель и автопилот без досье сюда не приходят (сначала
     # собирают его); ветка жива для API/скриптов и тестов старого пути. Переписывать по старому промпту
     # нечем — существующие страницы остаются как есть, и это сказано словами, а не молчаливым нулём.
@@ -435,13 +443,37 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
 REWRITE_STATUSES = frozenset({"draft", "edited", "published"})
 
 
-def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bool, *, brand: str,
-                niche: str | None, lang: str, country: str | None, promo: tuple, vertical: str | None,
-                offer_id: int) -> int:
+def _batch_message(written: int, total: int, *, down: bool, not_started: int, hand_edited: int,
+                   truncated: bool, failed: list) -> str | None:
+    """Итог прогона писателя одной строкой — или None, если сказать нечего. Реестр режет message до
+    400 символов: короткие счётчики идут первыми, одинаковые причины схлопываются в одну со списком
+    путей, оставшееся место причины делят поровну."""
+    notes = []
+    if down:
+        notes.append(f"модель недоступна — прогон остановлен, не начато страниц: {not_started}")
+    if hand_edited:
+        notes.append(f"не тронуты, правлены вручную: {hand_edited}")
+    if truncated:
+        notes.append("правила письма обрезаны по лимиту")
+    by_reason: dict[str, list[str]] = {}
+    for path, err in failed:
+        by_reason.setdefault(err, []).append(path)
+    if by_reason:
+        cut = 240 // len(by_reason)
+        notes.append("не написаны: " + "; ".join(f"{', '.join(paths)} — {err[:cut]}"
+                                                 for err, paths in by_reason.items()))
+    return f"написано {written} из {total}; " + "; ".join(notes) if notes else None
+
+
+def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bool, overwrite_manual: bool,
+                *, brand: str, niche: str | None, lang: str, country: str | None, promo: tuple,
+                vertical: str | None, offer_id: int) -> int:
     """Путь с досье: страницы пишет писатель (PageDoc). Возвращает создано + переписано.
 
-    Проваленная страница (два ответа мимо схемы, молчащая модель) НЕ создаётся и НЕ меняется: причина
-    уходит в сообщение задачи, прогон закрывается «с замечаниями», остальные страницы пишутся."""
+    Проваленная страница (два ответа мимо схемы, пустой ответ) НЕ создаётся и НЕ меняется: причина
+    уходит в сообщение задачи, прогон закрывается «с замечаниями», остальные страницы пишутся.
+    Сбой клиента модели (WriterDown) останавливает пачку: шлюз лежит, каждая следующая страница
+    сожгла бы тот же таймаут. Уже записанные страницы остаются."""
     from sqlalchemy.exc import IntegrityError
     from app.db import SessionLocal
     from app.models.site import Page
@@ -454,64 +486,73 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
         old = by_path.get(spec["url_path"])
         if old is None:
             todo.append((spec, None))
-        elif rewrite and old.blocks_stale:
+        elif rewrite and old.blocks_stale and not overwrite_manual:
             hand_edited += 1                 # ручная правка дороже свежего текста модели — не затираем
         elif rewrite and old.status in REWRITE_STATUSES:
             todo.append((spec, old))
 
     llm = LlmClient(timeout=600)             # страница на 2000 слов через шлюз идёт минуты
-    written, failed = 0, []
+    written, failed, down, truncated, i = 0, [], False, False, 0
     jobs.report(run, done=0, total=len(todo))
-    for i, (spec, old) in enumerate(todo):
-        if jobs.cancelled(run):
-            raise jobs.Cancelled()           # уже записанные страницы остаются (коммит по странице)
-        jobs.report(run, done=i, total=len(todo), current=spec["title"])
-        doc, err = _write_page(llm, rows, spec, brand=brand, lang=lang, country=country, promo=promo,
-                               vertical=vertical)
-        if err:
-            failed.append((spec["url_path"], err))
-            continue
-        # коммит КАЖДОЙ страницы сразу, как в старом пути: осечка на 3-й не выбрасывает токены 1-й и 2-й
-        with SessionLocal() as db:
-            if old is None:
-                page = Page(site_id=site_id, url_path=spec["url_path"], lang=lang, offer_id=offer_id)
-                db.add(page)
-            else:
-                page = db.get(Page, old.id)
-                if page is None:
-                    failed.append((spec["url_path"], "страница исчезла, пока модель писала"))
-                    continue
-                if _hand_edited(page, old.body):
-                    hand_edited += 1
-                    continue
-            _apply_doc(page, doc, spec["kind"], lang)
+    # try/finally: накопленные причины и счётчики обязаны дожить до карточки задачи и при отмене, и при
+    # гонке вставки (ValueError ниже) — иначе оператор видит «отменено»/ошибку без того, что уже выяснено
+    try:
+        for i, (spec, old) in enumerate(todo):
+            if jobs.cancelled(run):
+                raise jobs.Cancelled()       # уже записанные страницы остаются (коммит по странице)
+            jobs.report(run, done=i, total=len(todo), current=spec["title"])
+            system, prompt, cut_rules = _prompts(rows, spec, brand=brand, lang=lang, country=country,
+                                                 promo=promo, vertical=vertical)
+            truncated = truncated or cut_rules
             try:
-                db.commit()
-            except IntegrityError:
-                db.rollback()
-                if old is not None:
-                    raise
-                # uq_page_per_path: гонка двух процессов на вставке одного пути — см. старый путь выше
-                raise ValueError(
-                    f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
-                    f"генерация пропущена, дубли не заводим") from None
-        written += 1
-    jobs.report(run, done=len(todo), total=len(todo), current="")
-    notes = []
-    if hand_edited:
-        notes.append(f"не тронуты, правлены вручную: {hand_edited}")
-    if failed:
-        cut = 280 // len(failed)             # message — 400 симв. на всё: причины делят место поровну
-        notes.append("не написаны: " + "; ".join(f"{path} — {err[:cut]}" for path, err in failed))
-    if notes:
-        jobs.report(run, message=f"написано {written} из {len(todo)}; " + "; ".join(notes))
+                doc, err = write_doc(llm, system=system, prompt=prompt)
+            except WriterDown as e:
+                failed.append((spec["url_path"], str(e)))
+                down = True
+                break
+            if err:
+                failed.append((spec["url_path"], err))
+                continue
+            # коммит КАЖДОЙ страницы сразу, как в старом пути: осечка на 3-й не выбрасывает токены 1-й и 2-й
+            with SessionLocal() as db:
+                if old is None:
+                    page = Page(site_id=site_id, url_path=spec["url_path"], lang=lang, offer_id=offer_id)
+                    db.add(page)
+                else:
+                    page = db.get(Page, old.id)
+                    if page is None:
+                        failed.append((spec["url_path"], "страница исчезла, пока модель писала"))
+                        continue
+                    if _hand_edited(page, old.body, overwrite_manual):
+                        hand_edited += 1
+                        continue
+                _apply_doc(page, doc, spec["kind"], lang)
+                try:
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()
+                    if old is not None:
+                        raise
+                    # uq_page_per_path: гонка двух процессов на вставке одного пути — см. старый путь выше
+                    raise ValueError(
+                        f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
+                        f"генерация пропущена, дубли не заводим") from None
+            written += 1
+        if not down:
+            jobs.report(run, done=len(todo), total=len(todo), current="")
+    finally:
+        message = _batch_message(written, len(todo), down=down, not_started=len(todo) - i - 1,
+                                 hand_edited=hand_edited, truncated=truncated, failed=failed)
+        if message:
+            jobs.report(run, message=message)
     if failed:
         jobs.finish(run, "done_warn")
     return written
 
 
-def rewrite_page(page_id: int, issues: list[str]) -> dict:
+def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False) -> dict:
     """Переписать ОДНУ страницу по замечаниям критика, на месте: -> {"page_id", "ok", "error"}.
+    Правленую руками (blocks_stale) не трогает, пока оператор явно не разрешил (`overwrite_manual`).
 
     Оффер и язык — те, под которые страница написана (Page.offer_id/lang, F26), тип — по её пути в
     scaffold(). Отказ (нет досье, ручная правка, провал писателя) страницу не меняет и возвращается
@@ -531,7 +572,7 @@ def rewrite_page(page_id: int, issues: list[str]) -> dict:
         page = db.get(Page, page_id)
         if page is None:
             return out(f"страница #{page_id} не найдена")
-        if page.blocks_stale:
+        if page.blocks_stale and not overwrite_manual:
             return out("страницу правили вручную — переписывание затёрло бы правку")
         if page.status not in REWRITE_STATUSES:
             return out(f"страница в статусе «{page.status}» — переписывать нельзя")
@@ -550,15 +591,19 @@ def rewrite_page(page_id: int, issues: list[str]) -> dict:
         brand, country, promo = offer.brand, offer.country, (offer.promo_code, offer.promo_terms)
         db.expunge_all()                     # строки досье нужны после закрытия сессии
 
-    doc, err = _write_page(LlmClient(timeout=600), rows, spec, brand=brand, lang=lang, country=country,
-                           promo=promo, vertical=vertical_block(brand), issues=issues)
+    system, prompt, _ = _prompts(rows, spec, brand=brand, lang=lang, country=country, promo=promo,
+                                 vertical=vertical_block(brand))
+    try:
+        doc, err = write_doc(LlmClient(timeout=600), system=system, prompt=prompt, issues=issues)
+    except WriterDown as e:
+        doc, err = None, str(e)
     if err:
         return out(err)
     with SessionLocal() as db:
         page = db.get(Page, page_id)
         if page is None:
             return out(f"страница #{page_id} исчезла, пока модель писала")
-        if _hand_edited(page, seen_body):
+        if _hand_edited(page, seen_body, overwrite_manual):
             return out("страницу правили вручную, пока модель писала, — правка сохранена, текст модели отброшен")
         _apply_doc(page, doc, spec["kind"], lang)
         db.commit()
@@ -575,9 +620,10 @@ def _visible_len(body: str | None) -> int:
 
 
 def _set_body(page, new_body: str) -> None:
-    """Тело из редактора. Если оно разошлось с рендером блоков писателя — помечаем blocks_stale:
-    переписывание такую страницу не тронет. Одобрение «как лежит» и страницы без blocks флаг не ставят."""
-    if page.blocks and new_body != (page.body or ""):
+    """Тело из редактора. Изменилось — помечаем blocks_stale («тело правили руками»): переписывание
+    такую страницу не тронет. Флаг ставится и странице без blocks (старый путь): правка оператора
+    стоит того же, чем бы ни был написан исходный текст. Одобрение «как лежит» флаг не ставит."""
+    if new_body != (page.body or ""):
         page.blocks_stale = True
     page.body = new_body
 
