@@ -22,12 +22,12 @@ CONFIRM = ("Переписать тексты сайта? Опубликован
 SENT = "Durev VPN работает стабильно, подключается быстро и помогает спокойно смотреть любимые сериалы в поездках. "
 
 
-def _site(dossier: bool = True, status: str = "content", offer: bool = True) -> int:
+def _site(dossier: bool = True, status: str = "content", offer: bool = True, domain: str = "wp.xyz") -> int:
     with db.SessionLocal() as s:
         o = Offer(brand="Durev VPN", affiliate_link="https://durevpn.example/aff", language="ru", active=True)
-        d = Domain(domain="wp.xyz", source="list", status="purchased", market_lang="ru")
+        d = Domain(domain=domain, source="list", status="purchased", market_lang="ru")
         s.add_all([o, d]); s.commit()
-        site = Site(domain_id=d.id, status=status, doc_root="/www/wwwroot/wp.xyz", aapanel_site_name="wp.xyz",
+        site = Site(domain_id=d.id, status=status, doc_root=f"/www/wwwroot/{domain}", aapanel_site_name=domain,
                     offer_id=o.id if offer else None, provision_step="done")
         s.add(site); s.commit()
         if dossier:
@@ -43,6 +43,17 @@ def _page(site_id: int, path: str = "/", status: str = "draft", **kw) -> int:
                            body="<p>текст</p>"), **kw})
         s.add(p); s.commit()
         return p.id
+
+
+def _judged(site_id: int, path: str, notes: dict, **kw) -> int:
+    """Страница с вердиктом критика к её НЫНЕШНЕМУ тексту: в заметках — отпечаток заголовка и тела, как
+    его пишет критик (без него карточка считает вердикт устаревшим)."""
+    pid = _page(site_id, path, critic_checked_at=NOW, **kw)
+    with db.SessionLocal() as s:
+        page = s.get(Page, pid)
+        page.critic_notes = {**notes, "fp": content_critic.fingerprint(page.title, page.body)}
+        s.commit()
+    return pid
 
 
 def _spawned(monkeypatch, ok: bool = True) -> list:
@@ -177,7 +188,7 @@ def test_edit_spawns_critic_and_leaves_the_toggle_to_the_service(client, monkeyp
     assert "одобрит сам" in _flash(client.post(f"/sites/{sid}/edit", follow_redirects=False))
 
 
-def _passing_draft(site_id: int) -> int:
+def _passing_draft(site_id: int, path: str = "/") -> int:
     """Черновик писателя, который вычитку ПРОХОДИТ (как в test_critic_gate): структура `blocks`, тело — её
     рендер, оффер записан, бренд назван, язык русский, объём в границах обзора, чисел нет."""
     doc = {"meta": {"title": "Durev VPN: обзор и честный тест",
@@ -187,7 +198,7 @@ def _passing_draft(site_id: int) -> int:
     body = content._sanitize(page_doc.render_blocks(page_doc.PageDoc.model_validate(doc), "review", "ru"))
     with db.SessionLocal() as s:
         offer_id = s.get(Site, site_id).offer_id
-    return _page(site_id, "/", title=doc["meta"]["title"], body=body, blocks=doc, offer_id=offer_id)
+    return _page(site_id, path, title=doc["meta"]["title"], body=body, blocks=doc, offer_id=offer_id)
 
 
 @pytest.fixture
@@ -305,9 +316,8 @@ def _critic_td(row: str) -> str:
 
 def test_card_shows_critic_verdict_per_page(client):
     sid = _site()
-    _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": True, "issues": [], "round": 0})
-    _page(sid, "/vs", critic_checked_at=NOW,
-          critic_notes={"pass": False, "issues": ["мало конкретики про скорость", "нет цены"], "round": 1})
+    _judged(sid, "/", {"pass": True, "issues": [], "round": 0})
+    _judged(sid, "/vs", {"pass": False, "issues": ["мало конкретики про скорость", "нет цены"], "round": 1})
     _page(sid, "/setup")
     html = client.get(f"/sites/{sid}").text
     assert "<th>критик</th>" in html
@@ -321,7 +331,7 @@ def test_card_shows_critic_verdict_per_page(client):
 
 def test_card_critic_cell_keeps_long_lists_in_the_tooltip(client):
     sid = _site()
-    _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": False, "issues": [f"з{i}" for i in range(5)]})
+    _judged(sid, "/", {"pass": False, "issues": [f"з{i}" for i in range(5)]})
     cell = _critic_td(_rows(client.get(f"/sites/{sid}").text)["/"])
     assert ">5 замеч.</td>" in cell and 'title="з0; з1; з2 … и ещё 2"' in cell
 
@@ -330,15 +340,87 @@ def test_card_critic_cell_tells_passed_for_human_from_not_reviewed(client):
     """«Прошла, но всё ещё черновик» и «вычитка не состоялась» — разные состояния, и оба не «замечания»."""
     sid = _site()
     note = "одобряет человек: текст правился вручную или написан старым способом"
-    _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": True, "issues": [], "note": note})
-    _page(sid, "/vs", critic_checked_at=NOW,
-          critic_notes={"pass": False, "issues": ["критик не ответил: ReadTimeout"], "error": "ReadTimeout"})
+    _judged(sid, "/", {"pass": True, "issues": [], "note": note})
+    _judged(sid, "/vs", {"pass": False, "issues": ["критик не ответил: ReadTimeout"], "error": "ReadTimeout"})
     rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
     # «прошла» — основной строкой, «одобряешь ты» — второй: одной строкой колонка не умещалась на 1024px
     assert '></span>прошла<div class="hint">одобряешь ты</div></td>' in rows["/"]
     assert f'title="{note}"' in rows["/"] and "led-ok" in rows["/"]
     assert ">не проверена</td>" in rows["/vs"] and "led-warn" in rows["/vs"]
     assert 'title="вычитка не состоялась: ReadTimeout"' in rows["/vs"] and "замеч" not in rows["/vs"]
+
+
+def test_card_shows_a_verdict_only_for_the_text_it_was_given_to(client):
+    """Правка после вычитки: «прошла» относилась бы к тексту, которого на странице уже нет."""
+    sid = _site()
+    passed = _judged(sid, "/", {"pass": True, "issues": []})
+    judged = _judged(sid, "/vs", {"pass": False, "issues": ["вода"]})
+    _page(sid, "/setup", critic_checked_at=NOW, critic_notes={"pass": True, "issues": []})   # заметки без отпечатка
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    assert ">прошла</td>" in rows["/"] and ">1 замеч.</td>" in rows["/vs"]
+    stale = '<td title="текст изменён после вычитки — вычитай заново"><span class="led led-off"></span>устарел</td>'
+    assert rows["/setup"] == stale
+    for pid in (passed, judged):
+        content.save_draft(pid, "<p>Оператор переписал абзац руками уже после того, как критик прочёл страницу.</p>")
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    assert rows["/"] == stale and rows["/vs"] == stale
+
+
+def test_card_says_you_approve_only_while_the_page_is_a_draft(client):
+    """«Одобряешь ты» и «остаётся черновиком» — про черновик. Одобренной человеком странице это не пишем."""
+    note = "одобряет человек: текст правился вручную или написан старым способом"
+    body = "<p>" + SENT * 4 + "</p>"
+    sid = _site()
+    held = _judged(sid, "/", {"pass": True, "issues": [], "note": note}, body=body)
+    plain = _judged(sid, "/vs", {"pass": True, "issues": []}, body=body)
+    changed = _judged(sid, "/setup", {"pass": True, "issues": [], "note": note}, body=body)
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    assert "одобряешь ты" in rows["/"] and "остаётся черновиком" in rows["/vs"]
+    content.mark_edited(held)                                            # человек одобрил как лежит
+    content.mark_edited(plain)
+    content.mark_edited(changed, body="<p>" + SENT * 5 + "</p>")          # человек одобрил свою правку
+    with db.SessionLocal() as s:
+        assert {s.get(Page, x).status for x in (held, plain, changed)} == {"edited"}
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    for path in ("/", "/vs"):
+        assert ">прошла</td>" in rows[path]
+        assert "одобряешь ты" not in rows[path] and "остаётся черновиком" not in rows[path] and note not in rows[path]
+    assert ">устарел</td>" in rows["/setup"] and "одобряешь ты" not in rows["/setup"]
+
+
+# --- редактор страницы: кнопка «Вычитать» и значок вердикта ---
+
+@pytest.mark.parametrize("auto_edit, then", [
+    (False, "Вердикт записан. Страница остаётся черновиком — одобряешь ты."),
+    (True, "Вердикт записан. Одобрит критик при следующей вычитке сайта или ты сам."),
+])
+def test_editor_critique_flash_says_who_approves_next(client, critic_says_pass, auto_edit, then):
+    autonomy.update_autonomy(auto_edit=auto_edit)
+    pid = _passing_draft(_site())
+    loc = _flash(client.post(f"/pages/{pid}/critique", follow_redirects=False))
+    assert "msg=" in loc and then in loc
+    with db.SessionLocal() as s:
+        assert s.get(Page, pid).status == "draft" and s.get(Page, pid).critic_notes["pass"] is True
+    assert critic_says_pass == []                 # сама кнопка не одобряет ни при каком тумблере
+
+
+def test_editor_badge_tells_failed_check_from_remarks(client):
+    sid = _site()
+    pid = _judged(sid, "/", {"pass": False, "issues": ["критик не ответил: ReadTimeout"], "code": [],
+                             "model": ["критик не ответил: ReadTimeout"], "error": "ReadTimeout"})
+    html = client.get(f"/pages/{pid}").text
+    badge = _tag(html, "вычитка не состоялась: ReadTimeout")
+    assert "критик: не проверена" in html and "критик: замечания" not in html and "b-warn" in badge
+
+
+def test_editor_pass_tooltip_mentions_draft_only_for_a_draft(client):
+    body = "<p>" + SENT * 4 + "</p>"
+    pid = _judged(_site(), "/", {"pass": True, "issues": [], "code": [], "model": []}, body=body)
+    html = client.get(f"/pages/{pid}").text
+    assert "критик: pass" in html and "остаётся черновиком, пока её не одобрят" in html
+    content.mark_edited(pid)
+    html = client.get(f"/pages/{pid}").text
+    assert "критик: pass" in html and "остаётся черновиком, пока её не одобрят" not in html
 
 
 def test_card_marks_rewritten_page_that_is_still_live(client):

@@ -870,25 +870,32 @@ def queue_view(request: Request):
 
 def _critic_cell(page) -> dict | None:
     """Вердикт критика для строки таблицы страниц: {"led", "label", "title"} и необязательная вторая строка
-    "sub"; None — страницу не вычитывали (или заметки в формате до плана Б — их показывает редактор
-    страницы). Подпись — одна короткая строка, подробности — в `title`: таблица обязана умещаться по ширине."""
-    from app.services.content_critic import MAX_ROUNDS
+    "sub"; None — страницу не вычитывали. Подпись — одна короткая строка, подробности — в `title`: таблица
+    обязана умещаться по ширине. Записанный вердикт показываем, только если он относится к нынешнему
+    тексту (`verdict_is_fresh`): после правки он про другой текст, и «прошла» у него было бы неправдой."""
+    from app.services import content_critic
     notes = page.critic_notes
     if page.critic_checked_at is None or not isinstance(notes, dict):
         return None
+    if not content_critic.verdict_is_fresh(page):
+        return {"led": "led-off", "label": "устарел", "title": "текст изменён после вычитки — вычитай заново"}
     if notes.get("error"):
         # вердикта нет: критик не ответил или упала проверка — это не «замечания к тексту»
         return {"led": "led-warn", "label": "не проверена", "title": f"вычитка не состоялась: {notes['error']}"}
     if notes.get("pass") is True:
+        title = "у проверок кодом и у редактора-модели замечаний нет"
+        if page.status != "draft":
+            return {"led": "led-ok", "label": "прошла", "title": title}     # уже одобрена — ждать некого
         if notes.get("note"):
             # прошла, но критик её сам не одобряет (правлена руками, старый способ) — почему, в заметке
             return {"led": "led-ok", "label": "прошла", "sub": "одобряешь ты", "title": str(notes["note"])}
-        return {"led": "led-ok", "label": "прошла", "title": "у проверок кодом и у редактора-модели замечаний нет"}
+        return {"led": "led-ok", "label": "прошла",
+                "title": title + ". Страница остаётся черновиком, пока её не одобрят"}
     issues = [str(x) for x in notes.get("issues") or []]
     title = "; ".join(issues[:3]) + (f" … и ещё {len(issues) - 3}" if len(issues) > 3 else "")
     rounds = notes.get("round")
     if type(rounds) is int and rounds > 0:
-        title += f" · переписана по замечаниям: {rounds} из {MAX_ROUNDS}"
+        title += f" · переписана по замечаниям: {rounds} из {content_critic.MAX_ROUNDS}"
     return {"led": "led-todo", "label": f"{len(issues)} замеч." if issues else "не прошла", "title": title}
 
 
@@ -1622,8 +1629,10 @@ def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(
 @router.post("/pages/{page_id}/critique")
 def critique_page_action(page_id: int):
     """Кнопка «Вычитать»: проверки кодом + вердикт модели по одной странице (план Б). Подсказка человеку:
-    статус страницы не меняется ни при каком вердикте и ни при каком тумблере — одобряет «Одобрить»."""
+    сама кнопка статус страницы не меняет ни при каком вердикте и ни при каком тумблере. Кто одобрит
+    прошедшую страницу дальше, зависит от тумблера автопилота — флеш говорит это как есть."""
     from app.services import content_critic
+    from app.services.autonomy import get_autonomy
     try:
         v = content_critic.critique_page(page_id)
     except ValueError as e:
@@ -1633,7 +1642,9 @@ def critique_page_action(page_id: int):
     if v["error"]:
         return _back(f"/pages/{page_id}", err=f"вычитка не состоялась: {v['error']}")
     if v["pass"]:
-        return _back(f"/pages/{page_id}", msg="Вычитано: замечаний нет. Страница остаётся черновиком — одобряешь ты.")
+        then = ("Одобрит критик при следующей вычитке сайта или ты сам." if get_autonomy()["auto_edit"]
+                else "Страница остаётся черновиком — одобряешь ты.")
+        return _back(f"/pages/{page_id}", msg=f"Вердикт записан. {then}")
     return _back(f"/pages/{page_id}", msg=f"Вычитано: замечаний — {len(v['issues'])}, список — под кнопкой.")
 
 

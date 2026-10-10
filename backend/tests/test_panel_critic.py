@@ -132,7 +132,9 @@ def test_page_edit_view_shows_closed_failure_without_score(client):
     note = "критик не ответил: пустой ответ модели"
     html = _show(client, pid, None, {"pass": False, "issues": [note], "code": [], "model": [note], "round": 0,
                                      "error": "пустой ответ модели"})
-    assert "критик: замечания" in html and note in html and "/100" not in html
+    # вычитка не состоялась — это не замечания к тексту: то же слово, что на карточке сайта
+    assert "критик: не проверена" in html and "критик: замечания" not in html
+    assert note in html and "/100" not in html
 
 
 def test_page_edit_view_hides_verdict_of_another_text(client):

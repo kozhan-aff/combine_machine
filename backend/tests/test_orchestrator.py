@@ -337,9 +337,8 @@ def test_stage_generate_skips_site_without_dossier(monkeypatch):
     seen = []
     monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: seen.append(site_id) or 3)
     done, errs, extra = orch._stage_generate(5)
-    assert seen == [] and done == 0 and extra == {"generate_no_dossier": 1}
-    assert errs == ["нет досье, генерация пропущена (стадия «досье» или кнопка на карточке сайта) — "
-                    f"сайтов: 1 (#{sid})"]
+    # только счётчик: причину раз в сутки называет стадия «досье», ежечасная строка её бы обесценила
+    assert seen == [] and done == 0 and errs == [] and extra == {"generate_no_dossier": 1}
     _dossier(sid)
     done, errs, extra = orch._stage_generate(5)
     assert seen == [sid] and done == 1 and errs == [] and extra == {}
@@ -354,29 +353,30 @@ def test_stage_generate_cap_is_not_eaten_by_sites_without_dossier(monkeypatch):
     seen = []
     monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: seen.append(site_id) or 3)
     done, errs, extra = orch._stage_generate(1)
-    assert seen == [ready] and done == 1 and extra == {"generate_no_dossier": 1} and f"(#{stuck})" in errs[0]
+    assert stuck < ready and seen == [ready] and done == 1 and errs == [] and extra == {"generate_no_dossier": 1}
 
 
-def test_stage_generate_names_skipped_sites_in_one_line_per_reason(monkeypatch):
-    """Двенадцать сайтов без досье — одна строка с десятью номерами, а не двенадцать ошибок за свип;
-    сайты без оффера — своя строка. Досье проверяется дёшево: тексты конкурентов не грузятся."""
+def test_stage_generate_counts_sites_without_dossier_and_names_those_without_offer(monkeypatch):
+    """Сайты без досье — только счётчик, без строки в ошибках; сайты без оффера — одна строка на свип, не
+    больше десяти номеров. Досье проверяется дёшево: тексты конкурентов не грузятся."""
     from app.services import research
     monkeypatch.setattr(research, "dossier",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("полное досье стадии не нужно")))
     monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: 3)
-    bare = [_site_in("content", f"bare{i}.ru") for i in range(12)]
+    for i in range(3):
+        _site_in("content", f"bare{i}.ru")
+    orphans = []
     with db.SessionLocal() as s:
-        d = Domain(domain="nooffer.ru", source="backorder", status="purchased")
-        s.add(d); s.commit()
-        orphan = Site(domain_id=d.id, status="content"); s.add(orphan); s.commit()
-        orphan = orphan.id
+        for i in range(12):
+            d = Domain(domain=f"nooffer{i}.ru", source="backorder", status="purchased")
+            s.add(d); s.commit()
+            site = Site(domain_id=d.id, status="content"); s.add(site); s.commit()
+            orphans.append(site.id)
     ready = _site_in("content", "ready.ru"); _dossier(ready)
     done, errs, extra = orch._stage_generate(5)
-    shown = ", ".join(f"#{i}" for i in bare[:10])
-    assert errs == [f"оффер не привязан, генерация пропущена — сайтов: 1 (#{orphan})",
-                    "нет досье, генерация пропущена (стадия «досье» или кнопка на карточке сайта) — "
-                    f"сайтов: 12 ({shown} …)"]
-    assert done == 1 and extra == {"generate_no_dossier": 12}
+    shown = ", ".join(f"#{i}" for i in orphans[:10])
+    assert errs == [f"оффер не привязан, генерация пропущена — сайтов: 12 ({shown} …)"]
+    assert done == 1 and extra == {"generate_no_dossier": 3}
 
 
 def test_stage_generate_does_not_count_site_left_without_texts(monkeypatch):
@@ -491,6 +491,67 @@ def test_stage_edit_queue_rotates_by_oldest_attempt(monkeypatch):
     calls.clear()
     orch._stage_edit(10)
     assert _sites_of(calls) == [never, tried_long_ago, tried_recently]
+
+
+ERR = {"pass": False, "issues": ["критик не ответил"], "error": "ReadTimeout"}
+
+
+def test_stage_edit_pauses_the_whole_site_after_a_fresh_failure(monkeypatch):
+    """Критик читает ВСЕ черновики сайта по порядку. Сайт, где первая страница только что не вычиталась,
+    а две другие ещё не читаны, без паузы шёл бы первым каждый свип, упирался в ту же страницу и
+    останавливал стадию — до соседа дело не доходило бы никогда."""
+    autonomy.update_autonomy(auto_edit=True)
+    a = _site_in("content", "a.ru")
+    first = _draft(a, "/", critic_checked_at=_hours_ago(1), critic_notes=ERR)
+    _draft(a, "/vs"); _draft(a, "/setup")                        # ни разу не читаны
+    b = _site_in("content", "b.ru"); _draft(b)
+    calls = _spy_edit(monkeypatch)
+    assert orch._stage_edit(1)[0] == 1 and _sites_of(calls) == [b]
+    calls.clear()
+    orch._stage_edit(10)
+    assert _sites_of(calls) == [b]                               # лимит ни при чём: A на паузе
+    with db.SessionLocal() as s:                                 # пауза вышла — A снова в очереди, и первым
+        s.get(Page, first).critic_checked_at = _hours_ago(orch.EDIT_RETRY_HOURS + 1)
+        s.commit()
+    calls.clear()
+    orch._stage_edit(1)
+    assert _sites_of(calls) == [a]
+
+
+def test_stage_edit_comes_back_to_a_page_held_for_a_service_reason(monkeypatch):
+    """`retry` — модель была довольна, помешала служебная причина (не было досье, упала проверка): страница
+    нуждается в вычитке так же, как несостоявшаяся, и под той же паузой."""
+    autonomy.update_autonomy(auto_edit=True)
+    held = {"pass": False, "issues": ["нет досье — сверить текст не с чем"], "retry": True}
+    recent = _site_in("content", "rr.ru")
+    _draft(recent, "/", critic_checked_at=_hours_ago(2), critic_notes=held)
+    _draft(recent, "/vs")                                        # свежий retry держит и нечитанную соседку
+    due = _site_in("content", "rd.ru"); _draft(due, critic_checked_at=_hours_ago(7), critic_notes=held)
+    final = _site_in("content", "rf.ru")                         # тот же вердикт без retry — окончательный
+    _draft(final, critic_checked_at=_hours_ago(7), critic_notes={"pass": False, "issues": ["вода"]})
+    calls = _spy_edit(monkeypatch)
+    orch._stage_edit(10)
+    assert _sites_of(calls) == [due]
+
+
+def test_stage_edit_site_that_raises_does_not_take_the_cap(monkeypatch):
+    from app.services import content_critic
+    autonomy.update_autonomy(auto_edit=True)
+    bad = _site_in("content", "bad1.ru"); _draft(bad)
+    good = _site_in("content", "good1.ru"); _draft(good)
+    later = _site_in("content", "later1.ru"); _draft(later)
+    seen = []
+
+    def edit(site_id):
+        seen.append(site_id)
+        if site_id == bad:
+            raise RuntimeError("сломанная страница")
+        return {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
+
+    monkeypatch.setattr(content_critic, "edit_site", edit)
+    done, errs, extra = orch._stage_edit(1)
+    assert seen == [bad, good]                                   # лимит 1 достался следующему сайту
+    assert done == 1 and errs == [f"site#{bad}: RuntimeError: сломанная страница"]
 
 
 def test_stage_edit_respects_cap_and_counts_remarks(monkeypatch):
@@ -629,3 +690,128 @@ def test_publish_stage_reports_page_failure_in_its_own_words(monkeypatch):
     _draft(sid, status="edited")
     done, errs = orch._stage_publish(5)
     assert done == 1 and errs == [f"site#{sid}/: {why}"]
+
+
+# --- стадия «вычитка» с НАСТОЯЩИМ критиком: подменён только ответ модели ---
+import pytest
+
+PASSED = '{"pass": true, "score": 90, "issues": []}'
+
+
+@pytest.fixture
+def model(tmp_path, monkeypatch):
+    """Настоящий `content_critic.edit_site`; подменён только `LlmClient.complete`. `model["answer"]` — что
+    ответит модель (исключение будет брошено), `model["during"]` — что сделать посреди её ответа."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
+    state = {"answer": PASSED, "during": None, "calls": 0}
+
+    def complete(self, system, prompt, **kw):
+        state["calls"] += 1
+        if state["during"]:
+            state["during"]()
+        if isinstance(state["answer"], Exception):
+            raise state["answer"]
+        return state["answer"]
+
+    monkeypatch.setattr("app.integrations.llm.LlmClient.complete", complete)
+    return state
+
+
+def _writer_site(domain: str, paths=("/",)) -> tuple[int, list[int]]:
+    """Сайт с оффером, досье и черновиками писателя, которые вычитку проходят (фикстура ворот кнопки)."""
+    from tests.test_writer_panel import _passing_draft, _site
+    sid = _site(domain=domain)
+    return sid, [_passing_draft(sid, path) for path in paths]
+
+
+def _row(page_id: int) -> Page:
+    with db.SessionLocal() as s:
+        return s.get(Page, page_id)
+
+
+def _spy_mark_edited(monkeypatch) -> list:
+    from app.services import content
+    seen, real = [], content.mark_edited
+
+    def spy(*a, **kw):
+        seen.append(a[0])
+        return real(*a, **kw)
+
+    monkeypatch.setattr(content, "mark_edited", spy)
+    return seen
+
+
+def test_real_critic_approves_passing_pages_through_mark_edited(model, monkeypatch):
+    autonomy.update_autonomy(auto_edit=True)
+    a, (pa,) = _writer_site("ea.xyz")
+    b, (pb,) = _writer_site("eb.xyz")
+    approved = _spy_mark_edited(monkeypatch)
+    done, errs, extra = orch._stage_edit(5)
+    assert (done, errs, extra) == (2, [], {})
+    assert approved == [pa, pb]                                  # единственный путь к edited
+    assert _row(pa).status == _row(pb).status == "edited"
+    assert _row(pa).critic_notes["pass"] is True
+    assert orch._stage_edit(5) == (0, [], {})                    # черновиков не осталось — критик не нужен
+
+
+def test_real_critic_model_down_stops_the_stage_and_the_site_waits_out_the_pause(model, monkeypatch):
+    """Шлюз модели лежит: стадия встаёт на первом сайте. Следующий свип берёт соседа, а не тот же сайт;
+    после паузы стадия возвращается к странице, и она проходит."""
+    import httpx
+    autonomy.update_autonomy(auto_edit=True)
+    a, (pa,) = _writer_site("da.xyz")
+    b, (pb,) = _writer_site("db.xyz")
+    model["answer"] = httpx.ConnectError("шлюз не отвечает")
+    done, errs, extra = orch._stage_edit(5)
+    assert done == 0 and errs == [f"site#{a}: модель недоступна — вычитка остановлена"]
+    assert _row(pa).status == "draft" and _row(pa).critic_notes["error"]
+    assert _row(pb).critic_checked_at is None                    # второй сайт не начат
+    asked = model["calls"]
+
+    model["answer"] = PASSED                                     # шлюз поднялся — следующий свип
+    done, errs, extra = orch._stage_edit(5)
+    assert (done, errs) == (1, []) and _row(pb).status == "edited"
+    assert _row(pa).status == "draft" and model["calls"] == asked + 1    # A на паузе: к критику не ходили
+
+    with db.SessionLocal() as s:                                 # пауза вышла
+        s.get(Page, pa).critic_checked_at = _hours_ago(orch.EDIT_RETRY_HOURS + 1)
+        s.commit()
+    done, errs, extra = orch._stage_edit(5)
+    assert (done, errs) == (1, []) and _row(pa).status == "edited" and "error" not in _row(pa).critic_notes
+
+
+def test_real_critic_stop_button_midway_keeps_the_stage_from_the_next_site(model):
+    """«Стоп» нажат, пока критик читает первую страницу первого сайта: вторую страницу он не берёт, и
+    стадия ко второму сайту не переходит."""
+    from app.services import jobs
+    autonomy.update_autonomy(auto_edit=True)
+    a, (pa1, pa2) = _writer_site("ca.xyz", paths=("/", "/vs"))
+    b, (pb,) = _writer_site("cb.xyz")
+    model["during"] = lambda: jobs.request_cancel("edit")        # та же функция, что у кнопки «✕ Отменить»
+    done, errs, extra = orch._stage_edit(5)
+    assert (done, errs) == (0, []) and model["calls"] == 1
+    assert _row(pa1).critic_checked_at is not None               # начатая страница дочитана и записана
+    assert _row(pa2).critic_checked_at is None and _row(pb).critic_checked_at is None
+    assert jobs.last("edit")["status"] == "cancelled"
+
+
+def test_real_critic_stop_button_on_the_last_page_still_stops_the_stage(model):
+    """У сайта одна страница: критик дочитывает её и «стоп» уже не замечает (задача закрывается как
+    сделанная). Стадия видит пометку на закрытой задаче и к следующему сайту не идёт."""
+    from app.services import jobs
+    autonomy.update_autonomy(auto_edit=True)
+    a, (pa,) = _writer_site("la.xyz")
+    b, (pb,) = _writer_site("lb.xyz")
+    model["during"] = lambda: jobs.request_cancel("edit")
+    done, errs, extra = orch._stage_edit(5)
+    assert (done, errs) == (1, []) and _row(pa).status == "edited"       # сайт дочитан — он «сделан»
+    assert _row(pb).critic_checked_at is None and model["calls"] == 1
+
+
+def test_real_critic_is_not_called_at_all_while_the_toggle_is_off(model, monkeypatch):
+    autonomy.update_autonomy(auto_edit=False)
+    a, (pa,) = _writer_site("oa.xyz")
+    approved = _spy_mark_edited(monkeypatch)
+    assert orch._stage_edit(5) == (0, [], {})
+    assert model["calls"] == 0 and approved == [] and _row(pa).critic_checked_at is None
