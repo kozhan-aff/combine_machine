@@ -330,6 +330,15 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 (`Connect call failed ('192.168.65.254', 11434)`). Это значит Ollama на Windows слушает только 127.0.0.1: нужно задать
 системную переменную `OLLAMA_HOST=0.0.0.0` и перезапустить Ollama, затем `LLM_MODEL`/`LLM_CLASSIFY_MODEL=ollama/<модель>`
 на `/settings/keys`. SearXNG — 0 результатов (движки suspended/CAPTCHA). NameSilo/Ahrefs/Web Risk — ключей нет.
+**На боксе есть второй LLM-шлюз `:3033`** (`claude-code-server` v10, OpenAI-совместимый: `/v1/models`, `/v1/chat/completions`;
+модели `sonnet`/`opus`/`haiku` через `claude --print` по подписке Max, `mistral*` и `ollama/*` через LiteLLM `:4000`, с цепочкой
+фолбэков sonnet→mistral→ollama). Проба 2026-10-10 с Mac: шлюз отвечает, но ВСЕ апстримы мертвы — `claude --print` падает
+`exit_1` с пустым stderr (похоже на слетевшую авторизацию CLI в контейнере: `docker exec -it claude-code claude --print
+--model sonnet "say ok"` покажет причину), mistral 403, ollama 500 (тот же `host.docker.internal:11434`). Когда CLI
+залогинен, комбайн можно перевести на шлюз: на `/settings/keys` `LLM_BASE_URL=http://192.168.1.77:3033`, `LLM_MODEL=sonnet`,
+`LLM_CLASSIFY_MODEL=haiku` (клиент шлёт system+user, `stream:false` — шлюз это умеет; `think` для не-ollama не шлётся).
+Оговорка: шлюз молча подменяет модель по цепочке фолбэков — в ответе поле `model` покажет, кто реально писал. SSH на бокс
+с Mac по ключу не пускает (порт 22 открыт, `publickey` отклонён для kozhan/Sereja0210) — логи контейнеров читать нельзя.
 `docker compose up -d --build` для сервиса `backup` ещё не выполнялся (compose меняется не кнопкой).
 Сквозной офлайн-прогон M4→M5 по реальному коду (фейковые LLM и aaPanel, es-рынок) даёт 3 страницы + 8 ассетов + robots/
 sitemap/ключ IndexNow; скриншоты смотрели глазами. **Живой провижн/публикация на настоящем домене не выполнялись** — нет
