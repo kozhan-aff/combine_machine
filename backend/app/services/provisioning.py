@@ -401,6 +401,9 @@ def provision(site_id: int) -> dict:
             problems.append(f"ssl: {type(e).__name__}: {e}"[:300])
         _ensure_setting(cf, zone["id"], "always_use_https", "on", problems)
         _ensure_setting(cf, zone["id"], "min_tls_version", "1.2", problems)
+        # Web Analytics (RUM) — CF подмешивает beacon.min.js на все страницы: общий скрипт/тег на весь
+        # портфель = footprint (на tunnelnotes.xyz 2026-10-10 он появился сам). Выключаем явно.
+        _ensure_setting(cf, zone["id"], "rum", "off", problems)
         site.ssl_error = "; ".join(problems)[:500] or None
 
         # 6. DNS: proxied A на apex и www -> VPS origin (маскирует IP origin). Только теперь, когда

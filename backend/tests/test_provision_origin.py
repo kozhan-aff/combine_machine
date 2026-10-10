@@ -45,7 +45,7 @@ class _CF:
         return {"id": "r"}
 
     def get_zone_setting(self, zid, sid):
-        return {"value": self.mode if sid == "ssl" else self.settings.get(sid, "off")}
+        return {"value": self.mode if sid == "ssl" else self.settings.get(sid, "on" if sid == "rum" else "off")}
 
     def set_ssl(self, zid, mode="full"):
         if self.ssl_boom:
@@ -286,7 +286,7 @@ def test_www_alias_dns_and_zone_hardening(monkeypatch):
     assert ("ex.com", IP, True) in cf.records and ("www.ex.com", IP, True) in cf.records
     webname = json.loads(next(d for p, d in panel.calls if "AddSite" in p)["webname"])
     assert webname["domainlist"] == ["www.ex.com"]
-    assert cf.settings == {"always_use_https": "on", "min_tls_version": "1.2"}
+    assert cf.settings == {"always_use_https": "on", "min_tls_version": "1.2", "rum": "off"}
 
 
 def test_existing_vhost_without_www_alias_gets_adddomain_then_dns(monkeypatch, origin_probe):
