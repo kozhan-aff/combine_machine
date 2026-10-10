@@ -169,7 +169,7 @@ def test_reapproved_page_publishes_its_new_approved_body(writes, session_mode):
     assert _page(ids["/vs"]).status == "published" and _page(ids["/vs"]).body == approved
 
 
-def test_stamp_is_committed_at_once_with_site_and_domain_status(writes, monkeypatch):
+def test_stamp_is_committed_at_once_with_site_and_domain_status(writes):
     """Отметка коммитится сразу (блокировка строки не висит всю выгрузку) и вместе со статусом сайта и
     домена: что бы ни случилось со следующей страницей, опубликованная остаётся опубликованной, а сайт
     с опубликованной страницей — опубликованным."""
@@ -179,14 +179,15 @@ def test_stamp_is_committed_at_once_with_site_and_domain_status(writes, monkeypa
         site.status = "content"
         s.get(Domain, site.domain_id).status = "purchased"
         s.commit()
-    real = content.render_html
 
-    def render(page, *a, **kw):
-        if page.url_path == "/vs":
-            raise RuntimeError("шаблон сломан")                      # не отказ записи, а авария посреди фазы 3
-        return real(page, *a, **kw)
-    monkeypatch.setattr(content, "render_html", render)
-    with pytest.raises(RuntimeError, match="шаблон сломан"):
+    class Crash(BaseException):
+        """Не отказ записи (его ловит постраничный except), а авария посреди фазы 3: процесс убили."""
+
+    def crash(path):
+        if path == f"{ROOT}/vs/index.html":
+            raise Crash()
+    writes.hook = crash
+    with pytest.raises(Crash):
         publish.publish_site(ids["site"])
     assert _page(ids["/"]).status == "published" and _page(ids["/"]).published_at is not None
     assert _page(ids["/vs"]).status == "edited"
@@ -286,3 +287,27 @@ def test_autopilot_index_stage_picks_site_with_rewritten_live_pages(monkeypatch)
     seen.clear()
     orch._stage_check_index(5)
     assert seen == []
+
+
+# --- сбой рендера одной страницы не обрывает прогон ---
+
+def test_render_failure_of_one_page_does_not_abort_the_run(writes, monkeypatch):
+    """Рендер стоял вне постраничного try: шаблон, упавший на второй странице, обрывал прогон исключением
+    уже после того, как первая получила отметку, — без sitemap и без отчёта по страницам."""
+    ids = _site([("/", "edited", None), ("/vs", "edited", None)])
+    real = content.render_html
+
+    def render(page, *a, **kw):
+        if page.url_path == "/vs":
+            raise RuntimeError("шаблон сломан")
+        return real(page, *a, **kw)
+
+    monkeypatch.setattr(content, "render_html", render)
+    out = publish.publish_site(ids["site"])
+    assert out["status"] == "partial" and out["pages"] == ["/"] and out["written"] == ["/"]
+    assert out["failed"] == {"/vs": "RuntimeError: шаблон сломан"}
+    assert _page(ids["/"]).status == "published" and _page(ids["/vs"]).status == "edited"
+    paths = [path for path, _ in writes]
+    assert f"{ROOT}/vs/index.html" not in paths
+    sitemap = dict(writes)[f"{ROOT}/sitemap.xml"]
+    assert "rw.com/</loc>" in sitemap and "/vs" not in sitemap

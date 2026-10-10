@@ -317,6 +317,10 @@ def test_panel_generate_refusal_and_attach_sets_site_offer(client, monkeypatch):
     client.post(f"/sites/{sid}/attach-offer", data={"offer_id": oid}, follow_redirects=False)
     with db.SessionLocal() as s:
         assert s.get(Site, sid).offer_id == oid
+        # панель пишет тексты только по досье конкурентов (спека 2026-10-10 §4.5)
+        from app.models.research import SiteResearch
+        s.add(SiteResearch(site_id=sid, kind="review", query="q", rank=1, url="https://c.example/1"))
+        s.commit()
     ran = []
     monkeypatch.setattr(jobs, "spawn", lambda name, fn: ran.append(name) or True)
     r = client.post(f"/sites/{sid}/generate", data={"lang": "en"}, follow_redirects=False)
@@ -325,7 +329,7 @@ def test_panel_generate_refusal_and_attach_sets_site_offer(client, monkeypatch):
 
 def test_generate_stage_reports_site_without_offer():
     sid = _site()
-    done, errs = orch._stage_generate(5)
+    done, errs, _ = orch._stage_generate(5)
     assert done == 0 and errs == [f"site#{sid}: оффер не привязан — генерация пропущена"]
 
 

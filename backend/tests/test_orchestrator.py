@@ -105,26 +105,40 @@ def test_provision_stage_two_suboperations(monkeypatch):
     assert "create" in kinds and "prov" in kinds                        # обе под-операции сработали
 
 
-def test_generate_stage_uses_competitor(monkeypatch):
-    seen = {}
+def _dossier(site_id: int) -> None:
+    """Строка досье конкурентов: без неё стадия генерации сайт не берёт (спека 2026-10-10 §4.5)."""
+    from app.models.research import SiteResearch
+    with db.SessionLocal() as s:
+        s.add(SiteResearch(site_id=site_id, kind="review", query="q", rank=1, url="https://c.example/1"))
+        s.commit()
+
+
+def test_generate_stage_writes_by_dossier(monkeypatch):
+    seen = []
     monkeypatch.setattr("app.services.content.generate_site",
-                        lambda site_id, use_competitor=False: seen.update(sid=site_id, uc=use_competitor) or 3)
+                        lambda site_id, **kw: seen.append((site_id, kw)) or 3)
     with db.SessionLocal() as s:
         d = Domain(domain="g.ru", source="backorder", status="purchased")
         s.add(d); s.commit()
-        s.add(Site(domain_id=d.id, status="content", offer_id=_offer_id())); s.commit()   # content без страниц
+        site = Site(domain_id=d.id, status="content", offer_id=_offer_id()); s.add(site); s.commit()   # content без страниц
+        sid = site.id
+    _dossier(sid)
     _enable(auto_generate=True)
-    orch.run_sweep(trigger="cron")
-    assert seen.get("uc") is True                                       # спек: use_competitor=True
+    out = orch.run_sweep(trigger="cron")
+    assert seen == [(sid, {})]          # структуру конкурентов несёт досье — use_competitor не передаётся
+    assert out["counts"]["generate"] == 1 and out["errors"] == []
 
 
 def test_gate_invariants_never_cross_human_gates(monkeypatch):
-    """ЖЁСТКО: свип со ВСЕМИ тумблерами не двигает scored/draft и не зовёт гейт-функции."""
+    """ЖЁСТКО: свип со всеми тумблерами, кроме auto_edit, не двигает scored/draft и не зовёт гейт-функции.
+    auto_edit — отдельное решение оператора (критик одобряет сам); без него вычитка не запускается вовсе."""
     for fn in ("confirm_order", "execute_confirmed_order", "mark_caught"):
         monkeypatch.setattr(f"app.services.acquisition.{fn}",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError(f"gate {fn} called")))
     monkeypatch.setattr("app.services.content.mark_edited",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("editorial gate called")))
+    monkeypatch.setattr("app.services.content_critic.edit_site",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("critic called without auto_edit")))
     # offline: сетевые bulk-стадии в no-op, чтобы тумблеры можно было включить все
     monkeypatch.setattr("app.services.discovery.run_discovery", lambda: 0)
     monkeypatch.setattr("app.services.scoring.score_pending", lambda limit=100: 0)
@@ -134,11 +148,13 @@ def test_gate_invariants_never_cross_human_gates(monkeypatch):
         s.add(d); s.commit()
         site = Site(domain_id=d.id, status="content", offer_id=_offer_id()); s.add(site); s.commit()
         s.add(Page(site_id=site.id, url_path="/", status="draft", body="<p>x</p>")); s.commit()
+        sid = site.id
+    _dossier(sid)
     _enable(auto_discovery=True, auto_score=True, auto_queue=True, auto_provision=True,
             auto_generate=True, auto_publish=True, auto_check_index=True)
     monkeypatch.setattr("app.services.provisioning.create_site_for", lambda did: 0)
     monkeypatch.setattr("app.services.provisioning.provision", lambda sid: {})
-    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, use_competitor=False: 0)
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: 2)
     monkeypatch.setattr("app.services.publish.publish_site", lambda sid: {})
     monkeypatch.setattr("app.services.publish.check_index", lambda sid, only_due=False: {})
     out = orch.run_sweep(trigger="cron")
@@ -271,3 +287,228 @@ def test_autopilot_form_saves_new_toggles(client):
     a = autonomy.get_autonomy()
     assert a["auto_research"] is True and a["cap_research"] == 7 and a["auto_edit"] is True and a["cap_design"] == 2
     assert a["auto_design"] is False
+
+
+# --- план Б: генерация только по досье, стадия «вычитка» -----------------------
+
+def _draft(site_id: int, path: str = "/", **kw) -> int:
+    with db.SessionLocal() as s:
+        p = Page(**{**dict(site_id=site_id, url_path=path, status="draft", body="<p>x</p>"), **kw})
+        s.add(p); s.commit()
+        return p.id
+
+
+def _site_in(status: str, domain: str) -> int:
+    with db.SessionLocal() as s:
+        d = Domain(domain=domain, source="backorder", status="purchased")
+        s.add(d); s.commit()
+        site = Site(domain_id=d.id, status=status, offer_id=_offer_id())
+        s.add(site); s.commit()
+        return site.id
+
+
+def _spy_edit(monkeypatch, result=None) -> list:
+    from app.services import content_critic
+    calls = []
+    out = result or {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
+    monkeypatch.setattr(content_critic, "edit_site",
+                        lambda site_id, auto_edit=None: calls.append((site_id, auto_edit)) or dict(out))
+    return calls
+
+
+def test_edit_stage_sits_between_generate_and_publish():
+    keys = [s[0] for s in orch.STAGES]
+    assert keys.index("edit") == keys.index("generate") + 1 == keys.index("publish") - 1
+    key, flag, cap, _ = orch.STAGES[keys.index("edit")]
+    assert (flag, cap) == ("auto_edit", "cap_generate")
+    assert orch.STAGE_RU["edit"] == "вычитка"
+    assert orch.COUNT_RU["edit_failed"] == "вычитка: замечания"
+    assert orch.COUNT_RU["generate_no_dossier"] == "нет досье"
+    assert orch.COUNT_RU["generate_empty"] == "тексты не написаны"
+
+
+def test_stage_generate_skips_site_without_dossier(monkeypatch):
+    sid = _content_site()
+    seen = []
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: seen.append(site_id) or 3)
+    done, errs, extra = orch._stage_generate(5)
+    assert seen == [] and done == 0 and extra == {"generate_no_dossier": 1}
+    assert errs == [f"site#{sid}: нет досье — генерация пропущена (стадия «досье» или кнопка на карточке сайта)"]
+    _dossier(sid)
+    done, errs, extra = orch._stage_generate(5)
+    assert seen == [sid] and done == 1 and errs == [] and extra == {}
+
+
+def test_stage_generate_cap_is_not_eaten_by_sites_without_dossier(monkeypatch):
+    """Сайт без досье сам из выборки не уходит: при LIMIT в SQL он занимал бы кап каждый свип."""
+    stuck = _content_site()
+    ready = _site_in("content", "ready.ru")
+    later = _site_in("content", "later.ru")
+    _dossier(ready); _dossier(later)
+    seen = []
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: seen.append(site_id) or 3)
+    done, errs, extra = orch._stage_generate(1)
+    assert seen == [ready] and done == 1 and extra == {"generate_no_dossier": 1} and f"site#{stuck}" in errs[0]
+
+
+def test_stage_generate_does_not_count_site_left_without_texts(monkeypatch):
+    """Писатель вернул 0 (шлюз модели лежит), страниц по-прежнему нет: «сделано» тут было бы враньём —
+    причина из итога задачи `generate` уходит в ошибки стадии."""
+    from app.services import jobs
+    sid = _content_site()
+    _dossier(sid)
+
+    def down(site_id, **kw):
+        with jobs.track("generate") as run:
+            jobs.report(run, message="написано 0 из 3; модель недоступна — прогон остановлен, не начато страниц: 2")
+        return 0
+
+    monkeypatch.setattr("app.services.content.generate_site", down)
+    done, errs, extra = orch._stage_generate(5)
+    assert done == 0 and extra == {"generate_empty": 1}
+    assert errs == [f"site#{sid}: тексты не написаны — написано 0 из 3; модель недоступна — прогон остановлен, "
+                    "не начато страниц: 2"]
+
+
+def test_stage_generate_zero_is_fine_when_pages_are_all_there(monkeypatch):
+    """0 при полном наборе страниц (их дописал параллельный прогон) — не «тексты не написаны»."""
+    sid = _content_site()
+    _dossier(sid)
+    _draft(sid, "/")
+
+    def racer(site_id, **kw):
+        _draft(site_id, "/vs"); _draft(site_id, "/setup")
+        return 0
+
+    monkeypatch.setattr("app.services.content.generate_site", racer)
+    assert orch._stage_generate(5) == (1, [], {})
+
+
+def test_stage_edit_takes_unreviewed_drafts_only(monkeypatch):
+    from datetime import datetime, timezone
+    autonomy.update_autonomy(auto_edit=True)
+    fresh = _site_in("content", "fresh.ru"); _draft(fresh)                       # черновик, критик не читал
+    seen_before = _site_in("content", "seen.ru")                                # черновик с замечаниями — уже вычитан
+    _draft(seen_before, critic_checked_at=datetime.now(timezone.utc), critic_notes={"pass": False, "issues": ["x"]})
+    approved = _site_in("content", "appr.ru"); _draft(approved, status="edited")  # одобрена — вычитывать нечего
+    early = _site_in("provisioning", "early.ru"); _draft(early)                  # инфраструктура не готова
+    live = _site_in("published", "live.ru"); _draft(live)                        # переписанная страница живого сайта
+    calls = _spy_edit(monkeypatch)
+    done, errs, extra = orch._stage_edit(10)
+    assert calls == [(fresh, True), (live, True)]
+    assert done == 2 and errs == [] and extra == {}
+
+
+def test_stage_edit_respects_cap_and_counts_remarks(monkeypatch):
+    autonomy.update_autonomy(auto_edit=True)
+    sids = [_site_in("content", f"cap{i}.ru") for i in range(3)]
+    for sid in sids:
+        _draft(sid)
+    calls = _spy_edit(monkeypatch, {"reviewed": 2, "edited": 1, "rewritten": 1, "failed": 1})
+    done, errs, extra = orch._stage_edit(2)
+    assert [c[0] for c in calls] == sids[:2]            # кап — на сайты
+    assert done == 2 and errs == [] and extra == {"edit_failed": 2}
+
+
+def test_stage_edit_entity_error_does_not_sink_the_stage(monkeypatch):
+    from app.services import content_critic
+    autonomy.update_autonomy(auto_edit=True)
+    bad = _site_in("content", "bad.ru"); _draft(bad)
+    good = _site_in("content", "good.ru"); _draft(good)
+
+    def edit(site_id, auto_edit=None):
+        if site_id == bad:
+            raise RuntimeError("шлюз модели не ответил")
+        return {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
+
+    monkeypatch.setattr(content_critic, "edit_site", edit)
+    done, errs, extra = orch._stage_edit(5)
+    assert done == 1 and errs == [f"site#{bad}: RuntimeError: шлюз модели не ответил"] and extra == {}
+
+
+def test_stage_edit_propagates_already_running(monkeypatch):
+    import pytest
+    from app.services import content_critic, jobs
+    autonomy.update_autonomy(auto_edit=True)
+    _draft(_site_in("content", "busy.ru"))
+    monkeypatch.setattr(content_critic, "edit_site",
+                        lambda site_id, auto_edit=None: (_ for _ in ()).throw(jobs.AlreadyRunning("edit")))
+    with pytest.raises(jobs.AlreadyRunning):
+        orch._stage_edit(5)
+
+
+def test_stage_edit_handler_does_nothing_while_toggle_is_off(monkeypatch):
+    """Вторая линия защиты: даже вызванный напрямую, обработчик без тумблера критика не зовёт."""
+    autonomy.update_autonomy(auto_edit=False)
+    _draft(_site_in("content", "off.ru"))
+    calls = _spy_edit(monkeypatch)
+    assert orch._stage_edit(5) == (0, [], {}) and calls == []
+
+
+def test_stage_edit_stops_when_toggle_is_switched_off_midway(monkeypatch):
+    """Вычитка сайта — минуты модели; оператор, снявший тумблер посреди стадии, вправе ждать, что следующий
+    сайт критик уже не одобрит."""
+    from app.services import content_critic
+    autonomy.update_autonomy(auto_edit=True)
+    first = _site_in("content", "one.ru"); _draft(first)
+    _draft(_site_in("content", "two.ru"))
+    calls = []
+
+    def edit(site_id, auto_edit=None):
+        calls.append(site_id)
+        autonomy.update_autonomy(auto_edit=False)
+        return {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
+
+    monkeypatch.setattr(content_critic, "edit_site", edit)
+    done, errs, extra = orch._stage_edit(5)
+    assert calls == [first] and done == 1
+
+
+def test_stage_edit_off_when_auto_edit_false(monkeypatch):
+    """Полный свип со всеми стадиями, кроме вычитки: критик не зовётся ни разу, черновик остаётся черновиком."""
+    monkeypatch.setattr("app.services.discovery.run_discovery", lambda: 0)
+    monkeypatch.setattr("app.services.scoring.score_pending", lambda limit=100: 0)
+    monkeypatch.setattr("app.services.research.build_dossier", lambda s, force=False: {"status": "done", "rows": 1})
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: 2)
+    monkeypatch.setattr("app.services.publish.publish_site", lambda sid: {})
+    monkeypatch.setattr("app.services.publish.check_index", lambda sid, only_due=False: {})
+    sid = _content_site()
+    _dossier(sid)
+    pid = _draft(sid)
+    calls = _spy_edit(monkeypatch)
+    _enable(auto_discovery=True, auto_score=True, auto_queue=True, auto_provision=True, auto_research=True,
+            auto_generate=True, auto_publish=True, auto_check_index=True, auto_edit=False)
+    out = orch.run_sweep(trigger="cron")
+    assert calls == [] and "edit" not in out["counts"]
+    with db.SessionLocal() as s:
+        assert s.get(Page, pid).status == "draft"
+
+
+def test_sweep_with_auto_edit_runs_critic_after_generate_and_before_publish(monkeypatch):
+    order = []
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: order.append("generate") or 2)
+    monkeypatch.setattr("app.services.content_critic.edit_site",
+                        lambda site_id, auto_edit=None: order.append(("edit", auto_edit)) or
+                        {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1})
+    monkeypatch.setattr("app.services.publish.publish_site", lambda sid: order.append("publish") or {})
+    sid = _content_site()
+    _dossier(sid)
+    _draft(sid)
+    _draft(_site_in("content", "pub.ru"), status="edited")     # одобренная страница — чтобы публикации было что брать
+    _enable(auto_generate=True, auto_edit=True, auto_publish=True)
+    out = orch.run_sweep(trigger="cron")
+    assert order == ["generate", ("edit", True), "publish"]
+    assert out["counts"]["edit"] == 1 and out["counts"]["edit_failed"] == 1
+
+
+def test_publish_stage_reports_page_failure_in_its_own_words(monkeypatch):
+    """Файл записан, но отметка не легла (страницу переписали во время публикации): приставка «не записана»
+    была неправдой — причина идёт как есть, с путём."""
+    why = "страница изменилась во время публикации — на сайте записана прежняя версия, опубликуй её ещё раз"
+    monkeypatch.setattr("app.services.publish.publish_site",
+                        lambda sid: {"status": "partial", "pages": ["/vs"], "failed": {"/": why},
+                                     "unverified": {}, "warnings": []})
+    sid = _site_in("content", "pw.ru")
+    _draft(sid, status="edited")
+    done, errs = orch._stage_publish(5)
+    assert done == 1 and errs == [f"site#{sid}/: {why}"]

@@ -1,8 +1,9 @@
 """M-оркестратор автономии. Двигает конвейер по включённым «авто»-стадиям до гейтов.
 
 Тонкий диспетчер: НИКАКОЙ новой бизнес-логики — только (1) запрос подходящих сущностей,
-(2) вызов существующего безопасного сервиса, (3) учёт. Три человеческих гейта (курация,
-деньги, редактура) он НЕ трогает — см. _FORBIDDEN в докстринге run_sweep.
+(2) вызов существующего безопасного сервиса, (3) учёт. Гейты курации и денег он НЕ трогает никогда —
+см. докстринг run_sweep. Гейт редактуры двигает только стадия «вычитка» и только когда оператор сам
+включил тумблер auto_edit: одобряет критик, тем же единственным путём (content.mark_edited).
 """
 from datetime import datetime, timezone
 
@@ -260,7 +261,7 @@ def _stage_research(cap):
 
 
 def _stage_generate(cap):
-    """Сайты status=content, где страниц МЕНЬШЕ ожидаемого -> generate_site(use_competitor=True).
+    """Сайты status=content, где страниц МЕНЬШЕ ожидаемого -> generate_site (писатель по досье).
 
     Раньше селектор был «у сайта вообще нет страниц» (аудит F19, пункт Б): `scaffold()` даёт
     фиксированный набор страниц (3 спеки) за вызов, но если хотя бы одна LLM-генерация
@@ -270,14 +271,19 @@ def _stage_generate(cap):
     навсегда. `generate_site()` для КАЖДОЙ спеки сам проверяет «уже есть» (`Page.url_path`) и
     пропускает существующие — повторный вызов на сайте с частью страниц ДОЗАПОЛНЯЕТ
     недостающие, а не дублирует (а гонку двух процессов на одном пути дополнительно ловит
-    `uq_page_per_path`, миграция 0014 — см. content.generate_site/IntegrityError)."""
+    `uq_page_per_path`, миграция 0014 — см. content.generate_site/IntegrityError).
+
+    Без досье конкурентов сайт не пишется (спека 2026-10-10 §4.5): писать не по чему. Это не ошибка
+    стадии, а отдельный счётчик `generate_no_dossier` + строка словами — как `research_empty`.
+    Сайт, по которому писатель вернул 0 при недостающих страницах (шлюз модели лежит, ответы мимо
+    схемы), «сделанным» не считается: счётчик `generate_empty`, причина — из итога задачи `generate`."""
     from sqlalchemy import select, func
     from app.db import SessionLocal
     from app.models.site import Site, Page
-    from app.services import content, jobs
+    from app.services import content, jobs, research
 
     expected = len(content.scaffold(""))   # число страниц/сайт — фиксировано scaffold(), не зависит от бренда
-    done, errs = 0, []
+    done, errs, no_dossier, empty = 0, [], 0, 0
     with SessionLocal() as db:
         page_counts = (
             select(Page.site_id, func.count(Page.id).label("n"))
@@ -287,27 +293,90 @@ def _stage_generate(cap):
             .outerjoin(page_counts, page_counts.c.site_id == Site.id)
             .where(Site.status == "content",
                    func.coalesce(page_counts.c.n, 0) < expected)
-            .order_by(Site.id).limit(cap)).all()
+            .order_by(Site.id)).all()
         # S6-13/S7-12: без явного оффера (Site.offer_id) сайт не генерируется. Говорим об этом в
         # ошибках свипа, а не молча перескакиваем — оператор должен привязать оффер на карточке.
         # Legacy-сайт с SiteOffer, но без offer_id, generate_site сам разрешит через site_offer().
+        # Кап — на сайты, которые реально пойдут писателю, а не LIMIT в SQL: иначе сайты без оффера
+        # или досье (сами они оттуда не уходят) занимали бы весь кап каждый свип — как грязь в _stage_queue.
         ids = []
         for sid, oid in rows:
+            if len(ids) >= cap:
+                break
             if oid is None:
                 site = db.get(Site, sid)
                 if content.site_offer(db, site) is None:
                     errs.append(f"site#{sid}: оффер не привязан — генерация пропущена")
                     continue
+            if not research.dossier(db, sid):
+                no_dossier += 1
+                errs.append(f"site#{sid}: нет досье — генерация пропущена "
+                            "(стадия «досье» или кнопка на карточке сайта)")
+                continue
             ids.append(sid)
     for sid in ids:
         try:
-            content.generate_site(sid, use_competitor=True)
-            done += 1
+            written = content.generate_site(sid)
         except jobs.AlreadyRunning:
             raise                       # ручная генерация идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
-    return done, errs
+            continue
+        if not written:
+            with SessionLocal() as db:
+                have = db.scalar(select(func.count()).select_from(Page).where(Page.site_id == sid)) or 0
+            if have < expected:
+                # почему — писатель сказал в итоге своей задачи (она только что закрылась)
+                last = jobs.last("generate") or {}
+                empty += 1
+                errs.append(f"site#{sid}: тексты не написаны — "
+                            f"{last.get('message') or last.get('error') or 'причина не записана'}")
+                continue
+        done += 1
+    extra = {}
+    if no_dossier:
+        extra["generate_no_dossier"] = no_dossier
+    if empty:
+        extra["generate_empty"] = empty
+    return done, errs, extra
+
+
+def _stage_edit(cap):
+    """Сайты с ещё не вычитанным черновиком -> content_critic.edit_site (критик вычитывает, слабое
+    переписывает, прошедшее одобряет). Стадия идёт только при тумблере auto_edit — и сама его
+    перечитывает перед каждым сайтом: вычитка сайта длится минуты, и оператор, снявший тумблер
+    посреди стадии, вправе ждать, что дальше критик ничего не одобрит.
+
+    «Не вычитан» = draft с пустым critic_checked_at: страница с замечаниями остаётся человеку и не
+    крутится в стадии вечно. Берём и живые сайты (published|monitoring) — там черновики появляются
+    после переписывания. Замечания — не ошибка стадии, а счётчик `edit_failed`."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.site import Site, Page
+    from app.services import content_critic, jobs
+    from app.services.autonomy import get_autonomy
+
+    done, errs, failed = 0, [], 0
+    with SessionLocal() as db:
+        unread = select(Page.site_id).where(Page.status == "draft", Page.critic_checked_at.is_(None))
+        # ponytail: общий кап с генерацией; свой — когда вычитка станет узким местом
+        ids = [r[0] for r in db.execute(
+            select(Site.id).where(Site.status.in_(("content", "published", "monitoring")),
+                                  Site.id.in_(unread))
+            .order_by(Site.id).limit(cap)).all()]
+    for sid in ids:
+        if get_autonomy()["auto_edit"] is not True:
+            break                       # тумблер снят — ни вычитки, ни одобрения
+        try:
+            out = content_critic.edit_site(sid, auto_edit=True)
+        except jobs.AlreadyRunning:
+            raise                       # ручная вычитка идёт — стадия пропущена целиком, честно
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            continue
+        done += 1
+        failed += out.get("failed", 0)
+    return done, errs, {"edit_failed": failed} if failed else {}
 
 
 def _stage_publish(cap):
@@ -341,9 +410,11 @@ def _stage_publish(cap):
                 errs.append(f"site#{sid}: {out.get('hint', 'сайт не провиженен')}")
                 continue
             if isinstance(out, dict):
-                # S7-18: отказ/непроверенная запись/предупреждение по странице — в ошибки свипа
+                # S7-18: отказ/непроверенная запись/предупреждение по странице — в ошибки свипа.
+                # Причину отказа не предваряем: «не записана» было неправдой для страницы, чей файл
+                # лёг на сайт, а отметка — нет (её переписали во время публикации).
                 for path, why in (out.get("failed") or {}).items():
-                    errs.append(f"site#{sid}{path}: не записана — {why}")
+                    errs.append(f"site#{sid}{path}: {why}")
                 for path, why in (out.get("unverified") or {}).items():
                     errs.append(f"site#{sid}{path}: записана, но не подтверждена доменом — {why}")
                 for w in out.get("warnings") or []:
@@ -416,13 +487,14 @@ STAGES = [
     ("provision", "auto_provision", "cap_provision", _stage_provision),
     ("research", "auto_research", "cap_research", _stage_research),
     ("generate", "auto_generate", "cap_generate", _stage_generate),
+    ("edit", "auto_edit", "cap_generate", _stage_edit),
     ("publish", "auto_publish", "cap_publish", _stage_publish),
     ("check_index", "auto_check_index", "cap_check_index", _stage_check_index),
 ]
 
 STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "очередь",
-            "provision": "провижн", "research": "досье", "generate": "контент", "publish": "публикация",
-            "check_index": "индексация"}
+            "provision": "провижн", "research": "досье", "generate": "контент", "edit": "вычитка",
+            "publish": "публикация", "check_index": "индексация"}
 
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
 # стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной,
@@ -431,15 +503,18 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
 # `provision_awaiting` — сколько сайтов ждут смены NS у регистратора (не успех, не отказ — F19).
 COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
             "index_unknown": "индекс не выяснен", "gsc_fallback": "GSC недоступен", "provision_awaiting": "провижн: ждёт NS",
-            "research_empty": "досье пустое"}
+            "research_empty": "досье пустое", "generate_no_dossier": "нет досье",
+            "generate_empty": "тексты не написаны", "edit_failed": "вычитка: замечания"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     """Прогнать включённые авто-стадии до гейтов. respect_master=False у ручного запуска.
 
     ЖЁСТКО: зовёт ТОЛЬКО безопасные сервисы из STAGES. НИКОГДА — confirm_order/
-    execute_confirmed_order/mark_caught (деньги) и mark_edited (редактура): эти три гейта
-    двигает только человек через роуты панели. Ошибка одной сущности не топит стадию/свип.
+    execute_confirmed_order/mark_caught (деньги): их двигает только человек через роуты панели.
+    mark_edited (редактура) свип сам не зовёт; одобрить страницу может только критик в стадии
+    «вычитка», а она идёт лишь при тумблере auto_edit — решение оператора, по умолчанию выключено.
+    Ошибка одной сущности не топит стадию/свип.
 
     Прогресс пишет сам (jobs.track) — именно поэтому свип из воркера теперь виден Пульту.
     Выключенные тумблером стадии показываем как skip, а не прячем: «стадия отключена» и

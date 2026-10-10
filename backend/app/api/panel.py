@@ -51,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists", "domain_ranks", "research")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "edit", "domain_lists", "domain_ranks", "research")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -812,6 +812,32 @@ def queue_view(request: Request):
     })
 
 
+def _remarks_ru(n: int) -> str:
+    """«1 замечание», «2 замечания», «5 замечаний»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} замечание"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} замечания"
+    return f"{n} замечаний"
+
+
+def _critic_cell(page) -> dict | None:
+    """Вердикт критика для строки таблицы страниц: {"ok", "label", "title"}; None — страницу не вычитывали
+    (или заметки в формате до плана Б — их показывает редактор страницы)."""
+    from app.services.content_critic import MAX_ROUNDS
+    notes = page.critic_notes
+    if page.critic_checked_at is None or not isinstance(notes, dict):
+        return None
+    if notes.get("pass") is True:
+        return {"ok": True, "label": "прошла", "title": "у проверок кодом и у редактора-модели замечаний нет"}
+    issues = [str(x) for x in notes.get("issues") or []]
+    title = "; ".join(issues[:3]) + (f" … и ещё {len(issues) - 3}" if len(issues) > 3 else "")
+    rounds = notes.get("round")
+    if type(rounds) is int and rounds > 0:
+        title += f" · переписана по замечаниям: {rounds} из {MAX_ROUNDS}"
+    return {"ok": False, "label": _remarks_ru(len(issues)) if issues else "не прошла", "title": title}
+
+
 @router.get("/sites/{site_id}", response_class=HTMLResponse)
 def site_view(request: Request, site_id: int, db: Session = Depends(get_session)):
     site = db.get(Site, site_id)
@@ -836,6 +862,7 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
     _os_row = db.get(OfferSettings, 1)
     reserve_configured = bool(_os_row and _os_row.reserve_offer_url)
     from app.services import jobs, research
+    from app.services.autonomy import get_autonomy
     return templates.TemplateResponse(request, "site.html", {
         "active": "dash",
         "site": site, "domain": d.domain if d else f"#{site.domain_id}",
@@ -843,6 +870,10 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
         "page_offers": page_offers, "reserve_configured": reserve_configured,
         "research": research.summary(db, site_id), "research_rows": research.dossier(db, site_id),
         "research_last": jobs.last("research"),
+        "critic": {p.id: _critic_cell(p) for p in pages}, "auto_edit": get_autonomy()["auto_edit"],
+        # «живые» — у которых есть файл на сайте (то же правило, что publish.live_clause): переписанная
+        # страница — draft в базе, но сайт от этого неопубликованным не стал
+        "n_live": sum(1 for p in pages if p.published_at is not None or p.status == "published"),
     })
 
 
@@ -1417,11 +1448,10 @@ def provision_action(site_id: int, request: Request):
         return _back(f"/sites/{site_id}", err=f"provision: {e}")
 
 
-@router.post("/sites/{site_id}/generate")
-def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(get_session)):
-    """Генерация — фоновая задача `generate` (S6-11/S7-14): LLM пишет минуты, держать ради этого
-    HTTP-запрос нельзя. Явный отказ (нет сайта/оффера) отдаём сразу, а не потом в карточке задачи."""
-    from app.services import content, jobs
+def _writer_refusal(db: Session, site_id: int) -> RedirectResponse | None:
+    """Почему писателя запускать нельзя — готовым редиректом с причиной (None — можно). Общий для
+    «Написать тексты» и «Переписать тексты»: явный отказ отдаём сразу, а не потом в карточке задачи."""
+    from app.services import content, research
     site = db.get(Site, site_id)
     if site is None:
         return _back("/", err=f"сайт #{site_id} не найден")
@@ -1432,12 +1462,61 @@ def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(ge
     if not has_offer:
         return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
                      "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
-    # use_competitor=True: подмешать карту тем от топ-конкурента (A-Parser, best-effort)
-    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None, use_competitor=True))
+    if not research.dossier(db, site_id):
+        # спека 2026-10-10 §4.5: темы, факты и цифры писатель берёт из досье — без него только выдумывать
+        return _back(f"/sites/{site_id}", err="Сначала собери досье конкурентов (шаг 3½): без него писать не по чему.")
+    return None
+
+
+@router.post("/sites/{site_id}/generate")
+def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(get_session)):
+    """Генерация — фоновая задача `generate` (S6-11/S7-14): LLM пишет минуты, держать ради этого
+    HTTP-запрос нельзя. Пишет только по досье конкурентов: структуру тем несёт оно, отдельный
+    `use_competitor` больше не нужен."""
+    from app.services import content, jobs
+    refusal = _writer_refusal(db, site_id)
+    if refusal:
+        return refusal
+    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None))
     if not ok:
         return _back(f"/sites/{site_id}", err=jobs.busy_msg("Генерация уже идёт — дождись её на Пульте"))
     return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "
                  "Дальше — редактура (гейт: publish берёт только edited).")
+
+
+@router.post("/sites/{site_id}/rewrite")
+def rewrite_action(site_id: int, overwrite_manual: str = Form(""), db: Session = Depends(get_session)):
+    """Переписать существующие страницы по досье — та же фоновая задача `generate`. Страницы возвращаются
+    в черновики; файлы опубликованных остаются на сайте до новой публикации. Галочка `overwrite_manual` —
+    явное решение оператора переписать и то, что он правил руками."""
+    from app.services import content, jobs
+    refusal = _writer_refusal(db, site_id)
+    if refusal:
+        return refusal
+    manual = bool(overwrite_manual)
+    ok = jobs.spawn("generate", lambda: content.generate_site(site_id, rewrite=True, overwrite_manual=manual))
+    if not ok:
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Тексты уже пишутся — дождись на Пульте"))
+    return _back(f"/sites/{site_id}", msg="Тексты переписываются в фоне: ход — на Пульте. Страницы вернутся в "
+                 "черновики; опубликованные останутся на сайте в прежнем виде, пока не опубликуешь новые.")
+
+
+@router.post("/sites/{site_id}/edit")
+def edit_action(site_id: int, db: Session = Depends(get_session)):
+    """Вычитка черновиков сайта критиком — фоновая задача `edit`. Одобрять ли прошедшие страницы, решает
+    тумблер автопилота: сервис читает его сам (auto_edit не передаём), выключен — статус не меняется."""
+    from app.services import content_critic, jobs
+    from app.services.autonomy import get_autonomy
+    if db.get(Site, site_id) is None:
+        return _back("/", err=f"сайт #{site_id} не найден")
+    if not db.scalar(select(Page.id).where(Page.site_id == site_id, Page.status == "draft").limit(1)):
+        return _back(f"/sites/{site_id}", err="Вычитывать нечего: у сайта нет черновиков.")
+    ok = jobs.spawn("edit", lambda: content_critic.edit_site(site_id))
+    if not ok:
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Вычитка уже идёт (возможно, другого сайта) — дождись на Пульте"))
+    then = ("прошедшие проверку страницы одобрит сам" if get_autonomy()["auto_edit"]
+            else "вердикт появится в таблице страниц — одобряешь ты")
+    return _back(f"/sites/{site_id}", msg=f"Критик читает черновики в фоне: {then}. Ход — на Пульте.")
 
 
 @router.post("/sites/{site_id}/research")
@@ -1511,7 +1590,8 @@ def publish_action(site_id: int):
         if r.get("status") == "not_provisioned":
             return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт не провиженен')}.")
         warn = (" ⚠ " + "; ".join(r["warnings"])) if r.get("warnings") else ""
-        problems = [f"{k}: не записана — {v}" for k, v in (r.get("failed") or {}).items()] + \
+        # причина отказа — как есть: файл страницы, переписанной во время публикации, на сайт лёг
+        problems = [f"{k}: {v}" for k, v in (r.get("failed") or {}).items()] + \
                    [f"{k}: записана, но домен не подтвердил — {v}" for k, v in (r.get("unverified") or {}).items()]
         if r.get("status") in ("partial", "failed"):
             done = f"Опубликовано: {', '.join(r.get('pages', [])) or 'ничего'}. " if r.get("pages") else ""

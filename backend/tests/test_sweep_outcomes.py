@@ -39,7 +39,7 @@ def _site_provisioning(name: str) -> int:
         return site.id
 
 
-def _site_content(name: str) -> int:
+def _site_content(name: str, dossier: bool = True) -> int:
     did = _purchased(name)
     with db.SessionLocal() as s:
         off = Offer(brand="NordVPN", affiliate_link="https://ex.com/aff", active=True)
@@ -49,6 +49,11 @@ def _site_content(name: str) -> int:
         s.add(site)
         s.commit()
         s.refresh(site)
+        if dossier:
+            # стадия генерации берёт только сайт с досье конкурентов (спека 2026-10-10 §4.5)
+            from app.models.research import SiteResearch
+            s.add(SiteResearch(site_id=site.id, kind="review", query="q", rank=1, url="https://c.example/1"))
+            s.commit()
         return site.id
 
 
@@ -219,12 +224,12 @@ def test_generate_stage_reselects_site_with_partial_pages(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "app.services.content.generate_site",
-        lambda site_id, use_competitor=False: seen.append(site_id) or 2)
+        lambda site_id, **kw: seen.append(site_id) or 2)
 
-    done, errs = orch._stage_generate(10)
+    done, errs, extra = orch._stage_generate(10)
 
     assert seen == [sid]                       # сайт С ЧАСТЬЮ страниц ПОПАЛ в выборку
-    assert done == 1 and errs == []
+    assert done == 1 and errs == [] and extra == {}
 
 
 def test_generate_stage_skips_a_fully_generated_site(monkeypatch):
@@ -237,11 +242,11 @@ def test_generate_stage_skips_a_fully_generated_site(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "app.services.content.generate_site",
-        lambda site_id, use_competitor=False: seen.append(site_id) or 0)
+        lambda site_id, **kw: seen.append(site_id) or 0)
 
-    done, errs = orch._stage_generate(10)
+    done, errs, extra = orch._stage_generate(10)
 
-    assert seen == [] and done == 0 and errs == []
+    assert seen == [] and done == 0 and errs == [] and extra == {}
 
 
 def test_generate_site_fills_only_the_missing_page(monkeypatch):
@@ -250,7 +255,7 @@ def test_generate_site_fills_only_the_missing_page(monkeypatch):
     from app.integrations.llm import LlmClient
     from app.services import content
 
-    sid = _site_content("fill.ru")
+    sid = _site_content("fill.ru", dossier=False)     # старый путь генерации — сайт без досье
     _add_page(sid, "/")
 
     monkeypatch.setattr(LlmClient, "complete", lambda self, system, prompt, **kw: "<p>черновик</p>")

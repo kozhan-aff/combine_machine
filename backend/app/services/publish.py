@@ -245,9 +245,11 @@ def publish_site(site_id: int) -> dict:
                                       "вычитай и опубликуй её ещё раз")
                 continue
             body = p.body                        # ровно это тело уходит в файл — по нему и ставим отметку
-            bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url, ctx=ctx))
-            doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid, ctx=ctx)
+            # Рендер — под тем же except, что и запись: сбой шаблона на одной странице не должен
+            # обрывать прогон, когда предыдущие страницы уже отмечены опубликованными.
             try:
+                bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url, ctx=ctx))
+                doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid, ctx=ctx)
                 ap.write_file(_target_path(site.doc_root, p.url_path), doc)
             except AaPanelBlocked as e:
                 blocked = e                      # панель на паузе: остальным писать бесполезно

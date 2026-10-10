@@ -21,7 +21,7 @@ def test_card_shows_empty_dossier_and_button(client):
     sid = _site()
     html = client.get(f"/sites/{sid}").text
     assert "Досье конкурентов" in html and f'action="/sites/{sid}/research"' in html and "досье не собрано" in html
-    assert "Без него черновик пишется вслепую" in html and "Без досье генерация не идёт" not in html
+    assert "Без досье тексты не пишутся" in html      # с плана Б это правда: панель и автопилот без досье не пишут
 
 
 def test_card_lists_sources_and_rebuild(client):
