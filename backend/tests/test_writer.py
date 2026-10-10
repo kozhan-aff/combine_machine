@@ -363,22 +363,21 @@ def test_writer_uses_writer_model(monkeypatch):
 # --- промпты ---
 
 def test_prompt_has_guides_and_promo_terms(monkeypatch, _own_guides):
-    for sub, text in (("", "ПРАВИЛО-ОБЩЕЕ"), ("ru", "ПРАВИЛО-ЯЗЫКА"), ("en", "ПРАВИЛО-ЧУЖОГО-ЯЗЫКА"),
-                      ("review", "ПРАВИЛО-ОБЗОРА"), ("howto", "ПРАВИЛО-ИНСТРУКЦИИ")):
-        (_own_guides / sub).mkdir(parents=True, exist_ok=True)
-        (_own_guides / sub / "rules.md").write_text(text, encoding="utf-8")
+    """Правила письма — одна плоская папка (с 2026-10-10): каждый файл идёт в задание любой страницы."""
+    (_own_guides / "ru").mkdir(parents=True)
+    (_own_guides / "10-тон.md").write_text("ПРАВИЛО-ТОНА", encoding="utf-8")
+    (_own_guides / "20-структура.txt").write_text("ПРАВИЛО-СТРУКТУРЫ", encoding="utf-8")
+    (_own_guides / "ru" / "old.md").write_text("ПРАВИЛО-ИЗ-ПОДПАПКИ", encoding="utf-8")
     site_id = _site()
     calls = _llm(monkeypatch)
     content.generate_site(site_id)
-    review, vs, howto = calls
+    assert len(calls) == 3
     for c in calls:
-        assert "ПРАВИЛО-ОБЩЕЕ" in c["system"] and "ПРАВИЛО-ЯЗЫКА" in c["system"]
-        assert "ПРАВИЛО-ЧУЖОГО-ЯЗЫКА" not in c["system"]
+        assert "ПРАВИЛО-ТОНА" in c["system"] and "ПРАВИЛО-СТРУКТУРЫ" in c["system"]
+        assert "ПРАВИЛО-ИЗ-ПОДПАПКИ" not in c["system"]                    # подпапок больше нет
         assert "Russian" in c["system"] and "DE" in c["system"]            # язык вывода и рынок названы
         assert "DUREV20" in c["prompt"] and "скидка 20% на первый год" in c["prompt"]
         assert "Durev VPN" in c["prompt"]
-    assert "ПРАВИЛО-ОБЗОРА" in review["system"] and "ПРАВИЛО-ОБЗОРА" not in vs["system"]
-    assert "ПРАВИЛО-ИНСТРУКЦИИ" in howto["system"] and "ПРАВИЛО-ИНСТРУКЦИИ" not in review["system"]
 
 
 def test_writer_system_names_every_pagedoc_field():
