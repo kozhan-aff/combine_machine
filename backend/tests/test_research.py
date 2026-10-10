@@ -2,6 +2,8 @@
 пустое досье — причина словами (спека §4)."""
 from datetime import datetime, timedelta, timezone
 
+import socket
+
 import pytest
 
 import app.db as db
@@ -10,7 +12,7 @@ from app.models.domain import Domain
 from app.models.offer import Offer
 from app.models.research import SiteResearch
 from app.models.site import Site
-from app.services import research
+from app.services import jobs, research
 
 LONG = "<html><body><h2>Цена</h2><p>" + "слово " * 350 + "5.99 $ в месяц</p><table><tr><th>a</th></tr><tr><td>b</td></tr></table></body></html>"
 LONG_PRIVATE_CSS = LONG.replace("<body>", '<head><link rel="stylesheet" href="http://192.168.1.77:8000/x.css"></head><body>')
@@ -53,6 +55,18 @@ class FakeBL:
         self.shots.append(url); return b"\x89PNG"
 
 
+@pytest.fixture(autouse=True)
+def _dns(monkeypatch):
+    """Офлайн-резолвер: *.lan-bad.test -> LAN-адрес, *.v6map.test -> ::ffff:10.0.0.1, *.nxdomain.test -> сбой, остальное — публичный."""
+    def fake(host, port, *a, **kw):
+        if host.endswith(".nxdomain.test"):
+            raise socket.gaierror("nx")
+        ip = ("192.168.1.5" if host.endswith(".lan-bad.test")
+              else "::ffff:10.0.0.1" if host.endswith(".v6map.test") else "93.184.216.34")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+    monkeypatch.setattr(research, "_resolve", fake)
+
+
 @pytest.fixture
 def wire(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "RESEARCH_DIR", str(tmp_path))
@@ -83,10 +97,10 @@ def test_every_language_has_query_templates():
 
 def test_build_filters_noise_brand_short_pages_and_stores_rows(wire):
     sid = _site()
-    unsafe = ["http://192.168.1.77:8000/x", "http://localhost/x", "ftp://a.com/x"]
-    urls = ["https://durevpn.com/", "https://reddit.com/r/x", *unsafe, "https://a.com/1", "https://a.com/2",
+    unsafe = ["http://192.168.1.77:8000/x", "http://localhost/x", "ftp://a.com/x", "http://x.lan-bad.test/"]
+    urls = ["https://durevpn.com/", "https://reddit.com/r/x", *unsafe, "https://www.a.com/1", "https://a.com/2",
             "https://b.com/short", "https://c.com/ok", "https://d.com/none"]
-    pages = {"https://a.com/1": LONG, "https://a.com/2": LONG, "https://b.com/short": SHORT,
+    pages = {"https://www.a.com/1": LONG, "https://a.com/2": LONG, "https://b.com/short": SHORT,
              "https://c.com/ok": LONG_PRIVATE_CSS, "https://durevpn.com/": LONG, **{u: LONG for u in unsafe}}
     ap = FakeAP(urls, pages)
     wire(ap)
@@ -102,7 +116,7 @@ def test_build_filters_noise_brand_short_pages_and_stores_rows(wire):
             by_kind.setdefault(r.kind, []).append(r)
         assert set(by_kind) == set(research.KINDS)
         review = by_kind["review"]
-        assert [r.url for r in review] == ["https://a.com/1", "https://c.com/ok"]   # a.com один раз, brand/reddit/short/none/unsafe — нет
+        assert [r.url for r in review] == ["https://www.a.com/1", "https://c.com/ok"]   # a.com (с www и без) один раз, brand/reddit/short/none/unsafe — нет
         assert review[0].rank == 1 and review[1].rank == 2 and review[0].words >= 300 and review[0].numbers
         assert research.summary(s, sid)["rows"] == 8 and research.is_fresh(s, sid)
 
@@ -122,9 +136,10 @@ def test_goto_redirects_are_judged_by_fetched_page(wire):
 
 
 def test_goto_without_canonical_is_kept_with_placeholder_domain(wire):
+    """Без canonical/og:url домен — заглушка, даже если страница 3+ раза ссылается на сайт бренда."""
     sid = _site()
     g = "https://www.google.com/goto?url=zzz"
-    wire(FakeAP([g], {g: LONG}))
+    wire(FakeAP([g], {g: LONG + '<a href="https://durevpn.com/a">1</a>' * 3}))
     assert research.build_dossier(sid)["status"] == "done"
     with db.SessionLocal() as s:
         r = research.dossier(s, sid)[0]
@@ -135,7 +150,8 @@ def test_safe_url_guard():
     ok = ["https://a.com/x", "http://sub.example.org/"]
     bad = ["ftp://a.com/x", "http://localhost/x", "http://127.0.0.1/", "http://192.168.1.77:8000/", "http://10.0.0.5/",
            "http://169.254.169.254/latest", "http://[::1]/", "http://printer.local/", "http://db.internal/",
-           "http://2130706433/", "http:///x", "javascript:alert(1)", ""]
+           "http://2130706433/", "http:///x", "javascript:alert(1)", "",
+           "http://x.lan-bad.test/", "http://x.v6map.test/", "http://x.nxdomain.test/"]
     assert all(research._safe_url(u) for u in ok)
     assert not any(research._safe_url(u) for u in bad)
 
@@ -153,6 +169,8 @@ def test_all_fetches_fail_is_empty_with_reason_not_exception(wire):
     wire(FakeAP(["https://www.google.com/goto?url=abc"], {}))
     out = research.build_dossier(sid)
     assert out["status"] == "empty" and "ни одной" in out["reason"]
+    last = jobs.last("research")          # из панели (jobs.spawn) dict никто не читает — причина обязана быть в job_run
+    assert last["status"] == "done_warn" and "ни одной" in last["message"]
     with db.SessionLocal() as s:
         assert research.dossier(s, sid) == [] and research.summary(s, sid)["rows"] == 0
 
@@ -179,6 +197,7 @@ def test_screenshots_when_enabled_and_browserless_down_is_warning(wire, monkeypa
     bl = FakeBL()
     wire(FakeAP(["https://a.com/1"], {"https://a.com/1": LONG}), bl=bl)
     research.build_dossier(sid)
+    assert jobs.last("research")["status"] == "done" and "4" in jobs.last("research")["message"]
     assert bl.shots == ["https://a.com/1"] * 4
     with db.SessionLocal() as s:
         r = research.dossier(s, sid)[0]
@@ -187,6 +206,8 @@ def test_screenshots_when_enabled_and_browserless_down_is_warning(wire, monkeypa
     wire(FakeAP(["https://a.com/1"], {"https://a.com/1": LONG}), bl=FakeBL(boom=True))
     out = research.build_dossier(sid, force=True)
     assert out["status"] == "done" and any("скриншот" in w for w in out["warnings"])
+    last = jobs.last("research")
+    assert last["status"] == "done_warn" and "скриншот" in last["message"]
     with db.SessionLocal() as s:
         r = research.dossier(s, sid)[0]
         assert r.screenshot_path is None and "скриншот" in (r.note or "")

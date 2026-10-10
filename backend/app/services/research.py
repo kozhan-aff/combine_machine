@@ -8,11 +8,12 @@
   (canonical / og:url), и уже по нему фильтруем.
 - URL приходят из выдачи (чужой ввод) и уходят в A-Parser/Browserless, которые стоят в LAN бокса —
   перед любым запросом URL проходит `_safe_url` (SSRF-гард): только http(s), не localhost/.local/.internal,
-  не приватный/loopback/link-local IP-литерал. Небезопасный URL молча пропускается, как шум."""
+  не приватный/loopback/link-local IP-литерал, а для имени — ВСЕ его DNS-адреса обязаны быть глобальными
+  (ошибка резолвера = небезопасно). Небезопасный URL молча пропускается, как шум."""
 import ipaddress
 import logging
 import re
-from collections import Counter
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,8 +29,10 @@ PER_QUERY = 5
 MIN_WORDS = 300
 _EXTRA_NOISE = ("apps.apple.", "play.google.", "chrome.google.", "github.", "amazon.", "aliexpress.")
 
+_resolve = socket.getaddrinfo      # шов для тестов: офлайн-сьют подменяет резолвер
+_EMPTY_REASON = ("ни одной живой страницы конкурентов ни по одному запросу "
+                 "(SERP пуст или страницы не скачались) — генерация без досье не идёт")
 _TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
-_A_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["'](https?://[^"'\s>]+)""", re.I)
 
 
 def _aparser():
@@ -72,9 +75,27 @@ def _safe_url(url: str) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         # 2130706433 / 0x7f000001 / 127.1 — числовые формы IP, которые ip_address не разбирает, но резолвер съест
-        return not re.fullmatch(r"[0-9.]+|0x[0-9a-f.]+", host)
+        if re.fullmatch(r"[0-9.]+|0x[0-9a-f.]+", host):
+            return False
+        return _resolves_global(host)
     return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
                 or ip.is_multicast or ip.is_unspecified)
+
+
+def _resolves_global(host: str) -> bool:
+    """Имя годится, только если ВСЕ его адреса глобальные: A-запись на 192.168.x — тот же SSRF, что и литерал."""
+    try:
+        infos = _resolve(host, None, proto=socket.IPPROTO_TCP)
+        addrs = [ipaddress.ip_address(sa[0].split("%")[0]) for _f, _t, _p, _c, sa in infos]
+    except Exception:  # noqa: BLE001  gaierror, мусор от резолвера — всё равно небезопасно
+        return False
+    if not addrs:
+        return False
+    for ip in addrs:
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if not ip.is_global or ip.is_multicast:
+            return False
+    return True
 
 
 def _serp(query: str, lang: str) -> list[str]:
@@ -93,7 +114,7 @@ def _serp(query: str, lang: str) -> list[str]:
 
 def _host(url: str) -> str:
     try:
-        return (urlparse(url).hostname or "").lower()
+        return (urlparse(url).hostname or "").lower().removeprefix("www.")
     except ValueError:
         return ""
 
@@ -120,10 +141,10 @@ def _attr(tag: str, name: str) -> str | None:
     return (m.group(1) or m.group(2)) if m else None
 
 
-def _real_page(html: str, url: str) -> tuple[str, str, bool]:
-    """(домен, final_url, надёжно?) реальной страницы за goto-редиректом.
-    Надёжно — только canonical / og:url. Домен «чаще всего встречающийся в ссылках» — лишь ярлык: обзор
-    бренда ссылается на сайт бренда не меньше трёх раз, и судить по нему шум/бренд/дедуп нельзя."""
+def _real_page(html: str, url: str) -> tuple[str, str]:
+    """(домен, final_url) реальной страницы за goto-редиректом — только по canonical / og:url.
+    Домен «из ссылок» не берём: обзор бренда ссылается на сайт бренда не меньше трёх раз.
+    Нет ни того ни другого -> ("", url): страница считается живой, домен — заглушка goto{rank}."""
     for m in _TAG_RE.finditer(html or ""):
         tag = m.group(0)
         if tag.lower().startswith("<link") and (_attr(tag, "rel") or "").lower() == "canonical":
@@ -133,13 +154,8 @@ def _real_page(html: str, url: str) -> tuple[str, str, bool]:
         else:
             continue
         if href and href.startswith(("http://", "https://")) and _host(href):
-            return _host(href), href, True
-    hosts = Counter(h for h in (_host(u) for u in _A_HREF_RE.findall(html or "")) if h and not h.endswith("google.com"))
-    if hosts:
-        host, n = hosts.most_common(1)[0]
-        if n >= 3:
-            return host, url, False
-    return "", url, False
+            return _host(href), href
+    return "", url
 
 
 def _css_for(ap, html: str, url: str) -> list[str]:
@@ -221,7 +237,7 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
         brand, country, aff = offer.brand, offer.country, offer.affiliate_link
     queries = queries_for(brand, lang, country)
     brand_key = _norm(brand)
-    own_host = _host(aff or "").removeprefix("www.")
+    own_host = _host(aff or "")
     shots_on = str(settings.RESEARCH_SCREENSHOTS).strip().lower() in ("1", "true", "yes", "on")
     ap = _aparser()
     bl = _browserless() if shots_on else None
@@ -257,7 +273,8 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                         continue
                     final_url, reliable = url, True
                     if goto:                           # редирект: судим по реальной странице
-                        host, final_url, reliable = _real_page(html, url)
+                        host, final_url = _real_page(html, url)
+                        reliable = bool(host)
                         if reliable and (_blocked_host(host, brand_key, own_host) or host in seen_domains):
                             continue
                     data = rx.extract_all(html, _css_for(ap, html, final_url))
@@ -266,8 +283,8 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                     rank += 1
                     if reliable:
                         seen_domains.add(host)
-                    else:                              # домен не установлен -> ярлык, дедуп по нему не делаем
-                        host = host or f"goto{rank}"
+                    else:                              # домен не установлен -> заглушка, дедуп по ней не делаем
+                        host = f"goto{rank}"
                     shot_url = final_url if _safe_url(final_url) else url
                     shot, note = _shot(bl, shot_url, site_id, kind, rank) if bl else (None, None)
                     if note:
@@ -278,16 +295,24 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                 if rank == 0:
                     warnings.append(f"{kind}: по запросу «{query}» ни одной живой страницы")
             jobs.report(run, done=len(queries), total=len(queries), current="")
+            if not rows:           # причина и замечания должны дожить до панели: dict из spawn никто не читает
+                jobs.report(run, message=_EMPTY_REASON)
+                jobs.finish(run, "done_warn")
+            elif warnings:
+                jobs.report(run, message=f"{len(rows)} источников; замечания: {'; '.join(warnings)}")
+                jobs.finish(run, "done_warn")
+            else:
+                jobs.report(run, message=f"{len(rows)} источников")
         except jobs.Cancelled:
             was_cancelled = True
+            jobs.report(run, message="отменено оператором — прежнее досье не тронуто")
             raise
 
     if was_cancelled:        # track глотает Cancelled; прежнее досье не трогаем, недособранное не сохраняем
         return {"status": "empty", "rows": 0, "reason": "сборка досье отменена оператором — прежние данные не тронуты",
                 "warnings": warnings}
     if not rows:
-        return {"status": "empty", "rows": 0, "reason": "ни одной живой страницы конкурентов ни по одному запросу "
-                "(SERP пуст или страницы не скачались) — генерация без досье не идёт", "warnings": warnings}
+        return {"status": "empty", "rows": 0, "reason": _EMPTY_REASON, "warnings": warnings}
     with SessionLocal() as db:
         db.query(SiteResearch).filter(SiteResearch.site_id == site_id).delete()
         db.add_all(SiteResearch(**r) for r in rows)
