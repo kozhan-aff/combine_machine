@@ -562,6 +562,7 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
     при ошибке форма возвращается с его значениями поверх сохранённых, иначе он чинит JSON, жмёт
     «Сохранить» — и прочие правки молча теряются. В БД draft не пишется, только рисуется."""
     import json
+    from app.services import guides
     from app.services import settings as st
     s = st.get_settings()
     draft = draft or {}
@@ -576,6 +577,7 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
     return templates.TemplateResponse(request, "settings.html", {
         "active": "settings", "s": s, "counts": _pool_counts(db, s), "lists": _lists_view(db), "ranks": _ranks_view(db),
         "units_left": diag_cache.value("ahrefs"), "emd_text": emd_text, "form_err": form_err,
+        "guides": guides.list_guides(), "guide_subdirs": guides.SUBDIRS,
         "tld_text": tld_text if tld_text is not None else "\n".join(s["tld_allowlist"]),
         "brand_text": brand_text if brand_text is not None else "\n".join(s["brand_tokens"])},
         status_code=status_code)
@@ -584,6 +586,34 @@ def _settings_page(request: Request, db: Session, emd_draft: str | None = None,
 @router.get("/settings", response_class=HTMLResponse)
 def settings_view(request: Request, db: Session = Depends(get_session)):
     return _settings_page(request, db)
+
+
+@router.post("/settings/guides/upload")
+async def guides_upload_action(request: Request):
+    """Загрузить файл правил письма в content_guides/<subdir>/ (спека 2026-10-10 §5).
+    Путь строится ТОЛЬКО из белого списка подпапок и санированного имени — см. guides.save_guide."""
+    from app.services import guides
+    form = await request.form()
+    up = form.get("file")
+    subdir = form.get("subdir") if isinstance(form.get("subdir"), str) else ""
+    if up is None or not getattr(up, "filename", ""):
+        return _back("/settings", err="правила: файл не выбран")
+    data = await up.read()
+    try:
+        rel = guides.save_guide(subdir, up.filename, data)
+    except ValueError as e:
+        return _back("/settings", err=f"правила: {e}")
+    return _back("/settings", msg=f"Правила письма: сохранён {rel} ({len(data)} байт)")
+
+
+@router.post("/settings/guides/delete")
+def guides_delete_action(rel: str = Form("")):
+    from app.services import guides
+    try:
+        guides.delete_guide(rel)
+    except ValueError as e:
+        return _back("/settings", err=f"правила: {e}")
+    return _back("/settings", msg=f"Правила письма: удалён {rel}")
 
 
 def _keys_page(request: Request, form_err: str | None = None, draft: dict | None = None,
