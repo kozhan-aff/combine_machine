@@ -299,23 +299,42 @@ def test_fetch_retries_none_then_succeeds(pauses):
     assert len(pauses) == 4
 
 
-def test_fetch_retries_exception():
-    ap = SeqAP(RuntimeError("proxy 502"), LONG)
-    assert research._fetch(ap, "https://a.com/") == LONG and ap.calls == 2
+def test_fetch_does_not_retry_exception(pauses):
+    """Исключение уже прошло 3 транспортных попытки в BaseClient; повтор после таймаута дублирует задание (S2-12)."""
+    ap = SeqAP(RuntimeError("ReadTimeout"), LONG)
+    assert research._fetch(ap, "https://a.com/") is None and ap.calls == 1 and pauses == []
 
 
-def test_build_dossier_retries_failed_fetch(wire):
-    """`build_dossier` качает через `_fetch`: страница, не отдавшаяся с первого раза, всё равно попадает в досье."""
+def test_build_dossier_retries_failed_fetch(wire, pauses):
+    """`build_dossier` качает через `_fetch`: страница, не отдавшаяся с первого раза, попадает в досье ТОГО ЖЕ
+    запроса. URL у всех четырёх запросов один, а дедуп доменов — по запросу: без повтора первый тип (review)
+    остался бы пустым, остальные три скачались бы и так — поэтому сверяем типы, паузы и число скачиваний."""
     sid = _site()
+    url = "https://a.com/1"
     class Flaky(FakeAP):
-        def fetch_html(self, url):
-            self.fetched.append(url)
-            return self.pages.get(url) if self.fetched.count(url) >= 2 else None
-    ap = Flaky(["https://a.com/1"], {"https://a.com/1": LONG})
+        def fetch_html(self, u):
+            self.fetched.append(u)
+            return self.pages.get(u) if len(self.fetched) >= 2 else None       # только самый первый ответ — 502
+    ap = Flaky([url], {url: LONG})
     wire(ap)
     assert research.build_dossier(sid)["status"] == "done"
     with db.SessionLocal() as s:
-        assert {r.url for r in research.dossier(s, sid)} == {"https://a.com/1"}
+        assert [r.kind for r in research.dossier(s, sid)] == list(research.KINDS)
+    assert pauses == [1] and ap.fetched.count(url) == len(research.KINDS) + 1   # один повтор, не больше
+
+
+def test_cancel_between_urls_stops_fetching_and_keeps_old_dossier(wire, monkeypatch):
+    """«Отменить» не ждёт конца запроса (до 10 URL по три попытки): проверка — перед каждой страницей."""
+    sid = _site()
+    wire(FakeAP(["https://old.com/1"], {"https://old.com/1": LONG}))
+    research.build_dossier(sid)
+    ap = FakeAP(["https://a.com/1", "https://b.com/1"], {"https://a.com/1": LONG, "https://b.com/1": LONG})
+    wire(ap)
+    monkeypatch.setattr(jobs, "cancelled", lambda run: bool(ap.fetched))       # флаг встал после первой страницы
+    assert "отменена" in research.build_dossier(sid, force=True)["reason"]
+    assert ap.fetched == ["https://a.com/1"] and jobs.last("research")["status"] == "cancelled"
+    with db.SessionLocal() as s:
+        assert {r.url for r in research.dossier(s, sid)} == {"https://old.com/1"}
 
 
 def test_cyrillic_platform_names_filtered():
@@ -340,18 +359,18 @@ def test_build_dossier_stamps_research_checked_at(wire, monkeypatch):
     assert research.build_dossier(sid, force=True)["status"] == "empty" and _checked_at(sid) > old   # пустое
 
 
-def test_recently_empty_needs_no_rows_and_a_recent_check(wire):
+def test_recently_checked_judges_the_stamp_not_the_rows(wire):
     sid = _site()
     now = datetime.now(timezone.utc)
     with db.SessionLocal() as s:
-        assert research.recently_empty(s, sid) is False            # ни разу не собирали — брать
+        assert research.recently_checked(s, sid) is False          # ни разу не собирали — брать
     _checked_at(sid, (now - timedelta(hours=2)).replace(tzinfo=None))        # naive трактуется как UTC
     with db.SessionLocal() as s:
-        assert research.recently_empty(s, sid) is True
+        assert research.recently_checked(s, sid) is True
     _checked_at(sid, now - timedelta(hours=research.EMPTY_RETRY_HOURS + 1))
     with db.SessionLocal() as s:
-        assert research.recently_empty(s, sid) is False            # пауза вышла
+        assert research.recently_checked(s, sid) is False          # пауза вышла
     wire(FakeAP(["https://a.com/1"], {"https://a.com/1": LONG}))
     research.build_dossier(sid)
     with db.SessionLocal() as s:
-        assert research.recently_empty(s, sid) is False            # строки есть — это вопрос свежести, не паузы
+        assert research.dossier(s, sid) and research.recently_checked(s, sid) is True   # строки есть — пауза та же

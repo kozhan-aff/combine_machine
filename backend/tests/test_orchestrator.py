@@ -208,7 +208,7 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
 
 
 def test_stage_research_skips_recently_empty_site(monkeypatch):
-    """Пустое досье свип пересобирал каждый час впустую: сутки после пустой сборки сайт не берётся."""
+    """Пустое досье свип пересобирал каждый час впустую: сутки после сборки сайт не берётся."""
     from datetime import datetime, timedelta, timezone
     from app.services import orchestrator, research
     sid = _content_site()
@@ -226,6 +226,32 @@ def test_stage_research_skips_recently_empty_site(monkeypatch):
     checked(25)
     done, errs, extra = orchestrator._stage_research(cap=5)
     assert calls == [sid] and done == 0 and extra == {"research_empty": 1}
+
+
+def test_stage_research_skips_recently_checked_site_with_stale_dossier(monkeypatch):
+    """Протухшее досье, чья пересборка вышла пустой, старые строки сохраняет: пауза обязана держаться и для него."""
+    from datetime import datetime, timedelta, timezone
+    from app.config import settings
+    from app.models.research import SiteResearch
+    from app.services import orchestrator, research
+    sid = _content_site()
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(SiteResearch(site_id=sid, kind="review", query="q", rank=1, url="https://old.com/1",
+                           fetched_at=now - timedelta(days=settings.RESEARCH_MAX_AGE_DAYS + 1)))
+        s.get(Site, sid).research_checked_at = now - timedelta(hours=2)
+        s.commit()
+        assert not research.is_fresh(s, sid)
+    calls = []
+    monkeypatch.setattr(research, "build_dossier", lambda s, force=False: calls.append(s) or
+                        {"status": "empty", "rows": 0, "reason": "пусто", "warnings": []})
+    assert orchestrator._stage_research(cap=5) == (0, [], {}) and calls == []
+    with db.SessionLocal() as s:
+        assert [r.url for r in research.dossier(s, sid)] == ["https://old.com/1"]
+        s.get(Site, sid).research_checked_at = now - timedelta(hours=25)
+        s.commit()
+    orchestrator._stage_research(cap=5)
+    assert calls == [sid]
 
 
 def test_research_stage_propagates_already_running(monkeypatch):

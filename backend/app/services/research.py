@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 KINDS = ("review", "comparison", "howto", "market")
 PER_QUERY = 5
 MIN_WORDS = 300
-EMPTY_RETRY_HOURS = 24   # пустое досье не пересобираем чаще: свип шёл по такому сайту каждый час впустую
+EMPTY_RETRY_HOURS = 24   # после сборки свип не возвращается к сайту раньше: несобравшееся досье он гонял каждый час
 _EXTRA_NOISE = ("apps.apple.", "play.google.", "chrome.google.", "github.", "amazon.", "aliexpress.")
 
 # Резолвер — функция, а не `_resolve = socket.getaddrinfo`: ссылка, захваченная при импорте, обходила бы
@@ -206,15 +206,17 @@ def _platform_or_brand(names: list[str], brand_key: str) -> bool:
 
 def _fetch(ap, url: str, attempts: int = 3) -> str | None:
     """Скачать страницу с повтором: прокси A-Parser отдаёт 502 на ~половину goto-ссылок (`fetch_html` -> None),
-    и вторая попытка обычно проходит. Исключение — тоже попытка. Первый непустой ответ возвращается."""
+    и вторая попытка обычно проходит. Повторяем ТОЛЬКО `None`. Исключение не повторяем: транспорт уже сделал
+    свои 3 попытки в BaseClient (с нашими вышло бы 9 запросов на URL), а повтор после ReadTimeout дублирует
+    задание в очереди парсера (S2-12)."""
     for i in range(attempts):
         if i:
             _sleep(1)
         try:
             html = ap.fetch_html(url)
         except Exception as e:  # noqa: BLE001
-            log.warning("research: fetch %s (попытка %d/%d): %s", url, i + 1, attempts, e)
-            html = None
+            log.warning("research: fetch %s: %s", url, e)
+            return None
         if html:
             return html
     return None
@@ -261,13 +263,11 @@ def is_fresh(db, site_id: int) -> bool:
     return datetime.now(timezone.utc) - newest < timedelta(days=settings.RESEARCH_MAX_AGE_DAYS)
 
 
-def recently_empty(db, site_id: int) -> bool:
-    """Досье собирали меньше EMPTY_RETRY_HOURS назад и оно пустое — свипу рано пробовать снова."""
-    from sqlalchemy import select, func
-    from app.models.research import SiteResearch
+def recently_checked(db, site_id: int) -> bool:
+    """Досье собирали меньше EMPTY_RETRY_HOURS назад — свипу рано пробовать снова. Есть ли строки, не важно:
+    пересборка протухшего досье, вышедшая пустой, старые строки оставляет, и без паузы шла бы каждый час."""
+    from sqlalchemy import select
     from app.models.site import Site
-    if db.scalar(select(func.count()).select_from(SiteResearch).where(SiteResearch.site_id == site_id)):
-        return False
     checked = db.scalar(select(Site.research_checked_at).where(Site.id == site_id))
     if checked is None:
         return False
@@ -337,6 +337,8 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                 for url in _serp(query, lang):
                     if rank >= PER_QUERY:
                         break
+                    if jobs.cancelled(run):            # и между страницами: запрос — до 10 URL по три попытки
+                        raise jobs.Cancelled()
                     if not _safe_url(url):
                         continue
                     goto = _is_goto(url)
@@ -395,7 +397,7 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
             db.query(SiteResearch).filter(SiteResearch.site_id == site_id).delete()
             db.add_all(SiteResearch(**r) for r in rows)
         site = db.get(Site, site_id)
-        if site is not None:     # отметка «проверяли» — и для пустого досье: по ней свип выдерживает паузу
+        if site is not None:     # отметка «проверяли» — при любом исходе: по ней свип выдерживает паузу
             site.research_checked_at = datetime.now(timezone.utc)
         db.commit()
     if not rows:

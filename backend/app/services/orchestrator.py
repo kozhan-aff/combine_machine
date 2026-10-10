@@ -229,7 +229,8 @@ def _stage_provision(cap):
 
 def _stage_research(cap):
     """Сайты status=content без свежего досье -> research.build_dossier (спека 2026-10-10 §4, §8).
-    Сайт, чьё досье вышло пустым меньше суток назад, не берём: выдача за час не меняется.
+    Сайт, чьё досье собирали меньше суток назад, не берём: если оно не собралось (пусто или старые
+    строки остались протухшими), выдача за час не изменится.
     «Пустое» досье — не ошибка стадии, а отдельный счётчик research_empty + причина словами: сайт
     остаётся в content, генерация его не возьмёт (план Б), оператор видит почему на карточке."""
     from sqlalchemy import select
@@ -240,7 +241,7 @@ def _stage_research(cap):
     done, errs, empty = 0, [], 0
     with SessionLocal() as db:
         ids = [sid for (sid,) in db.execute(select(Site.id).where(Site.status == "content").order_by(Site.id)).all()
-               if not research.is_fresh(db, sid) and not research.recently_empty(db, sid)][:cap]
+               if not research.is_fresh(db, sid) and not research.recently_checked(db, sid)][:cap]
     for sid in ids:
         try:
             out = research.build_dossier(sid)
