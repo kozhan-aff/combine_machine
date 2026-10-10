@@ -1,13 +1,21 @@
 """Чистые функции извлечения досье из HTML/CSS конкурента (спека 2026-10-10 §4.3). Без сети и БД:
 stdlib html.parser + re + nh3 (через wayback._visible_text — судим по ВИДИМОМУ тексту)."""
 import re
+from bisect import bisect_left, bisect_right
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from app.integrations.wayback import _visible_text
 
 _NAV_TAGS = {"nav", "header", "footer", "aside"}
-_NUM_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:[  ]\d{3})+|\d+(?:[.,]\d+)?)(?![\w])")
+# Число в свободном тексте, ОДНА группа (потребители зовут findall). Три записи: группы тысяч через пробел
+# (обычный, неразрывный, узкий неразрывный) — «1 500»; несколько групп через точку/запятую — «1,500,000»
+# (однозначно тысячи); простое целое или дробь — «5.99». Одна группа «5,500» неоднозначна (дробь или
+# тысячи) и остаётся дробью: оба прочтения учитывает brief.allowed_numbers.
+_NUM_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:[ \xa0\u202f]\d{3})+|\d{1,3}(?:[.,]\d{3}){2,}|\d+(?:[.,]\d+)?)(?![\w])")
+NUM_RE = _NUM_RE            # публичное имя: регулярку читают бриф и критик
+_GROUPS_RE = re.compile(r"\d{1,3}(?:[.,]\d{3}){2,}")
+_WORD_RE = re.compile(r"\S+")
 _FONT_RE = re.compile(r"font-family\s*:\s*([^;}]+)", re.I)
 _COLOR_RE = re.compile(r"#(?:[0-9a-f]{6}|[0-9a-f]{3})\b", re.I)
 _MAXW_RE = re.compile(r"max-width\s*:\s*(\d{3,4})px", re.I)
@@ -142,16 +150,25 @@ def faq(html: str, cap: int = 20) -> list[dict]:
     return uniq[:cap]
 
 
+def number_value(raw: str) -> str:
+    """Запись числа -> значение: без пробелов любого рода; несколько групп тысяч («1,500,000», «1.500.000»)
+    — только цифры; иначе десятичная запятая -> точка."""
+    v = "".join(str(raw).split())
+    return re.sub(r"[.,]", "", v) if _GROUPS_RE.fullmatch(v) else v.replace(",", ".")
+
+
 def numbers(text: str, cap: int = 60) -> list[dict]:
-    words = (text or "").split()
+    """Числа видимого текста с контекстом ±8 слов. Ищем по ВСЕМУ тексту, а не по словам: «1 500 серверов» —
+    одно число 1500, а не «1» и «500» (так терялись все числа с разделителем тысяч)."""
+    text = text or ""
+    spans = [m.span() for m in _WORD_RE.finditer(text)]
+    starts = [a for a, _ in spans]
+    words = [text[a:b] for a, b in spans]
     out = []
-    for i, w in enumerate(words):
-        m = _NUM_RE.search(w)
-        if not m:
-            continue
-        val = m.group(1).replace(" ", " ").replace(" ", "").replace(",", ".")
-        ctx = " ".join(words[max(0, i - 8): i + 9])
-        out.append({"value": val, "ctx": ctx})
+    for m in _NUM_RE.finditer(text):
+        i = bisect_right(starts, m.start(1)) - 1      # слово, в котором число начинается…
+        j = bisect_left(starts, m.end(1)) - 1         # …и в котором кончается: «1 500» — это два слова
+        out.append({"value": number_value(m.group(1)), "ctx": " ".join(words[max(0, i - 8): j + 9])})
         if len(out) >= cap:
             break
     return out

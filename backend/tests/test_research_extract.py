@@ -36,6 +36,34 @@ def test_numbers_with_context():
     assert any("в месяц" in x["ctx"] for x in n if x["value"] == "5.99")
 
 
+def test_numbers_with_thousands_separator_are_one_value():
+    # разделитель тысяч — обычный пробел, неразрывный и узкий неразрывный: одно число, а не «1» и «500»
+    for sep in (" ", "\xa0", "\u202f"):
+        n = rx.numbers(f"У сервиса 1{sep}500 серверов в 60 странах")
+        assert [x["value"] for x in n] == ["1500", "60"], repr(sep)
+        assert n[0]["ctx"] == "У сервиса 1 500 серверов в 60 странах"       # контекст — вокруг ВСЕГО числа
+    assert [x["value"] for x in rx.numbers("база 12 500 000 адресов")] == ["12500000"]
+    # соседние числа без группы из трёх цифр не склеиваются
+    assert [x["value"] for x in rx.numbers("тариф на 12 месяцев за 60 $")] == ["12", "60"]
+
+
+def test_numbers_grouped_by_dots_or_commas():
+    # несколько групп — однозначно тысячи: только цифры; одна группа неоднозначна и остаётся дробью
+    vals = [x["value"] for x in rx.numbers("1,500,000 users, 2.300.000 Nutzer, rating 3.5, 5,500 servers, 2,5 $")]
+    assert vals == ["1500000", "2300000", "3.5", "5.500", "2.5"]
+    assert rx.number_value("1,500,000") == "1500000" and rx.number_value("3.5") == "3.5"
+    assert rx.NUM_RE is rx._NUM_RE and rx.NUM_RE.findall("от 1,500,000 до 3.5") == ["1,500,000", "3.5"]   # одна группа
+
+
+def test_numbers_context_window_and_cap():
+    words = [f"с{i}" for i in range(30)]
+    text = " ".join(words[:15] + ["1 500"] + words[15:])
+    [n] = rx.numbers(text)
+    assert n == {"value": "1500", "ctx": " ".join(words[7:15] + ["1", "500"] + words[15:23])}     # по 8 слов с каждой стороны
+    assert len(rx.numbers(" ".join(str(i) for i in range(1000, 1200)))) == 60
+    assert len(rx.numbers("10 20 30 40", cap=2)) == 2
+
+
 def test_stylesheet_links_and_css_tokens():
     assert rx.stylesheet_links(SAMPLE, "https://ex.com/r/") == ["https://ex.com/s/a.css", "https://cdn/b.css"]
     # живые формы ссылок (research-live-formats-2026-10): протокол-относительная и корневая
