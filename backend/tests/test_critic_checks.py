@@ -1,6 +1,7 @@
 """Критик: проверки кодом (план Б, задача 5) — копирование, бренд, язык, объём, числа без источника.
 Чистые функции над текстом: без БД, сети и LLM."""
 import time
+import unicodedata
 from datetime import datetime, timezone
 
 from app.services import content_critic as cc
@@ -85,6 +86,27 @@ def test_copy_survives_yo_and_invisible_characters():
     wide = plain.replace("трафика", "\uff54\uff52\uff41\uff46\uff46\uff49\uff43").replace("сайтов", "wi\ufb01")
     assert wide != latin
     assert len(only(check(f"{RU} {wide.upper()}.", sources=[latin]), "копирование")) == 1
+
+
+def test_copy_survives_decomposed_unicode():
+    # NFD: «й» = «и» + отдельный знак краткости, «ё» = «е» + две точки. Текст приводится целиком ДО
+    # разбиения на слова, иначе знак рвёт слово и одинаковый текст не совпадает ни одним шинглом
+    plain = ("Провайдер всё ещё видит объём трафика, но не видит адреса сайтов, "
+             "который открывает каждый пользователь своей домашней сети")
+    nfd = unicodedata.normalize("NFD", plain)
+    assert len(nfd) > len(plain) and unicodedata.normalize("NFC", nfd) == plain
+    assert len(only(check(f"{RU} {plain}.", sources=[nfd]), "копирование")) == 1        # источник в NFD
+    [issue] = only(check(f"{RU} {nfd}.", sources=[plain]), "копирование")               # страница в NFD
+    assert issue == "копирование источника: «Провайдер всё ещё видит объём трафика, но не видит адреса сайтов, который»"
+
+
+def test_copy_quote_when_lowercasing_changes_length():
+    # турецкая «I с точкой» в нижнем регистре — два знака: позиции слов к исходному тексту не приложить,
+    # цитата берётся из приведённого текста (и не съезжает, и не падает)
+    dotted = chr(0x130)
+    run = SOURCE.split()[:12]
+    [issue] = only(check(f"{dotted}stanbul {dotted}zmir. " + " ".join(run).upper(), sources=[SOURCE]), "копирование")
+    assert issue == f"копирование источника: «{' '.join(run)}»"
 
 
 def test_copy_quote_is_one_line():
@@ -225,8 +247,8 @@ def test_number_formats_match_allowed():
     assert only(check(text, allowed={"2.5", "30"}), "числа без источника") == ["числа без источника: 1 500"]
 
 
-def nums(text, allowed=()):
-    return only(check(f"{RU} {text}", allowed=allowed), "числа без источника")
+def nums(text, allowed=(), sources=()):
+    return only(check(f"{RU} {text}", allowed=allowed, sources=sources), "числа без источника")
 
 
 def test_thousands_with_separator_are_never_exempt():
@@ -244,18 +266,52 @@ def test_thousands_accept_any_reading():
     assert nums("Скачали 2,000,000 раз.", allowed={"2", "2000"}) == ["числа без источника: 2,000,000"]
 
 
+def test_thousands_integer_decimal_reading_is_not_accepted():
+    # малые целые почти всегда есть среди разрешённых (тарифы, устройства, сроки): «6» не узаконивает «6,000»
+    small = {"2", "3", "6", "7", "10"}
+    for written in ("6,000", "6.000", "10,000", "2,000,000", "2.000.000"):
+        assert nums(f"В сети {written} серверов.", allowed=small) == [f"числа без источника: {written}"], written
+    # тысячное прочтение принимается, нецелая дробь — тоже
+    assert nums("В сети 6,000 серверов.", allowed={"6000"}) == []
+    assert nums("В сети 6.000 серверов.", allowed={"6000"}) == []
+    assert nums("В сети 5,500 серверов.", allowed={"5.5"}) == []
+    assert nums("В сети 5,050 серверов.", allowed={"5.05"}) == []
+    assert nums("В сети 5,500 серверов.", allowed={"5", "55", "550"}) == ["числа без источника: 5,500"]
+
+
 def test_small_int_with_magnitude_word_is_a_fact():
     for written in ("6 тысяч", "10 тыс.", "3 млн", "2 млрд", "5K", "5k", "6 thousand", "2 million",
                     "6\u00a0тысяч", "7 миллионов", "3 Billion"):
         shown = written.replace("\u00a0", " ")
         assert nums(f"В сети {written} серверов.") == [f"числа без источника: {shown}"], written
     assert nums("Настройка в 6 шагов и 5 кликов, тариф на 12 месяцев.") == []
-    # число из источника годится и со словом: само («6») или умноженное («6000», «6500», «3000000»)
-    assert nums("В сети 6 тысяч серверов.", allowed={"6"}) == []
+    # годится только УМНОЖЕННОЕ значение («6000», «6500», «3000000»): голое «6» есть почти в любом наборе
+    small = {"2", "3", "5", "6", "10"}
+    for written in ("6 тысяч", "10 тыс.", "3 млн", "5K", "6 thousand", "2 million"):
+        assert nums(f"В сети {written} серверов.", allowed=small) == [f"числа без источника: {written}"], written
+    assert nums("Аудитория 3 млн пользователей.", allowed={"3"}) == ["числа без источника: 3 млн"]
+    assert nums("В сети 6 тысяч серверов.", allowed={"6000"}) == []
     assert nums("В сети 6 тысяч серверов и 6,5 тыс. адресов.", allowed={"6000", "6500"}) == []
     assert nums("Аудитория 3 млн, было 5K.", allowed={"3000000", "5000"}) == []
     assert nums("В сети 65 тысяч серверов.", allowed={"65000"}) == []
     assert nums("В сети 65 тысяч серверов.") == ["числа без источника: 65 тысяч"]
+
+
+def test_magnitude_in_source_text_legitimises_it_on_the_page():
+    # в досье «6 тыс.» лежит как «6»; узаконить множитель может только сам текст источника
+    source = "По данным сервиса, у него около 6 тыс. серверов, 2 million users и 5K отзывов в магазине."
+    assert nums("В сети 6 тысяч серверов.", sources=[source]) == []
+    assert nums("В сети 6 thousand серверов, 2 млн клиентов, 5K отзывов.", sources=["", source]) == []
+    assert nums("В сети 6000 серверов, а точнее 6,000.", sources=[source]) == []      # то же число цифрами
+    # другое число или другой множитель — не из источника
+    assert nums("В сети 7 тысяч серверов.", sources=[source]) == ["числа без источника: 7 тысяч"]
+    assert nums("В сети 6 млн серверов.", sources=[source]) == ["числа без источника: 6 млн"]
+    assert nums("В сети 6 тысяч серверов.", sources=["у него 6 серверов и тысяча причин"]) == [
+        "числа без источника: 6 тысяч"]
+    # из текста источника берутся ТОЛЬКО числа с множителем: простое число узаконивает лишь `allowed`
+    assert nums("Скорость 450 Мбит/с.", sources=[source + " Скорость 450 Мбит/с."]) == ["числа без источника: 450"]
+    # разрешение видео в источнике — не «четыре тысячи»
+    assert nums("В сети 4K серверов.", sources=["Стриминг в 4K без буферизации."]) == ["числа без источника: 4K"]
 
 
 def test_table_cells_do_not_fuse_into_one_number():
@@ -280,6 +336,51 @@ def test_identifiers_are_not_facts():
     assert nums("Оценка 85/100 и 7/7.") == ["числа без источника: 85, 100"]
 
 
+def test_identifier_names_do_not_hide_facts():
+    # «имя + число» — идентификатор только при настоящих значениях; скорость, рейтинг, счёт — факты
+    old = YEAR - 4
+    probes = {
+        "Скорость на WireGuard 450 Мбит/с, на OpenVPN 210 Мбит/с": "450, 210",
+        "WireGuard 950 Mbps": "950",
+        "по Wi-Fi 100 Мбит/с": "100",
+        "На Windows 95 Мбит/с, на Android 80 Мбит/с": "95, 80",
+        "для iOS 4.7, для Android 4,5": "4.7, 4,5",                      # рейтинги магазинов
+        "для Android 4500 отзывов": "4500",
+        "apps support 3200 servers": "3200",                              # sup-port — не «port»
+        "We support 5000 servers": "5000",
+        f"transparency report {old}": f"{old}",
+        "Транспорт 300 рублей": "300",
+        "Over 4K servers": "4K",                                          # не разрешение видео, а 4000
+        "В сети 2.000.000.000 адресов": "2.000.000.000",                  # не IPv4
+        "289/10 устройств": "289",                                        # не оценка N/10
+        "Android 14 устройств и iOS 15 серверов": "14, 15",               # за версией — счётное слово
+        "OpenVPN 2.5 Гбит/с": "2.5",
+        "шифр AES-300 и RSA-999": "300, 999",                             # не длина ключа
+        "порт 300 рублей и ports 700000": "300, 700000",                   # за портом единица; шесть цифр
+        "адрес 300.1.1.1": "300.1",                                       # октет больше 255
+        "Android 4.4 в рейтинге, iOS 3 звезды": "4.4",
+        "Оценка: 85/10": "85",
+        "Скорость 256 Мбит/с": "256",                                     # не разрядность
+        "ключ 300-bit": "300",
+        "по Wi-Fi 300 точек доступа": "300",                              # поколение Wi-Fi — одна цифра 4–7
+        "OpenVPN 15 раз быстрее": "15",                                   # версия — только с точкой
+        "TLS 450 соединений": "450",
+        "macOS 4.8 в рейтинге": "4.8",
+        "код 45.13.2020": "45.13",                                        # не дата
+    }
+    for text, shown in probes.items():
+        assert nums(text + ".") == [f"числа без источника: {shown}"], text
+
+
+def test_real_identifiers_stay_clean():
+    for written in ("AES-256", "256-bit", "TLS 1.3", "24/7", "1.1.1.1", "05.10.2026", "порт 443", "Оценка: 8.5/10",
+                    "OpenVPN 2.6", "iOS 17", "Android 14", "Windows 11", "SHA-2", "SSL 3.0", "RSA 2048", "64-bit",
+                    "WireGuard 1.0.20", "macOS 10.15", "Windows 8.1", "Android 5.0", "iOS 17.4.1", "Wi-Fi 6",
+                    "порта 1194", "ports 51820", "255.255.255.0", "Оценка: 10/10", "8K"):
+        assert nums(f"Сервис: {written}, и точка.") == [], written
+        assert nums(f"Сервис: {written}.") == [], written                 # точка в конце фразы — не продолжение
+
+
 def test_prices_and_percents_need_a_source():
     text = "Тариф 289 руб/мес, скидка 67%."
     assert nums(text) == ["числа без источника: 289, 67"]
@@ -289,6 +390,28 @@ def test_prices_and_percents_need_a_source():
 def test_unsourced_numbers_are_deduplicated():
     assert nums("Скидка 67%, повторим: 67%, и ещё раз 67 процентов, а серверов 4500 и 4500.") == [
         "числа без источника: 67, 4500"]
+
+
+def test_digit_floods_are_linear_and_never_raise(monkeypatch):
+    # зациклившаяся модель: на Python 3.11+ int() длинной строки бросает ValueError (у нас 3.12 в проде).
+    # Локальный 3.10 этого не покажет, поэтому int модуля подменён таким же строгим.
+    def strict_int(x, *args):
+        assert len(str(x)) <= 4300, "int() на потоке цифр"
+        return int(x, *args)
+    monkeypatch.setattr(cc, "int", strict_int, raising=False)
+
+    [issue] = nums("Число " + "7" * 5000 + " серверов.")
+    assert issue == "числа без источника: 777777777777…"       # помечено, показано начало, а не 5000 цифр
+    assert nums("А ещё " + "1 111" * 2000 + " и " + "2,000" * 2000 + ".") != []
+
+    floods = ["9" * 100_000, "1." * 50_000, "1," * 50_000, "1 111 " * 16_000, "24/7" * 25_000, "4K" * 50_000,
+              "192.168.1.1." * 8_000, "AES-2" * 20_000, "5 тыс. " * 14_000, "0" * 50_000 + "." + "0" * 50_000]
+    for flood in floods:
+        started = time.perf_counter()
+        issues = cc.code_checks(text=flood, kind="howto", lang="ru", brand="Durev VPN", sources=[flood, flood],
+                                allowed={"1", "5"})
+        assert time.perf_counter() - started < 1.0, flood[:12]
+        assert isinstance(issues, list) and issues, flood[:12]
 
 
 def test_unsourced_numbers_capped_at_ten():

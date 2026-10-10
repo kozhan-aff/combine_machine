@@ -130,22 +130,40 @@ _MAGNITUDE_RE = re.compile(
 _POWERS = (("тыс", 3), ("thousand", 3), ("млн", 6), ("миллион", 6), ("million", 6),
            ("млрд", 9), ("миллиард", 9), ("billion", 9))
 _GLUED_K_RE = re.compile(r"(?<![\w.])(\d+(?:[.,]\d+)?)[Kk](?!\w)")     # «5K» — слитно, NUM_RE его не видит
+_NUM_MAX_LEN = 20             # запись длиннее — не число, а поток цифр: помечаем, не разбирая (и без int())
 
 # Числа-идентификаторы — не факты, источник им не нужен. Перед поиском чисел заменяются пробелом.
-# Имя и число — только в одной строке (пробел, не `\s`): перевод строки — граница блока, и ячейка
-# «Android» не должна спрятать число из соседней ячейки.
+# Список намеренно узкий: «имя + любое число» прятало бы выдуманные факты («на WireGuard 450 Мбит/с»,
+# «для Android 4500 отзывов», рейтинг «iOS 4.7»), поэтому у каждого имени — только его настоящие значения.
+#  * имя и число — в одной строке (пробел, не `\s`): перевод строки — граница блока, и ячейка «Android»
+#    не прячет число из соседней ячейки;
+#  * у каждой ветки левая граница (`(?<!\w)` / `(?<![\w.,])`): «Транспорт 300» — не «порт 300», а на
+#    потоке цифр движок не начинает разбор с каждой позиции (иначе квадратичное время);
+#  * END — за числом нет продолжения («4,5», «4500»); NOUNIT — за ним нет единицы или счётного слова.
+_UNIT = (r"(?:%|[кмг]бит|[кмгт]б(?!\w)|[kmgt]bit|[kmgt]bps|[kmgt]b(?!\w)|мс(?!\w)|ms(?!\w)|отзыв|оцен|зв[её]зд"
+         r"|устройств|стран|сервер|локац|пользовател|клиент|руб|device|server|countr|location|user|review"
+         r"|rating|star)")
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 _IDENT_RE = re.compile(r"""
-      (?<!\w)(?:AES|SHA|RSA|TLS|SSL|IKEv|OpenVPN|WireGuard|iOS|Android|Windows|macOS|Wi-?Fi)[ \xa0-]?\d+(?:\.\d+)*
-                                                    # алгоритм, протокол, версия ОС: AES-256, TLS 1.3, iOS 17.4
-    | \d+[ \xa0-]?(?:bit|бит)\w*                    # разрядность: 256-bit, 256 бит
-    | (?<![\w/])24/7(?![\w/])                       # круглосуточно
-    | (?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])    # IPv4: 1.1.1.1
-    | (?<![\d.])\d{1,2}\.\d{1,2}\.\d{4}(?!\d)       # дата дд.мм.гггг
-    | (?<!\d)\d{4}-\d{2}-\d{2}(?!\d)                # дата гггг-мм-дд
-    | (?:порт|port)[ \xa0]+\d+                      # номер порта
-    | \d+(?:[.,]\d+)?[ \xa0]*/[ \xa0]*10(?!\d)      # оценка вердикта из шаблона: 8.5/10
-    | (?<!\w)(?-i:[48]K)(?!\w)                      # разрешение видео 4K/8K (заглавная K), не «4 тысячи»
-""", re.I | re.X)
+      (?<!\w)(?:AES|SHA|RSA)[ \xa0-]?(?:128|192|256|384|512|1024|2048|3072|4096)END    # шифр и длина ключа: AES-256
+    | (?<!\w)SHA[ \xa0-]?[123]END                                                    # семейство: SHA-1, SHA-2
+    | (?<!\w)(?:TLS|SSL|IKEv)[ \xa0-]?\d{1,2}(?:\.\d)?END                            # версия протокола: TLS 1.3
+    | (?<!\w)(?:WireGuard|OpenVPN)[ \xa0-]?\d{1,2}(?:\.\d{1,2}){1,2}END NOUNIT       # только версия с точкой: OpenVPN 2.6
+    | (?<!\w)Wi-?Fi[ \xa0-]?[4-7]END NOUNIT                                          # поколение: Wi-Fi 6
+    | (?<!\w)iOS[ \xa0-]?(?:9|1\d|2[0-6])(?:\.\d){0,2}END NOUNIT                     # iOS 9–26 (ниже — рейтинг магазина)
+    | (?<!\w)macOS[ \xa0-]?(?:1\d|2[0-6])(?:\.\d{1,2}){0,2}END NOUNIT                # macOS 10–26
+    | (?<!\w)Android[ \xa0-]?(?:[5-9]|1\d|20)(?:\.\d)?END NOUNIT                     # Android 5–20 (ниже — рейтинг)
+    | (?<!\w)Windows[ \xa0-]?(?:7|8\.1|8|10|11)END NOUNIT                            # Windows 7, 8, 8.1, 10, 11
+    | (?<![\w.,])(?:32|64|128|192|256|384|512|1024|2048|3072|4096)[ \xa0-]?(?:bit|бит)\w*   # разрядность: 256-bit
+    | (?<![\w/.,])24/7(?![\w/])                                                      # круглосуточно
+    | (?<![\w.,])(?:OCTET\.){3}OCTET(?!\.?\d)(?!\w)                                  # IPv4: ровно четыре октета до 255
+    | (?<![\w.,])(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.(?:19|20)\d\d(?!\w)END    # дата дд.мм.гггг
+    | (?<![\w.,-])(?:19|20)\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\w-])   # дата гггг-мм-дд
+    | (?<!\w)(?:порт[аеуы]?|ports?)[ \xa0]+\d{1,5}END NOUNIT                         # номер порта
+    | (?<![\w.,/])(?:10|\d(?:[.,]\d)?)[ \xa0]*/[ \xa0]*10(?![\d/])END                # оценка вердикта: 8.5/10, не больше 10
+    | (?<!\w)(?-i:[48]K)(?!\w)(?![ \xa0]?(?:\+|UNIT))                                # разрешение 4K/8K, но не «4K серверов»
+""".replace("NOUNIT", r"(?![ \xa0]?UNIT)").replace("UNIT", _UNIT).replace("END", r"(?![.,]?\d)")
+    .replace("OCTET", _OCTET), re.I | re.X)
 
 
 def visible_text(body_html: str) -> str:
@@ -163,37 +181,49 @@ def visible_text(body_html: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _norm_word(w: str) -> str:
-    """Слово в сравнимом виде — ОДНО правило для страницы и источника: NFKC (лигатуры, полноширинные
-    знаки), без невидимых знаков, регистр, «ё» = «е»."""
-    return unicodedata.normalize("NFKC", w).translate(_DROP_INVISIBLE).lower().replace("ё", "е")
+def _compose(text: str) -> str:
+    """NFKC (лигатуры, полноширинные знаки, буква + отдельный диакритический знак -> одна буква) и без
+    невидимых знаков. Делается над ВСЕМ текстом до разбиения на слова: «й» в виде «и» + знак краткости
+    иначе рвёт слово пополам, и одинаковый текст не совпал бы ни одним шинглом."""
+    return unicodedata.normalize("NFKC", text).translate(_DROP_INVISIBLE)
+
+
+def _fold(text: str) -> str:
+    """Регистр и «ё» = «е» (и конечная сигма — обычной: `lower()` различает их по месту в слове)."""
+    return text.lower().replace("ё", "е").replace("ς", "σ")
 
 
 def _copy_issues(text: str, sources: list[str]) -> list[str]:
-    """Шинглы по SHINGLE слов текста против каждого источника. Один проход по тексту и по одному на
-    источник (поиск в словаре) — страница в 2500 слов против пяти источников по 7000 считается за
+    """Шинглы по SHINGLE слов текста против каждого источника; обе стороны приводятся ОДНИМ правилом
+    (`_compose`, затем `_fold`) целиком и только потом режутся на слова. Один проход по тексту и по одному
+    на источник (поиск в словаре) — страница в 2500 слов против пяти источников по 7000 считается за
     десятки миллисекунд. Источник короче шингла ничего не даёт: его range пуст."""
     if not sources:
         return []
-    spans = [m.span() for m in _WORD_RE.finditer(text)]
-    low = [_norm_word(text[a:b]) for a, b in spans]
+    shown = _compose(text)
+    norm = _fold(shown)
+    spans = [m.span() for m in _WORD_RE.finditer(norm)]
+    low = [norm[a:b] for a, b in spans]
     first = {}                                   # шингл текста -> позиция его первого вхождения
     for i in range(len(low) - SHINGLE + 1):
         first.setdefault(tuple(low[i:i + SHINGLE]), i)
     hits = set()
     for src in sources if first else ():
-        sw = [_norm_word(w) for w in _WORD_RE.findall(src)]
+        sw = _WORD_RE.findall(_fold(_compose(src)))
         for i in range(len(sw) - SHINGLE + 1):
             pos = first.get(tuple(sw[i:i + SHINGLE]))
             if pos is not None:
                 hits.add(pos)
     # кусок в 30 скопированных слов — это 19 шинглов со сдвигом на слово; цитируем фразы встык, без
-    # перекрытий, и так, как они стоят на странице (с пунктуацией — оператор найдёт их поиском)
+    # перекрытий, и так, как они стоят на странице (с пунктуацией и регистром — оператор найдёт их
+    # поиском). `lower()` длину почти никогда не меняет; если изменил (турецкая «İ») — позиции слов
+    # к исходному регистру уже не приложить, цитируем приведённый текст.
+    quoted = shown if len(shown) == len(norm) else norm
     out, free = [], 0
     for pos in sorted(hits):
         if pos < free:
             continue
-        quote = " ".join(text[spans[pos][0]:spans[pos + SHINGLE - 1][1]].split())
+        quote = " ".join(quoted[spans[pos][0]:spans[pos + SHINGLE - 1][1]].split())
         out.append(f"копирование источника: «{quote}»")
         free = pos + SHINGLE
         if len(out) == _COPY_MAX:
@@ -265,39 +295,72 @@ def _scaled(value: str, power: int) -> str:
         return ""
 
 
-def _number_issues(text: str, allowed: set[str]) -> list[str]:
-    """Числа текста, которых нет среди разрешённых (`brief.allowed_numbers`: досье, факты вертикали,
-    условия промокода), — «факт без источника». Обе стороны сравниваются в виде `norm_number`; у
-    неоднозначной записи достаточно одного совпавшего прочтения. Не считаются фактами идентификаторы
-    (`_IDENT_RE`), целые до `_SMALL_INT` и годы «прошлый — текущий — следующий» (UTC на момент вызова) —
-    кроме записей с разделителем тысяч и чисел со словом-множителем. В замечании числа стоят так, как
-    написаны на странице."""
-    year = datetime.now(timezone.utc).year
-    clean = _IDENT_RE.sub(" ", text)
-    found = sorted((*NUM_RE.finditer(clean), *_GLUED_K_RE.finditer(clean)), key=lambda m: m.start(1))
-    bad, seen = [], set()
-    for m in found:
-        raw = shown = m.group(1)
-        value = norm_number(raw)
-        readings = {value}
-        thousands = bool(_THOUSANDS_RE.fullmatch(raw))
-        if thousands:
-            readings.add(re.sub(r"[.,]", "", raw))       # «5,500»: дробь 5.5 или 5500 — годится любое
-        power = 0
+def _number_tokens(text: str):
+    """Числа текста по порядку: (запись как на странице, запись самого числа, степень множителя).
+    Множитель — слово сразу за числом («6 тысяч» -> 3) или слитная K («5K» -> 3); без него степень 0."""
+    for m in sorted((*NUM_RE.finditer(text), *_GLUED_K_RE.finditer(text)), key=lambda m: m.start(1)):
+        raw = m.group(1)
         if m.re is _GLUED_K_RE:
-            power, shown = 3, m.group()
+            yield m.group(), raw, 3
+            continue
+        word = _MAGNITUDE_RE.match(text, m.end(1))
+        if word:
+            name = word.group(1).lower()
+            yield f"{raw} {word.group(1)}", raw, next((p for prefix, p in _POWERS if name.startswith(prefix)), 3)
         else:
-            word = _MAGNITUDE_RE.match(clean, m.end(1))
-            if word:
-                name = word.group(1).lower()
-                power = next((p for prefix, p in _POWERS if name.startswith(prefix)), 3)
-                shown = f"{raw} {word.group(1)}"
-        if power:
-            readings |= {_scaled(r, power) for r in readings}
-        exempt = (not thousands and not power and value.isdigit()
+            yield raw, raw, 0
+
+
+def _readings(raw: str, power: int) -> set[str]:
+    """Сравнимые прочтения записи числа (вид `norm_number`). Запись с разделителем тысяч («6,000») —
+    это тысячи; дробью она читается, только если дробь не целая: «5,500» — и 5500, и 5.5, а «6,000» —
+    только 6000 (малые целые почти всегда есть среди разрешённых, и «6» пропускало бы любые «6,000»).
+    С множителем прочтение одно — умноженное: «6 тысяч» — это 6000, голого «6» среди разрешённых мало."""
+    value = norm_number(raw)
+    out = {value}
+    if _THOUSANDS_RE.fullmatch(raw):
+        out = {re.sub(r"[.,]", "", raw)} | ({value} if "." in value else set())
+    if power:
+        out = {_scaled(r, power) for r in out} - {""}
+    return out
+
+
+def _source_magnitudes(sources: list[str]) -> set[str]:
+    """Числа с множителем из текстов источников, уже умноженные: «около 6 тыс. серверов» -> «6000».
+    В досье такое число лежит как «6», поэтому узаконить «6 тысяч» на странице может только сам текст."""
+    out = set()
+    for src in sources:
+        for _, raw, power in _number_tokens(_IDENT_RE.sub(" ", src)):
+            if power and len(raw) <= _NUM_MAX_LEN:
+                out |= _readings(raw, power)
+    return out
+
+
+def _number_issues(text: str, allowed: set[str], sources: list[str]) -> list[str]:
+    """Числа текста, которых нет среди разрешённых (`brief.allowed_numbers`: досье, факты вертикали,
+    условия промокода) и умноженных чисел источников (`_source_magnitudes`), — «факт без источника».
+    Обе стороны сравниваются в виде `norm_number`; у неоднозначной записи достаточно одного совпавшего
+    прочтения (`_readings`). Не считаются фактами идентификаторы (`_IDENT_RE`), целые до `_SMALL_INT` и
+    годы «прошлый — текущий — следующий» (UTC на момент вызова) — кроме записей с разделителем тысяч и
+    чисел с множителем. В замечании числа стоят так, как написаны на странице."""
+    year = datetime.now(timezone.utc).year
+    known = None                                 # разрешённые + множители источников; считаем по требованию
+    bad, seen = [], set()
+    for shown, raw, power in _number_tokens(_IDENT_RE.sub(" ", text)):
+        if len(raw) > _NUM_MAX_LEN:
+            # поток цифр (зациклившаяся модель): не число и не повод для int() — на 3.11+ он бросает
+            # ValueError уже на 4300 цифрах. Помечаем, показав начало.
+            shown, ok = raw[:12] + "…", False
+        else:
+            value = norm_number(raw)
+            ok = (not power and not _THOUSANDS_RE.fullmatch(raw) and value.isdigit()
                   and (int(value) <= _SMALL_INT or year - 1 <= int(value) <= year + 1))
+            if not ok:
+                if known is None:
+                    known = allowed | _source_magnitudes(sources)
+                ok = bool(_readings(raw, power) & known)
         shown = " ".join(shown.split())          # неразрывный пробел в замечании — обычным
-        if exempt or readings & allowed or shown in seen:
+        if ok or shown in seen:
             continue
         seen.add(shown)
         bad.append(shown)
@@ -325,5 +388,6 @@ def code_checks(*, text: str, kind: str | None, lang: str, brand: str | None,
     text = text if isinstance(text, str) else ""
     lang = lang if isinstance(lang, str) else ""
     brand = brand if isinstance(brand, str) else None
-    return [*_copy_issues(text, _strings(sources)), *_brand_issues(text, brand), *_lang_issues(text, lang),
-            *_volume_issues(text, kind), *_number_issues(text, set(_strings(allowed)))]
+    sources = _strings(sources)
+    return [*_copy_issues(text, sources), *_brand_issues(text, brand), *_lang_issues(text, lang),
+            *_volume_issues(text, kind), *_number_issues(text, set(_strings(allowed)), sources)]
