@@ -503,3 +503,11 @@ def test_broken_url_and_json_errors_name_the_field(ak):
         with pytest.raises(ValueError) as e:
             ak.validate(ak.EDITABLE[key], bad)
         assert str(e.value).startswith(key + ":") and "[::1" not in str(e.value)
+
+
+def test_research_keys_are_editable_and_screenshots_is_choice():
+    from app.services import api_keys
+    for k in ("BROWSERLESS_URL", "BROWSERLESS_TOKEN", "RESEARCH_SCREENSHOTS", "RESEARCH_DIR"):
+        assert k in api_keys.EDITABLE, k
+    assert api_keys.EDITABLE["RESEARCH_SCREENSHOTS"].kind == "choice"
+    assert api_keys.EDITABLE["BROWSERLESS_TOKEN"].secret is True

@@ -260,6 +260,8 @@ def _no_paid_keys(monkeypatch):
         monkeypatch.setattr(settings, key, "")
     # IndexNow по умолчанию включён и ходит в сеть после публикации; в тестах выключен
     # (тесты самого пинга включают его и подставляют мок-транспорт).
+    # досье: скриншоты через Browserless в тестах выключены (сеть и так заблокирована)
+    monkeypatch.setattr(settings, "RESEARCH_SCREENSHOTS", False)
     monkeypatch.setattr(settings, "INDEXNOW_ENABLED", False)
     monkeypatch.setattr(settings, "INDEXNOW_SECRET", "test-installation-secret")
     monkeypatch.setattr(RdapClient, "_bootstrap", lambda self: {})

@@ -24,3 +24,6 @@ AGENTS.md
 
 # iCloud-дубли («file 2.py») — мусор синхронизации Documents на Mac, в репо не нужны
 * 2.*
+
+# общая папка досье/скриншотов со шлюзом (bind в compose, локально на Mac)
+/research_data/

@@ -145,6 +145,15 @@ GROUPS = [
             "Рекомендуется ollama/qwen3.5:9b-q8_0. Пусто — без запасной."),
       Field("SEARXNG_URL", "SearXNG · адрес", "Локальный мета-поиск, например http://192.168.1.77:8080. "
             "Нужен для проверки индексации (site:).", kind="url"),
+      Field("BROWSERLESS_URL", "Browserless · адрес", "Контейнер browserless на боксе, например "
+            "http://192.168.1.77:3000 — скриншоты конкурентов и проверка макета.", kind="url"),
+      Field("BROWSERLESS_TOKEN", "Browserless · токен", "Если контейнер запущен с TOKEN=…; пусто — без токена.",
+            secret=True),
+      Field("RESEARCH_SCREENSHOTS", "Досье · скриншоты конкурентов", "true — при сборке досье Browserless снимает "
+            "первый экран каждой страницы (дизайнер видит их). false (по умолчанию) — только текст и CSS-токены.",
+            kind="choice", choices=("false", "true")),
+      Field("RESEARCH_DIR", "Досье · папка скриншотов", "Внутри контейнера backend; по умолчанию "
+            "/workspace/combine/research — та же папка смонтирована в шлюз :3033 как /workspace/combine."),
       Field("GSC_SERVICE_ACCOUNT_JSON", "Google Search Console · JSON сервис-аккаунта",
             "Содержимое JSON-ключа сервис-аккаунта целиком (Google Cloud → IAM → Service accounts → Keys). "
             "Аккаунт нужно добавить в свойство GSC каждого сайта (доменное sc-domain: или префикс URL). "

@@ -74,6 +74,7 @@ services:
       # весь репо (с .git) → /repo, чтобы кнопка «Обновить из git» в панели делала
       # git pull прямо в смонтированные файлы (./backend == /app подхватит --reload).
       - .:/repo
+      - ${RESEARCH_HOST_DIR:-./research_data}:/workspace/combine
     # auto-migrate on start (alembic upgrade head is idempotent), then serve.
     # --reload ОСТАВЛЕН сознательно (F8-16): оператор обновляет бокс кнопкой git-pull без консоли, а
     # без reload код панели не подхватится до ручного рестарта. Убийство идущих задач при pull
@@ -103,6 +104,7 @@ services:
       - combine
     volumes:
       - ./backend:/app
+      - ${RESEARCH_HOST_DIR:-./research_data}:/workspace/combine
     # watchfiles (в образе через uvicorn[standard]) перезапускает шедулер при правке *.py в /app —
     # код воркера подхватывается после git-pull живьём, без пересборки/рестарта контейнера.
     command: watchfiles 'python -m app.workers.scheduler' /app
