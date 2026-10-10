@@ -6,6 +6,7 @@
 LlmClient.complete; писателя и критика различаем по модели вызова."""
 import json
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,7 @@ COPIED = ("Сервис держит соединение на загружен�
 PASS = json.dumps({"pass": True, "score": 90, "issues": []})
 FAIL = json.dumps({"pass": False, "score": 40, "issues": ["мало конкретики про скорость"]}, ensure_ascii=False)
 OTHER_BODY = "<h2>Правка</h2><p>Оператор переписал страницу руками, пока критик читал прежний текст.</p>"
+PATHS3 = ("/", "/vs", "/setup")
 
 
 def _doc(mark: str = "", n: int = 60) -> dict:
@@ -433,6 +435,36 @@ def test_empty_answer_is_no_verdict_and_is_asked_again(monkeypatch, answer):
     assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1) and len(calls["critic"]) == 1
 
 
+def test_brand_only_in_the_title_is_not_enough(monkeypatch):
+    """Заголовок называет бренд оффера, а тело целиком про другой сервис: проверка бренда смотрит в тело."""
+    doc = json.loads(json.dumps(_doc(), ensure_ascii=False).replace("Durev VPN работает", "NordVPN работает"))
+    doc["meta"]["title"] = "Durev VPN: обзор и честный тест"
+    site_id, ids = _site(body=_body(doc), blocks=doc, blocks_stale=True)
+    assert "Durev VPN" not in content_critic.visible_text(_page(ids["/"]).body)
+    seen = _spy_mark_edited(monkeypatch)
+    _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, failed=1)
+    assert _page(ids["/"]).critic_notes["code"] == ["в тексте нет бренда Durev VPN"] and seen == []
+
+
+def test_huge_or_slow_answer_does_not_hang_or_crash_the_job(monkeypatch):
+    site_id, ids = _site(paths=("/", "/vs", "/setup"))
+    pad = " " * 500_000
+    answers = ['{"pass": true, "score": 1' + "0" * 400 + ', "issues": []}',          # оценка — число в 400 цифр
+               f"```json{pad}{PASS}{pad}```",                                          # мегабайт пробелов в ограде
+               '{"pass": true, "issues": ["' + "ы" * 250_000 + '"]}']                # ответ длиннее лимита
+    _llm(monkeypatch, *answers)
+    started = time.monotonic()
+    out = content_critic.edit_site(site_id)
+    assert time.monotonic() - started < 5
+    assert out == _out(reviewed=3, edited=1, failed=2)
+    first, second, third = (_page(pid) for pid in ids.values())
+    assert first.status == "edited" and first.critic_score is None                  # вердикт есть, оценки нет
+    for refused in (second, third):
+        assert refused.status == "draft" and refused.critic_notes["model"] == [
+            "критик ответил не по форме — страницу читает человек"]
+
+
 def test_fenced_verdict_is_a_verdict(monkeypatch):
     site_id, ids = _site()
     _llm(monkeypatch, critic_default=f"```json\n{PASS}\n```")
@@ -660,7 +692,8 @@ def test_passing_page_that_is_not_a_render_of_its_blocks_is_left_to_the_human(mo
     assert p.critic_notes["note"] == "одобряет человек: текст правился вручную или написан старым способом"
     last = jobs.last("edit")
     assert last["status"] == "done"
-    assert "одобряет человек (текст правился вручную или написан старым способом): 1" in last["message"]
+    assert ("одобряет человек (текст правился вручную, написан старым способом, уже был отклонён критиком или "
+            "вычитан без правил письма): 1" in last["message"])
     assert publish.publish_site(site_id)["status"] == "no_edited_pages"
 
 
@@ -803,6 +836,251 @@ def test_mark_edited_expected_body_other_refusals():
     with pytest.raises(ValueError, match="не одобрена"):             # страницы нет — нет и строки под UPDATE
         content.mark_edited(999999, expected_body=_body(_doc()))
     assert _page(ids["/"]).status == "draft"
+
+
+# --- окончательный отказ критика кнопкой не снимается ---
+
+REFUSED_NOTE = "критик ранее отклонил этот текст — одобряет человек"
+
+
+def _refused_page(monkeypatch, *critic, **kw) -> tuple[int, int, list]:
+    """Страница, годная для авто-одобрения (тело — рендер blocks), которой критик окончательно отказал."""
+    site_id, ids = _site()
+    seen = _spy_mark_edited(monkeypatch)
+    _llm(monkeypatch, *critic, **kw)
+    out = content_critic.edit_site(site_id)
+    assert out["failed"] == 1 and out["edited"] == 0
+    return site_id, ids["/"], seen
+
+
+@pytest.mark.parametrize("how", ["rounds", "off_form"])
+def test_final_refusal_is_not_cleared_by_the_review_button(monkeypatch, how):
+    """Критик окончательно отказал тексту (круги исчерпаны / ответ не по форме). Кнопка «Вычитать» в
+    редакторе страницы может показать свежий вердикт «pass» — но авто-одобрения этот текст не получит:
+    иначе отказ снимался бы нажатием кнопки."""
+    if how == "rounds":
+        site_id, pid, seen = _refused_page(monkeypatch, critic_default=FAIL)        # три отказа, два круга
+        assert _page(pid).critic_notes["round"] == 2
+    else:
+        site_id, pid, seen = _refused_page(monkeypatch, "Публиковать нельзя.")
+    refused = _page(pid)
+    assert refused.critic_notes["refused_fp"] == content_critic.fingerprint(refused.title, refused.body)
+
+    calls = _llm(monkeypatch)                                        # теперь модель отвечает «pass»
+    for _ in range(2):                                               # кнопка — хоть сколько раз
+        assert content_critic.critique_page(pid)["pass"] is True     # свежий вердикт-подсказка виден
+    p = _page(pid)
+    assert p.critic_notes["pass"] is True and p.critic_notes["refused_fp"] == refused.critic_notes["refused_fp"]
+    for _ in range(2):
+        assert content_critic.edit_site(site_id) == _out(reviewed=1, manual=1)
+    p = _page(pid)
+    assert p.status == "draft" and seen == [] and p.body == refused.body
+    assert p.critic_notes["pass"] is True and p.critic_notes["note"] == REFUSED_NOTE
+    assert len(calls["critic"]) == 4 and not calls["writer"]
+    assert publish.publish_site(site_id)["status"] == "no_edited_pages"
+
+    # текст изменился (новый отпечаток) — прежний отказ к нему не относится
+    assert content.rewrite_page(pid, ["x"])["ok"] is True
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1)
+    assert _page(pid).status == "edited" and "refused_fp" not in _page(pid).critic_notes
+
+
+def test_refusal_marker_survives_a_revoked_approval(monkeypatch):
+    """Отозванное одобрение (страница изменилась под рукой и вернулась) отметку об отказе не стирает."""
+    site_id, pid, seen = _refused_page(monkeypatch, "Публиковать нельзя.")
+    marker = _page(pid).critic_notes["refused_fp"]
+    content_critic._revoke(pid, "страница изменилась во время вычитки — не одобрена")
+    notes = _page(pid).critic_notes
+    assert notes["refused_fp"] == marker and notes["pass"] is False
+
+
+def test_refusal_marker_follows_the_text_not_the_row(monkeypatch):
+    """Оператор поправил текст и вернул прежний: отказ относился к прежнему тексту — и снова к нему относится."""
+    site_id, pid, seen = _refused_page(monkeypatch, "Публиковать нельзя.")
+    original = _page(pid).body
+    _llm(monkeypatch)
+    _set(pid, body=OTHER_BODY)                                       # другой текст: отказ к нему не относится
+    assert content_critic.review_page(pid)["refused"] is False
+    _set(pid, body=original)
+    out = content_critic.review_page(pid)
+    assert out["pass"] is True and out["refused"] is True
+
+
+def test_negative_verdict_with_rounds_left_is_not_a_final_refusal(monkeypatch):
+    """Отказ, после которого страницу ещё можно переписать, — не окончательный: переписали, прошла, одобрена."""
+    site_id, ids = _site()
+    _llm(monkeypatch, FAIL, writer=["не JSON", "не JSON"])
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, failed=1)
+    assert "refused_fp" not in _page(ids["/"]).critic_notes
+    _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1, rewritten=1)
+
+
+@pytest.mark.parametrize("answer", [RuntimeError("шлюз"), ""])
+def test_no_verdict_is_not_a_final_refusal(monkeypatch, answer):
+    site_id, ids = _site()
+    _llm(monkeypatch, answer)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, failed=1)
+    assert "refused_fp" not in _page(ids["/"]).critic_notes
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1)
+
+
+# --- правила письма без выжимки: критик их не учитывал — сам не одобряет ---
+
+def _pending_rules(monkeypatch, *names) -> list:
+    """Подмена guides.load_guides: у критика нет ни одной выжимки, файлы `names` ждут сборки. -> журнал вызовов."""
+    from app.services import guides
+    calls = []
+
+    def load_guides(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"text": "", "files": [], "truncated": False, "pending": list(names)}
+
+    monkeypatch.setattr(guides, "load_guides", load_guides)
+    return calls
+
+
+@pytest.mark.parametrize("n, files, tail", [(17, "17 файлов", "критик их не учитывал"), (1, "1 файл", "критик его не учитывал"),
+                                            (3, "3 файла", "критик их не учитывал")])
+def test_undigested_rules_block_auto_approval(monkeypatch, n, files, tail):
+    """На боксе, где выжимку правил не собирали, критик читает страницы без единого правила оператора.
+    Вычитка идёт и вердикты пишутся, но сам он не одобряет ничего — и говорит об этом в сообщении задачи."""
+    site_id, ids = _site(paths=PATHS3)
+    seen = _spy_mark_edited(monkeypatch)
+    loads = _pending_rules(monkeypatch, *(f"rule{i}.md" for i in range(n)))
+    _llm(monkeypatch, PASS, PASS, FAIL, critic_default=FAIL, writer=["не JSON", "не JSON"])
+    out = content_critic.edit_site(site_id)
+    assert out == _out(reviewed=3, manual=2, failed=1)               # прошедшие — человеку, замечания — как всегда
+    assert seen == []
+    for path in ("/", "/vs"):
+        p = _page(ids[path])
+        assert p.status == "draft" and p.critic_notes["pass"] is True
+        assert p.critic_notes["note"] == f"правила письма не сжаты ({files}) — одобряет человек"
+    assert _page(ids["/setup"]).critic_notes["pass"] is False and "note" not in _page(ids["/setup"]).critic_notes
+    last = jobs.last("edit")
+    assert last["status"] == "done_warn"
+    assert f"правила письма: {files} без выжимки — {tail}" in last["message"]
+    assert len([c for c in loads if not c[0]]) == 1                  # состояние правил читается раз за прогон
+    assert publish.publish_site(site_id)["status"] == "no_edited_pages"
+
+
+def test_undigested_rules_warn_even_when_every_page_passed(monkeypatch):
+    site_id, ids = _site()
+    _pending_rules(monkeypatch, "style.md")
+    _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, manual=1)
+    assert jobs.last("edit")["status"] == "done_warn"
+
+
+def test_unreadable_rules_block_auto_approval(monkeypatch):
+    """Состояние правил не удалось узнать — это не «всё в порядке»: одобрения нет."""
+    from app.services import guides
+    site_id, ids = _site()
+    seen = _spy_mark_edited(monkeypatch)
+    real = guides.load_guides
+
+    def load_guides(*args, **kwargs):
+        if not args:                                                 # вызов из edit_site, не из вычитки
+            raise OSError("диск")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(guides, "load_guides", load_guides)
+    _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, manual=1)
+    assert seen == [] and _page(ids["/"]).status == "draft"
+    assert "правила письма не прочитаны" in _page(ids["/"]).critic_notes["note"]
+    assert "правила письма не прочитаны (OSError)" in jobs.last("edit")["message"]
+
+
+def test_digested_rules_do_not_block_approval(monkeypatch):
+    from app.services import guides
+    site_id, ids = _site()
+    monkeypatch.setattr(guides, "load_guides", lambda *a, **kw: {"text": "--- style.md ---\nПРАВИЛО", "files":
+                                                               ["style.md"], "truncated": False, "pending": []})
+    calls = _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1)
+    assert "ПРАВИЛО" in calls["critic"][0]["system"] and "правила письма" not in jobs.last("edit")["message"]
+    assert jobs.last("edit")["status"] == "done"
+
+
+# --- текст страницы заменён — статус «черновик» записан всегда ---
+
+def _approved_under(monkeypatch, name: str, pid: int) -> None:
+    """Между чтением строки и записью нового текста страницу одобряет другая сессия. `name` — функция
+    content.py, которая зовётся ровно в этом промежутке."""
+    real = getattr(content, name)
+
+    def hooked(page, *args, **kwargs):
+        if page.id == pid:
+            _set(pid, status="edited")
+        return real(page, *args, **kwargs)
+
+    monkeypatch.setattr(content, name, hooked)
+
+
+def _updates_of_pages(run) -> list[str]:
+    engine, seen = db.SessionLocal().get_bind(), []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("UPDATE PAGES"):
+            seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        run()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return seen
+
+
+@pytest.mark.parametrize("path", ["rewrite_page", "generate_rewrite"])
+def test_writer_always_writes_draft_with_the_new_text(monkeypatch, path):
+    """Писатель прочёл строку черновиком; пока он шёл к записи, её одобрили. Новый текст никто не читал —
+    строка обязана стать draft. Раньше ORM не видел перемены статуса («draft» -> «draft») и не включал его в
+    UPDATE: строка оставалась edited с непрочитанным текстом."""
+    site_id, ids = _site(paths=PATHS3)
+    before = _page(ids["/"]).body
+    _llm(monkeypatch)
+    _approved_under(monkeypatch, "_hand_edited", ids["/"])
+    if path == "rewrite_page":
+        sql = _updates_of_pages(lambda: content.rewrite_page(ids["/"], ["x"]))
+    else:
+        sql = _updates_of_pages(lambda: content.generate_site(site_id, rewrite=True))
+    p = _page(ids["/"])
+    assert p.body != before and "Вторая редакция текста." in p.body
+    assert p.status == "draft" and p.critic_notes is None
+    mine = [x for x in sql if "body" in x.lower().split("where")[0]]
+    assert mine and all("status" in x.lower().split("where")[0] for x in mine)
+    assert publish.publish_site(site_id)["status"] == "no_edited_pages"
+
+
+def test_save_draft_always_writes_draft(monkeypatch):
+    """То же в редакторе: «Сохранить черновик» прочёл строку черновиком, её тут же одобрили — сохранённая
+    правка всё равно черновик, и функция возвращает то, что лежит в строке."""
+    site_id, ids = _site()
+    _approved_under(monkeypatch, "_set_body", ids["/"])
+    out = {}
+    sql = _updates_of_pages(lambda: out.update(content.save_draft(ids["/"], OTHER_BODY)))
+    p = _page(ids["/"])
+    assert p.status == "draft" == out["status"] and p.body == OTHER_BODY and p.blocks_stale is True
+    mine = [x for x in sql if "body" in x.lower().split("where")[0]]             # без UPDATE самой «другой сессии»
+    assert mine and all("status" in x.lower().split("where")[0] for x in mine)
+
+
+def test_save_draft_writes_the_form_text_even_if_it_equals_the_loaded_one(monkeypatch):
+    """Форма несёт тот же текст, что был прочитан, а в строке к записи уже лежит другой: сохраняется текст
+    формы — тот, что видел оператор."""
+    site_id, ids = _site()
+    seen_by_operator = _page(ids["/"]).body
+    real = content._set_body
+
+    def hooked(page, new_body):
+        _set(ids["/"], body=OTHER_BODY)
+        return real(page, new_body)
+
+    monkeypatch.setattr(content, "_set_body", hooked)
+    content.save_draft(ids["/"], seen_by_operator)
+    assert _page(ids["/"]).body == seen_by_operator and _page(ids["/"]).status == "draft"
 
 
 # --- какие страницы трогаем ---

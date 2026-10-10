@@ -260,11 +260,16 @@ def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
     """Записать страницу писателя в строку Page (новую или переписываемую). Статус — всегда draft:
     переписанный текст никто не читал, прежние «вычитано»/«опубликовано» и оценка критика к нему не
     относятся. url_path, lang, offer_id, published_at и поля индексации не трогаем — это история строки."""
+    from sqlalchemy.orm.attributes import flag_modified
     page.title = doc.meta.title
     page.body = _sanitize(page_doc.render_blocks(doc, kind, lang))
     page.blocks = doc.model_dump()
     page.blocks_stale = False
     page.status = "draft"
+    # Статус пишется в строку ВСЕГДА, а не «если изменился»: загруженное значение могло быть draft, а в
+    # строке к мигу записи — уже edited (страницу одобрили, пока мы шли сюда). ORM перемены не увидел бы,
+    # не включил бы статус в UPDATE — и новый, никем не читанный текст остался бы «вычитанным».
+    flag_modified(page, "status")
     page.critic_score = page.critic_notes = page.critic_checked_at = None
 
 
@@ -545,7 +550,8 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
                     page = Page(site_id=site_id, url_path=spec["url_path"], lang=lang, offer_id=offer_id)
                     db.add(page)
                 else:
-                    page = db.get(Page, old.id)
+                    # строка — под блокировкой до коммита: чтение, проверки и запись неразрывны
+                    page = db.get(Page, old.id, with_for_update=True)
                     if page is None:
                         failed.append((spec["url_path"], "страница исчезла, пока модель писала"))
                         continue
@@ -585,7 +591,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
 
     `only_status` — переписать, только если страница в этом статусе и в начале, и в момент записи.
     Писатель работает минуты: без этого критик затёр бы новым текстом и разжаловал в draft страницу,
-    которую оператор за это время одобрил (или которая ушла на сайт). Запись идёт под блокировкой строки.
+    которую оператор за это время одобрил (или которая ушла на сайт). Запись всегда идёт под блокировкой
+    строки, и статус draft в ней пишется всегда (`_apply_doc`).
 
     Оффер и язык — те, под которые страница написана (Page.offer_id/lang, F26), тип — по её пути в
     scaffold(). Отказ (нет досье, ручная правка, провал писателя) страницу не меняет и возвращается
@@ -636,8 +643,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
     if err:
         return out(err)
     with SessionLocal() as db:
-        # only_status: строка — под блокировкой до коммита, проверка статуса и запись неразрывны
-        page = db.get(Page, page_id, with_for_update=only_status is not None)
+        # строка — под блокировкой до коммита: проверки (статус, ручная правка) и запись неразрывны
+        page = db.get(Page, page_id, with_for_update=True)
         if page is None:
             return out(f"страница #{page_id} исчезла, пока модель писала")
         if only_status is not None and page.status != only_status:
@@ -674,8 +681,10 @@ def save_draft(page_id: int, body: str) -> dict:
     from app.db import SessionLocal
     from app.models.site import Page
 
+    from sqlalchemy.orm.attributes import flag_modified
+
     with SessionLocal() as db:
-        p = db.get(Page, page_id)
+        p = db.get(Page, page_id, with_for_update=True)      # чтение и запись неразрывны
         if p is None:
             raise ValueError(f"page {page_id} not found")
         if p.status not in ("draft", "edited"):
@@ -683,8 +692,12 @@ def save_draft(page_id: int, body: str) -> dict:
                              "только черновик или вычитанную, ещё не опубликованную страницу")
         _set_body(p, _sanitize(body))
         p.status = "draft"
+        # и текст формы, и статус пишутся в строку всегда, а не «если изменились» (см. _apply_doc): иначе
+        # правка, сохранённая поверх только что одобренной страницы, осталась бы «вычитанной»
+        flag_modified(p, "body")
+        flag_modified(p, "status")
         db.commit()
-        return {"page_id": page_id, "status": p.status}
+    return {"page_id": page_id, "status": "draft"}
 
 
 def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | None = None) -> dict:

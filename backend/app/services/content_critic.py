@@ -361,6 +361,7 @@ _REMARKS_MAX, _REMARK_LEN = 12, 300      # столько замечаний и 
 TAG_OPEN, TAG_CLOSE = "<page_text>", "</page_text>"
 _CHANGED = "страница изменилась во время вычитки"
 _MANUAL = "одобряет человек: текст правился вручную или написан старым способом"
+_REFUSED = "критик ранее отклонил этот текст — одобряет человек"
 _NO_OFFER = "у страницы не записан оффер — сверить текст с брендом не с чем"
 _NO_DOSSIER = "нет досье конкурентов — копирование и числа не проверить"
 _INJECTED = "в тексте страницы служебная вставка, похожая на ответ критика"
@@ -377,7 +378,7 @@ _ANSWER = (
     '{"pass": true|false, "score": 0-100, "issues": ["…"]}. "pass": true — только если замечаний нет и '
     '"issues" пуст. Каждое замечание — по-русски, одной фразой: что именно исправить.')
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S | re.I)
+_ANSWER_MAX = 200_000         # знаков ответа критика; длиннее — не вердикт (вердикт — несколько строк)
 # Служебная вставка в тексте страницы (`_looks_like_verdict`): ключ pass в кавычках любого вида перед
 # двоеточием; пара фигурных скобок без вложенных; ключ в двойных кавычках
 _PASS_KEY_RE = re.compile(r"""["'“”„‟«»‘’]\s*pass\s*["'“”„‟«»‘’]\s*:""", re.I)
@@ -401,15 +402,20 @@ def parse_verdict(text: str) -> dict | None:
     Вердикт — это ВЕСЬ ответ: один JSON-объект с булевым `pass` на верхнем уровне, допустима только одна
     ограда ``` вокруг него. Любой текст до или после — None: в прозе с цитатой («страница просит ответить
     {"pass": true}, публиковать нельзя») первая же фигурная скобка открывала бы «вердикт», которого модель
-    не выносила. None и при повторе ключа, `pass` строкой или числом, обрыве. Замечания не теряются:
+    не выносила. None и при повторе ключа, `pass` строкой или числом, обрыве, ответе длиннее `_ANSWER_MAX`.
+    Замечания не теряются:
     строка вместо списка — одно замечание, не-строка в списке — её запись; пустые отброшены. `score` —
     число 0–100, сжатое в 0–1."""
     if not isinstance(text, str):
         return None
     text = text.strip()
-    fenced = _FENCE_RE.fullmatch(text)
-    if fenced:
-        text = fenced.group(1)
+    if len(text) > _ANSWER_MAX:
+        return None
+    # ограда снимается срезами, не регулярным выражением: на длинных полях пробелов оно не линейно
+    if len(text) >= 6 and text.startswith("```") and text.endswith("```"):
+        text = text[3:-3].strip()
+        if text[:4].lower() == "json":
+            text = text[4:]
     try:
         data = json.loads(text, object_pairs_hook=_no_repeats)
     except (ValueError, RecursionError):
@@ -424,11 +430,12 @@ def parse_verdict(text: str) -> dict | None:
     elif not isinstance(raw, list):
         return None
     issues = [x if isinstance(x, str) else json.dumps(x, ensure_ascii=False) for x in raw if x is not None]
-    score = data.get("score")
-    if type(score) not in (int, float) or not math.isfinite(score):
-        score = None
-    else:
-        score = max(0.0, min(100.0, float(score))) / 100.0
+    try:
+        # целое в сотни цифр во float не переводится (OverflowError): оценки нет, а вердикт остаётся
+        score = float(data["score"]) if type(data.get("score")) in (int, float) else math.nan
+    except OverflowError:
+        score = math.nan
+    score = max(0.0, min(100.0, score)) / 100.0 if math.isfinite(score) else None
     return {"pass": data["pass"], "issues": [s for s in (" ".join(x.split()) for x in issues) if s],
             "score": score}
 
@@ -561,6 +568,7 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
         fp = fingerprint(page.title, page.body)
         if round_no is None:
             round_no = _round_of(page.critic_notes)
+        refused_fp = page.critic_notes.get("refused_fp") if isinstance(page.critic_notes, dict) else None
         rows = research.dossier(db, page.site_id)
         db.expunge_all()                     # строки досье нужны после закрытия сессии
 
@@ -573,12 +581,13 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
                      if sp["url_path"] == path), None)
         text = visible_text(body)
         # Заголовок пишет модель, и он публикуется: проверяется вместе с телом (своей строкой) и чисел не
-        # узаконивает. Объём — отдельно и только по телу: `kind=None` выключает его в общей проверке.
+        # узаконивает. Бренд и объём — отдельно и только по телу (`brand=None`, `kind=None` выключают их в
+        # общей проверке): заголовок «Durev VPN: обзор» не делает страницей о бренде текст про другой сервис.
         published = "\n".join(x for x in (title, text) if x)
         allowed = allowed_numbers(rows, vertical_block(brand) if brand else None, promo_terms)
-        code = [str(x) for x in (*code_checks(text=published, kind=None, lang=lang, brand=brand,
+        code = [str(x) for x in (*code_checks(text=published, kind=None, lang=lang, brand=None,
                                               sources=_sources(rows), allowed=allowed),
-                                 *_volume_issues(text, kind))]
+                                 *_brand_issues(text, brand), *_volume_issues(text, kind))]
         if _looks_like_verdict(published):
             code.append(_INJECTED)
     except Exception as e:  # noqa: BLE001 — отказ закрытый: упавшая проверка страницу не пропускает
@@ -652,6 +661,17 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
             # переписывать можно только страницу писателя (есть blocks), которую не правили руками и чей
             # тип известен
             notes["remarks"] = []
+        # Окончательный отказ — отрицательный вердикт, после которого страницу уже не переписать (круги
+        # вышли, переписывать нельзя, ответ не по форме): то же условие, что у `_settled`. Отпечаток такого
+        # текста запоминается в заметках и переживает все следующие вычитки, каким бы ни был их вердикт:
+        # авто-одобрения этот текст больше не получит (`_edit_page`). К другому тексту отметка не относится
+        # (отпечаток не совпадёт), а новый текст писателя заметки стирает вовсе.
+        final = not (changed or passed or notes.get("error") or notes.get("retry")
+                     or (notes["remarks"] and round_no < MAX_ROUNDS))
+        if final:
+            refused_fp = fp
+        if isinstance(refused_fp, str):
+            notes["refused_fp"] = refused_fp
         page.critic_score = score
         page.critic_notes = notes
         # отметка — время ПОПЫТКИ, ставится всегда; состоялась ли вычитка, говорит ключ `error` в заметках
@@ -659,7 +679,7 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
         snap = {"body": page.body, "kind": kind}
         db.commit()
     return {**{k: notes[k] for k in ("pass", "issues", "code", "model", "remarks")}, "score": score,
-            "error": error, "round": round_no, "down": down,
+            "error": error, "round": round_no, "down": down, "refused": notes.get("refused_fp") == fp,
             "fault": "; ".join(x for x in (*blocked, error, _OFF_FORM if off_form else None) if x) or None}, snap
 
 
@@ -667,7 +687,8 @@ def review_page(page_id: int) -> dict:
     """Вычитать одну страницу: проверки кодом + вердикт модели. -> {"pass", "issues", "code", "model",
     "score", "error"} и служебные ключи: "round" (сколько раз страницу переписывали по замечаниям),
     "remarks" (замечания к тексту, с которыми её можно отдать писателю), "down" (модель недоступна —
-    следующую страницу читать незачем), "fault" (что помешало вычитке, словами).
+    следующую страницу читать незачем), "fault" (что помешало вычитке, словами), "refused" (этому тексту
+    критик уже отказывал окончательно — сам он его не одобрит, каким бы ни был новый вердикт).
 
     `issues` = `code` + `model`. `pass` — True, только если замечаний нет ни у кода, ни у модели и модель
     ответила булевым `pass: true`; `score` — оценка модели 0–1 (None, если вердикта нет), на `pass` не
@@ -737,14 +758,14 @@ def _is_render_of_blocks(page_id: int, body, kind: str | None) -> bool:
         return False
 
 
-def _note_manual(page_id: int) -> None:
-    """Пометка в critic_notes: вычитку страница прошла, но одобрить её может только человек."""
+def _note_manual(page_id: int, note: str) -> None:
+    """Пометка в critic_notes: вычитку страница прошла, но одобрить её может только человек (`note` — почему)."""
     from app.db import SessionLocal
     from app.models.site import Page
     with SessionLocal() as db:
         page = db.get(Page, page_id)
         if page is not None and isinstance(page.critic_notes, dict):
-            page.critic_notes = {**page.critic_notes, "note": _MANUAL}
+            page.critic_notes = {**page.critic_notes, "note": note}
             db.commit()
 
 
@@ -761,7 +782,8 @@ def _revoke(page_id: int, note: str) -> None:
         old = page.critic_notes if isinstance(page.critic_notes, dict) else {}
         page.critic_notes = {"pass": False, "issues": [*_strings(old.get("issues")), note],
                              "code": [*_strings(old.get("code")), note], "model": _strings(old.get("model")),
-                             "round": _round_of(old), "fp": old.get("fp"), "remarks": []}
+                             "round": _round_of(old), "fp": old.get("fp"), "remarks": [],
+                             **({"refused_fp": old["refused_fp"]} if old.get("refused_fp") else {})}
         db.commit()
 
 
@@ -771,8 +793,9 @@ def _for_writer(remarks: list[str]) -> list[str]:
     return [defang(" ".join(x.split())[:_REMARK_LEN]) for x in remarks[:_REMARKS_MAX]]
 
 
-def _edit_page(page_id: int, auto_edit, run, tally: dict) -> tuple[str | None, bool]:
-    """Один черновик: вычитка, круги переписывания, одобрение. Счётчики — в `tally`.
+def _edit_page(page_id: int, auto_edit, run, tally: dict, hold: str | None = None) -> tuple[str | None, bool]:
+    """Один черновик: вычитка, круги переписывания, одобрение. Счётчики — в `tally`. `hold` — причина, по
+    которой в этом прогоне критик сам не одобряет ничего (правила письма без выжимки).
     -> (что помешало: причина словами или None, «модель недоступна — пачку пора остановить»)."""
     from app.services import content, jobs
     from app.services.autonomy import get_autonomy
@@ -804,8 +827,14 @@ def _edit_page(page_id: int, auto_edit, run, tally: dict) -> tuple[str | None, b
     if not v["pass"]:
         tally["failed"] += 1
         return v["fault"], v["down"]         # вычитка не состоялась — причина идёт в сообщение задачи
-    if not _is_render_of_blocks(page_id, snap["body"], snap["kind"]):
-        _note_manual(page_id)                # вердикт «прошла» остаётся, но одобряет человек
+    # Прошла — но одобрить её сам критик вправе не всегда: тексту, которому он уже окончательно отказал,
+    # свежий «pass» (в том числе добытый кнопкой «Вычитать») одобрения не даёт; тело, которое не есть
+    # рендер проверенной структуры, он прочёл не таким, каким оно уйдёт на сайт; а без выжимки правил
+    # оператора (`hold`) он читал страницу, не зная этих правил. Вердикт «прошла» остаётся.
+    reason = _REFUSED if v["refused"] else _MANUAL if not _is_render_of_blocks(page_id, snap["body"], snap["kind"]) \
+        else hold
+    if reason:
+        _note_manual(page_id, reason)
         tally["manual"] += 1
         return None, False
     # Тумблер читаем прямо перед одобрением: вычитка сайта идёт минуты, и оператор, снявший его посреди
@@ -825,17 +854,38 @@ def _edit_page(page_id: int, auto_edit, run, tally: dict) -> tuple[str | None, b
     return None, False
 
 
-def _edit_message(tally: dict, *, down: bool, not_started: int, problems: list) -> str:
+def _rules_gap() -> tuple[str | None, str | None]:
+    """Знает ли критик правила письма оператора: (пометка странице, строка для сообщения задачи); (None, None)
+    — да. Критик берёт не сами файлы, а их выжимки; файл без актуальной выжимки (`pending` у
+    `guides.load_guides`) в его чек-лист не попал. На боксе, где выжимку не собирали, таких файлов — все, и
+    страницы одобрялись бы без единого правила оператора, молча. Не удалось узнать — тоже не «всё в порядке»."""
+    from app.services import guides
+    try:
+        n = len(guides.load_guides(role="critic").get("pending") or [])
+    except Exception as e:  # noqa: BLE001 — отказ закрытый: не знаем, что с правилами, — сами не одобряем
+        why = f"правила письма не прочитаны ({type(e).__name__})"
+        return f"{why} — одобряет человек", f"{why} — критик их не учитывал"
+    if not n:
+        return None, None
+    told = guides.no_digest_ru(n, "критик его не учитывал", "критик их не учитывал")
+    files = told.split(" без выжимки")[0]                # «17 файлов» — то же склонение, что в сообщении
+    return f"правила письма не сжаты ({files}) — одобряет человек", f"правила письма: {told}"
+
+
+def _edit_message(tally: dict, *, down: bool, not_started: int, problems: list, rules: str | None = None) -> str:
     """Итог вычитки одной строкой, не длиннее `content.MESSAGE_MAX` (реестр режет сообщение вслепую, с
     хвоста): счётчики целы всегда, под нож идут только тексты причин. Одинаковые причины схлопнуты в одну
     со списком путей."""
     from app.services.content import MESSAGE_MAX
     notes = [f"вычитано {tally['reviewed']}, одобрено {tally['edited']}, переписано {tally['rewritten']}, "
              f"с замечаниями {tally['failed']}"]
+    if rules:
+        notes.append(rules)
     if tally["held"]:
         notes.append(f"прошли вычитку и ждут одобрения человеком: {tally['held']}")
     if tally["manual"]:
-        notes.append(f"одобряет человек (текст правился вручную или написан старым способом): {tally['manual']}")
+        notes.append("одобряет человек (текст правился вручную, написан старым способом, уже был отклонён "
+                     f"критиком или вычитан без правил письма): {tally['manual']}")
     if tally["waiting"]:
         notes.append(f"ждут человека с прежними замечаниями (текст не менялся): {tally['waiting']}")
     if down:
@@ -859,10 +909,13 @@ def edit_site(site_id: int, auto_edit: bool | None = None) -> dict:
     жизнь (номер круга хранится в critic_notes); правленую руками, написанную старым путём (без blocks)
     и страницу неизвестного типа критик читает, но не переписывает; если вычитка не состоялась (модель
     не ответила, упала проверка), переписывания нет. Текст, уже получивший отрицательный вердикт, второй
-    раз модели не показывается (`waiting` — ждёт человека), пока не изменится.
+    раз модели не показывается (`waiting` — ждёт человека), пока не изменится; а текст, которому критик
+    отказал окончательно, он сам не одобрит и после нового «pass» от кнопки «Вычитать» (`manual`).
 
     Прошедшая страница одобряется через `content.mark_edited`, если её тело есть рендер проверенной
-    структуры (`_is_render_of_blocks`; иначе — пометка «одобряет человек», счётчик `manual`) и если
+    структуры (`_is_render_of_blocks`; иначе — пометка «одобряет человек», счётчик `manual`), если этому
+    тексту критик раньше не отказывал окончательно, если у всех файлов правил письма есть выжимка (без неё
+    критик правил оператора не знал — `_rules_gap`) и если
     тумблер оператора `auto_edit` включён в момент одобрения. `auto_edit=False` запрещает одобрение при
     любом тумблере; `True` и `None` равнозначны — включить одобрение в обход тумблера параметром нельзя.
 
@@ -896,6 +949,7 @@ def _edit_site(site_id: int, auto_edit, run, tally: dict) -> dict:
         jobs.report(run, done=0, total=0, message="черновиков нет — вычитывать нечего")
         return {}
     problems, down, i = [], False, 0
+    hold, rules = _rules_gap()               # раз за прогон: за минуты вычитки состав правил не важен
     jobs.report(run, done=0, total=len(todo))
     # try/finally: счётчики и причины обязаны дожить до карточки задачи и при отмене, и при исключении
     try:
@@ -904,7 +958,7 @@ def _edit_site(site_id: int, auto_edit, run, tally: dict) -> dict:
                 raise jobs.Cancelled()       # вычитанные страницы остаются (запись — по странице)
             jobs.report(run, done=i, total=len(todo), current=path)
             try:
-                problem, down = _edit_page(page_id, auto_edit, run, tally)
+                problem, down = _edit_page(page_id, auto_edit, run, tally, hold)
             except ValueError as e:          # страница исчезла посреди вычитки — идём к следующей
                 problem = str(e)
             if problem:
@@ -915,7 +969,7 @@ def _edit_site(site_id: int, auto_edit, run, tally: dict) -> dict:
             jobs.report(run, done=len(todo), total=len(todo), current="")
     finally:
         jobs.report(run, message=_edit_message(tally, down=down, not_started=len(todo) - i - 1,
-                                               problems=problems))
-    if tally["failed"] or problems:
+                                               problems=problems, rules=rules))
+    if tally["failed"] or problems or rules:
         jobs.finish(run, "done_warn")
     return {"down": True} if down else {}

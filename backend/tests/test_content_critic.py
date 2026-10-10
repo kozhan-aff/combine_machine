@@ -2,6 +2,7 @@
 Статус страницы критик не трогает никогда — это проверяют и здесь, и в test_critic_gate.py. LLM — только
 подмена LlmClient.complete."""
 import json
+import time
 
 import pytest
 
@@ -81,6 +82,31 @@ def test_parse_verdict_score_nan_and_missing_keys():
     assert parse_verdict('{"pass": false}') == {"pass": False, "score": None, "issues": []}
 
 
+def test_parse_verdict_score_never_raises():
+    """Оценка — что угодно: число в сотни цифр, огромная степень. Вердикт остаётся вердиктом, оценки нет."""
+    for raw in ("1" + "0" * 400, "-1" + "0" * 400, "1e999", "-1e999", "1" + "0" * 5000):
+        out = parse_verdict('{"pass": false, "score": ' + raw + ', "issues": ["вода"]}')
+        assert out is None or (out["pass"] is False and out["issues"] == ["вода"]), raw[:12]
+    assert parse_verdict('{"pass": true, "score": 1' + "0" * 400 + '}') == {"pass": True, "issues": [], "score": None}
+    assert parse_verdict('{"pass": true, "score": 1e999}')["score"] is None
+
+
+def test_parse_verdict_is_linear_on_whitespace_and_caps_the_answer():
+    obj = '{"pass": true, "score": 90, "issues": []}'
+    pad = " " * 500_000
+    started = time.monotonic()
+    for text in (f"```json{pad}{obj}{pad}```", f"{pad}```\n{obj}\n```{pad}", f"```{pad}json{pad}{obj}```",
+                 f"```json\n{obj}{pad}", f"{pad}{obj}{pad}", "```" + pad, pad + "```json" + pad + "```" + pad,
+                 "```" * 100_000, "```json" + "\n" * 500_000 + obj + "\n" * 500_000 + "```"):
+        parse_verdict(text)
+    assert time.monotonic() - started < 2
+    assert parse_verdict(f"```json{pad}{obj}{pad}```") is None            # ответ длиннее лимита — не вердикт
+    assert parse_verdict(f"{pad}```json\n{obj}\n```{pad}") == {"pass": True, "score": 0.9, "issues": []}
+    assert parse_verdict(" " * 5_000 + "```json" + " " * 5_000 + obj + " " * 5_000 + "```") == {
+        "pass": True, "score": 0.9, "issues": []}
+    assert parse_verdict('{"pass": false, "issues": ["' + "ы" * 250_000 + '"]}') is None
+
+
 def test_parse_verdict_keeps_every_remark():
     """Замечание не теряется, в каком бы виде модель его ни дала: строка вместо списка, объект в списке."""
     assert parse_verdict('{"pass": true, "issues": "вода во вступлении"}')["issues"] == ["вода во вступлении"]
@@ -141,7 +167,9 @@ def test_review_page_writes_fields_and_keeps_status(monkeypatch):
     assert p.critic_score == 0.6 and p.critic_checked_at is not None
     assert p.critic_notes == {"pass": False, "issues": ["маловато конкретики"], "code": [],
                               "model": ["маловато конкретики"], "round": 0, "remarks": [],
-                              "fp": content_critic.fingerprint(p.title, p.body)}
+                              "fp": content_critic.fingerprint(p.title, p.body),
+                              # страницу без blocks не переписать — этот отказ окончательный
+                              "refused_fp": content_critic.fingerprint(p.title, p.body)}
     assert p.status == "draft"                                       # ГЕЙТ НЕ ТРОНУТ
 
 
@@ -375,6 +403,16 @@ def test_review_page_copy_of_faq_answer_is_flagged(monkeypatch):
     pid = _seed_page(body=BODY + f"<p>{answer}.</p>", faq_answer=answer)
     out = content_critic.review_page(pid)
     assert out["pass"] is False and out["code"][0].startswith("копирование источника")
+
+
+def test_review_page_brand_is_looked_for_in_the_body(monkeypatch):
+    """Бренд в заголовке проверку бренда не закрывает: тело целиком про другой сервис."""
+    _llm(monkeypatch)
+    body = BODY.replace("NordVPN", "Durev VPN")
+    pid = _seed_page(body=body, title="NordVPN: обзор")
+    out = content_critic.review_page(pid)
+    assert out["pass"] is False and out["code"] == ["в тексте нет бренда NordVPN"]
+    assert content_critic.review_page(_seed_page(title="Обзор сервиса", domain="crit2.xyz"))["code"] == []
 
 
 def test_review_page_without_offer_never_passes(monkeypatch):
