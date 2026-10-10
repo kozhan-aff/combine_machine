@@ -646,7 +646,7 @@ def guide_digest_view(request: Request, name: str):
     if row is None:
         return _back("/guides", err=f"файла {name} нет")
     return templates.TemplateResponse(request, "guide_digest.html", {
-        "active": "guides", "g": row, "text": text, "roles": guides.ROLE_RU, "max": guides.DIGEST_MAX * 2})
+        "active": "guides", "g": row, "text": text, "roles": guides.ROLE_RU, "max": guides.current_cap() * 2})
 
 
 @router.post("/guides/digest/{name}")

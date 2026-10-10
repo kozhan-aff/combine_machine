@@ -185,6 +185,12 @@ def test_digest_page_shows_and_saves_the_text(client, gdir, monkeypatch):
     assert r.status_code == 303 and r.headers["location"].startswith(url + "?msg=")
     assert guides.read_digest("10-стиль.md") == "- пиши коротко\n- без штампов" and _row("10-стиль.md")["edited"]
     assert "Текст правлен тобой" in client.get(url).text
+    assert 'maxlength="32000"' in client.get(url).text               # файл один: потолок 16 000, руками — вдвое
+    r = client.post(url, data={"text": "д" * 40_000}, follow_redirects=False)
+    assert "32000" in unquote(r.headers["location"]) and len(guides.read_digest("10-стиль.md")) == 32_000
+    for i in range(16):                                              # 17 файлов — прежние 3500 и 7000
+        (gdir / f"z{i:02d}.md").write_text("короткое правило", encoding="utf-8")
+    assert 'maxlength="7000"' in client.get(url).text
     r = client.post(url, data={"text": "д" * 9000}, follow_redirects=False)
     assert "7000" in unquote(r.headers["location"]) and len(guides.read_digest("10-стиль.md")) == 7000
     r = client.post(url, data={"text": ""}, follow_redirects=False)   # пусто — вернуть файл машине
@@ -279,13 +285,13 @@ def test_failed_rebuild_is_told_in_the_row_title_and_digest_stays(client, gdir, 
 
 def test_cut_note_is_in_the_row_title_even_with_an_operator_role(client, gdir, monkeypatch):
     (gdir / "a.md").write_text(BIG, encoding="utf-8")
-    _llm(monkeypatch, _answer("writer", ("- " + "х" * 98 + "\n") * 60))
+    _llm(monkeypatch, _answer("writer", ("- " + "х" * 98 + "\n") * 200))   # 20 200 симв. при потолке 16 000
     guides.build_digests()
     guides.set_role("a.md", "critic")
     html = client.get("/guides").text
     assert 'title="выбрано тобой — при сжатии не меняется"' in html
-    assert 'title="посмотреть и поправить выжимку · выжимка обрезана до 3500 символов"' in html
-    assert "При сжатии: выжимка обрезана до 3500 символов." in client.get("/guides/digest/a.md").text
+    assert 'title="посмотреть и поправить выжимку · выжимка обрезана до 16000 символов"' in html
+    assert "При сжатии: выжимка обрезана до 16000 символов." in client.get("/guides/digest/a.md").text
 
 
 def test_write_failure_is_a_flash_error_not_a_500(client, gdir):

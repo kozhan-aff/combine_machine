@@ -75,7 +75,7 @@ def test_big_file_is_one_model_call_and_lands_in_index_and_on_disk(gdir, monkeyp
                                                      "каталог ошибок") + "\n```")
     assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
     assert len(calls) == 1 and calls[0]["model"] == "writer-m" and calls[0]["timeout"] == 600
-    assert "НИША-ДЛЯ-ТЕСТА" in calls[0]["system"] and str(guides.DIGEST_MAX) in calls[0]["system"]
+    assert "НИША-ДЛЯ-ТЕСТА" in calls[0]["system"] and "не длиннее 16000 символов" in calls[0]["system"]
     assert "<rules_file>" in calls[0]["prompt"] and "правило стиля" in calls[0]["prompt"]
     entry = _index(gdir)["20-стиль.md"]
     assert entry["role"] == "critic" and entry["role_by"] == "auto" and entry["why"] == "каталог ошибок"
@@ -232,14 +232,100 @@ def test_second_build_at_once_is_refused(gdir):
             guides.build_digests()
 
 
+def _crowd(gdir, n: int) -> None:
+    """Ещё `n` коротких файлов в папке: бюджет роли делится на всех, потолок выжимки падает."""
+    for i in range(n):
+        (gdir / f"z{i:02d}.md").write_text(f"короткое правило {i}", encoding="utf-8")
+
+
 def test_long_digest_is_cut_at_a_line_boundary(gdir, monkeypatch):
     (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    _crowd(gdir, 16)                                               # 17 файлов — потолок 3500, как и был
     line = "- " + "х" * 98 + "\n"
-    _llm(monkeypatch, _answer(digest=line * 60))                    # 6060 символов
+    calls = _llm(monkeypatch, _answer(digest=line * 60))            # 6060 символов
     guides.build_digests()
     digest = guides.read_digest("a.md")
     assert len(digest) <= guides.DIGEST_MAX and digest == (line * 34).strip()
     assert _row("a.md")["note"] == "выжимка обрезана до 3500 символов"
+    assert "маркированный список на языке исходника, не длиннее 3500 символов" in calls[0]["system"]
+    assert "разделы" not in calls[0]["system"]                      # просьба сохранить разделы — только при щедром потолке
+
+
+# --- потолок выжимки растёт, когда файлов мало ---
+
+def test_digest_cap_by_the_number_of_files():
+    assert [guides.digest_cap(n) for n in (1, 2, 3, 8, 17, 0)] == [16_000, 15_000, 10_000, 3_750, 3_500, 16_000]
+    assert guides.digest_cap(4) == 7_500 and guides.digest_cap(9) == 3_500 and guides.digest_cap(500) == 3_500
+
+
+def test_single_file_keeps_a_long_digest_whole(gdir, monkeypatch):
+    """Один сводный файл оператора: при свободных 40 000 на роль его незачем ужимать до 3500."""
+    (gdir / "kratko.md").write_text(BIG * 5, encoding="utf-8")       # 30 000 символов
+    long_digest = ("## Стиль\n" + "- " + "х" * 97 + "\n") * 112     # 12 208 символов, с заголовками
+    calls = _llm(monkeypatch, _answer("both", long_digest, "сводный файл"))
+    assert guides.current_cap() == 16_000
+    assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
+    system = calls[0]["system"]
+    assert "не длиннее 16000 символов" in system and "3500" not in system
+    assert "разделы" in system and "КАЖДОЕ конкретное требование, порог и запрет" in system
+    assert "сжимай формулировки, а не перечень правил" in system and "Процедуры агента" in system
+    assert "сводный файл правил" in system                           # смешанный файл — роль both
+    row = _row("kratko.md")
+    assert 12_000 < row["digest_chars"] == len(long_digest.strip()) and row["note"] == "" and row["role"] == "both"
+    assert guides.read_digest("kratko.md") == long_digest.strip()
+    for role in ("writer", "critic"):                                # и целиком уходит обоим
+        r = guides.load_guides(role=role)
+        assert r["files"] == ["kratko.md"] and r["cut"] == [] and long_digest.strip() in r["text"]
+
+
+def test_single_file_digest_over_the_generous_cap_is_still_cut(gdir, monkeypatch):
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    line = "- " + "х" * 98 + "\n"
+    _llm(monkeypatch, _answer(digest=line * 200))                   # 20 200 символов
+    guides.build_digests()
+    assert guides.read_digest("a.md") == (line * 158).strip()       # 158 строк по 101 — последняя целая до 16 000
+    assert _row("a.md")["note"] == "выжимка обрезана до 16000 символов"
+
+
+def test_files_excluded_by_operator_do_not_share_the_budget(gdir, monkeypatch):
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    _crowd(gdir, 16)
+    assert guides.current_cap() == 3_500
+    for i in range(15):
+        guides.set_role(f"z{i:02d}.md", "skip")
+    assert guides.current_cap() == 15_000                           # в счёте — a.md и z15.md
+    guides.set_role("z15.md", "skip")
+    calls = _llm(monkeypatch, _answer(digest="- " + "х" * 12_000))
+    guides.build_digests()
+    assert "не длиннее 16000 символов" in calls[0]["system"] and _row("a.md")["digest_chars"] == 12_002
+    guides.set_role("a.md", "skip")                                 # исключено всё — делить не с кем, деления на ноль нет
+    assert guides.current_cap() == 16_000
+
+
+def test_cap_is_counted_once_per_job_not_per_file(gdir, monkeypatch):
+    """Файлы, добавленные или исключённые посреди прогона, потолок идущей задачи не меняют."""
+    for name in ("a.md", "b.md"):
+        (gdir / name).write_text(BIG + name, encoding="utf-8")
+    calls = _llm(monkeypatch, _answer(digest="- " + "х" * 14_000), _answer(digest="- " + "х" * 14_000),
+                 during=lambda n: _crowd(gdir, 16))
+    guides.build_digests()
+    assert _row("a.md")["digest_chars"] == _row("b.md")["digest_chars"] == 14_002    # потолок 15 000 на обоих
+    assert _row("a.md")["note"] == _row("b.md")["note"] == ""
+    assert len(calls) == 2
+
+
+def test_a_new_cap_alone_does_not_invalidate_digests(gdir, monkeypatch):
+    """Потолок сменился (файлов стало больше или меньше) — готовые выжимки действуют: решает хеш исходника.
+    Новый потолок применяет «все файлы заново»."""
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    calls = _llm(monkeypatch, _answer(digest="- " + "х" * 12_000), _answer(digest="- " + "х" * 12_000))
+    guides.build_digests()
+    _crowd(gdir, 16)                                               # потолок упал с 16 000 до 3500
+    assert guides.build_digests() == {"built": 16, "skipped": 1, "failed": 0} and len(calls) == 1
+    assert _row("a.md")["state"] == "ok" and _row("a.md")["digest_chars"] == 12_002
+    guides.build_digests(force=True)
+    assert len(calls) == 2 and "не длиннее 3500 символов" in calls[1]["system"]
+    assert _row("a.md")["digest_chars"] == 3_500 and "обрезана до 3500" in _row("a.md")["note"]
 
 
 def test_long_source_is_cut_and_says_so(gdir, monkeypatch):
@@ -386,8 +472,15 @@ def test_save_digest_marks_edited_and_caps_the_length(gdir):
     row = _row("a.md")
     assert (row["state"], row["edited"], row["role"], row["role_by"]) == ("ok", True, "both", "auto")
     assert guides.read_digest("a.md") == "- строка\n- вторая"
+    guides.save_digest("a.md", "д" * 9000)                                           # файл один — потолок щедрый
+    assert len(guides.read_digest("a.md")) == 9000
+    guides.save_digest("a.md", "д" * 40_000)
+    assert len(guides.read_digest("a.md")) == guides.current_cap() * 2 == 32_000
+    _crowd(gdir, 16)                                                                 # 17 файлов — прежние 7000
     guides.save_digest("a.md", "д" * 9000)
-    assert len(guides.read_digest("a.md")) == guides.DIGEST_MAX * 2
+    assert len(guides.read_digest("a.md")) == guides.DIGEST_MAX * 2 == 7000
+    for i in range(16):
+        guides.delete_guide(f"z{i:02d}.md")
     guides.save_digest("a.md", "  ")                                                 # пусто — вернуть машине
     row = _row("a.md")
     assert (row["state"], row["edited"], row["digest_chars"]) == ("pending", False, None)
