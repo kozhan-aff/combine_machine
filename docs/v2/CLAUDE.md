@@ -330,6 +330,13 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 (`Connect call failed ('192.168.65.254', 11434)`). Это значит Ollama на Windows слушает только 127.0.0.1: нужно задать
 системную переменную `OLLAMA_HOST=0.0.0.0` и перезапустить Ollama, затем `LLM_MODEL`/`LLM_CLASSIFY_MODEL=ollama/<модель>`
 на `/settings/keys`. SearXNG — 0 результатов (движки suspended/CAPTCHA). NameSilo/Ahrefs/Web Risk — ключей нет.
+**LLM починен 2026-10-10 (по SSH как `Sereja0210@192.168.1.77`, ключ Mac принят):** Ollama на боксе был установлен, но
+НЕ запущен, а модели лежат в `D:\ollama` (не в `%USERPROFILE%\.ollama`). Сделано: `setx OLLAMA_MODELS D:\ollama`
+(user-scope, `OLLAMA_HOST=0.0.0.0:11434` уже стоял), запущен `ollama serve` фоном; LiteLLM `:4000` → `ollama/qwen3.5:9b-q8_0`
+отвечает (холодный старт ~50 с, тёплый ~4.5 с на 900 символов, `think:false`). На `/settings/keys` выставлены
+`LLM_MODEL` и `LLM_CLASSIFY_MODEL` = `ollama/qwen3.5:9b-q8_0`, `LLM_THINK=false`. После перезагрузки бокса Ollama должен
+стартовать сам (приложение в автозагрузке); если `/diag` снова покажет «Cannot connect … 11434» — запустить
+`ollama serve` или приложение Ollama. Сервис `backup` на боксе уже поднят оператором (первый дамп снят 2026-10-10 13:29 UTC).
 **На боксе есть второй LLM-шлюз `:3033`** (`claude-code-server` v10, OpenAI-совместимый: `/v1/models`, `/v1/chat/completions`;
 модели `sonnet`/`opus`/`haiku` через `claude --print` по подписке Max, `mistral*` и `ollama/*` через LiteLLM `:4000`, с цепочкой
 фолбэков sonnet→mistral→ollama). Проба 2026-10-10 с Mac: шлюз отвечает, но ВСЕ апстримы мертвы — `claude --print` падает
