@@ -461,3 +461,18 @@ def test_sanitize_strips_event_handlers_and_keeps_local_svg_only():
     assert "<script" not in out and "style=" not in out and "dofollow" not in out
     assert 'href="https://ok.com"' in out and "sponsored nofollow noopener" in out
     assert '<img src="/assets/a.svg"' in out
+
+
+def test_render_html_drops_leading_heading_duplicate_of_hero():
+    """Шапку <h1> рисует site_builder из title; ведущий заголовок тела (LLM повторяет title как h1 или
+    h2 с хвостом) снимается, остальные h2 остаются — живой дефект tunnelnotes.xyz 2026-10-10."""
+    from app.services import content, site_builder as sb
+    from types import SimpleNamespace as NS
+    ctx = sb.make_ctx("ex.com", [], "ru")
+    page = NS(title="Обзор X", body="<h2>Обзор X: честно</h2><p>текст</p><h2>Раздел</h2>", url_path="/")
+    doc = content.render_html(page, None, lang="ru", ctx=ctx)
+    assert "Обзор X: честно" not in doc and "<h2>Раздел</h2>" in doc and doc.count("<h1>") == 1
+    page = NS(title="Обзор X", body="<h1>Совсем другое</h1><p>текст</p>", url_path="/")
+    assert "Совсем другое" not in content.render_html(page, None, lang="ru", ctx=ctx)   # h1 тела — всегда лишний
+    page = NS(title="Обзор X", body="<h2>Как мы тестировали</h2><p>текст</p>", url_path="/")
+    assert "<h2>Как мы тестировали</h2>" in content.render_html(page, None, lang="ru", ctx=ctx)   # свой h2 остаётся

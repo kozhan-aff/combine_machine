@@ -358,7 +358,13 @@ Provision: зона CF → `changeNameServers` NameSilo живьём ОК → р
 origin проверен, SSL flexible (HTTPS на origin нет). Universal SSL Cloudflare выпустился ~30 мин после активации — до этого
 HTTPS 000 и publish-проверка не прошла бы. Токен CF НЕ читает `ssl/universal/settings` (403 9109) — статус SSL смотрим
 снаружи `curl`. Генерация 3 страниц на sonnet ≈ 3.5 мин, по ~700 слов. Автопилот выключен: Provision/Generate жали руками.
-Дальше: редактура (человек) → Publish → Check-index.
+Оператор одобрил 3 страницы и нажал Publish: `https://tunnelnotes.xyz/`, `/vs/`, `/setup/` отдают 200 через Cloudflare
+(aaPanel CreateFile/SaveFileBody живьём ОК, build-id сверен), nav/disclosure/sponsored-ссылка на месте. Check-index: SearXNG
+молчит (капча) — «не знаю». `INDEXNOW_SECRET` задан на `/settings/keys` (пинг пойдёт со следующей публикации; этот сайт
+без ключ-файла, пока страницы не пройдут редактуру заново). Найдено на живом: LLM повторяет заголовок первым h2/h1 тела
+(«заголовок дважды») — `render_html` теперь снимает ведущий дубликат; живой сайт обновится только после повторного
+edited→Publish. Cloudflare подмешивает beacon.min.js (Web Analytics) — выключить на зоне, если важен footprint.
+**MVP-критерий «сайт поднят системой, отредактирован, опубликован» — выполнен 2026-10-10; «в индексе» — ждём.**
 
 **Комбайн переведён на шлюз `:3033` (2026-10-10, после `claude login` оператора в контейнере):** `LLM_BASE_URL=
 http://192.168.1.77:3033`, `LLM_MODEL=sonnet` (контент), `LLM_CLASSIFY_MODEL=haiku` (W5, JSON чистый, ~3.5 с),

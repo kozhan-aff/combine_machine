@@ -383,7 +383,17 @@ def render_html(page, offer=None, lang: str = "en", reserve_url: str | None = No
         offer_block = (f'<aside class="{k("off")}"><p class="{k("disc")}">{disc}</p>'
                        f'<p><a href="{html.escape(link)}" rel="sponsored nofollow noopener">'
                        f'{cta}</a>.{promo}</p></aside>')
-    body = _sanitize(page.body)
+    # шапку <h1> рисует site_builder из page.title, а LLM кладёт заголовок первым и в тело — на живом
+    # сайте (tunnelnotes.xyz, 2026-10-10) он стоял дважды. Снимаем ведущий h1 (любой) или h2, если тот
+    # начинается с текста заголовка; делаем ДО санитайзера — он h1 не пропускает и оставил бы голый текст.
+    raw = page.body or ""
+    m = re.match(r"\s*<(h[12])\b[^>]*>(.*?)</\1>\s*", raw, flags=re.S | re.I)
+    if m:
+        norm = lambda x: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", x)).strip().lower()  # noqa: E731
+        ttl = norm(page.title or "")
+        if m.group(1).lower() == "h1" or (ttl and norm(m.group(2)).startswith(ttl)):
+            raw = raw[m.end():]
+    body = _sanitize(raw)
     # и над текстом: ссылки (CTA или партнёрские в теле) видны раньше, чем читатель дойдёт до низа
     top = f'<p class="{k("disc")}">{disc}</p>' if (link or "<a " in body) else ""
     return sb.render_document(
