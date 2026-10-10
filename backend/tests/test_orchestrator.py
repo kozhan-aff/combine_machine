@@ -815,3 +815,68 @@ def test_real_critic_is_not_called_at_all_while_the_toggle_is_off(model, monkeyp
     approved = _spy_mark_edited(monkeypatch)
     assert orch._stage_edit(5) == (0, [], {})
     assert model["calls"] == 0 and approved == [] and _row(pa).critic_checked_at is None
+
+
+# --- свип перечитывает тумблеры перед каждой стадией ---
+
+def _sweep_fixture(monkeypatch, during_generate) -> list:
+    """Свип из двух стадий — генерация и публикация. `during_generate()` выполняется «пока идёт» генерация;
+    -> список сайтов, которые дошли до publish_site."""
+    monkeypatch.setattr("app.services.content.generate_site", lambda site_id, **kw: during_generate() or 3)
+    published = []
+    monkeypatch.setattr("app.services.publish.publish_site", lambda sid: published.append(sid) or {})
+    _dossier(_content_site())                              # сайт под генерацию
+    for name in ("p1.ru", "p2.ru"):                        # два живых сайта с одобренной страницей — под публикацию
+        _draft(_site_in("published", name), status="edited")
+    return published
+
+
+def _chips(name: str = "sweep") -> dict:
+    from app.services import jobs
+    return {s["key"]: s["state"] for s in jobs.last(name)["stages"]}
+
+
+def test_sweep_skips_a_stage_switched_off_while_the_previous_one_ran(monkeypatch):
+    """Свип идёт часы: «публикацию» сняли, пока шла генерация, — publish_site звать уже нельзя."""
+    from app.services import jobs
+    published = _sweep_fixture(monkeypatch, lambda: autonomy.update_autonomy(auto_publish=False))
+    _enable(auto_generate=True, auto_publish=True)
+    out = orch.run_sweep(trigger="cron")
+    assert published == [] and out["counts"] == {"generate": 1} and out["status"] == "done"
+    chips = _chips()
+    assert chips["generate"] == "done" and chips["publish"] == "skip"      # как выключенная с самого начала
+    assert chips["score"] == "skip"
+    assert "выключены по ходу: публикация" in jobs.last("sweep")["message"]
+
+
+def test_sweep_takes_caps_from_the_fresh_read(monkeypatch):
+    published = _sweep_fixture(monkeypatch, lambda: autonomy.update_autonomy(cap_publish=1))
+    autonomy.update_autonomy(cap_publish=5)
+    _enable(auto_generate=True, auto_publish=True)
+    out = orch.run_sweep(trigger="cron")
+    assert len(published) == 1 and out["counts"]["publish"] == 1
+
+
+def test_scheduled_sweep_stops_when_master_is_switched_off_midway(monkeypatch):
+    from app.services import jobs
+    published = _sweep_fixture(monkeypatch, lambda: autonomy.update_autonomy(autopilot_on=False))
+    checked = []
+    monkeypatch.setattr("app.services.publish.check_index", lambda sid, only_due=False: checked.append(sid) or {})
+    _enable(auto_generate=True, auto_publish=True, auto_check_index=True)
+    out = orch.run_sweep(trigger="cron", respect_master=True)
+    assert published == [] and checked == [] and out["counts"] == {"generate": 1}
+    assert out["status"] == "done" and out["errors"] == []                # прогон закрыт штатно
+    chips = _chips()
+    assert (chips["generate"], chips["publish"], chips["check_index"]) == ("done", "skip", "skip")
+    assert jobs.last("sweep")["status"] == "done"
+    with db.SessionLocal() as s:
+        assert s.get(AutonomyRun, out["run_id"]).status == "done"
+
+
+def test_manual_sweep_ignores_master_switched_off_midway(monkeypatch):
+    """Кнопка «Прогнать сейчас» мастер не слушает — ни на старте, ни по ходу; тумблеры стадий слушает."""
+    published = _sweep_fixture(monkeypatch, lambda: autonomy.update_autonomy(autopilot_on=False))
+    _enable(auto_generate=True, auto_publish=True)
+    out = orch.run_sweep(trigger="manual", respect_master=False)
+    assert len(published) == 2 and out["counts"] == {"generate": 1, "publish": 2}
+    assert _chips()["publish"] == "done"

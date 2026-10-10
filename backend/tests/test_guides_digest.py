@@ -155,7 +155,7 @@ def test_file_excluded_by_operator_is_not_sent_to_the_model(gdir, monkeypatch):
     guides.set_role("a.md", "skip")
     calls = _llm(monkeypatch)
     assert guides.build_digests() == {"built": 0, "skipped": 1, "failed": 0} and calls == []
-    assert guides.load_guides(role="writer") == {"text": "", "files": [], "truncated": False, "pending": [], "cut": []}
+    assert guides.load_guides(role="writer") == {"text": "", "files": [], "truncated": False, "pending": [], "cut": [], "missing": False}
     guides.set_role("a.md", "writer")                              # передумал — файл снова ждёт выжимки
     assert guides.load_guides(role="writer")["pending"] == ["a.md"]
 
@@ -186,7 +186,7 @@ def test_skip_role_may_have_an_empty_digest(gdir, monkeypatch):
     assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
     assert (_row("a.md")["role"], _row("a.md")["state"], _row("a.md")["digest_chars"]) == ("skip", "ok", 0)
     assert guides.load_guides(role="writer") == guides.load_guides(role="critic") == \
-        {"text": "", "files": [], "truncated": False, "pending": [], "cut": []}
+        {"text": "", "files": [], "truncated": False, "pending": [], "cut": [], "missing": False}
     guides.set_role("a.md", "writer")                              # оператор не согласен, а выжимки нет
     assert _row("a.md")["state"] == "pending"
     calls = _llm(monkeypatch, _answer("skip", "", "процедуры агента"))
@@ -546,6 +546,89 @@ def test_file_vanishing_between_listing_and_reading_does_not_crash(gdir, monkeyp
     monkeypatch.setattr(guides, "_files", lambda: listed)
     assert guides.load_guides(role="writer")["files"] == ["b.md"]
     assert [g["rel"] for g in guides.status()] == ["b.md"]
+
+
+# --- честное состояние папки (финальная волна, Y3) ---
+
+def test_missing_folder_is_told_apart_from_an_empty_one(gdir, monkeypatch):
+    """«Папки нет» (том не подключён к контейнеру) и «папка пуста» — разные состояния: первое значит, что
+    процесс правил не видит вовсе, и одобрять по «пустым правилам» нельзя."""
+    for role in ("writer", "critic", None):
+        assert guides.load_guides(role=role)["missing"] is False          # папка есть, файлов нет
+    assert guides.folder_missing() is False
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(gdir / "не-подключена"))
+    for role in ("writer", "critic", None):
+        r = guides.load_guides(role=role)
+        assert r == {"text": "", "files": [], "truncated": False, "pending": [], "cut": [], "missing": True}
+    assert guides.folder_missing() is True and guides.status() == []
+
+
+def test_folder_path_that_is_a_file_counts_as_missing(gdir, monkeypatch):
+    (gdir / "файл-а-не-папка").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(gdir / "файл-а-не-папка"))
+    assert guides.load_guides(role="critic")["missing"] is True
+
+
+def _unreadable(monkeypatch, *names):
+    """Чтение этих файлов (по имени) падает OSError — права, сбой тома; остальные читаются как обычно."""
+    from pathlib import Path
+    for method in ("read_bytes", "read_text"):
+        real = getattr(Path, method)
+
+        def guarded(self, *a, _real=real, **kw):
+            if self.name in names:
+                raise PermissionError(13, "Permission denied", str(self))
+            return _real(self, *a, **kw)
+
+        monkeypatch.setattr(Path, method, guarded)
+
+
+def test_unreadable_source_is_pending_not_silently_skipped(gdir, monkeypatch):
+    _roles(gdir, monkeypatch, a="writer", b="both")
+    _unreadable(monkeypatch, "a.md")
+    for role in ("writer", "critic"):
+        r = guides.load_guides(role=role)
+        assert r["pending"] == ["a.md"] and r["files"] == ["b.md"] and "ВЫЖИМКА-a" not in r["text"]
+    raw = guides.load_guides()                                             # прежний путь без роли — так же
+    assert raw["pending"] == ["a.md"] and raw["files"] == ["b.md"] and raw["cut"] == [] and raw["missing"] is False
+
+
+def test_unreadable_digest_is_pending(gdir, monkeypatch):
+    """Исходник читается, а файл выжимки — нет: в задание нечего положить, и это видно в `pending`."""
+    _roles(gdir, monkeypatch, a="writer", b="both")
+    real = guides._digest_path
+    assert real("a.md").is_file()
+    from pathlib import Path
+    real_read = Path.read_text
+
+    def guarded(self, *a, **kw):
+        if self == real("a.md"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+    r = guides.load_guides(role="writer")
+    assert r["pending"] == ["a.md"] and r["files"] == ["b.md"]
+
+
+# --- ответ модели с настоящими переводами строк (Y4) ---
+
+def test_digest_with_raw_newlines_inside_the_json_string_is_accepted(gdir, monkeypatch):
+    """Выжимка — многострочный список, и модель ставит в JSON-строку настоящие переводы строк и табуляции.
+    Строгий разбор отвергал такой ответ целиком — файл оставался «с ошибкой»."""
+    digest = "- пиши коротко\n\t- без воды\n- цифры — только из источника"
+    raw = '{"role": "writer", "why": "стиль",\n "digest": "' + digest + '"}'
+    with pytest.raises(ValueError):
+        json.loads(raw)                                                    # строгий разбор такое не берёт
+    assert guides._parse_answer(raw) == {"role": "writer", "why": "стиль", "digest": digest, "cut": False}
+    assert guides._parse_answer(f"```json\n{raw}\n```")["digest"] == digest
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    _llm(monkeypatch, raw)
+    assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
+    assert guides.read_digest("a.md") == digest and _row("a.md")["state"] == "ok"   # переводы строк на месте
+    for bad in (raw + "\nГотово.", raw + raw, "[" + raw + "]"):           # остальная строгость на месте
+        with pytest.raises(ValueError):
+            guides._parse_answer(bad)
 
 
 def test_junk_role_in_the_index_means_no_role(gdir):

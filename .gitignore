@@ -27,3 +27,6 @@ AGENTS.md
 
 # общая папка досье/скриншотов со шлюзом (bind в compose, локально на Mac)
 /research_data/
+
+# выжимки правил письма — их строит машина рядом с файлами оператора (services/guides.py)
+content_guides/.digest/

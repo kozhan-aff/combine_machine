@@ -385,7 +385,21 @@ def test_card_says_you_approve_only_while_the_page_is_a_draft(client):
     for path in ("/", "/vs"):
         assert ">прошла</td>" in rows[path]
         assert "одобряешь ты" not in rows[path] and "остаётся черновиком" not in rows[path] and note not in rows[path]
-    assert ">устарел</td>" in rows["/setup"] and "одобряешь ты" not in rows["/setup"]
+    # человек одобрил свою правку: прежний вердикт к этому тексту не относится, а совет «вычитай заново»
+    # одобренной странице ни к чему — прочерк
+    assert rows["/setup"] == '<td><span class="hint">—</span></td>'
+
+
+def test_card_stale_verdict_advice_is_only_for_a_draft(client):
+    """«Устарел — вычитай заново» — про черновик. У одобренной и опубликованной страницы с вердиктом к
+    прежнему тексту в колонке прочерк."""
+    sid = _site()
+    for path, status in (("/", "draft"), ("/vs", "edited"), ("/setup", "published")):
+        _page(sid, path, status=status, critic_checked_at=NOW, critic_notes={"pass": True, "issues": []})  # без отпечатка
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    assert ">устарел</td>" in rows["/"] and "вычитай заново" in rows["/"]
+    for path in ("/vs", "/setup"):
+        assert rows[path] == '<td><span class="hint">—</span></td>'
 
 
 # --- редактор страницы: кнопка «Вычитать» и значок вердикта ---
@@ -450,6 +464,72 @@ def test_publish_flash_reports_page_failure_in_its_own_words(client, monkeypatch
                                      "warnings": []})
     loc = _flash(client.post(f"/sites/{_site()}/publish", follow_redirects=False))
     assert f"/: {why}" in loc and "не записана" not in loc
+
+
+# --- карточка сайта: действующий оффер ---
+
+def _offer_step(html: str) -> str:
+    """Шаг «2 · Оффер привязан» карточки."""
+    return html[html.index("2 · Оффер привязан"):html.index("3 · Provision")]
+
+
+def test_card_names_the_offer_the_site_writes_about(client):
+    """Раньше все привязанные офферы стояли равными бейджами под «генерация пишет про этот бренд»."""
+    from app.models.offer import SiteOffer
+    sid = _site()
+    with db.SessionLocal() as s:
+        old = Offer(brand="NordVPN", affiliate_link="https://nord.example/aff", active=True)
+        s.add(old); s.commit()
+        own = s.get(Site, sid).offer_id
+        s.add_all([SiteOffer(site_id=sid, offer_id=old.id), SiteOffer(site_id=sid, offer_id=own)]); s.commit()
+    step = _offer_step(client.get(f"/sites/{sid}").text)
+    assert re.search(r"Пишем про: <span class=\"badge b-approved\"[^>]*>Durev VPN</span>", step)
+    assert re.search(r'<span class="hint"[^>]*>ещё привязаны: NordVPN</span>', step)
+    assert "Привязано:" not in step and "led-ok" in step
+    assert step.count("badge b-approved") == 1                     # бейдж — только у действующего
+
+
+def test_card_shows_site_offer_even_without_a_link_row(client):
+    """Оффер записан прямо в сайт (Site.offer_id), строки привязки нет: шаг сделан, а не «выбери бренд»."""
+    step = _offer_step(client.get(f"/sites/{_site()}").text)
+    assert "Пишем про:" in step and "Durev VPN" in step and "ещё привязаны" not in step
+    assert "led-ok" in step and "Выбери, какой бренд" not in step and "написаны под" not in step
+
+
+def test_card_tells_when_pages_were_written_for_another_offer(client):
+    sid = _site()
+    with db.SessionLocal() as s:
+        old = Offer(brand="NordVPN", affiliate_link="https://nord.example/aff", active=True)
+        s.add(old); s.commit()
+        old_id, own = old.id, s.get(Site, sid).offer_id
+    _page(sid, "/", offer_id=old_id)
+    _page(sid, "/vs", offer_id=old_id)
+    _page(sid, "/setup", offer_id=own)
+    step = _offer_step(client.get(f"/sites/{sid}").text)
+    assert re.search(r'<div class="hint"[^>]*>страницы написаны под NordVPN — «Переписать тексты» '
+                     r"перепишет их под Durev VPN</div>", step)
+    with db.SessionLocal() as s:                                   # все страницы под оффер сайта — строки нет
+        for page in s.query(Page).filter(Page.site_id == sid):
+            page.offer_id = own
+        s.commit()
+    assert "написаны под" not in _offer_step(client.get(f"/sites/{sid}").text)
+
+
+def test_card_marks_a_switched_off_site_offer_and_keeps_legacy_sites_as_before(client):
+    from app.models.offer import SiteOffer
+    sid = _site()
+    with db.SessionLocal() as s:
+        s.get(Offer, s.get(Site, sid).offer_id).active = False
+        s.commit()
+    step = _offer_step(client.get(f"/sites/{sid}").text)
+    assert "Пишем про:" in step and ">выключен</span>" in step
+    legacy = _site(domain="legacy.xyz", offer=False)               # сайт без Site.offer_id, только привязка
+    with db.SessionLocal() as s:
+        o = Offer(brand="Proton VPN", affiliate_link="https://proton.example/aff", active=True)
+        s.add(o); s.commit()
+        s.add(SiteOffer(site_id=legacy, offer_id=o.id)); s.commit()
+    step = _offer_step(client.get(f"/sites/{legacy}").text)
+    assert "Привязано:" in step and "Proton VPN" in step and "Пишем про:" not in step
 
 
 # --- автопилот ---

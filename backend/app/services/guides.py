@@ -60,28 +60,45 @@ def _files() -> list[Path]:
                   and not p.name.startswith(".") and not p.name.lower().startswith("readme"))
 
 
+def folder_missing() -> bool:
+    """Папки правил этот процесс не видит (том не подключён к контейнеру, неверный CONTENT_GUIDES_DIR).
+    Это не «правил нет»: пустая папка существует, и оператор сам решил в неё ничего не класть."""
+    return not guides_dir().is_dir()
+
+
 def load_guides(lang: str | None = None, kind: str | None = None, limit: int | None = None,
                 role: str | None = None) -> dict:
-    """{"text", "files", "truncated", "pending"}: блок правил для промпта — части под разделителями
-    `--- имя ---`, файлы по алфавиту. `lang`/`kind` не используются (правила общие) — оставлены в
-    сигнатуре для вызывающих. Превышение лимита режет файлы С КОНЦА целиком (пол-файла правил хуже, чем
-    его отсутствие).
+    """{"text", "files", "truncated", "pending", "cut", "missing"}: блок правил для промпта — части под
+    разделителями `--- имя ---`, файлы по алфавиту. `lang`/`kind` не используются (правила общие) —
+    оставлены в сигнатуре для вызывающих. Превышение лимита режет файлы С КОНЦА целиком (пол-файла
+    правил хуже, чем его отсутствие).
 
-    `role` — "writer" или "critic": в текст идут ВЫЖИМКИ файлов этой роли и роли `both`; файл без
-    актуальной выжимки в текст не идёт и возвращается в `pending`, не влезший в лимит — в `cut`
-    (см. `_load_digests`). Без `role` — прежнее поведение: сырые файлы до лимита, `pending` пуст."""
+    `missing` — папки правил нет вовсе (`folder_missing`): пустой текст тогда значит «не вижу правил», а
+    не «оператор их не дал». `pending` — файлы, которые в текст не попали, хотя должны были: нет
+    актуальной выжимки либо файл (или его выжимку) не удалось прочитать.
+
+    `role` — "writer" или "critic": в текст идут ВЫЖИМКИ файлов этой роли и роли `both`; не влезший в
+    лимит — в `cut` (см. `_load_digests`). Без `role` — прежнее поведение: сырые файлы до лимита,
+    `cut` пуст."""
     limit = LIMIT if limit is None else limit
     if role is not None:
         return _load_digests(role, limit)
-    parts, files, total, truncated = [], [], 0, False
+    parts, files, pending, total, truncated = [], [], [], 0, False
     for p in _files():
-        body = p.read_text(encoding="utf-8", errors="replace").strip()
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace").strip()
+        except FileNotFoundError:                       # файл удалили, пока мы шли по папке
+            continue
+        except OSError:                                 # файл есть, а прочитать нельзя — не молчим
+            pending.append(p.name)
+            continue
         chunk = f"--- {p.name} ---\n{body}\n"
         if total + len(chunk) > limit:
             truncated = True
             break
         parts.append(chunk); files.append(p.name); total += len(chunk)
-    return {"text": "\n".join(parts), "files": files, "truncated": truncated, "pending": []}
+    return {"text": "\n".join(parts), "files": files, "truncated": truncated, "pending": pending, "cut": [],
+            "missing": folder_missing()}
 
 
 def _load_digests(role: str, limit: int) -> dict:
@@ -90,7 +107,11 @@ def _load_digests(role: str, limit: int) -> dict:
     тексту. Исключение — файл, который «не использовать» велел оператор: он не ждёт ничего.
 
     `cut` — файлы этой роли, не влезшие в лимит: как только очередной не помещается, он и все следующие
-    отброшены (обрезка с конца). Файл, который и один длиннее лимита, отброшен сам, остальных не отсекает."""
+    отброшены (обрезка с конца). Файл, который и один длиннее лимита, отброшен сам, остальных не отсекает.
+
+    Файл, который есть, но не читается (права, сбой тома), — тоже в `pending`: его правила в задание не
+    попали, и молча пропустить его значило бы выдать неполные правила за полные. Нечитаемая выжимка даёт
+    то же самое через `_state` (выжимки «нет»)."""
     index = _read_index()
     parts, files, pending, cut, total, full = [], [], [], [], 0, False
     for p in _files():
@@ -99,7 +120,10 @@ def _load_digests(role: str, limit: int) -> dict:
             continue
         try:
             src_hash = _hash(p.read_bytes())
-        except OSError:                                 # файл удалили, пока мы шли по папке
+        except FileNotFoundError:                       # файл удалили, пока мы шли по папке
+            continue
+        except OSError:
+            pending.append(p.name)
             continue
         digest = _digest_text(p.name)
         if _state(p.name, e, src_hash, digest) != "ok":
@@ -115,7 +139,8 @@ def _load_digests(role: str, limit: int) -> dict:
             continue
         total += size
         parts.append(chunk); files.append(p.name)
-    return {"text": "\n".join(parts), "files": files, "truncated": bool(cut), "pending": pending, "cut": cut}
+    return {"text": "\n".join(parts), "files": files, "truncated": bool(cut), "pending": pending, "cut": cut,
+            "missing": folder_missing()}
 
 
 def list_guides() -> list[dict]:
@@ -415,7 +440,10 @@ def _parse_answer(raw) -> dict:
             raise ValueError("ответ модели — не один JSON-объект")
         text = text[:-3].strip()
     try:
-        data = json.loads(text)
+        # strict=False: выжимка — многострочный список, и модели ставят в JSON-строку настоящие переводы
+        # строк и табуляции. Строгий разбор такой ответ отвергает целиком, и файл оставался «с ошибкой».
+        # Остальная строгость на месте: весь ответ — один объект, ограда — не больше одной.
+        data = json.loads(text, strict=False)
     except (ValueError, RecursionError):
         data = None
     if not isinstance(data, dict):

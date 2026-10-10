@@ -605,6 +605,8 @@ def guides_view(request: Request):
     return templates.TemplateResponse(request, "guides.html", {
         "active": "guides", "guides": guides.status(), "limit": guides.LIMIT, "roles": guides.ROLE_RU,
         "writer": writer, "critic": critic, "run": jobs.progress("guides_digest"),
+        # папки нет вовсе (том не подключён, неверный путь) — экран говорит это словами, с путём
+        "missing": writer["missing"], "guides_dir": str(guides.guides_dir()),
         "waiting": guides.no_digest_ru(waiting, "в задание не попадает", "в задание не попадают") if waiting else ""})
 
 
@@ -888,6 +890,8 @@ def _critic_cell(page) -> dict | None:
     if page.critic_checked_at is None or not isinstance(notes, dict):
         return None
     if not content_critic.verdict_is_fresh(page):
+        if page.status != "draft":
+            return None                  # одобренной странице совет «вычитай заново» ни к чему
         return {"led": "led-off", "label": "устарел", "title": "текст изменён после вычитки — вычитай заново"}
     if notes.get("error"):
         # вердикта нет: критик не ответил или упала проверка — это не «замечания к тексту»
@@ -942,6 +946,8 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
         "research": research.summary(db, site_id), "research_rows": research.dossier(db, site_id),
         "research_last": jobs.last("research"),
         "critic": {p.id: _critic_cell(p) for p in pages}, "auto_edit": get_autonomy()["auto_edit"],
+        # оффер САЙТА — про него пишет писатель; остальные привязанные показываем вторым планом
+        "own_offer": db.get(Offer, site.offer_id) if site.offer_id is not None else None,
         # «живые» — у которых есть файл на сайте (publish.live_clause): переписанная страница — draft
         # в базе, но сайт от этого неопубликованным не стал
         "n_live": db.scalar(select(func.count()).select_from(Page).where(
@@ -1709,6 +1715,8 @@ def _pull_banner(r: dict):
     r["ok"] честно отражает и git, и алембик (F22/F23/F29): упавшая миграция — красный
     err=, НЕ зелёный msg=, даже если код при этом обновился (git pull сам прошёл)."""
     rebuild = " · нужна пересборка образа: docker compose up -d --build" if r.get("needs_rebuild") else ""
+    if r.get("compose_hint"):
+        rebuild += f" · {r['compose_hint']}"         # состав контейнеров сменился — текст даёт deploy
     if not r.get("ok"):
         if "old" not in r:
             # git pull/fetch/checkout не прошёл сам по себе — до алембика не дошли

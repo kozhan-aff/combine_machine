@@ -565,6 +565,14 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     Прогресс пишет сам (jobs.track) — именно поэтому свип из воркера теперь виден Пульту.
     Выключенные тумблером стадии показываем как skip, а не прячем: «стадия отключена» и
     «стадия сломалась» — разные вещи, и оператор обязан их различать.
+
+    ТУМБЛЕРЫ ПЕРЕЧИТЫВАЮТСЯ ПЕРЕД КАЖДОЙ СТАДИЕЙ. Свип с LLM-стадиями идёт часы, и настройки,
+    прочитанные один раз на старте, к середине прогона уже могут быть отменены оператором: снятая
+    «публикация» всё равно выкладывала страницы. Стадия, чей тумблер снят по ходу, пропускается и
+    помечается skip, как выключенная с самого начала; мастер-выключатель, снятый по ходу свипа по
+    расписанию, останавливает его на этом месте (оставшиеся стадии — skip), и прогон закрывается
+    штатно. Ручной свип (respect_master=False) мастер не слушает ни на старте, ни по ходу. Капы —
+    тоже из свежего чтения. Стадия, выключенная на старте, в этом прогоне уже не включается.
     """
     from app.services import jobs
     from app.services.autonomy import get_autonomy
@@ -578,6 +586,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                "state": "pending" if cfg[flag] else "skip"} for k, flag, _, _ in STAGES]
     total = len(enabled)
     counts, errors, status = {}, [], "done"
+    switched_off: list[str] = []            # стадии, снятые тумблером уже по ходу прогона
     run_id = None
     try:
         # ЕДИНСТВЕННЫЙ замок свипа (шаг 4 F17): его держит реестр — уникальным индексом и
@@ -590,7 +599,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
             reap_orphan_runs()          # замок свипа у нас: прочие 'running' в журнале — трупы (S7-20)
             run_id = _start_run(trigger)
             try:
-                for i, (key, _flag, cap_attr, handler) in enumerate(enabled):
+                for i, (key, flag, cap_attr, handler) in enumerate(enabled):
                     # Между стадиями (не внутри — стадия атомарна для нас) спрашиваем реестр:
                     # нажали ли «стоп» и НАШ ЛИ ЕЩЁ ЗАМОК. Второе — фенсинг: если нас сочли
                     # трупом и отдали замок другому процессу, продолжать = гнать конвейер
@@ -598,6 +607,16 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     # между доменами останавливается score_pending, — новой логики нет.
                     if jobs.cancelled(run):
                         raise jobs.Cancelled()
+                    cfg = get_autonomy()        # свежие тумблеры и капы: предыдущая стадия могла идти час
+                    if respect_master and not cfg["autopilot_on"]:
+                        rest = [k for k, _, _, _ in enabled[i:]]
+                        jobs.skip_stages(run, rest)
+                        switched_off += rest
+                        break
+                    if not cfg[flag]:
+                        jobs.skip_stages(run, [key])
+                        switched_off.append(key)
+                        continue
                     jobs.report(run, done=i, total=total, stage=key, current=STAGE_RU[key])
                     cap = cfg[cap_attr] if cap_attr else None
                     try:
@@ -634,7 +653,10 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     # класс лжи об успехе. AutonomyRun при этом честно пишет "failed" в finally.
                     jobs.finish(run, "failed")
                 jobs.report(run, done=total, total=total, current="",
-                            message=f"стадий пройдено: {total}" + (f" · ошибок: {len(errors)}" if errors else ""))
+                            message=f"стадий пройдено: {total - len(switched_off)}"
+                            + (" · выключены по ходу: " + ", ".join(STAGE_RU[k] for k in switched_off)
+                               if switched_off else "")
+                            + (f" · ошибок: {len(errors)}" if errors else ""))
             except jobs.Cancelled:
                 status = "cancelled"
                 errors.append("свип остановлен — стоп-кнопка или потерянный замок")

@@ -23,7 +23,17 @@ def test_guides_page_is_in_the_menu_and_lists_files(client, gdir):
 
 
 def test_empty_folder_says_so(client, gdir):
-    assert "Сейчас правил нет" in client.get("/guides").text
+    html = client.get("/guides").text
+    assert "Сейчас правил нет" in html and "Папка правил не найдена" not in html
+
+
+def test_missing_folder_is_named_with_its_path_not_shown_as_no_rules(client, gdir, monkeypatch):
+    """Папки нет (том не подключён): «правил нет» было бы неправдой — оператор решил бы, что так и задумано."""
+    gone = gdir / "не-подключена"
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(gone))
+    html = client.get("/guides").text
+    assert f"Папка правил не найдена: <code>{gone}</code>" in html and f"Папка правил не найдена: {gone}." in html
+    assert "Сейчас правил нет" not in html and "Файлов нет." not in html
 
 
 def test_upload_takes_several_files_at_once(client, gdir):

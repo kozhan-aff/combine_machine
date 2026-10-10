@@ -413,6 +413,21 @@ def report(run_id: int | None, done: int | None = None, total: int | None = None
     _own(run_id, **values)
 
 
+def skip_stages(run_id: int | None, keys) -> None:
+    """Пометить стадии СВОЕГО прогона выключенными (`skip`) уже по ходу работы: свип перечитывает
+    тумблеры перед каждой стадией, и снятая посреди прогона стадия должна выглядеть так же, как
+    выключенная с самого начала. `_advance` и `_close` состояние `skip` не трогают. Вне track — no-op."""
+    keys = set(keys or ())
+    if run_id is None or not keys:
+        return
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.job import JobRun
+    with _DB_LOCK, SessionLocal() as db:
+        known = db.execute(select(JobRun.stages).where(JobRun.id == run_id)).scalar()
+    _own(run_id, stages=[{**s, "state": "skip"} if s.get("key") in keys else s for s in (known or [])])
+
+
 def finish(run_id: int | None, status: str) -> None:
     """Тело track заявляет СВОЙ терминальный статус (напр. свип «с замечаниями» -> done_warn).
     Иначе track закрывает прогон как "done". run_id=None — no-op (вне track)."""

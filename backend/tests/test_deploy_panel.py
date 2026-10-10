@@ -28,6 +28,17 @@ def test_pull_rebuild_hint(client, monkeypatch):
     assert "up%20-d%20--build" in r.headers["location"] or "--build" in r.headers["location"]
 
 
+def test_pull_compose_hint_reaches_the_banner(client, monkeypatch):
+    from urllib.parse import unquote
+    monkeypatch.setattr(deploy, "git_pull",
+                        lambda: {"ok": True, "old": "a", "new": "b", "subject": "s", "needs_rebuild": False,
+                                 "compose_hint": deploy.COMPOSE_HINT, "alembic_warn": ""})
+    r = client.post("/admin/pull", follow_redirects=False)
+    loc = unquote(r.headers["location"])
+    assert "msg=" in loc and "изменился docker-compose.yml — нужен `docker compose up -d`" in loc
+    assert "--build" not in loc
+
+
 def test_diag_renders_status(client, monkeypatch):
     # /diag пингует интеграции вживую — в тесте это ловушка герметичности; нас тут интересует
     # только строка деплоя, поэтому проверки глушим.

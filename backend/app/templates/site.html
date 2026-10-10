@@ -33,15 +33,26 @@
     </li>
 
     <li>
-      <span class="st"><span class="led {{ 'led-ok' if attached else 'led-todo' }}"></span></span>
+      {# оффер САЙТА (Site.offer_id) — про него пишет писатель; прочие привязанные — вторым планом, без
+         вида «равных»: раньше все бейджи стояли в ряд под «генерация пишет про этот бренд» #}
+      {% set others = attached | rejectattr('id', 'equalto', site.offer_id) | list %}
+      {% set old_brands = page_offers.values() | rejectattr('id', 'equalto', site.offer_id) | map(attribute='brand') | list %}
+      <span class="st"><span class="led {{ 'led-ok' if own_offer or attached else 'led-todo' }}"></span></span>
       <div class="body"><div class="t">2 · Оффер привязан <small>что рекламирует сайт</small></div>
         <div class="h">
-          {% if attached %}
+          {% if own_offer %}
+            Пишем про: <span class="badge b-approved" title="оффер сайта: о нём пишет писатель, его ссылку и промокод ставит публикация">{{ own_offer.brand }}{{ ' · ' + own_offer.promo_code if own_offer.promo_code }}</span>
+            {% if not own_offer.active %}<span class="badge b-warn" title="оффер сайта выключен: тексты не пишутся, пока не включишь его или не привяжешь другой">выключен</span>{% endif %}
+            {% if others %}<span class="hint" title="привязаны к сайту раньше; тексты пишутся не про них">ещё привязаны: {{ others | map(attribute='brand') | join(', ') }}</span>{% endif %}
+          {% elif attached %}
             Привязано: {% for o in attached %}<span class="badge b-approved">{{ o.brand }}{{ ' · ' + o.promo_code if o.promo_code }}</span> {% endfor %}
             — генерация пишет про этот бренд, публикация ставит его ссылку.
           {% else %}Выбери, какой бренд будет стоять на страницах: генерация напишет контент
             про него, публикация вставит его ссылку и промокод.{% endif %}
-        </div></div>
+        </div>
+        {% if own_offer and old_brands %}
+        <div class="hint" style="margin-top:6px">страницы написаны под {{ old_brands | join(', ') }} — «Переписать тексты» перепишет их под {{ own_offer.brand }}</div>
+        {% endif %}</div>
       <div class="act">
         {% if all_offers %}
         <form class="inline" method="post" action="/sites/{{ site.id }}/attach-offer" style="display:flex; gap:8px; align-items:center">

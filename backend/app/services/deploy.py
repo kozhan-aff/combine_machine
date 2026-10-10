@@ -58,13 +58,25 @@ def deploy_status() -> dict:
         return {"error": f"{type(e).__name__}: {_scrub(str(e))}"[:150]}
 
 
-def _detect_rebuild(old: str, new: str) -> bool:
-    """Менялись ли requirements.txt/Dockerfile в old..new → нужна ручная пересборка образа."""
+# Что оператору сделать руками после pull, если изменился сам состав контейнеров: панель этого не умеет,
+# а без пересоздания новый том (так воркер получает папку правил) или сервис просто не появится.
+COMPOSE_HINT = ("изменился docker-compose.yml — нужен `docker compose up -d` "
+                "(пересоздать контейнеры: новые тома/сервисы)")
+
+
+def _changed_files(old: str, new: str) -> list[str]:
     if not old or not new or old == new:
-        return False
+        return []
     diff = _git(["diff", "--name-only", f"{old}..{new}"], timeout=10)
-    files = diff.stdout.split() if diff.returncode == 0 else []
-    return any(f in ("backend/requirements.txt", "backend/Dockerfile") for f in files)
+    return diff.stdout.split() if diff.returncode == 0 else []
+
+
+def _detect_rebuild(old: str, new: str) -> dict:
+    """Что в old..new требует рук оператора: {"image": менялись requirements.txt/Dockerfile — пересборка
+    образа, "compose": менялся docker-compose.yml — пересоздать контейнеры (`docker compose up -d`)}."""
+    files = _changed_files(old, new)
+    return {"image": any(f in ("backend/requirements.txt", "backend/Dockerfile") for f in files),
+            "compose": "docker-compose.yml" in files}
 
 
 def _post_update(old: str) -> dict:
@@ -93,8 +105,10 @@ def _post_update(old: str) -> dict:
         alembic_warn = "миграция не завершилась за 120с и была прервана — проверь схему БД вручную"
     cur = deploy_status()
     new = cur.get("hash", "")
+    manual = _detect_rebuild(old, new)
     return {"ok": ok, "old": old, "new": new, "subject": cur.get("subject", ""),
-            "needs_rebuild": _detect_rebuild(old, new), "alembic_warn": alembic_warn}
+            "needs_rebuild": manual["image"], "compose_hint": COMPOSE_HINT if manual["compose"] else "",
+            "alembic_warn": alembic_warn}
 
 
 def _busy_jobs() -> list[str]:
