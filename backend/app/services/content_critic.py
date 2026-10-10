@@ -364,6 +364,7 @@ _MANUAL = "одобряет человек: текст правился вруч
 _NO_OFFER = "у страницы не записан оффер — сверить текст с брендом не с чем"
 _NO_DOSSIER = "нет досье конкурентов — копирование и числа не проверить"
 _INJECTED = "в тексте страницы служебная вставка, похожая на ответ критика"
+_OFF_FORM = "критик ответил не по форме — страницу читает человек"
 
 _CHECKLIST = (
     "1. Тема: текст — про названный бренд и отвечает типу страницы.\n"
@@ -589,8 +590,11 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
     if len(text) > _TEXT_MAX:
         blocked.append(f"текст длиннее {_TEXT_MAX} знаков — редактор-модель прочла не всё")
 
-    # ФАЗА 3 — вердикт модели. Сбой вызова, пустой ответ, ответ мимо формата — «критик не ответил».
-    verdict, error, down = None, None, False
+    # ФАЗА 3 — вердикт модели. Сбой вызова и пустой ответ — «критик не ответил»: вердикта нет (`error`).
+    # Непустой ответ, который не есть чистый вердикт (отказ прозой, текст вокруг JSON, нет булева pass), —
+    # другое дело: модель ответила, и «да» она не сказала. Это отрицательный вердикт тексту, окончательный,
+    # как любой другой: переспрашивать, пока не ответит по форме, — тот же перебор её ответов.
+    verdict, error, down, off_form = None, None, False, False
     try:
         raw = LlmClient(timeout=_CRITIC_TIMEOUT).complete(
             _critic_system(guides.load_guides(lang, kind)["text"]),
@@ -603,10 +607,11 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
             error = "пустой ответ модели"
         else:
             verdict = parse_verdict(raw)
-            if verdict is None:
-                error = "ответ не разобран как вердикт (нужен один JSON-объект с булевым pass, без текста вокруг)"
+            off_form = verdict is None
     remarks, score = [], None
-    if verdict is None:
+    if off_form:
+        model = [_OFF_FORM]
+    elif verdict is None:
         model = [f"критик не ответил: {error}"]
     else:
         score = verdict["score"]
@@ -617,16 +622,16 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
     # вердикт модели в одиночку не пропускает и «pass: true» при замечаниях одобрением не считается
     passed = not code and not blocked and model_ok
     # Замечания, с которыми страницу стоит отдать писателю, — только настоящие: от отработавших проверок
-    # кодом и из разобранного вердикта. Служебные строки («критик не ответил», «проверки не выполнены»)
-    # ему не уходят, и при них переписывания нет вовсе: переписывать по несостоявшейся вычитке нечего.
+    # кодом и из разобранного вердикта. Служебные строки («критик не ответил», «ответил не по форме»,
+    # «проверки не выполнены») ему не уходят, и при них переписывания нет вовсе: переписывать не по чему.
     remarks = [] if verdict is None or blocked else [*code, *remarks]
     notes = {"pass": passed, "issues": [*code, *blocked, *model], "code": [*code, *blocked], "model": model,
              "round": round_no, "fp": fp, "remarks": remarks}
-    # `error` — вердикта нет (модель не ответила или ответила не по форме): причина словами; автопилот по
+    # `error` — вердикта нет (модель не удалось спросить или она промолчала): причина словами; автопилот по
     # этому ключу возвращается к странице после паузы. `retry` — модель довольна, страницу держит только
     # служебная причина (нет досье, упала проверка). В обоих случаях отрицательного вердикта тексту никто
     # не выносил, и следующий прогон вычитает его заново; иначе вердикт окончателен (см. `_settled`).
-    if verdict is None:
+    if verdict is None and not off_form:
         notes["error"] = error
     elif not passed and model_ok and not code:
         notes["retry"] = True
@@ -655,7 +660,7 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
         db.commit()
     return {**{k: notes[k] for k in ("pass", "issues", "code", "model", "remarks")}, "score": score,
             "error": error, "round": round_no, "down": down,
-            "fault": "; ".join(x for x in (*blocked, error) if x) or None}, snap
+            "fault": "; ".join(x for x in (*blocked, error, _OFF_FORM if off_form else None) if x) or None}, snap
 
 
 def review_page(page_id: int) -> dict:
@@ -666,7 +671,8 @@ def review_page(page_id: int) -> dict:
 
     `issues` = `code` + `model`. `pass` — True, только если замечаний нет ни у кода, ни у модели и модель
     ответила булевым `pass: true`; `score` — оценка модели 0–1 (None, если вердикта нет), на `pass` не
-    влияет; `error` — почему вердикта нет. Пишет critic_score, critic_notes (с отпечатком вычитанного
+    влияет; `error` — почему вердикта нет (ответ не по форме — не «нет вердикта», а отказ: `error` пуст).
+    Пишет critic_score, critic_notes (с отпечатком вычитанного
     текста `fp`; при несостоявшейся вычитке — с причиной в `error`) и critic_checked_at (время попытки —
     всегда) и коммитит сама. Статус страницы НЕ трогает. Нет страницы — ValueError."""
     return _review(page_id)[0]

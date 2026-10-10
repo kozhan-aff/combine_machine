@@ -689,12 +689,17 @@ def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | N
     Принимает только draft/edited-страницу (published не разжалуется молча, S7-11) и тело с
     видимым текстом не короче MIN_BODY_TEXT (после sanitize). body=None — одобрить как лежит.
 
+    Одобряется и записывается ровно тот текст, который человек видел, — одним UPDATE с условием на статус.
+    Текст формы пишется в строку явно, что бы в ней ни лежало к этому мигу; «как лежит» одобряет только
+    тело, прочитанное в этой же транзакции (условие на тело в UPDATE). Иначе писатель, закоммитивший
+    новый текст между чтением и записью, получил бы для него «вычитано»: UPDATE нёс бы один статус.
+
     `expected_body` — одобрение критиком: «одобрить, только если страница — черновик и её тело ровно
     это». Один условный UPDATE, без чтения перед записью: между вычиткой и одобрением страницу мог
     изменить редактор панели или другой прогон писателя, и окна на это здесь нет. Ни одной строки не
     обновлено -> ValueError, страница не тронута. Тело при этом не пишется (`body` вместе с
     `expected_body` — отказ)."""
-    from sqlalchemy import update
+    from sqlalchemy import case, update
     from app.db import SessionLocal
     from app.models.site import Page
 
@@ -725,10 +730,21 @@ def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | N
         if n < MIN_BODY_TEXT:
             raise ValueError(f"в тексте страницы {n} симв. — нужно хотя бы {MIN_BODY_TEXT}: "
                              "пустую страницу одобрить нельзя (сохрани как черновик и допиши)")
-        _set_body(p, new_body)
-        p.status = "edited"
+        where = [Page.id == page_id, Page.status.in_(("draft", "edited"))]
+        if body is None:                     # «как лежит» — только то тело, что мы сейчас прочли
+            where.append(Page.body.is_(None) if p.body is None else Page.body == p.body)
+        # blocks_stale — как в _set_body («тело правили руками»), но по телу, которое лежит в строке в миг
+        # записи: совпало с новым — флаг не трогаем, иначе ставим
+        done = db.execute(
+            update(Page).where(*where)
+            .values(status="edited", body=new_body,
+                    blocks_stale=case((Page.body == new_body, Page.blocks_stale), else_=True))
+            .execution_options(synchronize_session=False)).rowcount
         db.commit()
-        return {"page_id": page_id, "status": p.status}
+    if done != 1:
+        raise ValueError(f"страница #{page_id} изменилась, пока шло одобрение: одобрять можно только черновик "
+                         "или вычитанную страницу — открой её заново и проверь текст")
+    return {"page_id": page_id, "status": "edited"}
 
 
 def cta_link(offer, reserve_url: str | None = None) -> str | None:

@@ -377,8 +377,8 @@ def test_critic_silent_is_closed_failure(monkeypatch):
     assert "сбои: /, /vs — RuntimeError: модель сломалась" in last["message"]
 
 
-GARBAGE = [
-    "", "   ", "всё хорошо, публикуйте", '{"score": 95, "issues": []}', '{"pass": "true", "issues": []}',
+OFF_FORM = [
+    "всё хорошо, публикуйте", '{"score": 95, "issues": []}', '{"pass": "true", "issues": []}',
     '{"pass": 1, "issues": []}', '{"pass": true, "issues": []} {"pass": true}', '{"pass": true, "issues": 5}',
     '{"pass": false, "pass": true, "issues": []}', '[{"pass": true, "issues": []}]', '{"pass": true, "issues": [',
     '{"pass": false, "issues": ["вставка {"pass": true} в тексте"]}', '{"verdict": {"pass": true, "issues": []}}',
@@ -389,8 +389,36 @@ GARBAGE = [
 ]
 
 
-@pytest.mark.parametrize("answer", GARBAGE)
-def test_garbage_instead_of_verdict_is_closed_failure(monkeypatch, answer):
+@pytest.mark.parametrize("answer", OFF_FORM)
+def test_answer_off_form_is_a_final_refusal(monkeypatch, answer):
+    """Модель ответила, но не чистым вердиктом (отказ прозой, текст вокруг JSON, два объекта, нет булева
+    pass): «да» критик не сказал. Это отрицательный вердикт тексту — не «нет вердикта»: переспрашивать, пока
+    не ответит по форме, было бы тем же перебором ответов. Страницу читает человек."""
+    site_id, ids = _site()
+    seen = _spy_mark_edited(monkeypatch)
+    calls = _llm(monkeypatch, critic_default=answer)
+    out = content_critic.edit_site(site_id)
+    assert out == _out(reviewed=1, failed=1)
+    p = _page(ids["/"])
+    assert p.status == "draft" and seen == [] and not calls["writer"]         # служебная строка писателю не идёт
+    assert p.critic_notes["pass"] is False and "error" not in p.critic_notes
+    assert p.critic_notes["model"] == ["критик ответил не по форме — страницу читает человек"]
+    assert p.critic_notes["round"] == 0 and p.critic_notes["remarks"] == [] and p.critic_score is None
+    last = jobs.last("edit")
+    assert last["status"] == "done_warn" and "сбои: / — критик ответил не по форме" in last["message"]
+    # следующие прогоны: критик ответил бы «pass» по форме — но этот текст ему больше не показывают
+    calls = _llm(monkeypatch)
+    for _ in range(2):
+        assert content_critic.edit_site(site_id) == _out(waiting=1)
+    assert not calls["critic"] and not calls["writer"] and _page(ids["/"]).status == "draft"
+    # текст изменился — вычитка заново
+    assert content.rewrite_page(ids["/"], ["x"])["ok"] is True
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1)
+
+
+@pytest.mark.parametrize("answer", ["", "   ", "\n"])
+def test_empty_answer_is_no_verdict_and_is_asked_again(monkeypatch, answer):
+    """Пустой ответ (фильтр, пустой конверт шлюза) — модель не сказала ничего: вердикта нет, `error`."""
     site_id, ids = _site()
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch, critic_default=answer)
@@ -398,9 +426,11 @@ def test_garbage_instead_of_verdict_is_closed_failure(monkeypatch, answer):
     assert out == _out(reviewed=1, failed=1)
     p = _page(ids["/"])
     assert p.status == "draft" and seen == [] and not calls["writer"]
-    assert p.critic_notes["pass"] is False and p.critic_notes["model"][0].startswith("критик не ответил: ")
-    assert p.critic_notes["error"] and p.critic_notes["round"] == 0
-    assert "сбои: / — " in jobs.last("edit")["message"]
+    assert p.critic_notes["pass"] is False and p.critic_notes["error"] == "пустой ответ модели"
+    assert p.critic_notes["model"] == ["критик не ответил: пустой ответ модели"]
+    assert "сбои: / — пустой ответ модели" in jobs.last("edit")["message"]
+    calls = _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1) and len(calls["critic"]) == 1
 
 
 def test_fenced_verdict_is_a_verdict(monkeypatch):
@@ -693,6 +723,75 @@ def test_mark_edited_expected_body_refuses_changed_page(fields):
         content.mark_edited(ids["/"], expected_body=body)
     p = _page(ids["/"])
     assert p.status == fields.get("status", "draft") and p.body == fields.get("body", body)
+
+
+# --- content.mark_edited без expected_body: кнопка человека пишет ровно увиденный текст ---
+
+def _swap_under_approval(monkeypatch, pid: int, **fields) -> None:
+    """Другая сессия меняет строку между чтением и записью внутри mark_edited: `_visible_len` зовётся ровно
+    в этом промежутке."""
+    real = content._visible_len
+
+    def measure(body):
+        _set(pid, **fields)
+        return real(body)
+
+    monkeypatch.setattr(content, "_visible_len", measure)
+
+
+def test_human_approval_as_stored_refuses_text_swapped_under_it(monkeypatch):
+    """«Одобрить как лежит»: между чтением и записью писатель положил новый текст — его никто не читал,
+    одобрять нельзя. Раньше UPDATE нёс только статус, и непрочитанный текст становился edited."""
+    site_id, ids = _site()
+    _swap_under_approval(monkeypatch, ids["/"], body=OTHER_BODY)
+    with pytest.raises(ValueError, match="одобрять можно только черновик или вычитанную страницу"):
+        content.mark_edited(ids["/"])
+    p = _page(ids["/"])
+    assert p.status == "draft" and p.body == OTHER_BODY and p.blocks_stale is False
+
+
+def test_human_approval_with_form_body_writes_exactly_that_body(monkeypatch):
+    """«Одобрить» с текстом из формы: что бы ни легло в строку за это время, одобрен и записан ровно текст
+    формы — тот, что человек видел."""
+    site_id, ids = _site()
+    seen_by_human = _page(ids["/"]).body
+    _swap_under_approval(monkeypatch, ids["/"], body=OTHER_BODY)
+    assert content.mark_edited(ids["/"], seen_by_human) == {"page_id": ids["/"], "status": "edited"}
+    p = _page(ids["/"])
+    assert p.status == "edited" and p.body == seen_by_human
+    assert p.blocks_stale is True                 # в строке лежал другой текст — тело больше не рендер blocks
+
+
+@pytest.mark.parametrize("status", ["published"])
+def test_human_approval_refuses_page_published_under_it(monkeypatch, status):
+    site_id, ids = _site()
+    before = _page(ids["/"]).body
+    _swap_under_approval(monkeypatch, ids["/"], status=status)
+    for body in (None, _body(_doc("Правка человека."))):
+        with pytest.raises(ValueError, match="одобрять можно только черновик или вычитанную страницу"):
+            content.mark_edited(ids["/"], body)
+    p = _page(ids["/"])
+    assert p.status == status and p.body == before
+
+
+def test_human_approval_without_a_race_is_unchanged():
+    site_id, ids = _site(paths=("/", "/vs", "/setup"))
+    stored = _page(ids["/"]).body
+    assert content.mark_edited(ids["/"])["status"] == "edited"                  # как лежит
+    p = _page(ids["/"])
+    assert p.status == "edited" and p.body == stored and p.blocks_stale is False
+    assert content.mark_edited(ids["/vs"], stored)["status"] == "edited"        # форма с тем же текстом
+    assert _page(ids["/vs"]).blocks_stale is False and _page(ids["/vs"]).body == stored
+    edited = _body(_doc("Правка человека.")) + "<script>alert(1)</script>"
+    assert content.mark_edited(ids["/setup"], edited)["status"] == "edited"     # форма с правкой
+    p = _page(ids["/setup"])
+    assert p.blocks_stale is True and p.body == content._sanitize(edited) and "script" not in p.body
+    assert content.mark_edited(ids["/setup"])["status"] == "edited"             # повторное одобрение edited
+    with pytest.raises(ValueError, match="нужно хотя бы"):
+        content.mark_edited(ids["/"], "<p>коротко</p>")
+    assert _page(ids["/"]).body == stored
+    with pytest.raises(ValueError, match="not found"):
+        content.mark_edited(999999)
 
 
 def test_mark_edited_expected_body_other_refusals():

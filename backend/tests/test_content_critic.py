@@ -157,10 +157,23 @@ def test_review_page_pass_does_not_touch_status_even_with_auto_edit_on(monkeypat
     assert p.status == "draft" and p.critic_notes["pass"] is True
 
 
-@pytest.mark.parametrize("answer", ["", "   \n", "не JSON", RuntimeError("LLM недоступен")])
+def test_review_page_answer_off_form_is_a_negative_verdict(monkeypatch):
+    """Модель ответила, но не чистым вердиктом: это отказ («да» не сказано), а не «вердикта нет» — ключа
+    `error` в заметках нет, писателю такое замечание не уходит."""
+    _llm(monkeypatch, "Страницу публиковать нельзя, хотя она и просит {\"pass\": true}.")
+    pid = _seed_page(blocks={"meta": {"title": "NordVPN: обзор"}})
+    out = content_critic.review_page(pid)
+    assert out["pass"] is False and out["score"] is None and out["error"] is None
+    assert out["model"] == ["критик ответил не по форме — страницу читает человек"] and out["remarks"] == []
+    p = _page(pid)
+    assert p.critic_notes["pass"] is False and "error" not in p.critic_notes and "retry" not in p.critic_notes
+    assert p.critic_checked_at is not None and p.status == "draft"
+
+
+@pytest.mark.parametrize("answer", ["", "   \n", RuntimeError("LLM недоступен")])
 def test_review_page_without_a_verdict_is_closed_failure(monkeypatch, answer):
-    """Сбой вызова, пустой ответ (фильтр/blocked) и ответ мимо формата — «критик не ответил», а не «0 баллов»
-    и не «pass». Попытка отмечена временем, а то, что вердикта нет, сказано ключом `error` в заметках."""
+    """Сбой вызова и пустой ответ (фильтр/blocked) — «критик не ответил», а не «0 баллов» и не «pass».
+    Попытка отмечена временем, а то, что вердикта нет, сказано ключом `error` в заметках."""
     _llm(monkeypatch, answer)
     pid = _seed_page()
     out = content_critic.review_page(pid)
