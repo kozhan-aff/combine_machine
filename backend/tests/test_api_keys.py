@@ -511,3 +511,15 @@ def test_research_keys_are_editable_and_screenshots_is_choice():
         assert k in api_keys.EDITABLE, k
     assert api_keys.EDITABLE["RESEARCH_SCREENSHOTS"].kind == "choice"
     assert api_keys.EDITABLE["BROWSERLESS_TOKEN"].secret is True
+
+
+def test_writer_and_critic_models_are_editable():
+    """Модели писателя и критика — поля экрана ключей в группе LLM; пусто -> модель для текстов."""
+    from app.services import api_keys
+    group = next(fields for gid, _, _, fields in api_keys.GROUPS if gid == "m45")
+    keys = [f.key for f in group]
+    for k in ("LLM_WRITER_MODEL", "LLM_CRITIC_MODEL"):
+        assert k in keys and type(settings).model_fields[k].default == ""
+        f = api_keys.EDITABLE[k]
+        assert f.kind == "text" and not f.secret and "Пусто" in f.hint
+    assert keys.index("LLM_MODEL") < keys.index("LLM_WRITER_MODEL") < keys.index("SEARXNG_URL")

@@ -110,29 +110,52 @@ def facts_for(brand: str) -> dict | None:
     return VPN_FACTS.get(key)
 
 
+_UNKNOWN = "неизвестно"
+
+
+def _known(value) -> bool:
+    """Есть ли что печатать: «неизвестно» и пустой список — это отсутствие данных, а не факт."""
+    if isinstance(value, str):
+        return value.strip().lower() != _UNKNOWN
+    return value != []
+
+
 def vertical_block(brand: str) -> str | None:
     """Готовый текстовый блок для промпта генерации, или None если бренда нет в датасете.
 
     Возвращает компактный список проверяемых фактов — LLM обязан на них опираться,
     а не выдумывать. Формат человекочитаемый (LLM лучше усваивает, чем сырой JSON).
+
+    Поле со значением «неизвестно» (и пустые protocols/extras) в блок не попадает: напечатанное
+    «Серверы: неизвестно» модель охотно превращает в цифру. Строка из двух полей печатается той
+    половиной, что известна. Не осталось ни одной строки — None, как для незнакомого бренда:
+    бриф тогда прямо говорит модели, что проверенных данных нет.
     """
     f = facts_for(brand)
     if not f:
         return None
-    proto = ", ".join(f["protocols"])
-    extras = "; ".join(f["extras"])
-    return (
-        f"Бренд: {f['brand']} (данные на {AS_OF}, использовать как факты, не выдумывать цифры).\n"
-        f"- Серверы: {f['servers']} в {f['countries']} странах.\n"
-        f"- Юрисдикция: {f['jurisdiction']}.\n"
-        f"- Протоколы: {proto}.\n"
-        f"- No-logs: {f['no_logs']}.\n"
-        f"- Независимые аудиты: {f['audit']}.\n"
-        f"- Стриминг: {f['streaming']}.\n"
-        f"- Устройств одновременно: {f['devices']}.\n"
-        f"- Цена от: {f['price_from']}; возврат в течение {f['refund_days']} дней.\n"
-        f"- Ключевые фичи: {extras}."
-    )
+    servers, countries = _known(f["servers"]), _known(f["countries"])
+    price, refund = _known(f["price_from"]), _known(f["refund_days"])
+    lines = [
+        (servers and countries, f"- Серверы: {f['servers']} в {f['countries']} странах."),
+        (servers and not countries, f"- Серверы: {f['servers']}."),
+        (countries and not servers, f"- Стран: {f['countries']}."),
+        (_known(f["jurisdiction"]), f"- Юрисдикция: {f['jurisdiction']}."),
+        (_known(f["protocols"]), f"- Протоколы: {', '.join(f['protocols'])}."),
+        (_known(f["no_logs"]), f"- No-logs: {f['no_logs']}."),
+        (_known(f["audit"]), f"- Независимые аудиты: {f['audit']}."),
+        (_known(f["streaming"]), f"- Стриминг: {f['streaming']}."),
+        (_known(f["devices"]), f"- Устройств одновременно: {f['devices']}."),
+        (price and refund, f"- Цена от: {f['price_from']}; возврат в течение {f['refund_days']} дней."),
+        (price and not refund, f"- Цена от: {f['price_from']}."),
+        (refund and not price, f"- Возврат в течение {f['refund_days']} дней."),
+        (_known(f["extras"]), f"- Ключевые фичи: {'; '.join(f['extras'])}."),
+    ]
+    shown = [text for ok, text in lines if ok]
+    if not shown:
+        return None
+    return "\n".join([f"Бренд: {f['brand']} (данные на {AS_OF}, использовать как факты, не выдумывать цифры).",
+                      *shown])
 
 
 def known_brands() -> list[str]:
