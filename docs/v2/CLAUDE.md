@@ -309,7 +309,7 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 `docs/superpowers/specs/2026-10-10-content-design-from-competitors-design.md`, живые форматы
 `docs/v2/research/research-live-formats-2026-10.md`.
 - **Появилось:** таблица `site_research` + `services/research.py` (4 запроса на языке рынка → до 5 живых страниц
-  конкурентов, SSRF-гард, отсев шума/бренда/площадок по og:site_name); `content_guides/` (корень/язык/тип) +
+  конкурентов, SSRF-гард, отсев шума/бренда/площадок по og:site_name); `content_guides/` (с 2026-10-10 одна плоская папка, экран `/guides` в меню) +
   загрузка правил на `/settings`; транспорт `integrations/browserless.py` (скриншот первого экрана по тумблеру
   `RESEARCH_SCREENSHOTS`); стадия `research` в автопилоте перед `generate`; блок «Досье конкурентов» на карточке
   сайта. Тумблеры `/autopilot`: `auto_research` работает, `auto_design`/`auto_edit` — пока без эффекта и в UI
