@@ -303,6 +303,7 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
   фикстур (`subscription-info` бесплатный, `public-domain-rating-free` — 0 units).
 
 ## План А влит 2026-10-10: досье конкурентов и правила письма
+**Живой прогон 2026-10-10:** досье tunnelnotes.xyz под Durev VPN собрано (`done_warn`, 4 источника: 2 howto + proprivacy/wizcase по рынку; по бренду обзоров в выдаче нет, половина goto-ссылок — 502 прокси A-Parser). Net::HTTP конечный URL не отдаёт — домен только по canonical/og. Детали — `docs/v2/research/research-live-formats-2026-10.md`.
 
 План `docs/superpowers/plans/2026-10-10-research-dossier-and-guides.md`, спека
 `docs/superpowers/specs/2026-10-10-content-design-from-competitors-design.md`, живые форматы
