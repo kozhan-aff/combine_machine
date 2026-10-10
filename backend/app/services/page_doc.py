@@ -16,17 +16,56 @@ from app.services.locales import t
 WORDS = {"review": (1500, 2200), "comparison": (1200, 1800), "howto": (900, 1400)}
 
 _MAX_ERRORS, _MAX_ERROR_LEN = 5, 600
+_MAX_ANSWER = 400_000         # знаков ответа писателя: длиннее — не страница (на 200 000 «{» разбор шёл 9 с)
+_MAX_DESCRIPTION = 300
+
+# Схема терпима к ФОРМЕ и строга к содержанию. У писателя один повтор на страницу, и тратить его на
+# `"pros": null`, строку вместо списка из одной строки или длину поля, которое никуда не публикуется,
+# нельзя; а раздел без абзацев или заголовок страницы в три буквы — по-прежнему ошибка.
 
 
-def _drop_empty(value):
-    """Пустые элементы списка строк (""/пробелы/null) молча выбрасываются ДО проверки длины списка:
-    один шальной "" — не ошибка, а список совсем без текста — ошибка схемы."""
+def _texts(value):
+    """Список строк: `null` — пустой список, одна строка — список из неё; пустые элементы (""/пробелы/null)
+    молча выбрасываются ДО проверки длины списка: один шальной "" — не ошибка, а список совсем без
+    текста — ошибка схемы."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
     if not isinstance(value, list):
         return value
     return [x for x in value if not (x is None or isinstance(x, str) and not x.strip())]
 
 
-Texts = Annotated[list[str], BeforeValidator(_drop_empty)]
+def _objects(empty):
+    """Список объектов (FAQ, шаги, подразделы): `null` — «блока нет» (`empty`), один объект — список из
+    него, `null` среди элементов выброшен. Не список и не объект (строка, число) — тоже «блока нет»:
+    объектом такое не станет, а блок необязательный."""
+    def convert(value):
+        if isinstance(value, dict):
+            return [value]
+        if not isinstance(value, list):
+            return empty() if empty else None
+        return [x for x in value if x is not None]
+    return convert
+
+
+def _links(value):
+    """Источники: строки из списка (или одна строка); всё остальное — нет источников."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [x for x in value if isinstance(x, str) and x.strip()]
+
+
+def _description(value):
+    if value is None:
+        return ""
+    return value.strip()[:_MAX_DESCRIPTION] if isinstance(value, str) else value
+
+
+Texts = Annotated[list[str], BeforeValidator(_texts)]
 
 
 class _Model(BaseModel):
@@ -36,8 +75,9 @@ class _Model(BaseModel):
 
 
 class Meta(_Model):
-    title: str = Field(min_length=10, max_length=110)
-    description: str = Field(min_length=40, max_length=200)
+    title: str = Field(min_length=10, max_length=110)          # публикуется: <h1> и <title>
+    # не публикуется (описание страницы на сайте — первый абзац тела): границ нет, длинное обрезается
+    description: Annotated[str, BeforeValidator(_description)] = Field(default="", max_length=_MAX_DESCRIPTION)
 
 
 class Verdict(_Model):
@@ -56,7 +96,7 @@ class Section(_Model):
     h2: str = Field(min_length=1)
     paragraphs: Texts = Field(min_length=1)
     bullets: Texts | None = None
-    h3s: list[H3] | None = None
+    h3s: Annotated[list[H3] | None, BeforeValidator(_objects(None))] = None
 
 
 class Table(_Model):
@@ -90,9 +130,9 @@ class PageDoc(_Model):
     cons: Texts = []
     sections: list[Section] = Field(min_length=2)
     table: Table | None = None
-    steps: list[Step] | None = None
-    faq: list[Faq] = []
-    sources: Texts = []
+    steps: Annotated[list[Step] | None, BeforeValidator(_objects(None))] = None
+    faq: Annotated[list[Faq], BeforeValidator(_objects(list))] = []
+    sources: Annotated[list[str], BeforeValidator(_links)] = []
 
 
 def _find_doc(raw: str) -> dict | None:
@@ -128,6 +168,8 @@ def parse(raw: str) -> PageDoc:
     Любой провал — ValueError с коротким текстом: он уходит модели в повторный запрос и оператору."""
     if not isinstance(raw, str):
         raise ValueError("ответ модели не строка")
+    if len(raw) > _MAX_ANSWER:               # до любого разбора: перебор по «{» на таком ответе — секунды
+        raise ValueError("ответ слишком длинный")
     raw = raw.strip()
     start = raw.find("{")
     if start < 0:

@@ -480,7 +480,9 @@ def test_rewrite_overwrites_manual_edit_only_on_explicit_request(monkeypatch):
     vs = {p.url_path: p for p in _pages(site_id)}["/vs"]
     assert "руками" in vs.body and vs.blocks_stale is True and len(calls) == 2
 
-    calls = _llm(monkeypatch)
+    # второй прогон — другой текст: вернувшийся знак в знак прежним переписыванием не считается
+    calls = _llm(monkeypatch, default=json.dumps({**DOC, "pros": ["Цена 5.99 в месяц", "Другая редакция"]},
+                                                 ensure_ascii=False))
     assert content.generate_site(site_id, rewrite=True, overwrite_manual=True) == 3 and len(calls) == 3
     vs = {p.url_path: p for p in _pages(site_id)}["/vs"]
     assert "<h2>Скорость</h2>" in vs.body and vs.blocks_stale is False and vs.id == ids["/vs"]
@@ -636,6 +638,116 @@ def test_mark_edited_without_body_keeps_blocks_fresh(monkeypatch):
     content.mark_edited(p.id, p.body + "<p>Редактор дописал абзац.</p>")
     got = _pages(p.site_id)[0]
     assert got.blocks_stale is True and got.status == "edited"
+
+
+# --- переписывание под оффер САЙТА ---
+
+def _old_offer_pages(site_id: int, paths=PATHS, **over) -> tuple[int, dict]:
+    """Страницы сайта, написанные под ПРЕЖНИЙ оффер (TestVPN); сам сайт привязан к Durev VPN.
+    -> (id прежнего оффера, {путь: id})."""
+    with db.SessionLocal() as s:
+        old = Offer(brand="TestVPN", affiliate_link="https://testvpn.example/aff", language="ru", active=True)
+        s.add(old); s.commit()
+        rows = [Page(**{**dict(site_id=site_id, url_path=path, title="Старый заголовок", status="published",
+                               body=OLD_BODY, lang="ru", offer_id=old.id), **over}) for path in paths]
+        s.add_all(rows); s.commit()
+        return old.id, {p.url_path: p.id for p in rows}
+
+
+def test_rewrite_writes_under_the_site_offer_not_the_old_pages_offer(monkeypatch):
+    """Сайт перепривязали к другому офферу, досье собрано под него. «Переписать тексты» пишет про оффер
+    сайта и записывает его в строку: иначе текст про прежний бренд, критик сверяет бренд по Page.offer_id и
+    одобряет, а публикация ставит ссылку прежнего оффера."""
+    from app.services.vertical_data import vertical_block
+    site_id = _site()
+    old_id, ids = _old_offer_pages(site_id)
+    with db.SessionLocal() as s:
+        site_offer_id = s.get(Site, site_id).offer_id
+    assert site_offer_id != old_id
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True) == 3
+    fact = vertical_block("Durev VPN").splitlines()[1]              # первая строка фактов бренда сайта
+    for c in calls:
+        assert "бренд — Durev VPN" in c["prompt"] and "TestVPN" not in c["prompt"]
+        assert fact in c["prompt"] and "скидка 20% на первый год" in c["prompt"]
+    assert {p.offer_id for p in _pages(site_id)} == {site_offer_id}
+    # круг критика пишет под оффер, записанный в странице, — теперь это оффер сайта
+    calls = _llm(monkeypatch, default=json.dumps({**DOC, "pros": ["Другая редакция"]}, ensure_ascii=False))
+    assert content.rewrite_page(ids["/"], ["x"])["ok"] is True
+    assert "бренд — Durev VPN" in calls[0]["prompt"] and _pages(site_id)[0].offer_id == site_offer_id
+
+
+def test_rewrite_skipped_pages_keep_their_offer(monkeypatch):
+    """Страницу, которую переписывание не тронуло (правлена руками), не перепривязываем: её текст — про прежний оффер."""
+    site_id = _site()
+    old_id, ids = _old_offer_pages(site_id)
+    with db.SessionLocal() as s:
+        s.get(Page, ids["/vs"]).blocks_stale = True
+        s.commit()
+    _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True) == 2
+    by_path = {p.url_path: p for p in _pages(site_id)}
+    assert by_path["/vs"].offer_id == old_id and by_path["/vs"].body == OLD_BODY
+    assert by_path["/"].offer_id != old_id and by_path["/setup"].offer_id != old_id
+
+
+def test_backfill_without_rewrite_still_inherits_the_pages_offer(monkeypatch):
+    """Дозаполнение недостающих страниц (без rewrite) — под тот же оффер и язык, что уже написанные."""
+    site_id = _site()
+    old_id, ids = _old_offer_pages(site_id, paths=("/",))
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id) == 2
+    assert all("бренд — TestVPN" in c["prompt"] for c in calls)
+    assert {p.offer_id for p in _pages(site_id)} == {old_id}
+    assert _pages(site_id)[0].body == OLD_BODY
+
+
+def test_rewrite_without_site_offer_falls_back_to_the_pages_offer(monkeypatch):
+    site_id = _site()
+    old_id, ids = _old_offer_pages(site_id)
+    with db.SessionLocal() as s:
+        s.get(Site, site_id).offer_id = None
+        s.commit()
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True) == 3
+    assert all("бренд — TestVPN" in c["prompt"] for c in calls)
+    assert {p.offer_id for p in _pages(site_id)} == {old_id}
+
+
+# --- тот же текст — не переписывание ---
+
+def test_rewrite_that_returns_the_same_text_changes_nothing(monkeypatch):
+    """Писатель вернул знак в знак прежний текст: строка, её статус и заметки критика не тронуты (иначе
+    «переписывание» стирало бы отказ критика, ничего не изменив)."""
+    site_id = _site()
+    _llm(monkeypatch)
+    assert content.generate_site(site_id) == 3
+    stamp = datetime.now(timezone.utc)
+    notes = {"pass": False, "issues": ["вода"], "refused_fp": "0123456789abcdef"}
+    with db.SessionLocal() as s:
+        for p in s.query(Page).filter(Page.site_id == site_id):
+            p.status, p.critic_notes, p.critic_score, p.critic_checked_at = "edited", notes, 0.3, stamp
+        s.commit()
+    before = [(p.title, p.body, p.blocks) for p in _pages(site_id)]
+
+    calls = _llm(monkeypatch)                                       # тот же DOC, что и в первый раз
+    assert content.generate_site(site_id, rewrite=True) == 0
+    assert len(calls) == 3
+    for p, old in zip(_pages(site_id), before):
+        assert (p.title, p.body, p.blocks) == old and p.status == "edited"
+        assert p.critic_notes == notes and p.critic_score == 0.3 and p.critic_checked_at is not None
+    last = jobs.last("generate")
+    assert last["status"] == "done_warn" and "написано 0 из 3" in last["message"]
+    assert "/, /vs, /setup — писатель вернул прежний текст" in last["message"]
+
+    pid = _pages(site_id)[0].id
+    out = content.rewrite_page(pid, ["x"])
+    assert out == {"page_id": pid, "ok": False, "error": "писатель вернул прежний текст"}
+    assert _pages(site_id)[0].critic_notes == notes and _pages(site_id)[0].status == "edited"
+    # другой текст — настоящее переписывание
+    _llm(monkeypatch, default=json.dumps({**DOC, "pros": ["Другая редакция"]}, ensure_ascii=False))
+    assert content.rewrite_page(pid, ["x"])["ok"] is True
+    assert _pages(site_id)[0].critic_notes is None and _pages(site_id)[0].status == "draft"
 
 
 # --- факты бренда ---

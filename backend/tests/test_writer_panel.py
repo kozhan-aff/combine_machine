@@ -205,6 +205,7 @@ def _passing_draft(site_id: int, path: str = "/") -> int:
 def critic_says_pass(tmp_path, monkeypatch):
     """Кнопка идёт до конца без подмены критика: задача выполняется на месте, модель отвечает «прошла»,
     правила письма — из пустой папки. -> список вызовов `content.mark_edited` (настоящая функция работает)."""
+    (tmp_path / "guides").mkdir()        # папка есть и пуста: «правил нет», а не «папка не видна процессу»
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
     monkeypatch.setattr(jobs, "spawn", lambda name, target: target() or True)
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
@@ -406,7 +407,7 @@ def test_card_stale_verdict_advice_is_only_for_a_draft(client):
 
 @pytest.mark.parametrize("auto_edit, then", [
     (False, "Вердикт записан. Страница остаётся черновиком — одобряешь ты."),
-    (True, "Вердикт записан. Одобрит критик при следующей вычитке сайта или ты сам."),
+    (True, "Вердикт записан. Критик одобрит страницу при следующей вычитке сайта."),
 ])
 def test_editor_critique_flash_says_who_approves_next(client, critic_says_pass, auto_edit, then):
     autonomy.update_autonomy(auto_edit=auto_edit)

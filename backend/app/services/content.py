@@ -259,7 +259,8 @@ def _prompts(rows: list, spec: dict, *, brand: str, lang: str, country: str | No
 def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
     """Записать страницу писателя в строку Page (новую или переписываемую). Статус — всегда draft:
     переписанный текст никто не читал, прежние «вычитано»/«опубликовано» и оценка критика к нему не
-    относятся. url_path, lang, offer_id, published_at и поля индексации не трогаем — это история строки."""
+    относятся. url_path, lang, published_at и поля индексации не трогаем — это история строки; оффер, под
+    который текст написан, в переписанную строку ставит зовущий — в той же записи."""
     from sqlalchemy.orm.attributes import flag_modified
     page.title = doc.meta.title
     page.body = _sanitize(page_doc.render_blocks(doc, kind, lang))
@@ -271,6 +272,14 @@ def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
     # не включил бы статус в UPDATE — и новый, никем не читанный текст остался бы «вычитанным».
     flag_modified(page, "status")
     page.critic_score = page.critic_notes = page.critic_checked_at = None
+
+
+def _same_text(page, doc: page_doc.PageDoc, kind: str, lang: str) -> bool:
+    """Писатель вернул то, что уже лежит в строке (заголовок и тело знак в знак). Это не переписывание:
+    строку не трогаем вовсе — иначе запись «нового» текста стёрла бы статус и заметки критика (в том
+    числе его окончательный отказ), ничего не изменив на странице."""
+    return (page.title or "") == doc.meta.title and \
+        (page.body or "") == _sanitize(page_doc.render_blocks(doc, kind, lang))
 
 
 def _hand_edited(page, seen_body: str | None, overwrite_manual: bool = False) -> bool:
@@ -320,7 +329,9 @@ def generate_site(site_id: int, lang: str | None = None, vertical_data: str | No
     путь: один промпт -> HTML-фрагмент (blocks пуст).
 
     rewrite: только путь с досье. Кроме недостающих страниц переписывает на месте существующие
-    (draft|edited|published -> draft, та же строка), кроме правленых руками (blocks_stale).
+    (draft|edited|published -> draft, та же строка), кроме правленых руками (blocks_stale). Пишет под
+    оффер САЙТА и записывает его в переписанную строку; без rewrite недостающие страницы дописываются
+    под оффер уже написанных. Текст, вернувшийся знак в знак прежним, строку не меняет.
     overwrite_manual: переписать и правленые руками — только по явному решению оператора (галочка
     в панели); автопилот его не передаёт.
 
@@ -365,7 +376,10 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
         existing_paths = {p.url_path for p in existing_pages}
         existing_page = existing_pages[0] if existing_pages else None
 
-        offer = None
+        # Переписывание идёт под оффер САЙТА: сайт могли перепривязать (досье собрано уже под новый
+        # бренд), и текст «про оффер первой страницы» вышел бы про прежний бренд — с его ссылкой при
+        # публикации. Оффер уже написанных страниц берётся, только если у сайта своего нет.
+        offer = site_offer(db, site) if rewrite else None
         if existing_page is not None:
             # Дозаполнение (S4/S5, аудит 2026-07-18): сайт уже частично сгенерирован —
             # наследуем lang/offer от уже существующих страниц, а не резолвим заново.
@@ -374,7 +388,8 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
             # языке или под другим брендом, чем уже созданные, — нарушая "один домен =
             # одно гео/язык" и рассинхронизируя publish.py с телом контента.
             lang = existing_page.lang or lang
-            offer = db.get(Offer, existing_page.offer_id) if existing_page.offer_id else None
+            if offer is None:
+                offer = db.get(Offer, existing_page.offer_id) if existing_page.offer_id else None
         if offer is None:
             # тематическая связность: бренд — из оффера, ЯВНО привязанного к сайту (Site.offer_id),
             # а не «самого раннего активного» (S6-13/S7-12): иначе несколько сайтов портфеля
@@ -558,6 +573,10 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
                     if _hand_edited(page, old.body, overwrite_manual):
                         hand_edited += 1
                         continue
+                    if _same_text(page, doc, spec["kind"], lang):
+                        failed.append((spec["url_path"], "писатель вернул прежний текст"))
+                        continue
+                    page.offer_id = offer_id     # под какой оффер текст написан — в той же записи, что и текст
                 _apply_doc(page, doc, spec["kind"], lang)
                 try:
                     db.commit()
@@ -595,7 +614,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
     строки, и статус draft в ней пишется всегда (`_apply_doc`).
 
     Оффер и язык — те, под которые страница написана (Page.offer_id/lang, F26), тип — по её пути в
-    scaffold(). Отказ (нет досье, ручная правка, провал писателя) страницу не меняет и возвращается
+    scaffold(). Отказ (нет досье, ручная правка, провал писателя, прежний текст вместо нового) страницу
+    не меняет и возвращается
     словами в `error`, а не исключением: зовущий обходит страницы пачкой. Реестр задач не трогает —
     задачу ведёт тот, кто зовёт."""
     from app.db import SessionLocal
@@ -629,7 +649,7 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
         rows = research.dossier(db, page.site_id)
         if not rows:
             return out("у сайта нет досье конкурентов — сначала собери его")
-        lang, seen_body = page.lang, page.body
+        lang, seen_body, offer_id = page.lang, page.body, offer.id
         brand, country, promo = offer.brand, offer.country, (offer.promo_code, offer.promo_terms)
         db.expunge_all()                     # строки досье нужны после закрытия сессии
 
@@ -651,7 +671,10 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
             return out("страница изменилась, пока писатель работал")
         if _hand_edited(page, seen_body, overwrite_manual):
             return out("страницу правили вручную, пока модель писала, — правка сохранена, текст модели отброшен")
+        if _same_text(page, doc, spec["kind"], lang):
+            return out("писатель вернул прежний текст")
         _apply_doc(page, doc, spec["kind"], lang)
+        page.offer_id = offer_id             # под какой оффер текст написан — в той же записи, что и текст
         db.commit()
     return out()
 
@@ -674,10 +697,28 @@ def _set_body(page, new_body: str) -> None:
     page.body = new_body
 
 
-def save_draft(page_id: int, body: str) -> dict:
+_UNSET = object()
+STALE_FORM = "страница изменилась, пока ты её редактировал (её переписал писатель) — открой заново"
+
+
+def _is(column, value):
+    """Сравнение колонки со значением, верное и для NULL."""
+    return column.is_(None) if value is None else column == value
+
+
+def _form_is_stale(page, seen_fp: str | None) -> bool:
+    """Редактор открыли с одним текстом, а в строке уже другой. `seen_fp` — отпечаток заголовка и тела,
+    с которыми страница была показана (скрытое поле формы); None — зовущий его не прислал (JSON-API,
+    старый клиент), сверять не с чем."""
+    from app.services.content_critic import fingerprint
+    return seen_fp is not None and seen_fp != fingerprint(page.title, page.body)
+
+
+def save_draft(page_id: int, body: str, seen_fp: str | None = None) -> dict:
     """Сохранить правку БЕЗ одобрения (S6-16): статус — draft. Одобряет только mark_edited.
     Правка уже одобренной (edited) страницы возвращает её в draft: иначе непросмотренный текст
-    уехал бы на сайт под старой отметкой «вычитано»."""
+    уехал бы на сайт под старой отметкой «вычитано». `seen_fp` — см. `_form_is_stale`: форма, открытая
+    до того, как страницу переписал писатель, его текст не затирает."""
     from app.db import SessionLocal
     from app.models.site import Page
 
@@ -690,6 +731,8 @@ def save_draft(page_id: int, body: str) -> dict:
         if p.status not in ("draft", "edited"):
             raise ValueError(f"страница #{page_id} в статусе «{p.status}» — править можно "
                              "только черновик или вычитанную, ещё не опубликованную страницу")
+        if _form_is_stale(p, seen_fp):
+            raise ValueError(STALE_FORM)
         _set_body(p, _sanitize(body))
         p.status = "draft"
         # и текст формы, и статус пишутся в строку всегда, а не «если изменились» (см. _apply_doc): иначе
@@ -700,36 +743,43 @@ def save_draft(page_id: int, body: str) -> dict:
     return {"page_id": page_id, "status": "draft"}
 
 
-def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | None = None) -> dict:
+def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | None = None,
+                expected_title=_UNSET, seen_fp: str | None = None) -> dict:
     """HUMAN gate: draft -> edited (the ONLY path to 'edited'). Optionally save edited body.
 
     Принимает только draft/edited-страницу (published не разжалуется молча, S7-11) и тело с
     видимым текстом не короче MIN_BODY_TEXT (после sanitize). body=None — одобрить как лежит.
 
-    Одобряется и записывается ровно тот текст, который человек видел, — одним UPDATE с условием на статус.
-    Текст формы пишется в строку явно, что бы в ней ни лежало к этому мигу; «как лежит» одобряет только
-    тело, прочитанное в этой же транзакции (условие на тело в UPDATE). Иначе писатель, закоммитивший
-    новый текст между чтением и записью, получил бы для него «вычитано»: UPDATE нёс бы один статус.
+    Одобряется и записывается ровно то, что человек видел, — одним UPDATE с условием на статус и на
+    заголовок (он тоже уходит на сайт — в <h1> и <title>). Текст формы пишется в строку явно; «как лежит»
+    одобряет только тело, прочитанное в этой же транзакции. `seen_fp` — отпечаток заголовка и тела, с
+    которыми редактор был открыт (см. `_form_is_stale`): если страницу с тех пор переписал писатель —
+    отказ, а не одобрение старого текста под новым заголовком; при нём UPDATE держит и условие на тело.
+    Без `seen_fp` (JSON-API, старый клиент) текст формы пишется, что бы ни лежало в строке.
 
-    `expected_body` — одобрение критиком: «одобрить, только если страница — черновик и её тело ровно
-    это». Один условный UPDATE, без чтения перед записью: между вычиткой и одобрением страницу мог
-    изменить редактор панели или другой прогон писателя, и окна на это здесь нет. Ни одной строки не
-    обновлено -> ValueError, страница не тронута. Тело при этом не пишется (`body` вместе с
-    `expected_body` — отказ)."""
+    `expected_body` (+ `expected_title`) — одобрение критиком: «одобрить, только если страница — черновик
+    и её тело (и заголовок) ровно эти». Один условный UPDATE, без чтения перед записью: между вычиткой и
+    одобрением страницу мог изменить редактор панели или другой прогон писателя, и окна на это здесь нет.
+    Ни одной строки не обновлено -> ValueError, страница не тронута. Тело при этом не пишется."""
     from sqlalchemy import case, update
     from app.db import SessionLocal
     from app.models.site import Page
 
-    if expected_body is not None:
-        if body is not None:
-            raise ValueError("mark_edited: body и expected_body вместе не передаются")
+    if expected_body is not None or expected_title is not _UNSET:
+        if body is not None or seen_fp is not None:
+            raise ValueError("mark_edited: body/seen_fp и expected_body вместе не передаются")
+        if not isinstance(expected_body, str):
+            # критик без прочитанного тела не должен провалиться в ветку человека «одобрить как лежит»
+            raise ValueError("mark_edited: одобрение критиком без прочитанного тела")
         n = _visible_len(expected_body)
         if n < MIN_BODY_TEXT:
             raise ValueError(f"в тексте страницы {n} симв. — нужно хотя бы {MIN_BODY_TEXT}: "
                              "пустую страницу одобрить нельзя")
+        where = [Page.id == page_id, Page.status == "draft", Page.body == expected_body]
+        if expected_title is not _UNSET:
+            where.append(_is(Page.title, expected_title))
         with SessionLocal() as db:
-            done = db.execute(update(Page).where(Page.id == page_id, Page.status == "draft",
-                                                 Page.body == expected_body).values(status="edited")).rowcount
+            done = db.execute(update(Page).where(*where).values(status="edited")).rowcount
             db.commit()
         if done != 1:
             raise ValueError("страница изменилась во время вычитки — не одобрена")
@@ -742,14 +792,19 @@ def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | N
         if p.status not in ("draft", "edited"):
             raise ValueError(f"страница #{page_id} в статусе «{p.status}»: одобрять можно только "
                              "черновик или вычитанную страницу, опубликованную молча не разжалуем")
+        if _form_is_stale(p, seen_fp):
+            raise ValueError(STALE_FORM)
         new_body = _sanitize(body) if body is not None else (p.body or "")  # defense-in-depth
         n = _visible_len(new_body)
         if n < MIN_BODY_TEXT:
             raise ValueError(f"в тексте страницы {n} симв. — нужно хотя бы {MIN_BODY_TEXT}: "
                              "пустую страницу одобрить нельзя (сохрани как черновик и допиши)")
-        where = [Page.id == page_id, Page.status.in_(("draft", "edited"))]
-        if body is None:                     # «как лежит» — только то тело, что мы сейчас прочли
-            where.append(Page.body.is_(None) if p.body is None else Page.body == p.body)
+        # заголовок — тот, что мы сейчас прочли: одобрить заголовок, которого никто не видел, нельзя
+        where = [Page.id == page_id, Page.status.in_(("draft", "edited")), _is(Page.title, p.title)]
+        if body is None or seen_fp is not None:
+            # «как лежит» — только то тело, что мы сейчас прочли; с отпечатком формы — тоже: человек видел
+            # именно его, и правка пишется поверх него, а не поверх чужой, прилетевшей в этот миг
+            where.append(_is(Page.body, p.body))
         # blocks_stale — как в _set_body («тело правили руками»), но по телу, которое лежит в строке в миг
         # записи: совпало с новым — флаг не трогаем, иначе ставим
         done = db.execute(

@@ -1,6 +1,7 @@
 """PageDoc: разбор ответа писателя (ограда, проза, обрезка, схема) и рендер блоков в HTML (план Б, задача 2)."""
 import copy
 import json
+import time
 
 import pytest
 
@@ -167,6 +168,70 @@ def test_parse_rejects_blocks_left_without_text():
                  ("verdict", "for_whom"), ("verdict", "not_for_whom")):
         for empty in ("", "  \n"):
             assert ".".join(map(str, path)) in broken(path, empty)
+
+
+# --- parse: мелочи не жгут единственный повтор писателя ---
+
+def test_parse_tolerates_null_and_bare_string_in_list_fields():
+    """`null` вместо списка и строка вместо списка из одной строки — не ошибка схемы."""
+    doc = _doc(pros=None, cons=None, faq=None, sources=None, steps=None)
+    assert doc.pros == [] and doc.cons == [] and doc.faq == [] and doc.sources == [] and doc.steps is None
+    doc = _doc(pros="Быстрый", cons="  Дорогой  ", sources="https://example.com/a")
+    assert doc.pros == ["Быстрый"] and doc.cons == ["Дорогой"] and doc.sources == ["https://example.com/a"]
+    data = _data()
+    data["sections"][0]["paragraphs"] = "Один абзац строкой."
+    data["sections"][0]["bullets"] = "Один пункт"
+    data["sections"][0]["h3s"] = None
+    data["sections"][1]["bullets"] = None
+    data["sections"][1]["h3s"] = {"h3": "Подзаголовок", "paragraphs": "Абзац строкой."}      # один объект
+    doc = page_doc.parse(_raw(data))
+    first, second = doc.sections
+    assert first.paragraphs == ["Один абзац строкой."] and first.bullets == ["Один пункт"] and first.h3s is None
+    assert second.bullets is None and second.h3s[0].paragraphs == ["Абзац строкой."]
+
+
+def test_parse_tolerates_single_object_and_junk_in_optional_blocks():
+    doc = _doc(faq={"q": "Есть пробный период?", "a": "Да."}, steps={"title": "Войди", "text": "По коду."})
+    assert doc.faq[0].q == "Есть пробный период?" and doc.steps[0].title == "Войди"
+    doc = _doc(faq="Есть ли пробный период? Да.", steps="Скачай и войди.", sources={"a": 1})
+    assert doc.faq == [] and doc.steps is None and doc.sources == []
+    doc = _doc(faq=[None, {"q": "В?", "a": "О."}], sources=["https://a.example", None, 5, "", ["x"]])
+    assert len(doc.faq) == 1 and doc.sources == ["https://a.example"]
+    assert _doc(sources=("https://a.example", "https://b.example")).sources == ["https://a.example",
+                                                                               "https://b.example"]
+
+
+def test_parse_required_text_is_still_required():
+    """Терпимость — к форме, не к пустоте: раздел без абзацев по-прежнему ошибка."""
+    data = _data()
+    data["sections"][0]["paragraphs"] = None
+    assert "sections.0.paragraphs" in _error(_raw(data))
+    assert "sections" in _error(_raw(_data(sections=None)))
+
+
+def test_meta_description_has_no_bounds():
+    """Описание на сайт берётся из тела; длина поля в ответе модели — не повод для отказа."""
+    for value, kept in (("коротко", "коротко"), ("", ""), (None, ""), ("д" * 500, "д" * 300), (42, "42")):
+        doc = _doc(meta={"title": "Durev VPN: обзор и честный тест", "description": value})
+        assert doc.meta.description == kept, repr(value)[:20]
+    assert _doc(meta={"title": "Durev VPN: обзор и честный тест"}).meta.description == ""
+    assert "meta.title" in _error(_raw(_data(meta={"title": "коротко", "description": "д" * 100})))
+
+
+def test_parse_refuses_too_long_answer_before_scanning():
+    started = time.monotonic()
+    assert _error("{" * 400_001) == "ответ слишком длинный"
+    assert _error(" " * 500_000 + _raw()) == "ответ слишком длинный"
+    assert time.monotonic() - started < 1
+    assert page_doc.parse(" " * 1000 + _raw() + " " * 1000).meta.title          # обычный ответ с полями — годится
+
+
+def test_tolerant_fields_round_trip_through_stored_blocks():
+    """blocks хранит model_dump(); повторная проверка сохранённого даёт тот же документ и тот же рендер."""
+    doc = _doc(pros="Быстрый", faq=None, sources=None,
+               meta={"title": "Durev VPN: обзор и честный тест", "description": None})
+    again = page_doc.PageDoc.model_validate(doc.model_dump())
+    assert again == doc and page_doc.render_blocks(again, "review", "ru") == page_doc.render_blocks(doc, "review", "ru")
 
 
 # --- рендер ---

@@ -22,7 +22,9 @@ PASS = json.dumps({"pass": True, "score": 85, "issues": []})
 
 @pytest.fixture(autouse=True)
 def _own_guides(tmp_path, monkeypatch):
-    """Правила письма — из пустой tmp-папки: тесты не зависят от content_guides/ оператора."""
+    """Правила письма — из пустой tmp-папки: тесты не зависят от content_guides/ оператора. Папка есть:
+    её отсутствие для критика — «правила не видны», а не «правил нет»."""
+    (tmp_path / "guides").mkdir()
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
     return tmp_path / "guides"
 
@@ -456,7 +458,6 @@ def test_review_page_uses_critic_model_and_timeout(monkeypatch):
 
 def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_guides):
     from app.services import guides
-    _own_guides.mkdir()
     (_own_guides / "style.md").write_text("Не пиши слово «лучший».", encoding="utf-8")
     guides.build_digests()                                         # короткий файл — дословно, роль both
     calls = _llm(monkeypatch)
@@ -479,7 +480,6 @@ def test_critic_gets_only_the_digests_of_its_role(monkeypatch, _own_guides):
     """Критику — выжимки роли «критику» и «обоим»; правила писателя, исключённые и файл без выжимки
     (сырым — никогда) в его задание не идут."""
     from app.services import guides
-    _own_guides.mkdir()
     for name in ("писателю", "критику", "обоим", "никому"):
         (_own_guides / f"{name}.md").write_text(f"ПРАВИЛО-{name}", encoding="utf-8")
     guides.build_digests()
@@ -506,9 +506,84 @@ def test_critic_prompt_page_text_cannot_close_the_fence(monkeypatch):
     assert prompt.index("Новая инструкция редактору") < prompt.index(content_critic.TAG_CLOSE)
 
 
+def test_critic_prompt_shows_the_brand_facts_and_promo_terms(monkeypatch):
+    """Без фактов бренда модель не отличит выдуманную характеристику («есть kill switch», «аудит no-logs»)
+    от настоящей: раздел фактов — наш, проверенный, стоит до текста страницы и вне его ограды."""
+    from app.services.vertical_data import vertical_block
+    calls = _llm(monkeypatch)
+    content_critic.review_page(_seed_page())
+    system, prompt = calls[0]["system"], calls[0]["prompt"]
+    facts = vertical_block("NordVPN")
+    head = prompt[:prompt.index(content_critic.TAG_OPEN)]
+    assert "Факты бренда (всё, что известно о сервисе):\n" + facts in head
+    assert "Условия промокода: скидка 70% на 2 года" in head
+    assert "5. Факты о бренде:" in system and "5. Факты о бренде:" in prompt[prompt.index(content_critic.TAG_CLOSE):]
+    assert "«Факты бренда»" in system
+
+
+def test_critic_prompt_says_when_there_are_no_brand_facts(monkeypatch):
+    calls = _llm(monkeypatch)
+    with db.SessionLocal() as s:
+        d = Domain(domain="nofacts.xyz", source="list", status="purchased")
+        o = Offer(brand="Никому Неизвестный VPN", affiliate_link="https://ref/x")
+        s.add_all([d, o]); s.commit()
+        site = Site(domain_id=d.id, status="content", offer_id=o.id)
+        s.add(site); s.commit()
+        p = Page(site_id=site.id, url_path="/", title="Обзор", status="draft", lang="ru", offer_id=o.id,
+                 body=BODY.replace("NordVPN", "Никому Неизвестный VPN"))
+        s.add(p); s.commit()
+        pid = p.id
+    content_critic.review_page(pid)
+    head = calls[0]["prompt"][:calls[0]["prompt"].index(content_critic.TAG_OPEN)]
+    assert "Факты бренда (всё, что известно о сервисе):\nпроверенных данных о бренде нет" in head
+    assert "Условия промокода" not in head
+
+
+def test_review_page_own_verdict_score_is_not_an_unsourced_number(monkeypatch):
+    """Оценка редакции из структуры страницы — её собственное число: «7,5 из 10» в прозе не «факт без источника»."""
+    _llm(monkeypatch)
+    body = BODY + "<p>Наша оценка — 7,5 из 10, и это честно.</p>"
+    blocks = {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 7.5, "summary": "x"}}
+    assert content_critic.review_page(_seed_page(body=body, blocks=blocks))["code"] == []
+    assert content_critic.review_page(_seed_page(body=body, domain="s2.xyz"))["code"] == ["числа без источника: 7,5"]
+    other = {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 8}}
+    assert content_critic.review_page(_seed_page(body=body, blocks=other, domain="s3.xyz"))["code"] == [
+        "числа без источника: 7,5"]
+    for n, junk in enumerate(({"verdict": {"score": "7.5"}}, {"verdict": {"score": True}}, {"verdict": 7.5},
+                              {"verdict": {"score": float("inf")}}, ["verdict"])):
+        pid = _seed_page(body=body, blocks=junk, domain=f"junk-score{n}.xyz")
+        assert content_critic.review_page(pid)["code"] == ["числа без источника: 7,5"]
+
+
+def test_critique_page_tells_who_will_approve(monkeypatch, _own_guides):
+    """Кнопка «Вычитать» считает ту же причину «одобряет человек», что и вычитка сайта, и пишет её в заметки."""
+    _llm(monkeypatch)
+    doc = {"meta": {"title": "NordVPN: обзор сервиса"},
+           "sections": [{"h2": "Скорость", "paragraphs": [SENT * 60]}, {"h2": "Приватность", "paragraphs": [SENT * 60]}]}
+    from app.services import content, page_doc
+    body = content._sanitize(page_doc.render_blocks(page_doc.PageDoc.model_validate(doc), "review", "ru"))
+    eligible = _seed_page(body=body, blocks=doc, title=doc["meta"]["title"])
+    out = content_critic.critique_page(eligible)
+    assert out["pass"] is True and out["note"] is None and "note" not in _page(eligible).critic_notes
+
+    by_hand = _seed_page(domain="hand.xyz")                              # страница без blocks
+    out = content_critic.critique_page(by_hand)
+    assert out["pass"] is True
+    assert out["note"] == "одобряет человек: текст правился вручную или написан старым способом"
+    assert _page(by_hand).critic_notes["note"] == out["note"] and "retry" not in _page(by_hand).critic_notes
+
+    (_own_guides / "новое.md").write_text("ПРАВИЛО без выжимки", encoding="utf-8")
+    out = content_critic.critique_page(eligible)
+    assert out["note"] == "правила письма не сжаты (1 файл) — одобряет человек"
+    assert _page(eligible).critic_notes["retry"] is True and _page(eligible).status == "draft"
+
+    _llm(monkeypatch, json.dumps({"pass": False, "score": 10, "issues": ["вода"]}, ensure_ascii=False))
+    assert content_critic.critique_page(eligible)["note"] is None     # не прошла — вопрос «кто одобрит» не стоит
+
+
 def test_critique_page_is_a_thin_wrapper(monkeypatch):
     _llm(monkeypatch, json.dumps({"pass": False, "score": 60, "issues": ["маловато конкретики"]}, ensure_ascii=False))
     pid = _seed_page()
     out = content_critic.critique_page(pid)
-    assert out == {"score": 0.6, "issues": ["маловато конкретики"], "error": None, "pass": False}
+    assert out == {"score": 0.6, "issues": ["маловато конкретики"], "error": None, "pass": False, "note": None}
     assert _page(pid).status == "draft"

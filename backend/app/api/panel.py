@@ -968,6 +968,9 @@ def page_edit_view(request: Request, page_id: int, db: Session = Depends(get_ses
         "page": page, "site": site, "domain": d.domain if d else "",
         # вердикт критика показываем, только если он относится к нынешнему тексту страницы
         "verdict_fresh": content_critic.verdict_is_fresh(page), "max_rounds": content_critic.MAX_ROUNDS,
+        # отпечаток показанных заголовка и тела едет скрытым полем формы: сохранить и одобрить можно только
+        # ту страницу, с которой редактор был открыт (пока он открыт, её мог переписать писатель)
+        "seen_fp": content_critic.fingerprint(page.title, page.body),
     })
 
 
@@ -1617,26 +1620,32 @@ def research_action(site_id: int, force: str = Form(""), db: Session = Depends(g
 
 
 @router.post("/pages/{page_id}/save")
-def page_save_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
+def page_save_action(page_id: int, body: str = Form(""), seen: str = Form(""),
+                     db: Session = Depends(get_session)):
     """ОДОБРИТЬ (гейт): draft -> edited. Тело — ровно то, что редактор видит в форме. Потерянное
     поле и очищенная textarea для FastAPI неразличимы (пустое значение = «нет поля»), поэтому обе
-    ситуации дают пустое тело, и гейт его не пропускает (S7-11): старый текст молча не одобряется."""
+    ситуации дают пустое тело, и гейт его не пропускает (S7-11): старый текст молча не одобряется.
+    `seen` — отпечаток заголовка и тела, с которыми форма была открыта: страницу, переписанную с тех пор
+    писателем, сервис не одобрит (иначе — старый текст формы под новым заголовком, которого никто не видел)."""
     from app.services import content
     p = db.get(Page, page_id)
     sid = p.site_id if p else None
     try:
-        content.mark_edited(page_id, body)   # ЧЕЛОВЕК прошёл гейт: draft -> edited (+ sanitize)
+        # ЧЕЛОВЕК прошёл гейт: draft -> edited (+ sanitize)
+        content.mark_edited(page_id, body, seen_fp=seen or None)
         return _back(f"/sites/{sid}", msg="Страница сохранена как edited — можно публиковать.")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
 
 @router.post("/pages/{page_id}/draft")
-def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(get_session)):
-    """Сохранить правку КАК ЧЕРНОВИК, без одобрения (S6-16): статус не edited, публикация не возьмёт."""
+def page_draft_action(page_id: int, body: str = Form(""), seen: str = Form(""),
+                      db: Session = Depends(get_session)):
+    """Сохранить правку КАК ЧЕРНОВИК, без одобрения (S6-16): статус не edited, публикация не возьмёт.
+    `seen` — как у «Одобрить»: форма, открытая до переписывания страницы, текст писателя не затирает."""
     from app.services import content
     try:
-        content.save_draft(page_id, body)
+        content.save_draft(page_id, body, seen_fp=seen or None)
         return _back(f"/pages/{page_id}", msg="Черновик сохранён (не одобрен — публикация его не возьмёт).")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
@@ -1646,7 +1655,8 @@ def page_draft_action(page_id: int, body: str = Form(""), db: Session = Depends(
 def critique_page_action(page_id: int):
     """Кнопка «Вычитать»: проверки кодом + вердикт модели по одной странице (план Б). Подсказка человеку:
     сама кнопка статус страницы не меняет ни при каком вердикте и ни при каком тумблере. Кто одобрит
-    прошедшую страницу дальше, зависит от тумблера автопилота — флеш говорит это как есть."""
+    прошедшую страницу дальше — критик при вычитке сайта или только человек (текст правлен вручную, правила
+    письма не сжаты, критик этому тексту уже отказывал), — флеш говорит как есть."""
     from app.services import content_critic
     from app.services.autonomy import get_autonomy
     try:
@@ -1657,11 +1667,15 @@ def critique_page_action(page_id: int):
         return _back(f"/pages/{page_id}", err=f"критик: {e}")
     if v["error"]:
         return _back(f"/pages/{page_id}", err=f"вычитка не состоялась: {v['error']}")
-    if v["pass"]:
-        then = ("Одобрит критик при следующей вычитке сайта или ты сам." if get_autonomy()["auto_edit"]
-                else "Страница остаётся черновиком — одобряешь ты.")
-        return _back(f"/pages/{page_id}", msg=f"Вердикт записан. {then}")
-    return _back(f"/pages/{page_id}", msg=f"Вычитано: замечаний — {len(v['issues'])}, список — под кнопкой.")
+    if not v["pass"]:
+        return _back(f"/pages/{page_id}", msg="Вердикт записан: есть замечания.")
+    if v["note"]:
+        # критик сам эту страницу не одобрит — говорим почему, а не обещаем «одобрит критик»
+        why = v["note"].removeprefix("одобряет человек: ").removesuffix(" — одобряет человек")
+        return _back(f"/pages/{page_id}", msg=f"Вердикт записан. Одобряешь ты: {why}.")
+    then = ("Критик одобрит страницу при следующей вычитке сайта." if get_autonomy()["auto_edit"] is True
+            else "Страница остаётся черновиком — одобряешь ты.")
+    return _back(f"/pages/{page_id}", msg=f"Вердикт записан. {then}")
 
 
 @router.post("/sites/{site_id}/publish")
