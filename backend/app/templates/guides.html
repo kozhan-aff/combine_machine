@@ -22,7 +22,7 @@
         <input type="file" name="file" accept=".md,.txt" multiple></label>
       <label class="f">или папка целиком <span class="note">возьмём из неё только .md и .txt</span>
         <input type="file" name="file" webkitdirectory></label>
-      <button class="btn-acc" title="сохранить в content_guides/; файл с тем же именем заменится, его выжимку и роль машина назначит заново">↑ Загрузить</button>
+      <button class="btn-acc" title="сохранить в content_guides/; файл с тем же именем заменится: выжимку машина сделает заново, выбранное тобой «кому» останется">↑ Загрузить</button>
     </form>
   </div>
   <details class="what"><summary>можно и без панели</summary>
@@ -39,9 +39,11 @@
   </form>
   <span class="hint" title="столько символов правил получит каждый при следующем прогоне{{ '; часть файлов не влезла в лимит — файлы с конца списка отброшены' if writer.truncated or critic.truncated }}">писателю уйдёт {{ '{:,}'.format(writer.text|length).replace(',', ' ') }} симв., критику — {{ '{:,}'.format(critic.text|length).replace(',', ' ') }} (лимит {{ '{:,}'.format(limit).replace(',', ' ') }} на каждого)</span>
   {% if waiting %}<b class="hint" style="color:var(--bad)" title="у этих файлов выжимки нет, она устарела или не получилась — нажми «Сжать правила» либо напиши выжимку сам (колонка «выжимка»)">{{ waiting }}</b>{% endif %}
+  {% if writer.cut or critic.cut %}<b class="hint" style="color:var(--bad)" title="выжимки одной роли вместе длиннее лимита: файлы с конца списка в задание не попадают — они помечены в таблице. Сократи выжимки или отдай часть файлов только писателю либо только критику">не влезло в лимит файлов: писателю — {{ writer.cut|length }}, критику — {{ critic.cut|length }}</b>{% endif %}
 </div>
 <p class="hint" style="max-width:920px; margin:0 0 10px">
-  {% if run.status == 'running' %}Сжатие идёт: {{ run.done }} из {{ run.total }}{% if run.current %} — {{ run.current }}{% endif %}. Таблица обновится, когда перезагрузишь страницу.
+  {% if run.status == 'running' and run.stale %}<b style="color:var(--bad)">Сжатие оборвалось: процесс не отвечает.</b> Собранное до обрыва сохранено — запусти «Сжать правила» ещё раз.
+  {% elif run.status == 'running' %}Сжатие идёт: {{ run.done }} из {{ run.total }}{% if run.current %} — {{ run.current }}{% endif %}. Таблица обновится, когда перезагрузишь страницу.
   {% elif run.status == 'failed' %}Последнее сжатие: <b style="color:var(--bad)">упало — {{ run.error }}</b>
   {% elif run.status == 'cancelled' %}Последнее сжатие: остановлено на {{ run.done }} из {{ run.total }}{% if run.message %} · {{ run.message }}{% endif %}
   {% elif run.status == 'done_warn' %}Последнее сжатие: <b style="color:var(--bad)">с замечаниями</b> — {{ run.message }}
@@ -70,7 +72,8 @@
           {% for key, ru in roles.items() %}<option value="{{ key }}" {{ 'selected' if g.role == key }}>{{ ru }}</option>{% endfor %}
         </select></form></td>
       <td>{% set href = '/guides/digest/' ~ (g.rel|urlencode) %}
-          {% if g.state == 'ok' %}<span class="led led-ok"></span><a href="{{ href }}" title="посмотреть и поправить выжимку">{{ g.digest_chars }} симв.</a>
+          {% if g.state == 'ok' %}<span class="led {{ 'led-warn' if g.cut else 'led-ok' }}"></span><a href="{{ href }}" title="посмотреть и поправить выжимку{{ ' · ' ~ g.note if g.note }}{{ ' · последняя пересборка не удалась: ' ~ g.last_error if g.last_error }}">{{ g.digest_chars }} симв.</a>
+            {% if g.cut %}<span class="hint" style="color:var(--bad)" title="выжимки этой роли вместе длиннее лимита — этот файл в задание не попадает. Сократи выжимки или отдай часть файлов только писателю либо только критику">не влез в лимит{% if g.role == 'both' %}: {{ 'обоим' if g.cut|length == 2 else roles[g.cut[0]] }}{% endif %}</span>{% endif %}
           {% elif g.role == 'skip' and by_me %}<span class="led led-off"></span><a href="{{ href }}" title="выжимки нет: файл помечен «не использовать», машина его не сжимает">нет</a>
           {% elif g.state == 'stale' %}<span class="led led-warn"></span><a href="{{ href }}" style="color:var(--bad)" title="файл изменился после сжатия: выжимка снята с прежнего текста и в задание не идёт — нажми «Сжать правила»">устарела</a>
           {% elif g.state == 'error' %}<span class="led led-bad"></span><a href="{{ href }}" style="color:var(--bad)" title="{{ g.error }}">ошибка</a>

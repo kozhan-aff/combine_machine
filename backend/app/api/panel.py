@@ -587,6 +587,14 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
     return _settings_page(request, db)
 
 
+def _guides_err(e: Exception) -> str:
+    """Отказ действия с правилами письма — словами. OSError (нет прав на папку, `.digest` занят файлом) —
+    тоже причина для оператора, а не голый 500."""
+    if isinstance(e, OSError):
+        return f"папка правил не принимает запись: {e.strerror or type(e).__name__}"
+    return str(e)
+
+
 @router.get("/guides", response_class=HTMLResponse)
 def guides_view(request: Request):
     """Правила письма оператора (content_guides/): файлы, кому идёт каждый и его выжимка; загрузка, удаление.
@@ -619,8 +627,8 @@ def guides_role_action(rel: str = Form(""), role: str = Form("")):
     from app.services import guides
     try:
         guides.set_role(rel, role)
-    except ValueError as e:
-        return _back("/guides", err=str(e))
+    except (ValueError, OSError) as e:
+        return _back("/guides", err=_guides_err(e))
     return _back("/guides", msg=f"{rel} — кому: {guides.ROLE_RU[role]}")
 
 
@@ -645,8 +653,8 @@ def guide_digest_save_action(name: str, text: str = Form("")):
     from app.services import guides
     try:
         saved = guides.save_digest(name, text)
-    except ValueError as e:
-        return _back("/guides", err=str(e))
+    except (ValueError, OSError) as e:
+        return _back("/guides", err=_guides_err(e))
     if not saved:
         return _back("/guides", msg=f"{name}: своей выжимки больше нет — файл сожмёт машина («Сжать правила»)")
     cut = len(saved) < len(text.replace("\r\n", "\n").strip())
@@ -669,6 +677,8 @@ async def guides_upload_action(request: Request):
             saved.append(guides.save_guide(up.filename, await up.read()))
         except ValueError as e:
             errs.append(str(e))
+        except OSError as e:
+            errs.append(f"«{up.filename}»: {_guides_err(e)}")
     done = f"Сохранено файлов: {len(saved)}" + (f" ({', '.join(saved)})" if saved else "")
     if errs:            # часть не прошла — говорим и что легло, и что нет (flash показывает одно из двух)
         return _back("/guides", err=f"{done}. Не приняты: " + "; ".join(errs))
@@ -680,8 +690,8 @@ def guides_delete_action(rel: str = Form("")):
     from app.services import guides
     try:
         guides.delete_guide(rel)
-    except ValueError as e:
-        return _back("/guides", err=str(e))
+    except (ValueError, OSError) as e:
+        return _back("/guides", err=_guides_err(e))
     return _back("/guides", msg=f"Удалён {rel}")
 
 

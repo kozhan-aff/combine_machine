@@ -2,6 +2,7 @@
 обоим / не использовать), кэш по хешу исходника в content_guides/.digest/. LLM — только подмена
 LlmClient.complete."""
 import json
+import time
 
 import httpx
 import pytest
@@ -154,7 +155,7 @@ def test_file_excluded_by_operator_is_not_sent_to_the_model(gdir, monkeypatch):
     guides.set_role("a.md", "skip")
     calls = _llm(monkeypatch)
     assert guides.build_digests() == {"built": 0, "skipped": 1, "failed": 0} and calls == []
-    assert guides.load_guides(role="writer") == {"text": "", "files": [], "truncated": False, "pending": []}
+    assert guides.load_guides(role="writer") == {"text": "", "files": [], "truncated": False, "pending": [], "cut": []}
     guides.set_role("a.md", "writer")                              # передумал — файл снова ждёт выжимки
     assert guides.load_guides(role="writer")["pending"] == ["a.md"]
 
@@ -185,7 +186,7 @@ def test_skip_role_may_have_an_empty_digest(gdir, monkeypatch):
     assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
     assert (_row("a.md")["role"], _row("a.md")["state"], _row("a.md")["digest_chars"]) == ("skip", "ok", 0)
     assert guides.load_guides(role="writer") == guides.load_guides(role="critic") == \
-        {"text": "", "files": [], "truncated": False, "pending": []}
+        {"text": "", "files": [], "truncated": False, "pending": [], "cut": []}
     guides.set_role("a.md", "writer")                              # оператор не согласен, а выжимки нет
     assert _row("a.md")["state"] == "pending"
     calls = _llm(monkeypatch, _answer("skip", "", "процедуры агента"))
@@ -238,6 +239,7 @@ def test_long_digest_is_cut_at_a_line_boundary(gdir, monkeypatch):
     guides.build_digests()
     digest = guides.read_digest("a.md")
     assert len(digest) <= guides.DIGEST_MAX and digest == (line * 34).strip()
+    assert _row("a.md")["note"] == "выжимка обрезана до 3500 символов"
 
 
 def test_long_source_is_cut_and_says_so(gdir, monkeypatch):
@@ -245,7 +247,9 @@ def test_long_source_is_cut_and_says_so(gdir, monkeypatch):
     calls = _llm(monkeypatch)
     guides.build_digests()
     assert "ХВОСТ" not in calls[0]["prompt"] and "КОНЕЦ-Г" in calls[0]["prompt"]
-    assert "80 000" in _row("a.md")["why"] and "правила стиля" in _row("a.md")["why"]
+    assert "80 000" in _row("a.md")["note"] and _row("a.md")["why"] == "правила стиля"
+    guides.set_role("a.md", "critic")                              # пометка об обрезке не зависит от того, чья роль
+    assert "80 000" in _row("a.md")["note"]
 
 
 def test_rules_text_cannot_close_the_fence(gdir, monkeypatch):
@@ -311,7 +315,27 @@ def test_limit_is_per_role_and_cuts_from_the_end(gdir, monkeypatch):
     assert w["files"] == [f"{n}.md" for n in names[1:12]] and w["truncated"] is True     # 11 частей по 3418 < 40 000
     assert c["files"] == [f"{n}.md" for n in names[:11]] and c["truncated"] is True
     assert len(w["text"]) <= guides.LIMIT and len(c["text"]) <= guides.LIMIT
+    assert w["cut"] == ["f12.md", "f13.md"] and c["cut"] == ["f11.md", "f12.md", "f13.md"]
     assert guides.load_guides(role="writer", limit=10**6)["truncated"] is False
+    # и в строках экрана видно, кому файл не достался, хотя выжимка у него в порядке
+    rows = {r["rel"]: r for r in guides.status()}
+    assert all(r["state"] == "ok" for r in rows.values())
+    assert [rows[f"{n}.md"]["cut"] for n in ("f00", "f10", "f11", "f12", "f13")] == \
+        [[], [], ["critic"], ["writer", "critic"], ["writer", "critic"]]
+
+
+def test_one_oversized_digest_does_not_empty_the_role(gdir, monkeypatch):
+    """Выжимка, которая и одна длиннее лимита, отбрасывается сама — следующие файлы идут в задание."""
+    (gdir / "a.md").write_text("а" * 3000, encoding="utf-8")       # короткие файлы — дословно, роль both
+    (gdir / "b.md").write_text("правило b", encoding="utf-8")
+    (gdir / "c.md").write_text("правило c", encoding="utf-8")
+    guides.build_digests()
+    r = guides.load_guides(role="writer", limit=100)
+    assert r["files"] == ["b.md", "c.md"] and r["cut"] == ["a.md"] and r["truncated"] is True
+    assert "правило b" in r["text"] and "правило c" in r["text"]
+    monkeypatch.setattr(guides, "LIMIT", 100)
+    assert [(g["rel"], g["cut"]) for g in guides.status()] == \
+        [("a.md", ["writer", "critic"]), ("b.md", []), ("c.md", [])]
 
 
 def test_load_without_a_role_is_the_old_raw_behaviour(gdir, monkeypatch):
@@ -402,11 +426,156 @@ def test_delete_and_replace_drop_the_digest_and_index_entry(gdir, monkeypatch):
     guides.save_guide("b.md", b"three")                            # замена исходника
     assert _row("b.md")["state"] == "pending" and "b.md" not in _index(gdir)
     assert not (gdir / ".digest" / "b.md.md").exists()
-    guides.delete_guide("a.md")
-    assert _index(gdir) == {} and not (gdir / ".digest" / "a.md.md").exists()
+    guides.save_guide("a.md", b"one, but rewritten")               # роль, выбранная оператором, замену переживает
+    row = _row("a.md")
+    assert (row["state"], row["role"], row["role_by"], row["digest_chars"]) == ("pending", "critic", "operator", None)
+    assert _index(gdir) == {"a.md": {"role": "critic", "role_by": "operator"}}
+    guides.build_digests()
+    assert (_row("a.md")["state"], _row("a.md")["role"]) == ("ok", "critic")
+    guides.delete_guide("a.md")                                    # удаление убирает запись целиком
+    assert list(_index(gdir)) == ["b.md"] and not (gdir / ".digest" / "a.md.md").exists()
 
 
 def test_no_digest_ru_agrees_the_words_with_the_number():
     assert [guides.no_digest_ru(n, "не учтён", "не учтены") for n in (1, 2, 5, 11, 21, 104)] == [
         "1 файл без выжимки — не учтён", "2 файла без выжимки — не учтены", "5 файлов без выжимки — не учтены",
         "11 файлов без выжимки — не учтены", "21 файл без выжимки — не учтён", "104 файла без выжимки — не учтены"]
+
+
+# --- правки после ревью: ограда без регулярки, неудачная пересборка, шлюз с мусором, гонки с папкой ---
+
+@pytest.mark.parametrize("raw", [
+    "```json" + "\n" * 150_000,                                    # ограда открыта, дальше одни переводы строк
+    "```json\n" + " \n" * 90_000 + _answer(),                      # закрывающей ограды нет
+    "```json\n" + "\n" * 1_000_000 + _answer() + "\n```",          # мегабайт пустоты: длиннее разбираемого
+    "```" * 60_000, "\n" * 199_000 + "{",
+])
+def test_fence_is_stripped_in_linear_time(raw):
+    """Регулярка ограды на таком ответе работала минуты и держала GIL — панель замирала."""
+    started = time.perf_counter()
+    with pytest.raises(ValueError):
+        guides._parse_answer(raw)
+    assert time.perf_counter() - started < 0.5
+
+
+def test_fence_forms():
+    ok = {"role": "writer", "digest": "- пиши коротко", "why": "правила стиля", "cut": False}
+    for good in (_answer(), f"  {_answer()}\n", f"```json\n{_answer()}\n```", f"```\n{_answer()}```",
+                 f"\n```JSON  \n\n{_answer()}\n\n```  \n", "```json\n" + "\n" * 150_000 + _answer() + "\n```"):
+        assert guides._parse_answer(good) == ok, good[:40]
+    for bad in (f"```json {_answer()} ```", f"``````json\n{_answer()}\n``````", f"``` вот ответ\n{_answer()}\n```",
+                f"```json\n{_answer()}\n```\n```json\n{_answer()}\n```", f"```json\n{_answer()}\n``` Готово.",
+                f"Ответ:\n```json\n{_answer()}\n```", "```", "```json\n```"):
+        with pytest.raises(ValueError):
+            guides._parse_answer(bad)
+
+
+def test_runaway_answer_is_a_file_error_not_a_hang(gdir, monkeypatch):
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    _llm(monkeypatch, "```json\n" + "\n" * 1_000_000)
+    started = time.perf_counter()
+    assert guides.build_digests() == {"built": 0, "skipped": 0, "failed": 1}
+    assert time.perf_counter() - started < 1 and "длиннее 200000" in _row("a.md")["error"]
+
+
+def test_failed_rebuild_keeps_the_working_digest(gdir, monkeypatch):
+    """«Все файлы заново», а модель отвечает не по форме: действующие выжимки остаются в задании."""
+    _roles(gdir, monkeypatch, a="writer", b="critic", c="both")
+    before = (guides.load_guides(role="writer"), guides.load_guides(role="critic"))
+    calls = _llm(monkeypatch, "мусор", _http_error(400, "too long"), _answer("writer", ""))
+    assert guides.build_digests(force=True) == {"built": 0, "skipped": 0, "failed": 3} and len(calls) == 3
+    assert (guides.load_guides(role="writer"), guides.load_guides(role="critic")) == before
+    rows = [_row(f"{n}.md") for n in "abc"]
+    assert [r["state"] for r in rows] == ["ok"] * 3 and [r["error"] for r in rows] == [""] * 3
+    assert "не один JSON" in rows[0]["last_error"] and "HTTP 400" in rows[1]["last_error"]
+    assert "не дала выжимку" in rows[2]["last_error"]
+    assert [guides.read_digest(f"{n}.md") for n in "abc"] == ["ВЫЖИМКА-a", "ВЫЖИМКА-b", "ВЫЖИМКА-c"]
+    last = jobs.last("guides_digest")
+    assert last["status"] == "done_warn" and "a.md" in last["message"] and "действует прежняя выжимка" in last["message"]
+
+
+def test_successful_rebuild_clears_the_last_error(gdir, monkeypatch):
+    _roles(gdir, monkeypatch, a="writer")
+    _llm(monkeypatch, "мусор", _answer("writer", "НОВАЯ-a"))
+    guides.build_digests(force=True)
+    assert _row("a.md")["last_error"] and guides.read_digest("a.md") == "ВЫЖИМКА-a"
+    guides.build_digests(force=True)
+    assert _row("a.md")["last_error"] == "" and guides.read_digest("a.md") == "НОВАЯ-a"
+
+
+def test_failure_on_a_changed_source_is_an_error_not_a_kept_digest(gdir, monkeypatch):
+    """Прежняя выжимка снята с прежнего текста: для изменённого исходника она не «действующая»."""
+    _roles(gdir, monkeypatch, a="writer")
+    (gdir / "a.md").write_text("ИСХОДНИК-a изменён " + BIG, encoding="utf-8")
+    _llm(monkeypatch, "мусор")
+    guides.build_digests()
+    row = _row("a.md")
+    assert row["state"] == "error" and "не один JSON" in row["error"] and row["last_error"] == ""
+    assert guides.load_guides(role="writer")["pending"] == ["a.md"]
+
+
+@pytest.mark.parametrize("exc", [json.JSONDecodeError("Expecting value", "<html>вход</html>", 0),
+                                 ValueError("ответ шлюза — не JSON"), KeyError("choices")])
+def test_gateway_answering_garbage_stops_the_job(gdir, monkeypatch, exc):
+    """Шлюз отдал 200 со страницей входа: это сбой шлюза, а не «файл не дался» — иначе задача пошла бы
+    дальше и пометила битым каждый файл."""
+    for name in ("a.md", "b.md", "c.md"):
+        (gdir / name).write_text(BIG + name, encoding="utf-8")
+    calls = _llm(monkeypatch, exc)
+    assert guides.build_digests() == {"built": 0, "skipped": 0, "failed": 0} and len(calls) == 1
+    assert [_row(n)["state"] for n in ("a.md", "b.md", "c.md")] == ["pending"] * 3
+    last = jobs.last("guides_digest")
+    assert last["status"] == "done_warn" and "модель недоступна" in last["message"]
+
+
+def test_file_deleted_while_the_job_runs_is_skipped(gdir, monkeypatch):
+    for name in ("a.md", "b.md", "c.md"):
+        (gdir / name).write_text(BIG + name, encoding="utf-8")
+    calls = _llm(monkeypatch, during=lambda n: (gdir / "b.md").unlink(missing_ok=True))
+    assert guides.build_digests() == {"built": 2, "skipped": 1, "failed": 0} and len(calls) == 2
+    assert [g["rel"] for g in guides.status()] == ["a.md", "c.md"] and "b.md" not in _index(gdir)
+    assert jobs.last("guides_digest")["status"] == "done"
+
+
+def test_file_vanishing_between_listing_and_reading_does_not_crash(gdir, monkeypatch):
+    (gdir / "a.md").write_text("правило a", encoding="utf-8")
+    (gdir / "b.md").write_text("правило b", encoding="utf-8")
+    guides.build_digests()
+    listed = guides._files()
+    (gdir / "a.md").unlink()
+    monkeypatch.setattr(guides, "_files", lambda: listed)
+    assert guides.load_guides(role="writer")["files"] == ["b.md"]
+    assert [g["rel"] for g in guides.status()] == ["b.md"]
+
+
+def test_junk_role_in_the_index_means_no_role(gdir):
+    (gdir / "a.md").write_text("правило", encoding="utf-8")
+    guides.build_digests()
+    index = _index(gdir)
+    index["a.md"]["role"] = "boss"
+    (gdir / ".digest" / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    row = _row("a.md")
+    assert (row["state"], row["role"]) == ("pending", None)
+    assert guides.load_guides(role="writer")["pending"] == ["a.md"]
+    assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0} and _row("a.md")["role"] == "both"
+
+
+def test_system_prompt_explains_the_guillemets(gdir, monkeypatch):
+    (gdir / "a.md").write_text(BIG + "- абзац < 60 слов\n", encoding="utf-8")
+    calls = _llm(monkeypatch)
+    guides.build_digests()
+    assert "‹ 60 слов" in calls[0]["prompt"] and "< 60" not in calls[0]["prompt"]
+    assert "‹" in calls[0]["system"] and "›" in calls[0]["system"] and "(<)" in calls[0]["system"]
+
+
+def test_unwritable_digest_folder_is_an_oserror_and_loses_nothing(gdir):
+    """`.digest` занят файлом (или нет прав): запись отказывает исключением, исходник не страдает."""
+    guides.save_guide("a.md", b"one")
+    (gdir / ".digest").write_text("не папка", encoding="utf-8")
+    assert _row("a.md")["state"] == "pending" and guides.load_guides(role="writer")["pending"] == ["a.md"]
+    for call in (lambda: guides.set_role("a.md", "writer"), lambda: guides.save_digest("a.md", "текст"),
+                 lambda: guides.delete_guide("a.md")):
+        with pytest.raises(OSError):
+            call()
+    assert (gdir / "a.md").read_bytes() == b"one"                   # удаление не прошло наполовину
+    assert guides.save_guide("a.md", b"two") == "a.md" and (gdir / "a.md").read_bytes() == b"two"

@@ -210,7 +210,7 @@ def test_delete_drops_the_digest_and_the_index_entry(client, gdir):
     assert (gdir / ".digest" / "b.md.md").exists()
 
 
-def test_digest_job_is_known_to_the_panel(client):
+def test_digest_job_is_known_to_the_panel(client, gdir):
     from app.api import panel
     assert "guides_digest" in panel._JOBS
     assert client.post("/run/guides_digest/cancel", follow_redirects=False).status_code != 404
@@ -226,3 +226,99 @@ def test_site_vertical_is_an_editable_key():
     assert "правил письма" in field.hint and "Сжать правила" in field.hint
     assert type(settings).model_fields["SITE_VERTICAL"].default.startswith("VPN-сервисы")
     assert api_keys.validate(field, "Онлайн-кинотеатры: обзоры и подборки") == "Онлайн-кинотеатры: обзоры и подборки"
+
+
+# --- правки после ревью: срез по лимиту виден, неудачная пересборка, сбой записи, оборванная задача ---
+
+def test_files_cut_by_the_limit_are_marked_and_counted(client, gdir, monkeypatch):
+    """Выжимка в порядке, а в задание файл не попал — не влез в лимит роли: это видно в строке и в итоге."""
+    for name in "abcd":
+        (gdir / f"{name}.md").write_text(f"правило {name}: " + "п" * 29, encoding="utf-8")   # 40 симв., часть — 54
+    guides.build_digests()
+    guides.set_role("a.md", "writer"); guides.set_role("d.md", "critic")
+    monkeypatch.setattr(guides, "LIMIT", 120)                       # в роль влезает две части из трёх
+    assert guides.load_guides(role="writer")["cut"] == ["c.md"] and guides.load_guides(role="critic")["cut"] == ["d.md"]
+    html = client.get("/guides").text
+    assert "не влезло в лимит файлов: писателю — 1, критику — 1" in html
+    rows = html.split("<tbody>")[1].split("</tbody>")[0].split("<tr>")[1:]
+    assert [("не влез в лимит" in r, "led-warn" in r, "led-ok" in r) for r in rows] == \
+        [(False, False, True), (False, False, True), (True, True, False), (True, True, False)]
+    assert "не влез в лимит: писателю</span>" in rows[2]            # «обоим» — сказано, кому не достался
+    assert "не влез в лимит</span>" in rows[3]
+    assert "Не влезла в лимит: писателю в задание не попадает." in client.get("/guides/digest/c.md").text
+    monkeypatch.setattr(guides, "LIMIT", 60)
+    html = client.get("/guides").text
+    assert "не влез в лимит: обоим</span>" in html and "писателю — 2, критику — 2" in html
+    monkeypatch.setattr(guides, "LIMIT", 40_000)
+    html = client.get("/guides").text
+    assert "не влез" not in html and "led-warn" not in html.split("<tbody>")[1]
+
+
+def test_failed_rebuild_is_told_in_the_row_title_and_digest_stays(client, gdir, monkeypatch):
+    (gdir / "10-стиль.md").write_text(BIG, encoding="utf-8")
+    _llm(monkeypatch, _answer("writer", "- пиши коротко"), "модель ответила прозой")
+    guides.build_digests()
+    assert guides.build_digests(force=True) == {"built": 0, "skipped": 0, "failed": 1}
+    html = client.get("/guides").text
+    assert ">14 симв.</a>" in html and ">ошибка</a>" not in html
+    assert "последняя пересборка не удалась: ответ модели — не один JSON-объект" in html
+    assert "0 симв., критику" not in html                            # писатель по-прежнему получает выжимку
+    page = client.get("/guides/digest/" + quote("10-стиль.md")).text
+    assert "Последняя пересборка не удалась" in page and "Действует прежняя выжимка" in page
+
+
+def test_cut_note_is_in_the_row_title_even_with_an_operator_role(client, gdir, monkeypatch):
+    (gdir / "a.md").write_text(BIG, encoding="utf-8")
+    _llm(monkeypatch, _answer("writer", ("- " + "х" * 98 + "\n") * 60))
+    guides.build_digests()
+    guides.set_role("a.md", "critic")
+    html = client.get("/guides").text
+    assert 'title="выбрано тобой — при сжатии не меняется"' in html
+    assert 'title="посмотреть и поправить выжимку · выжимка обрезана до 3500 символов"' in html
+    assert "При сжатии: выжимка обрезана до 3500 символов." in client.get("/guides/digest/a.md").text
+
+
+def test_write_failure_is_a_flash_error_not_a_500(client, gdir):
+    """`.digest` занят файлом (или нет прав на папку): действие отвечает причиной, исходники целы."""
+    guides.save_guide("a.md", b"one")
+    (gdir / ".digest").write_text("не папка", encoding="utf-8")
+    assert client.get("/guides").status_code == 200
+    for url, data in (("/guides/role", {"rel": "a.md", "role": "writer"}), ("/guides/digest/a.md", {"text": "текст"}),
+                      ("/guides/delete", {"rel": "a.md"})):
+        r = client.post(url, data=data, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/guides?err="), url
+        assert "папка правил не принимает запись" in unquote(r.headers["location"]), url
+    assert (gdir / "a.md").read_bytes() == b"one"
+    r = client.post("/guides/upload", files={"file": ("a.md", b"two", "text/markdown")}, follow_redirects=False)
+    assert r.status_code == 303 and "msg=" in r.headers["location"] and (gdir / "a.md").read_bytes() == b"two"
+
+
+def test_upload_failure_names_the_file(client, gdir, monkeypatch):
+    def boom(filename, data):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(guides, "save_guide", boom)
+    r = client.post("/guides/upload", files={"file": ("a.md", b"x", "text/markdown")}, follow_redirects=False)
+    loc = unquote(r.headers["location"])
+    assert r.status_code == 303 and "err=" in loc and "«a.md»" in loc and "Permission denied" in loc
+
+
+def test_upload_replacing_a_file_keeps_the_operator_role(client, gdir):
+    guides.save_guide("a.md", b"one")
+    guides.build_digests()
+    guides.set_role("a.md", "critic")
+    client.post("/guides/upload", files={"file": ("a.md", b"two", "text/markdown")}, follow_redirects=False)
+    row = _row("a.md")
+    assert (row["role"], row["role_by"], row["state"], row["digest_chars"]) == ("critic", "operator", "pending", None)
+    html = client.get("/guides").text
+    assert '<option value="critic" selected>критику</option>' in html and "«кому» останется" in html
+
+
+def test_stale_run_is_shown_as_broken_not_as_running(client, gdir, monkeypatch):
+    from app.services import jobs
+    (gdir / "a.md").write_text("правило", encoding="utf-8")
+    run = {**jobs._blank(), "name": "guides_digest", "status": "running", "running": True, "done": 3, "total": 17}
+    monkeypatch.setattr(jobs, "progress", lambda name: run)
+    assert "Сжатие идёт: 3 из 17" in client.get("/guides").text
+    run["stale"] = True
+    html = client.get("/guides").text
+    assert "Сжатие оборвалось" in html and "Сжатие идёт" not in html
