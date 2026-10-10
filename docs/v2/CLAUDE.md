@@ -345,6 +345,11 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 `bidAuction` (док): `auctionId`, `bid`, `proxyBid` — потолок человека уходит как `proxyBid`, ставка — шаг над текущей
 (шаг не сверен: низкая ставка даст отказ кодом, не списание). Живой `bidAuction` НЕ вызывался. Источник
 `namesilo_auction` включён на `/settings`.
+**`checkRegisterAvailability` (снято живьём тем же днём, первая попытка купить `tunnelnotes.xyz` упёрлась в гейт
+«нет в ответе»):** один домен приходит ОБЪЕКТОМ — `available: {"domain": {...}}`, `unavailable`/`invalid: {"domain": "name"}`,
+несколько — списком без обёртки (`_rows()` в клиенте). `duration=10` у ВСЕХ зон — максимальный срок, не срок цены:
+`price` совпадает с `getPrices[zone].registration` за год, `renew` — продление (`.xyz` 2.79 / 17.29). Отказ «цена за 10 лет»
+убран. Фикстура `tests/fixtures/namesilo_check_availability_live.json`. Бокс на `fd198a6`.
 
 **Комбайн переведён на шлюз `:3033` (2026-10-10, после `claude login` оператора в контейнере):** `LLM_BASE_URL=
 http://192.168.1.77:3033`, `LLM_MODEL=sonnet` (контент), `LLM_CLASSIFY_MODEL=haiku` (W5, JSON чистый, ~3.5 с),
