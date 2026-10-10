@@ -817,13 +817,14 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
     from app.models.offer import OfferSettings
     _os_row = db.get(OfferSettings, 1)
     reserve_configured = bool(_os_row and _os_row.reserve_offer_url)
-    from app.services import research
+    from app.services import jobs, research
     return templates.TemplateResponse(request, "site.html", {
         "active": "dash",
         "site": site, "domain": d.domain if d else f"#{site.domain_id}",
         "pages": pages, "pc": pc, "attached": attached, "all_offers": all_offers,
         "page_offers": page_offers, "reserve_configured": reserve_configured,
         "research": research.summary(db, site_id), "research_rows": research.dossier(db, site_id),
+        "research_last": jobs.last("research"),
     })
 
 
@@ -1406,7 +1407,7 @@ def research_action(site_id: int, force: str = Form(""), db: Session = Depends(g
         return _back(f"/sites/{site_id}", err="досье: оффер не привязан (или выключен) — не по чему искать конкурентов")
     ok = jobs.spawn("research", lambda: research.build_dossier(site_id, force=bool(force)))
     if not ok:
-        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Досье уже собирается — дождись на Пульте"))
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Сейчас уже идёт сборка досье (возможно, другого сайта) — дождись на Пульте"))
     return _back(f"/sites/{site_id}", msg="Досье собирается в фоне: 4 запроса × до 5 страниц; прогресс — на Пульте.")
 
 

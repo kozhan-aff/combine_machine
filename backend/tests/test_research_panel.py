@@ -21,6 +21,7 @@ def test_card_shows_empty_dossier_and_button(client):
     sid = _site()
     html = client.get(f"/sites/{sid}").text
     assert "Досье конкурентов" in html and f'action="/sites/{sid}/research"' in html and "досье не собрано" in html
+    assert "Без него черновик пишется вслепую" in html and "Без досье генерация не идёт" not in html
 
 
 def test_card_lists_sources_and_rebuild(client):
@@ -42,3 +43,16 @@ def test_button_spawns_job_and_force_passes_through(client, monkeypatch):
     r = client.post(f"/sites/{sid}/research", data={"force": "1"}, follow_redirects=False)
     assert r.status_code == 303 and f"/sites/{sid}" in r.headers["location"] and "msg=" in r.headers["location"]
     assert calls == ["research", (sid, True)]      # spawn получил имя research, сервис — force=True
+
+
+def test_empty_card_shows_reason_of_last_failed_run(client):
+    from datetime import datetime, timezone
+    from app.models.job import JobRun
+    sid = _site()
+    now = datetime.now(timezone.utc)
+    with db.SessionLocal() as s:
+        s.add(JobRun(name="research", status="done_warn", message="ни одной живой страницы",
+                     started_at=now, updated_at=now, finished_at=now))
+        s.commit()
+    html = client.get(f"/sites/{sid}").text
+    assert "Последняя сборка" in html and "ни одной живой страницы" in html

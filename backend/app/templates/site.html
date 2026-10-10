@@ -102,7 +102,12 @@
           ({% for k, n in research.kinds.items() %}{{ k }}: {{ n }}{{ ', ' if not loop.last }}{% endfor %}),
           скриншотов: {{ research.screenshots }}, собрано {{ research.fetched_at.strftime('%d.%m %H:%M') if research.fetched_at }}{{ '' if research.fresh else ' — устарело, пересобрать' }}.
           {% else %}досье не собрано: выдача по 4 запросам на языке рынка, до 5 живых страниц на запрос —
-          текст, заголовки, таблицы, FAQ, цифры, CSS-токены. Без досье генерация не идёт.{% endif %}</div>
+          текст, заголовки, таблицы, FAQ, цифры, CSS-токены. Досье — сырьё для писателя: темы, факты и цифры
+          конкурентов. Без него черновик пишется вслепую.
+          {# Последний прогон `research` — общий на систему (single-flight по имени джоба), а не конкретно
+             этого сайта: компромисс, поэтому строка нейтральна и показывается только в пустом состоянии. #}
+          {% if research_last and research_last.status in ('done_warn', 'failed', 'cancelled') %}
+          <br>Последняя сборка {{ research_last.finished_at[8:10] ~ '.' ~ research_last.finished_at[5:7] ~ ' ' ~ research_last.finished_at[11:16] if research_last.finished_at }}: {{ research_last.message or research_last.error }}{% endif %}{% endif %}</div>
         {% if research_rows %}<details class="what"><summary>источники</summary><div class="what-body">
           <table><thead><tr><th>тип</th><th>#</th><th>домен</th><th>слов</th><th>заголовков</th><th></th></tr></thead><tbody>
           {% for r in research_rows %}<tr><td>{{ r.kind }}</td><td>{{ r.rank }}</td>
