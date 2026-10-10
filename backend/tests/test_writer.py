@@ -33,7 +33,9 @@ PATHS = ("/", "/vs", "/setup")
 
 @pytest.fixture(autouse=True)
 def _own_guides(tmp_path, monkeypatch):
-    """Правила письма — из пустой tmp-папки: тесты не зависят от content_guides/ оператора."""
+    """Правила письма — из пустой tmp-папки: тесты не зависят от content_guides/ оператора. Папка есть:
+    без видимой папки правил писатель не пишет вовсе."""
+    (tmp_path / "guides").mkdir()
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
     return tmp_path / "guides"
 
@@ -286,7 +288,6 @@ def test_truncated_guides_are_reported(monkeypatch):
 def test_rules_without_digest_are_reported_and_not_sent(monkeypatch, _own_guides):
     """Файл правил без выжимки в задание не идёт (сырым — никогда), и прогон говорит об этом словами."""
     from app.services import guides
-    _own_guides.mkdir()
     (_own_guides / "10-тон.md").write_text("ПРАВИЛО-ТОНА", encoding="utf-8")
     (_own_guides / "20-структура.md").write_text("ПРАВИЛО-СТРУКТУРЫ", encoding="utf-8")
     guides.build_digests()
@@ -305,7 +306,6 @@ def test_rules_without_digest_are_reported_and_not_sent(monkeypatch, _own_guides
 
 def test_writer_gets_only_the_digests_of_its_role(monkeypatch, _own_guides):
     from app.services import guides
-    _own_guides.mkdir()
     for name in ("писателю", "критику", "обоим", "никому"):
         (_own_guides / f"{name}.md").write_text(f"ПРАВИЛО-{name}", encoding="utf-8")
     guides.build_digests()                                         # короткие файлы — дословно, роль both
@@ -404,7 +404,7 @@ def test_prompt_has_guides_and_promo_terms(monkeypatch, _own_guides):
     """Правила письма — одна плоская папка (с 2026-10-10): выжимка каждого файла идёт в задание любой
     страницы (короткий файл — дословно)."""
     from app.services import guides
-    (_own_guides / "ru").mkdir(parents=True)
+    (_own_guides / "ru").mkdir(parents=True, exist_ok=True)
     (_own_guides / "10-тон.md").write_text("ПРАВИЛО-ТОНА", encoding="utf-8")
     (_own_guides / "20-структура.txt").write_text("ПРАВИЛО-СТРУКТУРЫ", encoding="utf-8")
     (_own_guides / "ru" / "old.md").write_text("ПРАВИЛО-ИЗ-ПОДПАПКИ", encoding="utf-8")
@@ -712,6 +712,72 @@ def test_rewrite_without_site_offer_falls_back_to_the_pages_offer(monkeypatch):
     assert content.generate_site(site_id, rewrite=True) == 3
     assert all("бренд — TestVPN" in c["prompt"] for c in calls)
     assert {p.offer_id for p in _pages(site_id)} == {old_id}
+
+
+def test_rewrite_with_the_site_offer_switched_off_is_an_error(monkeypatch):
+    """Оффер сайта выключен или удалён: переписывать «под оффер первой страницы» молча нельзя — это ошибка."""
+    site_id = _site()
+    old_id, ids = _old_offer_pages(site_id)
+    with db.SessionLocal() as s:
+        s.get(Offer, s.get(Site, site_id).offer_id).active = False
+        s.commit()
+    calls = _llm(monkeypatch)
+    with pytest.raises(ValueError, match="оффер сайта выключен или удалён — включи его или привяжи другой"):
+        content.generate_site(site_id, rewrite=True)
+    assert calls == [] and all(p.body == OLD_BODY and p.offer_id == old_id for p in _pages(site_id))
+    with db.SessionLocal() as s:                                    # и когда оффера с таким id уже нет
+        s.get(Site, site_id).offer_id = 999999
+        s.commit()
+    with pytest.raises(ValueError, match="оффер сайта выключен или удалён"):
+        content.generate_site(site_id, rewrite=True)
+    assert content.generate_site(site_id) == 0 and calls == []      # без rewrite — как раньше: дописывать нечего
+
+
+def test_rewrite_records_the_language_it_wrote_in(monkeypatch):
+    """У строки не был записан язык: переписанная по-русски, она его получает — иначе критик вечно говорит
+    «язык страницы не задан», а переписать её по замечаниям нельзя."""
+    site_id = _site()
+    ids = _add_pages(site_id, lang=None)
+    _llm(monkeypatch)
+    assert content.generate_site(site_id, rewrite=True) == 3
+    assert {p.lang for p in _pages(site_id)} == {"ru"}
+    assert content.rewrite_page(ids["/"], ["x"])["error"] != "у страницы не записан оффер или язык — писать не под что"
+
+
+# --- писатель не пишет, когда не видит папку правил ---
+
+NO_RULES = "папка правил письма не видна этому процессу — переписывать нечем руководствоваться"
+
+
+def test_writer_refuses_when_the_rules_folder_is_invisible(monkeypatch, tmp_path):
+    """Папка правил не смонтирована в процесс: писать «без единого правила оператора» молча нельзя."""
+    site_id = _site()
+    ids = _add_pages(site_id, status="draft")
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "нет-такой-папки"))
+    calls = _llm(monkeypatch)
+    with pytest.raises(ValueError, match=NO_RULES):
+        content.generate_site(site_id, rewrite=True)
+    assert calls == [] and all(p.body == OLD_BODY for p in _pages(site_id))
+    assert jobs.last("generate")["status"] == "failed" and NO_RULES in jobs.last("generate")["error"]
+    out = content.rewrite_page(ids["/"], ["x"])
+    assert out == {"page_id": ids["/"], "ok": False, "error": NO_RULES} and calls == []
+
+
+def test_writer_refuses_when_the_rules_cannot_be_read(monkeypatch):
+    """Чтение правил упало — тот же отказ словами, а не трейс в карточке задачи."""
+    from app.services import guides
+    site_id = _site()
+    ids = _add_pages(site_id, status="draft")
+
+    def broken(*a, **kw):
+        raise OSError("диск")
+
+    monkeypatch.setattr(guides, "load_guides", broken)
+    calls = _llm(monkeypatch)
+    assert content.rewrite_page(ids["/"], ["x"]) == {"page_id": ids["/"], "ok": False, "error": NO_RULES}
+    with pytest.raises(ValueError, match=NO_RULES):
+        content.generate_site(site_id, rewrite=True)
+    assert calls == []
 
 
 # --- тот же текст — не переписывание ---

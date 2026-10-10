@@ -162,8 +162,8 @@ def test_stale_editor_form_is_refused(client, action):
     rewritten = _page(pid)
     r = client.post(f"/pages/{pid}/{action}", data={"body": old_body, "seen": _seen(opened)}, follow_redirects=False)
     assert "err=" in r.headers["location"]
-    assert "страница изменилась, пока ты её редактировал (её переписал писатель) — открой заново" in unquote(
-        r.headers["location"])
+    assert ("страница изменилась, пока ты её редактировал — открой её заново; свой текст верни кнопкой «назад» в "
+            "браузере и скопируй") in unquote(r.headers["location"])
     p = _page(pid)
     assert (p.status, p.title, p.body, bool(p.blocks_stale)) == ("draft", rewritten.title, rewritten.body, False)
 

@@ -540,19 +540,17 @@ def test_critic_prompt_says_when_there_are_no_brand_facts(monkeypatch):
 
 
 def test_review_page_own_verdict_score_is_not_an_unsourced_number(monkeypatch):
-    """Оценка редакции из структуры страницы — её собственное число: «7,5 из 10» в прозе не «факт без источника»."""
+    """«7,5 из 10» — оценка, а не факт, что бы ни лежало в структуре страницы. А вот само число из
+    `blocks.verdict.score` ничего не узаконивает: «скорость до 7.5 Гбит/с» с оценкой 7.5 — число без источника."""
     _llm(monkeypatch)
     body = BODY + "<p>Наша оценка — 7,5 из 10, и это честно.</p>"
-    blocks = {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 7.5, "summary": "x"}}
-    assert content_critic.review_page(_seed_page(body=body, blocks=blocks))["code"] == []
-    assert content_critic.review_page(_seed_page(body=body, domain="s2.xyz"))["code"] == ["числа без источника: 7,5"]
-    other = {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 8}}
-    assert content_critic.review_page(_seed_page(body=body, blocks=other, domain="s3.xyz"))["code"] == [
-        "числа без источника: 7,5"]
-    for n, junk in enumerate(({"verdict": {"score": "7.5"}}, {"verdict": {"score": True}}, {"verdict": 7.5},
-                              {"verdict": {"score": float("inf")}}, ["verdict"])):
-        pid = _seed_page(body=body, blocks=junk, domain=f"junk-score{n}.xyz")
-        assert content_critic.review_page(pid)["code"] == ["числа без источника: 7,5"]
+    scored = {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 7.5, "summary": "x"}}
+    for n, blocks in enumerate((scored, None, {"meta": {"title": "NordVPN: обзор"}, "verdict": {"score": 8}},
+                                {"verdict": "мусор"})):
+        assert content_critic.review_page(_seed_page(body=body, blocks=blocks, domain=f"s{n}.xyz"))["code"] == [], n
+    fast = BODY + "<p>Скорость до 7.5 Гбит/с, цена $7.5 в месяц.</p>"
+    assert content_critic.review_page(_seed_page(body=fast, blocks=scored, domain="fast.xyz"))["code"] == [
+        "числа без источника: 7.5"]
 
 
 def test_critique_page_tells_who_will_approve(monkeypatch, _own_guides):

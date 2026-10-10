@@ -906,7 +906,7 @@ def test_stale_editor_form_cannot_approve_or_overwrite_a_rewritten_page(monkeypa
     for act in (lambda: content.mark_edited(ids["/"], opened.body, seen_fp=seen_fp),
                 lambda: content.mark_edited(ids["/"], seen_fp=seen_fp),
                 lambda: content.save_draft(ids["/"], opened.body, seen_fp=seen_fp)):
-        with pytest.raises(ValueError, match="её переписал писатель"):
+        with pytest.raises(ValueError, match="открой её заново; свой текст верни кнопкой «назад» в браузере"):
             act()
         p = _page(ids["/"])
         assert (p.status, p.title, p.body, p.blocks_stale) == ("draft", rewritten.title, rewritten.body, False)
@@ -1000,6 +1000,7 @@ def test_final_refusal_is_not_cleared_by_the_review_button(monkeypatch, how):
     p = _page(pid)
     assert p.status == "draft" and seen == [] and p.body == refused.body
     assert p.critic_notes["pass"] is True and p.critic_notes["note"] == REFUSED_NOTE
+    assert "retry" not in p.critic_notes                             # прежний отказ ждёт человека, не автопилот
     assert len(calls["critic"]) == 4 and not calls["writer"]
     assert publish.publish_site(site_id)["status"] == "no_edited_pages"
 
@@ -1121,6 +1122,21 @@ def test_rules_gap_blocks_auto_approval(monkeypatch, state, gap, counted):
     assert f"правила: {counted}; {gap}" in last["message"]
     assert len(loads) == 3                                           # одно чтение правил на страницу: и текст, и состояние
     assert publish.publish_site(site_id)["status"] == "no_edited_pages"
+
+
+def test_real_missing_rules_folder_blocks_auto_approval(monkeypatch, tmp_path):
+    """Сквозной случай без подмены `load_guides`: папки правил у процесса просто нет (не смонтирована)."""
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "нет-такой-папки"))
+    site_id, ids = _site()
+    seen = _spy_mark_edited(monkeypatch)
+    _llm(monkeypatch)
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, manual=1)
+    p = _page(ids["/"])
+    assert p.status == "draft" and seen == []
+    assert p.critic_notes["note"] == "папка правил письма не видна этому процессу — одобряет человек"
+    assert p.critic_notes["retry"] is True
+    last = jobs.last("edit")
+    assert last["status"] == "done_warn" and "папка правил письма не видна этому процессу" in last["message"]
 
 
 def test_rules_state_is_taken_per_page_not_per_run(monkeypatch):

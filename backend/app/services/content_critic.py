@@ -117,7 +117,8 @@ _IDENT_RE = re.compile(r"""
     | (?<![\w.,])(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.(?:19|20)\d\d(?!\w)END    # дата дд.мм.гггг
     | (?<![\w.,-])(?:19|20)\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\w-])   # дата гггг-мм-дд
     | (?<!\w)(?:порт[аеуы]?|ports?)[ \xa0]+\d{1,5}END NOUNIT                         # номер порта
-    | (?<![\w.,/])(?:10|\d(?:[.,]\d)?)[ \xa0]*/[ \xa0]*10(?![\d/])END                # оценка вердикта: 8.5/10, не больше 10
+    # оценка по десятибалльной шкале — мнение редакции, а не факт о сервисе: 8.5/10, 7,5 из 10, 7.5 out of 10
+    | (?<![\w.,/])(?:10|\d(?:[.,]\d{1,2})?)(?:[ \xa0]*/[ \xa0]*|[ \xa0](?:из|out[ \xa0]of)[ \xa0])10(?![\d/])END NOUNIT
     | (?<!\w)(?-i:[48]K)(?!\w)(?![ \xa0]?(?:\+|UNIT))                                # разрешение 4K/8K, но не «4K серверов»
 """.replace("NOUNIT", r"(?![ \xa0]?UNIT)").replace("UNIT", _UNIT)
     .replace("END", r"(?![.,]?\d)(?![ \xa0\u202f]\d{3}(?!\d))").replace("OCTET", _OCTET), re.I | re.X)
@@ -529,15 +530,6 @@ def _one_line(value) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
-def _verdict_score(blocks) -> str | None:
-    """Оценка редакции из структуры страницы (`blocks.verdict.score`) текстом, или None."""
-    verdict = blocks.get("verdict") if isinstance(blocks, dict) else None
-    score = verdict.get("score") if isinstance(verdict, dict) else None
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-        return None
-    return f"{score:g}"
-
-
 def _files_ru(n: int) -> str:
     """«1 файл», «3 файла», «17 файлов»."""
     if n % 10 == 1 and n % 100 != 11:
@@ -610,7 +602,7 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
         offer = db.get(Offer, page.offer_id) if page.offer_id else None
         brand, promo_terms = (offer.brand, offer.promo_terms) if offer else (None, None)
         body, lang, path, title = page.body, page.lang, page.url_path, _one_line(page.title)
-        raw_title, blocks = page.title, page.blocks
+        raw_title = page.title
         fp = fingerprint(page.title, page.body)
         if round_no is None:
             round_no = _round_of(page.critic_notes)
@@ -631,9 +623,9 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
         # узаконивает. Бренд и объём — отдельно и только по телу (`brand=None`, `kind=None` выключают их в
         # общей проверке): заголовок «Durev VPN: обзор» не делает страницей о бренде текст про другой сервис.
         published = "\n".join(x for x in (title, text) if x)
-        # оценка редакции из структуры страницы — её собственное число: «7,5 из 10» в прозе не «факт без
-        # источника» (в отрисованном вердикте «Оценка: 7.5/10» она и так не считается)
-        allowed = allowed_numbers(rows, facts, promo_terms, _verdict_score(blocks))
+        # оценка редакции («7,5 из 10») в разрешённые числа НЕ идёт: число модели узаконило бы и «скорость
+        # до 7.5 Гбит/с». Саму запись «N из 10» проверка чисел фактом не считает (`_IDENT_RE`).
+        allowed = allowed_numbers(rows, facts, promo_terms)
         code = [str(x) for x in (*code_checks(text=published, kind=None, lang=lang, brand=None,
                                               sources=_sources(rows), allowed=allowed),
                                  *_brand_issues(text, brand), *_volume_issues(text, kind))]

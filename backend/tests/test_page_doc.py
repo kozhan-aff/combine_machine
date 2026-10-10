@@ -220,9 +220,12 @@ def test_meta_description_has_no_bounds():
 
 def test_parse_refuses_too_long_answer_before_scanning():
     started = time.monotonic()
-    assert _error("{" * 400_001) == "ответ слишком длинный"
-    assert _error(" " * 500_000 + _raw()) == "ответ слишком длинный"
+    assert _error("{" * 150_001) == "ответ слишком длинный"
+    assert _error(" " * 200_000 + _raw()) == "ответ слишком длинный"
     assert time.monotonic() - started < 1
+    big = _data()
+    big["sections"][0]["paragraphs"] = ["слово " * 20_000]            # страница в 20 тысяч слов — ещё годится
+    assert 100_000 < len(_raw(big)) < 150_000 and page_doc.parse(_raw(big)).sections
     assert page_doc.parse(" " * 1000 + _raw() + " " * 1000).meta.title          # обычный ответ с полями — годится
 
 

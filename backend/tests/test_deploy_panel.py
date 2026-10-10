@@ -35,7 +35,7 @@ def test_pull_compose_hint_reaches_the_banner(client, monkeypatch):
                                  "compose_hint": deploy.COMPOSE_HINT, "alembic_warn": ""})
     r = client.post("/admin/pull", follow_redirects=False)
     loc = unquote(r.headers["location"])
-    assert "msg=" in loc and "изменился docker-compose.yml — нужен `docker compose up -d`" in loc
+    assert "msg=" in loc and "изменился docker-compose.yml — нужно пересоздать контейнеры: docker compose up -d" in loc
     assert "--build" not in loc
 
 

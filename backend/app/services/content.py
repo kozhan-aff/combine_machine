@@ -243,13 +243,25 @@ def write_doc(llm, *, system: str, prompt: str,
     return None, reason
 
 
+NO_RULES = "папка правил письма не видна этому процессу — переписывать нечем руководствоваться"
+
+
 def _prompts(rows: list, spec: dict, *, brand: str, lang: str, country: str | None, promo: tuple,
              vertical: str | None) -> tuple[str, str, bool, int]:
     """Промпты одной страницы нового пути: (системный с правилами оператора, бриф из досье, «правила
-    письма не влезли в лимит и обрезаны», сколько файлов правил не учтено — у них нет выжимки)."""
+    письма не влезли в лимит и обрезаны», сколько файлов правил не учтено — у них нет выжимки).
+
+    Папка правил этому процессу не видна (не смонтирована) или правила не прочитались — ValueError
+    (`NO_RULES`): писать страницу без единого правила оператора молча нельзя. Пустая папка — не отказ:
+    правил у оператора может и не быть."""
     from app.services import brief, guides
     kind = spec["kind"]
-    rules = guides.load_guides(lang, kind, role="writer")
+    try:
+        rules = guides.load_guides(lang, kind, role="writer")
+    except Exception as e:  # noqa: BLE001 — причина словами в карточке задачи, а не трейс
+        raise ValueError(NO_RULES) from e
+    if rules.get("missing"):
+        raise ValueError(NO_RULES)
     prompt = brief.brief_text(brief.build_brief(rows, kind), brand=brand, kind=kind, title=spec["title"],
                               lang_name=LANG_NAMES[norm_lang(lang)], country=country, promo=promo,
                               vertical=vertical)
@@ -331,7 +343,8 @@ def generate_site(site_id: int, lang: str | None = None, vertical_data: str | No
     rewrite: только путь с досье. Кроме недостающих страниц переписывает на месте существующие
     (draft|edited|published -> draft, та же строка), кроме правленых руками (blocks_stale). Пишет под
     оффер САЙТА и записывает его в переписанную строку; без rewrite недостающие страницы дописываются
-    под оффер уже написанных. Текст, вернувшийся знак в знак прежним, строку не меняет.
+    под оффер уже написанных. Оффер сайта выключен или удалён — ошибка. Текст, вернувшийся знак в знак
+    прежним, строку не меняет. Папка правил письма процессу не видна — ошибка до первого вызова модели.
     overwrite_manual: переписать и правленые руками — только по явному решению оператора (галочка
     в панели); автопилот его не передаёт.
 
@@ -380,6 +393,10 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
         # бренд), и текст «про оффер первой страницы» вышел бы про прежний бренд — с его ссылкой при
         # публикации. Оффер уже написанных страниц берётся, только если у сайта своего нет.
         offer = site_offer(db, site) if rewrite else None
+        if rewrite and offer is None and site.offer_id is not None:
+            # оффер у сайта есть, но выключен или удалён: молча переписать «под оффер первой страницы» —
+            # значит снова написать про прежний бренд
+            raise ValueError("оффер сайта выключен или удалён — включи его или привяжи другой")
         if existing_page is not None:
             # Дозаполнение (S4/S5, аудит 2026-07-18): сайт уже частично сгенерирован —
             # наследуем lang/offer от уже существующих страниц, а не резолвим заново.
@@ -577,6 +594,8 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
                         failed.append((spec["url_path"], "писатель вернул прежний текст"))
                         continue
                     page.offer_id = offer_id     # под какой оффер текст написан — в той же записи, что и текст
+                    if not page.lang:
+                        page.lang = lang         # и на каком языке: строка без языка иначе осталась бы без него
                 _apply_doc(page, doc, spec["kind"], lang)
                 try:
                     db.commit()
@@ -653,8 +672,11 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
         brand, country, promo = offer.brand, offer.country, (offer.promo_code, offer.promo_terms)
         db.expunge_all()                     # строки досье нужны после закрытия сессии
 
-    system, prompt, *_ = _prompts(rows, spec, brand=brand, lang=lang, country=country, promo=promo,
-                                  vertical=vertical_block(brand))
+    try:
+        system, prompt, *_ = _prompts(rows, spec, brand=brand, lang=lang, country=country, promo=promo,
+                                      vertical=vertical_block(brand))
+    except ValueError as e:                  # папка правил не видна — отказ словами, круг не засчитан
+        return out(str(e))
     try:
         doc, err = write_doc(LlmClient(timeout=600), system=system, prompt=prompt, issues=issues)
     except WriterDown as e:
@@ -698,7 +720,9 @@ def _set_body(page, new_body: str) -> None:
 
 
 _UNSET = object()
-STALE_FORM = "страница изменилась, пока ты её редактировал (её переписал писатель) — открой заново"
+# кто изменил страницу, не говорим: тот же отказ получит и оператор, сохранивший её в соседней вкладке
+STALE_FORM = ("страница изменилась, пока ты её редактировал — открой её заново; свой текст верни кнопкой «назад» "
+              "в браузере и скопируй")
 
 
 def _is(column, value):

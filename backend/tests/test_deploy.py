@@ -101,8 +101,9 @@ def test_pull_detects_changed_compose_file(creds, monkeypatch):
     _patch(monkeypatch, Router(pull_rc=0, changed_files="docker-compose.yml\nbackend/app/x.py"))
     out = deploy.git_pull()
     assert out["ok"] and out["needs_rebuild"] is False
-    assert out["compose_hint"] == ("изменился docker-compose.yml — нужен `docker compose up -d` "
-                                   "(пересоздать контейнеры: новые тома/сервисы)")
+    assert "`" not in out["compose_hint"]             # обратная кавычка в PowerShell — перенос строки
+    assert out["compose_hint"] == ("изменился docker-compose.yml — нужно пересоздать контейнеры: docker compose up -d "
+                                   "(новые тома/сервисы)")
 
 
 def test_pull_compose_file_elsewhere_in_the_tree_is_not_ours(creds, monkeypatch):
