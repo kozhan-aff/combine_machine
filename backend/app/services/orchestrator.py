@@ -357,7 +357,7 @@ def _stage_publish(cap):
 
 
 def _stage_check_index(cap):
-    """Сайты с published-страницами -> check_index (GSC URL Inspection; без него — site: через SearXNG).
+    """Сайты с живыми страницами -> check_index (GSC URL Inspection; без него — site: через SearXNG).
 
     Страницы, про которые проверка ничего не выяснила (движки SearXNG не ответили — CAPTCHA/
     лимит), считаем ОТДЕЛЬНО: сайт тут ни при чём, сломан поисковик, и молчаливое «сделано N»
@@ -376,7 +376,9 @@ def _stage_check_index(cap):
         # остальные не проверялись НИКОГДА. Теперь берём только сайты с ПРОСРОЧЕННОЙ страницей
         # (cooldown, publish.index_due), самые давно не проверявшиеся — первыми.
         oldest: dict[int, datetime] = {}
-        for sid, pg in db.execute(select(Page.site_id, Page).where(Page.status == "published")).all():
+        # «живые» = файл на сайте есть (publish.live_clause): переписанная в draft страница всё ещё
+        # отдаётся по своему адресу, и её индексацию продолжаем смотреть
+        for sid, pg in db.execute(select(Page.site_id, Page).where(publish.live_clause())).all():
             if publish.index_due(pg, now):
                 ck = publish._aware(pg.index_checked_at) or datetime.min.replace(tzinfo=timezone.utc)
                 oldest[sid] = min(ck, oldest.get(sid, ck))

@@ -59,6 +59,17 @@ def _pick_offer(db, site):
     return site_offer(db, site)
 
 
+def live_clause():
+    """Условие «страница отдаётся с сайта»: у неё есть файл на сервере. Это НЕ то же, что статус
+    `published`: переписанная писателем страница уходит в draft, а её прежний файл остаётся онлайн до
+    повторной публикации. По этому условию собираются ссылки меню, sitemap и проверка индекса;
+    перерисовывать же файл можно только из вычитанного тела — см. фазу 3 publish_site.
+    `status == published` в условии — для строк без published_at (старые данные)."""
+    from sqlalchemy import or_
+    from app.models.site import Page
+    return or_(Page.published_at.is_not(None), Page.status == "published")
+
+
 # Статусы сайта, в которые публикуем: provision() уже довёл инфраструктуру до `content`.
 PUBLISH_STATUSES = frozenset({"content", "published", "monitoring"})
 
@@ -91,8 +102,13 @@ def publish_site(site_id: int) -> dict:
     `written` (легли на диск), `failed` и `unverified` с причинами. status: published | partial |
     failed. Непроверенная страница остаётся `edited` — повтор идемпотентен (write_file
     перезаписывает).
+
+    `published` ставится условно: только строке, которая всё ещё `edited` и несёт ТО ЖЕ тело, что
+    ушло в файл. Страницы читаются один раз и держатся всю выгрузку; если за это время писатель
+    переписал страницу (или редактор её поправил), отметка легла бы на текст, которого на сайте нет
+    и которого никто не читал, — такая страница уходит в `failed` с причиной.
     """
-    from sqlalchemy import select
+    from sqlalchemy import select, update
     from app.config import settings
     from app.db import SessionLocal
     from app.models.site import Site, Page
@@ -181,12 +197,12 @@ def publish_site(site_id: int) -> dict:
         # на ещё не лежащий CSS/картинку; провал ассетов = страницы НЕ трогаем (прежняя версия
         # сайта остаётся целой), оператору — список записанного. Атомарного rename через API
         # aaPanel не гарантируем (не проверено вживую), поэтому — порядок и честный отчёт.
-        # Прошлые опубликованные страницы сайта (не в этом прогоне) — в навигацию; их файлы
-        # перерисовываем в фазе 3 из того же p.body (у published тело неизменно: save_draft /
-        # mark_edited такие страницы отказывают), чтобы nav не осиротила страницы, вышедшие позже.
+        # Живые страницы сайта (не в этом прогоне) — в навигацию: все, у кого есть файл на сервере
+        # (live_clause), в том числе переписанные и ещё не вычитанные. Файлы перерисовываем в фазе 3
+        # только у тех, что в статусе published: их p.body — вычитанное (save_draft / mark_edited такие
+        # страницы отказывают, а переписывание уводит страницу в draft), и nav не осиротит вышедшие позже.
         lang0, brand0 = ready[0][2], ready[0][1].brand
-        live = db.execute(select(Page).where(Page.site_id == site_id, Page.status == "published")
-                          ).scalars().all()
+        live = db.execute(select(Page).where(Page.site_id == site_id, live_clause())).scalars().all()
         run_ids = {p.id for p, _, _ in ready}
         nav_src = {p.url_path: (p.title, lang) for p, _, lang in ready}
         for q in live:
@@ -233,9 +249,18 @@ def publish_site(site_id: int) -> dict:
                 if why:
                     unverified[p.url_path] = why
                     continue
-            # `published` — только после подтверждения панелью И (если включено) самим доменом.
-            p.status = "published"
-            p.published_at = now
+            # `published` — только после подтверждения панелью И (если включено) самим доменом,
+            # и только если строка всё ещё edited с тем телом, что ушло в файл (условный UPDATE: p прочитан
+            # до выгрузки, а писатель/редактор коммитят в своих сессиях).
+            stamped = db.execute(
+                update(Page).where(Page.id == p.id, Page.status == "edited", Page.body == p.body)
+                .values(status="published", published_at=now)
+                .execution_options(synchronize_session=False)).rowcount
+            db.refresh(p)                        # дальше функция видит строку как в БД, а не как прочитали
+            if stamped != 1:
+                failed[p.url_path] = ("страница изменилась во время публикации — на сайте записана прежняя "
+                                      "версия, опубликуй её ещё раз")
+                continue
             published.append(p.url_path)
 
         # Навигация общая: ранее опубликованным страницам нужна ссылка на только что вышедшие.
@@ -244,6 +269,11 @@ def publish_site(site_id: int) -> dict:
         if blocked is None and published:
             for q in live:
                 if q.id in run_ids:
+                    continue
+                if q.status != "published":
+                    # файл живой, но строку переписали (draft/edited): её нынешнее тело никто не
+                    # публиковал — на сайт его не несём. Прежний файл остаётся со старым меню до
+                    # повторной публикации страницы.
                     continue
                 q_offer = db.get(Offer, q.offer_id) if q.offer_id is not None else fallback_offer
                 if (q_offer is None or cta_link(q_offer, reserve_url) is None
@@ -262,9 +292,11 @@ def publish_site(site_id: int) -> dict:
                 except Exception as e:  # noqa: BLE001
                     warnings.append(f"{q.url_path}: nav не обновлён: {type(e).__name__}: {e}"[:200])
 
-        # ── фаза 4: robots.txt + sitemap.xml по ОПУБЛИКОВАННЫМ страницам (не по edited) ────────
+        # ── фаза 4: robots.txt + sitemap.xml по ЖИВЫМ страницам (не по edited) ─────────────────
+        # Живая страница этого прогона, чья публикация не состоялась, из sitemap не уходит: по её
+        # адресу по-прежнему отдаётся файл.
         if blocked is None and (published or live):
-            urls = published + [q.url_path for q in live if q.id not in run_ids]
+            urls = published + [q.url_path for q in live if q.url_path not in published]
             for rel, content in site_builder.build_site_files(domain, urls).items():
                 try:
                     ap.write_file(f"{root}/{rel}", content)
@@ -368,7 +400,8 @@ def _searxng_verdict(sx, domain: str, url_path: str) -> str:
 
 
 def check_index(site_id: int, only_due: bool = False) -> dict:
-    """Проверка индексации каждой published-страницы -> pages.index_status + index_history.
+    """Проверка индексации каждой живой страницы (publish.live_clause: файл на сайте есть, даже если
+    строку с тех пор переписали в draft) -> pages.index_status + index_history.
 
     Источники по порядку: Google Search Console URL Inspection (если задан ключ сервис-аккаунта и
     свойство сайта доступно) -> SearXNG `site:` как вспомогательный (GSC не настроен / нет доступа к
@@ -393,7 +426,7 @@ def check_index(site_id: int, only_due: bool = False) -> dict:
     Статус сайта: published -> monitoring только когда страница реально `indexed`; больше ничего
     check_index не двигает (ни страниц, ни домена).
 
-    Застрять в `unknown` навсегда страница не может: выборка берёт ВСЕ published-страницы независимо
+    Застрять в `unknown` навсегда страница не может: выборка берёт ВСЕ живые страницы независимо
     от index_status — следующая проверка (по cooldown) переспросит.
     """
     from sqlalchemy import select
@@ -410,8 +443,7 @@ def check_index(site_id: int, only_due: bool = False) -> dict:
         if site is None:
             raise ValueError(f"site {site_id} not found")
         domain = db.get(Domain, site.domain_id).domain
-        pages = db.execute(select(Page).where(
-            Page.site_id == site_id, Page.status == "published")).scalars().all()
+        pages = db.execute(select(Page).where(Page.site_id == site_id, live_clause())).scalars().all()
 
         sx = SearxngClient()
         now = datetime.now(timezone.utc)
