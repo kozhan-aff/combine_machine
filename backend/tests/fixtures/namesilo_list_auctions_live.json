@@ -1,0 +1,9 @@
+{
+  "_note": "ЖИВОЙ образец 2026-10-10: GET https://www.namesilo.com/public/api/listAuctions?version=1&type=json&key=***&typeId=3&statusId=2&page=1&pageSize=3. На /api и /apibatch та же операция отвечает 107 Invalid API operation. IP в request затёрт.",
+  "request": {"operation": "listAuctions", "ip": "0.0.0.0"},
+  "reply": {"code": 300, "detail": "success", "body": [
+    {"id": 16970943, "leaderUserId": 9037960895, "leaderUserSubId": 0, "ownerUserId": 0, "domainId": 18073710, "domain": "xd9.net", "statusId": 2, "typeId": 3, "openingBid": 1.0, "currentBid": 1.0, "maxBid": 1995.0, "bidId": null, "domainCreatedOn": "2024-06-21 00:00:00", "auctionEndsOn": "2025-07-22 08:00:00", "auctionEndsOnUtc": "2025-07-22 15:00:00", "url": "https://www.namesilo.com/auctions/xd9.net", "bidsQuantity": 1, "hasBids": true, "visits": 0, "clicks": 0, "ctr": 0.0},
+    {"id": 19016942, "leaderUserId": 9926603972, "leaderUserSubId": 0, "ownerUserId": 0, "domainId": 20501175, "domain": "swaydboots.com", "statusId": 2, "typeId": 3, "openingBid": 1.0, "currentBid": 1.0, "maxBid": 1000.0, "bidId": null, "domainCreatedOn": "2025-02-19 00:00:00", "auctionEndsOn": "2026-03-28 08:00:00", "auctionEndsOnUtc": "2026-03-28 15:00:00", "url": "https://www.namesilo.com/auctions/swaydboots.com", "bidsQuantity": 1, "hasBids": true, "visits": 0, "clicks": 0, "ctr": 0.0},
+    {"id": 19233285, "leaderUserId": 2461951722, "leaderUserSubId": 0, "ownerUserId": 0, "domainId": 20761846, "domain": "surronelectricride.com", "statusId": 2, "typeId": 3, "openingBid": 1.0, "currentBid": 1.0, "maxBid": 1000.0, "bidId": null, "domainCreatedOn": "2025-03-10 00:00:00", "auctionEndsOn": "2026-04-16 08:00:00", "auctionEndsOnUtc": "2026-04-16 15:00:00", "url": "https://www.namesilo.com/auctions/surronelectricride.com", "bidsQuantity": 1, "hasBids": true, "visits": 32, "clicks": 7, "ctr": 21.88}
+  ]}
+}

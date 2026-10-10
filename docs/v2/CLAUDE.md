@@ -337,6 +337,15 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 `LLM_MODEL` и `LLM_CLASSIFY_MODEL` = `ollama/qwen3.5:9b-q8_0`, `LLM_THINK=false`. После перезагрузки бокса Ollama должен
 стартовать сам (приложение в автозагрузке); если `/diag` снова покажет «Cannot connect … 11434» — запустить
 `ollama serve` или приложение Ollama. Сервис `backup` на боксе уже поднят оператором (первый дамп снят 2026-10-10 13:29 UTC).
+**NameSilo вживую (2026-10-10, ключ оператора на `/settings/keys`, баланс 14.55 USD):** `listAuctions` на `/api` и
+`/apibatch` отвечает `107 Invalid API operation` — операции аукционов живут на `https://www.namesilo.com/public/api`
+(клиент: `AUCTION_URL`/`AUCTION_OPS`). Живой формат — `reply.body` = список лотов (`id`, `currentBid`, `maxBid`,
+`domainCreatedOn`, `auctionEndsOnUtc`, `hasBids`), фикстура `tests/fixtures/namesilo_list_auctions_live.json`; `pageSize=500`
+работает; в выдаче 373/500 лотов — `.com`. `statusId=2` держит и лоты с прошедшим концом — `list_dropping` их пропускает.
+`bidAuction` (док): `auctionId`, `bid`, `proxyBid` — потолок человека уходит как `proxyBid`, ставка — шаг над текущей
+(шаг не сверен: низкая ставка даст отказ кодом, не списание). Живой `bidAuction` НЕ вызывался. Источник
+`namesilo_auction` включён на `/settings`.
+
 **Комбайн переведён на шлюз `:3033` (2026-10-10, после `claude login` оператора в контейнере):** `LLM_BASE_URL=
 http://192.168.1.77:3033`, `LLM_MODEL=sonnet` (контент), `LLM_CLASSIFY_MODEL=haiku` (W5, JSON чистый, ~3.5 с),
 `LLM_CLASSIFY_FALLBACK_MODEL=ollama/qwen3.5:9b-q8_0` (поле добавлено на `/settings/keys`). Шлюз сам падает по цепочке

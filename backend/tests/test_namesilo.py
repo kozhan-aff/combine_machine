@@ -6,7 +6,9 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
+import json
 import httpx
+from pathlib import Path
 import pytest
 
 import app.db as db
@@ -456,7 +458,53 @@ def test_bid_sends_once_with_confirmed_ceiling(make):
     c, srv = make(listAuctions=ok(auctions=[_lot("a.com", bid=20.0, aid=7)]), bidAuction=ok())
     res = c.bid("a.com", 45.0)
     p = srv.n("bidAuction")[0][1]
-    assert p["auctionId"] == "7" and p["bid"] == "45.00" and res["bid"] == 45.0 and len(srv.n("bidAuction")) == 1
+    # потолок уходит как proxyBid; сама ставка — шаг над текущей (лот без hasBids -> max(opening, current, 1))
+    assert p["auctionId"] == "7" and p["proxyBid"] == "45.00" and p["bid"] == "20.00"
+    assert res["bid"] == 45.0 and res["bid_now"] == 20.0 and len(srv.n("bidAuction")) == 1
+
+
+LIVE_AUCTIONS = json.loads((Path(__file__).parent / "fixtures" / "namesilo_list_auctions_live.json").read_text())
+
+
+def test_live_fixture_parses_body_fields_and_goes_to_public_api(make):
+    c, srv = make(listAuctions=LIVE_AUCTIONS)
+    lots = c.list_auctions()
+    assert [l["domain"] for l in lots] == ["xd9.net", "swaydboots.com", "surronelectricride.com"]
+    x = lots[0]
+    assert x["auction_id"] == 16970943 and x["bid"] == 1.0 and x["max_bid"] == 1995.0 and x["has_bids"] is True
+    assert x["end"] == datetime(2025, 7, 22, 15, 0, tzinfo=timezone.utc)          # auctionEndsOnUtc, не локальное
+    assert x["created"] == datetime(2024, 6, 21, 0, 0, tzinfo=timezone.utc)
+    req = srv.n("listAuctions")[0][2]
+    assert req.url.host == "www.namesilo.com" and req.url.path == "/public/api/listAuctions"
+    assert srv.n("listAuctions")[0][1]["pageSize"] == str(ns.AUCTION_PAGE_SIZE)
+
+
+def test_non_auction_ops_stay_on_base_url(make):
+    c, srv = make(getAccountBalance=ok(balance=5.0))
+    c.balance()
+    assert srv.n("getAccountBalance")[0][2].url.path == "/apibatch/getAccountBalance"
+
+
+def test_list_dropping_skips_lots_that_already_ended(make, monkeypatch):
+    c, _ = make(listAuctions=LIVE_AUCTIONS)
+    monkeypatch.setattr(ns, "_utcnow", lambda: datetime(2026, 4, 1, tzinfo=timezone.utc))
+    rows = c.list_dropping()
+    assert [r["domain"] for r in rows] == ["surronelectricride.com"]
+    assert rows[0]["acquire_deadline"] == datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
+
+
+def test_find_auction_filters_by_domain_name_first(make):
+    c, srv = make(listAuctions=LIVE_AUCTIONS)
+    a = c.find_auction("Swaydboots.com")
+    assert a["auction_id"] == 19016942
+    assert srv.n("listAuctions")[0][1]["domainName"] == "swaydboots.com" and len(srv.n("listAuctions")) == 1
+
+
+def test_bid_steps_over_current_bid_when_lot_has_bids(make):
+    c, srv = make(listAuctions=LIVE_AUCTIONS, bidAuction=ok(body={"auctionId": 19016942, "bid": 2, "proxyBid": 30}))
+    res = c.bid("swaydboots.com", 30.0)
+    p = [x for x in srv.n("bidAuction")][0][1]
+    assert p["bid"] == "2.00" and p["proxyBid"] == "30.00" and res["bid_now"] == 2.0
 
 
 def test_bid_refuses_when_current_bid_above_confirmed_ceiling(make):
@@ -777,7 +825,8 @@ def test_auction_operator_ceiling_is_frozen_with_renewal(monkeypatch, make):
     r = acquisition.confirm_order(oid, 40.0)
     assert r["bid_rub"] == 51.5 and r["currency"] == "USD"
     assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
-    assert srv.n("bidAuction")[0][1]["bid"] == "40.00"
+    p = srv.n("bidAuction")[0][1]
+    assert p["proxyBid"] == "40.00" and p["bid"] == "20.00"     # потолок = proxyBid, ставка = текущая (нет hasBids)
 
 
 def test_auction_ceiling_below_current_bid_is_refused_at_gate(monkeypatch, make):

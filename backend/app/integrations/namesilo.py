@@ -35,9 +35,14 @@ READ_TIMEOUT = httpx.Timeout(30.0, connect=8.0)
 MONEY_TIMEOUT = httpx.Timeout(75.0, connect=8.0)    # спека: 60-90 с на registerDomain, без автоповтора
 READ_ATTEMPTS = 3
 RECONCILE_MIN_AGE = timedelta(minutes=15)   # спека §5.7: «не зарегистрирован» — только после серии 30 с/2/5/15 мин
-AUCTION_PAGE_SIZE = 100
-AUCTION_MAX_PAGES = 20       # 2000 лотов за прогон discovery: ~20 с при 1 запросе/с
+AUCTION_PAGE_SIZE = 500      # живьём 2026-10-10: pageSize=500 отдаёт 500 лотов одной страницей
+AUCTION_MAX_PAGES = 4        # 2000 лотов за прогон discovery: ~4 с при 1 запросе/с
 FIND_AUCTION_MAX_PAGES = 10
+# Операции аукционов живут НЕ на /api и НЕ на /apibatch (там 107 Invalid API operation — снято живьём
+# 2026-10-10), а на /public/api. Остальные операции — по base_url (apibatch/sandbox).
+AUCTION_URL = "https://www.namesilo.com/public/api"
+AUCTION_OPS = frozenset({"listAuctions", "viewAuction", "viewAuctions", "bidAuction", "bulkBidAuction",
+                         "buyNowAuction", "watchAuction"})
 # Зоны без WHOIS privacy (спека §7): private=1 там — ошибка или тихий no-op, параметр не шлём.
 NO_PRIVACY = frozenset({"ac", "am", "asia", "at", "ca", "de", "eu", "film", "in", "it", "mx", "nyc",
                         "pro", "sh", "top", "travel", "uk", "us", "vote", "ws"})
@@ -102,6 +107,10 @@ def _zone_tail(domain: str) -> str:
     return domain.rsplit(".", 1)[-1].lower()
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _parse_dt(v) -> datetime | None:
     """Даты аукционов [не сверено]: ISO, `YYYY-MM-DD[ HH:MM[:SS]]` или unix-секунды."""
     if v in (None, ""):
@@ -162,8 +171,9 @@ class NameSiloClient:
             raise NameSiloError("NameSilo: адрес API должен быть https:// (ключ идёт в query)", 101)
         self._throttle()
         q = {"version": 1, "type": "json", "key": self.api_key, **params}
+        base = AUCTION_URL if (op in AUCTION_OPS and not settings.NAMESILO_SANDBOX) else self.base_url
         try:
-            r = self._client.get(f"{self.base_url}/{op}", params=q,
+            r = self._client.get(f"{base}/{op}", params=q,
                                  timeout=MONEY_TIMEOUT if money else READ_TIMEOUT)
         except httpx.HTTPError as e:
             raise fail(self._clean(f"{op}: {type(e).__name__}: {e}")[:200]) from None
@@ -395,41 +405,59 @@ class NameSiloClient:
 
     @staticmethod
     def _parse_auction(row: dict) -> dict | None:
-        """[не сверено живьём] Имена полей — из документации NameSilo; обязателен только `domain`."""
+        """Поля живого ответа (фикстура namesilo_list_auctions_live.json, 2026-10-10): id, domain, currentBid,
+        maxBid, openingBid, hasBids, domainCreatedOn, auctionEndsOnUtc. Старые имена из документации оставлены
+        запасными. Обязателен только `domain`."""
         if not isinstance(row, dict) or not row.get("domain"):
             return None
         pick = lambda *ks: next((row[k] for k in ks if row.get(k) not in (None, "")), None)   # noqa: E731
         return {"domain": str(row["domain"]).strip().lower(),
-                "auction_id": pick("auctionId", "auction_id", "id"),
+                "auction_id": pick("id", "auctionId", "auction_id"),
                 "bid": _f(pick("currentBid", "current_bid", "bid", "price", "openingBid")),
-                "end": _parse_dt(pick("endDate", "end_date", "closeDate", "ends", "end")),
-                "created": _parse_dt(pick("created", "createdDate", "registered"))}
+                "opening": _f(pick("openingBid", "opening_bid")),
+                "max_bid": _f(pick("maxBid", "max_bid")),
+                "has_bids": bool(row.get("hasBids")) if row.get("hasBids") is not None else None,
+                "end": _parse_dt(pick("auctionEndsOnUtc", "endDate", "end_date", "closeDate", "ends", "end",
+                                      "auctionEndsOn")),
+                "created": _parse_dt(pick("domainCreatedOn", "created", "createdDate", "registered"))}
 
-    def list_auctions(self, page: int = 1, page_size: int = AUCTION_PAGE_SIZE) -> list[dict]:
-        reply = self._call("listAuctions", {"typeId": 3, "statusId": 2, "page": page, "pageSize": page_size})
-        raw = reply.get("auctions") if reply.get("auctions") is not None else reply.get("auction")
+    def list_auctions(self, page: int = 1, page_size: int = AUCTION_PAGE_SIZE,
+                      domain: str | None = None) -> list[dict]:
+        params = {"typeId": 3, "statusId": 2, "page": page, "pageSize": page_size}
+        if domain:
+            params["domainName"] = domain          # фильтр по имени — из документации list-auctions
+        reply = self._call("listAuctions", params)
+        raw = reply.get("body")                    # живой формат: reply.body = список лотов
+        if raw is None:
+            raw = reply.get("auctions") if reply.get("auctions") is not None else reply.get("auction")
         if isinstance(raw, dict) and "auction" in raw:
             raw = raw["auction"]
         return [a for a in (self._parse_auction(r) for r in as_list(raw)) if a]
 
     def list_dropping(self) -> list[dict]:
         """Источник discovery: аукционы просроченных доменов NameSilo (дата создания сохраняется).
-        Строки в формате автоисточников: lane=bid, acquire_deadline = конец аукциона."""
+        Строки в формате автоисточников: lane=bid, acquire_deadline = конец аукциона (UTC).
+        Лоты с уже прошедшим концом (живьём statusId=2 держит и такие) — пропускаем."""
         rows: list[dict] = []
+        now = _utcnow()
         for page in range(1, AUCTION_MAX_PAGES + 1):
             part = self.list_auctions(page)
             # created -> Domain.whois_created (возраст сохраняется — главное преимущество лота),
             # bid -> Domain.acquire_price (текущая ставка на момент discovery)
             rows += [{"domain": a["domain"], "source": "namesilo_auction", "lane": "bid",
                       "acquire_deadline": a["end"], "created": a.get("created"),
-                      "bid": a.get("bid")} for a in part]
+                      "bid": a.get("bid")} for a in part if not (a["end"] and a["end"] < now)]
             if len(part) < AUCTION_PAGE_SIZE:
                 break
         return rows
 
     def find_auction(self, domain: str) -> dict:
-        """Свежая запись аукциона по домену (постраничный просмотр). Нет — чистый отказ."""
+        """Свежая запись аукциона по домену: сначала фильтр domainName, затем постраничный просмотр.
+        Нет — чистый отказ."""
         d = domain.strip().lower()
+        for a in self.list_auctions(1, 50, domain=d):
+            if a["domain"] == d:
+                return a
         for page in range(1, FIND_AUCTION_MAX_PAGES + 1):
             part = self.list_auctions(page)
             for a in part:
@@ -449,7 +477,14 @@ class NameSiloClient:
         if a["bid"] > float(max_bid):
             raise NameSiloError(f"{domain}: ставка на аукционе выросла ({a['bid']:.2f} > подтверждённых "
                                 f"{float(max_bid):.2f} {CURRENCY}) — подтверди заказ заново")
-        self._call("bidAuction", {"auctionId": a["auction_id"], "bid": f"{float(max_bid):.2f}"}, money=True)
+        # Документация bid-auction: `bid` пишется в историю как есть, `proxyBid` — потолок для автоставок.
+        # Потолок человека — это proxyBid; сама ставка — минимальный шаг над текущей (hasBids) или
+        # стартовая. Слать потолок как `bid` значило бы платить максимум сразу. [шаг ставки не сверен:
+        # слишком низкий `bid` даст чистый отказ кодом, не списание]
+        step = (a["bid"] or 0.0) + 1.0 if a.get("has_bids") else max(a.get("opening") or 0.0, a["bid"] or 0.0, 1.0)
+        bid_now = min(float(max_bid), step)
+        self._call("bidAuction", {"auctionId": a["auction_id"], "bid": f"{bid_now:.2f}",
+                                  "proxyBid": f"{float(max_bid):.2f}"}, money=True)
         return {"order_id": str(a["auction_id"]), "domain": a["domain"], "auction_id": a["auction_id"],
-                "bid": float(max_bid), "currency": CURRENCY,
-                "note": "ставка принята; итог аукциона — после его завершения (проверь вручную)"}
+                "bid": float(max_bid), "bid_now": bid_now, "currency": CURRENCY,
+                "note": "ставка принята (proxy до потолка); итог аукциона — после его завершения"}
