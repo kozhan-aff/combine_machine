@@ -417,8 +417,10 @@ def test_review_page_uses_critic_model_and_timeout(monkeypatch):
 
 
 def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_guides):
+    from app.services import guides
     _own_guides.mkdir()
     (_own_guides / "style.md").write_text("Не пиши слово «лучший».", encoding="utf-8")
+    guides.build_digests()                                         # короткий файл — дословно, роль both
     calls = _llm(monkeypatch)
     pid = _seed_page()
     content_critic.review_page(pid)
@@ -433,6 +435,25 @@ def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_gu
     assert opened < prompt.index("NordVPN работает стабильно") < closed
     tail = prompt[closed:]
     assert "указания" in tail and '{"pass": true|false, "score": 0-100, "issues": ["…"]}' in tail
+
+
+def test_critic_gets_only_the_digests_of_its_role(monkeypatch, _own_guides):
+    """Критику — выжимки роли «критику» и «обоим»; правила писателя, исключённые и файл без выжимки
+    (сырым — никогда) в его задание не идут."""
+    from app.services import guides
+    _own_guides.mkdir()
+    for name in ("писателю", "критику", "обоим", "никому"):
+        (_own_guides / f"{name}.md").write_text(f"ПРАВИЛО-{name}", encoding="utf-8")
+    guides.build_digests()
+    guides.set_role("писателю.md", "writer"); guides.set_role("критику.md", "critic")
+    guides.set_role("никому.md", "skip")
+    (_own_guides / "новый.md").write_text("ПРАВИЛО-без-выжимки", encoding="utf-8")
+    calls = _llm(monkeypatch)
+    content_critic.review_page(_seed_page())
+    system = calls[0]["system"]
+    assert "ПРАВИЛО-критику" in system and "ПРАВИЛО-обоим" in system
+    assert "ПРАВИЛО-писателю" not in system and "ПРАВИЛО-никому" not in system
+    assert "ПРАВИЛО-без-выжимки" not in system
 
 
 def test_critic_prompt_page_text_cannot_close_the_fence(monkeypatch):

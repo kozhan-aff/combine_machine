@@ -272,14 +272,52 @@ def test_reasons_survive_insert_race(monkeypatch):
 
 def test_truncated_guides_are_reported(monkeypatch):
     from app.services import guides
-    monkeypatch.setattr(guides, "load_guides",
-                        lambda lang, kind: {"text": "ПРАВИЛО", "files": ["a.md"], "truncated": kind == "howto"})
+    seen = []
+    monkeypatch.setattr(guides, "load_guides", lambda lang, kind, role=None: seen.append(role) or {
+        "text": "ПРАВИЛО", "files": ["a.md"], "truncated": kind == "howto", "pending": []})
     site_id = _site()
     calls = _llm(monkeypatch)
     assert content.generate_site(site_id) == 3
-    assert all("ПРАВИЛО" in c["system"] for c in calls)
+    assert all("ПРАВИЛО" in c["system"] for c in calls) and seen == ["writer"] * 3
     last = jobs.last("generate")
     assert last["status"] == "done" and last["message"] == "написано 3 из 3; правила письма обрезаны по лимиту"
+
+
+def test_rules_without_digest_are_reported_and_not_sent(monkeypatch, _own_guides):
+    """Файл правил без выжимки в задание не идёт (сырым — никогда), и прогон говорит об этом словами."""
+    from app.services import guides
+    _own_guides.mkdir()
+    (_own_guides / "10-тон.md").write_text("ПРАВИЛО-ТОНА", encoding="utf-8")
+    (_own_guides / "20-структура.md").write_text("ПРАВИЛО-СТРУКТУРЫ", encoding="utf-8")
+    guides.build_digests()
+    (_own_guides / "20-структура.md").write_text("ПРАВИЛО-СТРУКТУРЫ изменили", encoding="utf-8")   # выжимка устарела
+    (_own_guides / "30-новый.md").write_text("ПРАВИЛО-НОВОЕ", encoding="utf-8")                     # выжимки нет
+    site_id = _site()
+    calls = _llm(monkeypatch)
+    assert content.generate_site(site_id) == 3
+    for c in calls:
+        assert "ПРАВИЛО-ТОНА" in c["system"]
+        assert "ПРАВИЛО-СТРУКТУРЫ" not in c["system"] and "ПРАВИЛО-НОВОЕ" not in c["system"]
+    last = jobs.last("generate")
+    assert last["status"] == "done"
+    assert last["message"] == "написано 3 из 3; правила письма: 2 файла без выжимки — не учтены"
+
+
+def test_writer_gets_only_the_digests_of_its_role(monkeypatch, _own_guides):
+    from app.services import guides
+    _own_guides.mkdir()
+    for name in ("писателю", "критику", "обоим", "никому"):
+        (_own_guides / f"{name}.md").write_text(f"ПРАВИЛО-{name}", encoding="utf-8")
+    guides.build_digests()                                         # короткие файлы — дословно, роль both
+    guides.set_role("писателю.md", "writer"); guides.set_role("критику.md", "critic")
+    guides.set_role("никому.md", "skip")
+    site_id = _site()
+    calls = _llm(monkeypatch)
+    content.generate_site(site_id)
+    for c in calls:
+        assert "ПРАВИЛО-писателю" in c["system"] and "ПРАВИЛО-обоим" in c["system"]
+        assert "ПРАВИЛО-критику" not in c["system"] and "ПРАВИЛО-никому" not in c["system"]
+    assert not jobs.last("generate")["message"]                    # ждущих выжимки нет — сказать нечего
 
 
 def test_generate_without_rewrite_keeps_existing_pages(monkeypatch):
@@ -363,11 +401,14 @@ def test_writer_uses_writer_model(monkeypatch):
 # --- промпты ---
 
 def test_prompt_has_guides_and_promo_terms(monkeypatch, _own_guides):
-    """Правила письма — одна плоская папка (с 2026-10-10): каждый файл идёт в задание любой страницы."""
+    """Правила письма — одна плоская папка (с 2026-10-10): выжимка каждого файла идёт в задание любой
+    страницы (короткий файл — дословно)."""
+    from app.services import guides
     (_own_guides / "ru").mkdir(parents=True)
     (_own_guides / "10-тон.md").write_text("ПРАВИЛО-ТОНА", encoding="utf-8")
     (_own_guides / "20-структура.txt").write_text("ПРАВИЛО-СТРУКТУРЫ", encoding="utf-8")
     (_own_guides / "ru" / "old.md").write_text("ПРАВИЛО-ИЗ-ПОДПАПКИ", encoding="utf-8")
+    assert guides.build_digests()["built"] == 2
     site_id = _site()
     calls = _llm(monkeypatch)
     content.generate_site(site_id)

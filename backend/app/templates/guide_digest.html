@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Выжимка · {{ g.rel }}{% endblock %}
+{% block content %}
+
+<h2><span class="idx">✎</span> {{ g.rel }}
+  <span class="hint">выжимка правил — в задание идёт она, а не сам файл</span></h2>
+
+<p class="hint" style="margin:0 0 14px; max-width:820px">
+  Кому: <b style="color:var(--ink)">{{ roles[g.role] if g.role else 'не назначено' }}</b>{% if g.role_by == 'operator' %} (выбрано тобой){% elif g.role and g.why %} ({{ g.why }}){% endif %}.
+  {% if g.state == 'stale' %}<b style="color:var(--bad)">Файл изменился после сжатия: эта выжимка снята с прежнего текста и в задание не идёт.</b>
+    Нажми «Сжать правила» на экране правил либо проверь текст здесь и сохрани — он станет действующим.
+  {% elif g.state == 'error' %}<b style="color:var(--bad)">Сжать не получилось: {{ g.error }}.</b> Выжимку можно написать самому.
+  {% elif g.state == 'pending' %}Выжимки ещё нет: её сделает машина («Сжать правила» на экране правил), либо напиши сам.
+  {% endif %}
+  {% if not g.role %}Выжимку, сохранённую здесь, получат и писатель, и критик — поменять можно в списке правил.{% endif %}
+  {% if g.edited %}Текст правлен тобой — машина не перезапишет его, пока не изменится сам файл.{% endif %}
+</p>
+
+<form method="post" action="/guides/digest/{{ g.rel|urlencode }}" style="max-width:920px">
+  <label class="f">текст выжимки <span class="note">список требований, до {{ max }} симв.</span>
+    <textarea class="body" name="text" maxlength="{{ max }}" spellcheck="false">{{ text }}</textarea>
+  </label>
+  <p class="hint">исходник: {{ g.chars }} симв., выжимка: {{ text|length }}</p>
+  <div class="toolbar">
+    <button class="btn-acc" title="сохранить свой текст: машина не перезапишет его, пока не изменится сам файл. Пустое поле — отказаться от своей версии, файл сожмёт машина">Сохранить</button>
+    <a class="btn" href="/guides" title="вернуться к списку правил, изменения не сохранятся">← к правилам</a>
+  </div>
+</form>
+
+{% endblock %}

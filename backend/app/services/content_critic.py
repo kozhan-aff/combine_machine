@@ -597,7 +597,7 @@ def _review(page_id: int, round_no: int | None = None) -> tuple[dict, dict]:
     verdict, error, down, off_form = None, None, False, False
     try:
         raw = LlmClient(timeout=_CRITIC_TIMEOUT).complete(
-            _critic_system(guides.load_guides(lang, kind)["text"]),
+            _critic_system(guides.load_guides(lang, kind, role="critic")["text"]),
             _critic_prompt(brand=brand, kind=kind, lang=lang, title=title, text=text),
             model=settings.LLM_CRITIC_MODEL or settings.LLM_MODEL)
     except Exception as e:  # noqa: BLE001 — любая осечка = причина словами в замечании, не трейс

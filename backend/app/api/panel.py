@@ -51,7 +51,8 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "edit", "domain_lists", "domain_ranks", "research")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "edit", "domain_lists", "domain_ranks", "research",
+         "guides_digest")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -588,14 +589,69 @@ def settings_view(request: Request, db: Session = Depends(get_session)):
 
 @router.get("/guides", response_class=HTMLResponse)
 def guides_view(request: Request):
-    """Правила письма оператора (content_guides/): список, загрузка, удаление. Отдельный пункт меню —
-    это вход машины наравне с офферами: по этим файлам пишет писатель и судит критик."""
-    from app.services import guides
-    rows = guides.list_guides()
+    """Правила письма оператора (content_guides/): файлы, кому идёт каждый и его выжимка; загрузка, удаление.
+    Отдельный пункт меню — это вход машины наравне с офферами: по выжимкам пишет писатель и судит критик."""
+    from app.services import guides, jobs
+    writer, critic = guides.load_guides(role="writer"), guides.load_guides(role="critic")
+    waiting = len(writer["pending"])                     # ждущие выжимки — одни и те же для обеих ролей
     return templates.TemplateResponse(request, "guides.html", {
-        "active": "guides", "guides": rows, "limit": guides.LIMIT,
-        "chars": len(guides.load_guides(limit=10**9)["text"]),
-        "cut": [g["rel"] for g in rows if not g["used"]]})
+        "active": "guides", "guides": guides.status(), "limit": guides.LIMIT, "roles": guides.ROLE_RU,
+        "writer": writer, "critic": critic, "run": jobs.progress("guides_digest"),
+        "waiting": guides.no_digest_ru(waiting, "в задание не попадает", "в задание не попадают") if waiting else ""})
+
+
+@router.post("/guides/digest")
+def guides_digest_action(force: str = Form("")):
+    """Сжать правила письма — фоновая задача `guides_digest`: по обращению к модели на каждый большой файл,
+    у которого нет актуальной выжимки (`force` — на все). Запускается только отсюда: воркер папку правил
+    видит только на чтение."""
+    from app.services import guides, jobs
+    ok = jobs.spawn("guides_digest", lambda: guides.build_digests(force=bool(force)))
+    if not ok:
+        return _back("/guides", err=jobs.busy_msg("Правила уже сжимаются — дождись, полоса вверху покажет ход"))
+    return _back("/guides", msg="Правила сжимаются в фоне: большой файл — одно обращение к модели, до нескольких "
+                                "минут. Ход — в полосе вверху; когда она исчезнет, обнови страницу.")
+
+
+@router.post("/guides/role")
+def guides_role_action(rel: str = Form(""), role: str = Form("")):
+    """Кому идут правила файла — решение оператора: сжатие эту роль больше не меняет."""
+    from app.services import guides
+    try:
+        guides.set_role(rel, role)
+    except ValueError as e:
+        return _back("/guides", err=str(e))
+    return _back("/guides", msg=f"{rel} — кому: {guides.ROLE_RU[role]}")
+
+
+@router.get("/guides/digest/{name}", response_class=HTMLResponse)
+def guide_digest_view(request: Request, name: str):
+    """Выжимка одного файла правил: посмотреть и поправить. Имя — только существующий файл папки."""
+    from app.services import guides
+    try:
+        text = guides.read_digest(name)
+    except ValueError as e:
+        return _back("/guides", err=str(e))
+    row = next((g for g in guides.status() if g["rel"] == name), None)
+    if row is None:
+        return _back("/guides", err=f"файла {name} нет")
+    return templates.TemplateResponse(request, "guide_digest.html", {
+        "active": "guides", "g": row, "text": text, "roles": guides.ROLE_RU, "max": guides.DIGEST_MAX * 2})
+
+
+@router.post("/guides/digest/{name}")
+def guide_digest_save_action(name: str, text: str = Form("")):
+    """Сохранить выжимку, написанную или поправленную оператором. Пустой текст — отказ от своей версии."""
+    from app.services import guides
+    try:
+        saved = guides.save_digest(name, text)
+    except ValueError as e:
+        return _back("/guides", err=str(e))
+    if not saved:
+        return _back("/guides", msg=f"{name}: своей выжимки больше нет — файл сожмёт машина («Сжать правила»)")
+    cut = len(saved) < len(text.replace("\r\n", "\n").strip())
+    return _back(f"/guides/digest/{quote(name)}",
+                 msg="Выжимка сохранена" + (f" — текст обрезан до {len(saved)} симв." if cut else ""))
 
 
 @router.post("/guides/upload")

@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     LLM_WRITER_MODEL: str = ""                        # M4: писатель страниц по досье; пусто -> LLM_MODEL
     LLM_CRITIC_MODEL: str = ""                        # M4: критик страниц; пусто -> LLM_MODEL
     CONTENT_GUIDES_DIR: str = ""      # пусто -> /repo/content_guides (бокс) или <репо>/content_guides
+    # M4: ниша сайтов — по ней из правил письма оператора отбираются применимые (services/guides.py)
+    SITE_VERTICAL: str = "VPN-сервисы: партнёрские обзоры, сравнения и инструкции по настройке"
     RESEARCH_DIR: str = "/workspace/combine/research"   # общая папка со шлюзом :3033 (скриншоты для дизайнера)
     RESEARCH_SCREENSHOTS: bool = False                  # Browserless: снимать первый экран конкурентов
     RESEARCH_MAX_AGE_DAYS: int = 30

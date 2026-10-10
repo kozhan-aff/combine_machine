@@ -244,16 +244,16 @@ def write_doc(llm, *, system: str, prompt: str,
 
 
 def _prompts(rows: list, spec: dict, *, brand: str, lang: str, country: str | None, promo: tuple,
-             vertical: str | None) -> tuple[str, str, bool]:
+             vertical: str | None) -> tuple[str, str, bool, int]:
     """Промпты одной страницы нового пути: (системный с правилами оператора, бриф из досье, «правила
-    письма не влезли в лимит и обрезаны»)."""
+    письма не влезли в лимит и обрезаны», сколько файлов правил не учтено — у них нет выжимки)."""
     from app.services import brief, guides
     kind = spec["kind"]
-    rules = guides.load_guides(lang, kind)
+    rules = guides.load_guides(lang, kind, role="writer")
     prompt = brief.brief_text(brief.build_brief(rows, kind), brand=brand, kind=kind, title=spec["title"],
                               lang_name=LANG_NAMES[norm_lang(lang)], country=country, promo=promo,
                               vertical=vertical)
-    return writer_system(lang, country, rules["text"]), prompt, bool(rules["truncated"])
+    return writer_system(lang, country, rules["text"]), prompt, bool(rules["truncated"]), len(rules["pending"])
 
 
 def _apply_doc(page, doc: page_doc.PageDoc, kind: str, lang: str) -> None:
@@ -458,7 +458,7 @@ MESSAGE_MAX = 400      # длина JobRun.message: jobs.report режет по 
 
 
 def _batch_message(written: int, total: int, *, down: bool, not_started: int, hand_edited: int,
-                   truncated: bool, failed: list) -> str | None:
+                   truncated: bool, failed: list, no_digest: int = 0) -> str | None:
     """Итог прогона писателя одной строкой — или None, если сказать нечего. Укладывается в MESSAGE_MAX
     сам: одинаковые причины схлопнуты в одну со списком путей, а под нож идут только тексты причин
     (хвост заменяет «…») — счётчики и пути остаются целыми. Место делится от коротких причин к
@@ -470,6 +470,9 @@ def _batch_message(written: int, total: int, *, down: bool, not_started: int, ha
         notes.append(f"не тронуты, правлены вручную: {hand_edited}")
     if truncated:
         notes.append("правила письма обрезаны по лимиту")
+    if no_digest:
+        from app.services.guides import no_digest_ru
+        notes.append("правила письма: " + no_digest_ru(no_digest, "не учтён", "не учтены"))
     by_reason: dict[str, list[str]] = {}
     for path, err in failed:
         by_reason.setdefault(err, []).append(path)
@@ -515,7 +518,7 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
             todo.append((spec, old))
 
     llm = LlmClient(timeout=600)             # страница на 2000 слов через шлюз идёт минуты
-    written, failed, down, truncated, i = 0, [], False, False, 0
+    written, failed, down, truncated, no_digest, i = 0, [], False, False, 0, 0
     jobs.report(run, done=0, total=len(todo))
     # try/finally: накопленные причины и счётчики обязаны дожить до карточки задачи и при отмене, и при
     # гонке вставки (ValueError ниже) — иначе оператор видит «отменено»/ошибку без того, что уже выяснено
@@ -524,9 +527,9 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
             if jobs.cancelled(run):
                 raise jobs.Cancelled()       # уже записанные страницы остаются (коммит по странице)
             jobs.report(run, done=i, total=len(todo), current=spec["title"])
-            system, prompt, cut_rules = _prompts(rows, spec, brand=brand, lang=lang, country=country,
-                                                 promo=promo, vertical=vertical)
-            truncated = truncated or cut_rules
+            system, prompt, cut_rules, waiting = _prompts(rows, spec, brand=brand, lang=lang, country=country,
+                                                          promo=promo, vertical=vertical)
+            truncated, no_digest = truncated or cut_rules, max(no_digest, waiting)
             try:
                 doc, err = write_doc(llm, system=system, prompt=prompt)
             except WriterDown as e:
@@ -565,7 +568,8 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
             jobs.report(run, done=len(todo), total=len(todo), current="")
     finally:
         message = _batch_message(written, len(todo), down=down, not_started=len(todo) - i - 1,
-                                 hand_edited=hand_edited, truncated=truncated, failed=failed)
+                                 hand_edited=hand_edited, truncated=truncated, failed=failed,
+                                 no_digest=no_digest)
         if message:
             jobs.report(run, message=message)
     if failed:
@@ -622,8 +626,8 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
         brand, country, promo = offer.brand, offer.country, (offer.promo_code, offer.promo_terms)
         db.expunge_all()                     # строки досье нужны после закрытия сессии
 
-    system, prompt, _ = _prompts(rows, spec, brand=brand, lang=lang, country=country, promo=promo,
-                                 vertical=vertical_block(brand))
+    system, prompt, *_ = _prompts(rows, spec, brand=brand, lang=lang, country=country, promo=promo,
+                                  vertical=vertical_block(brand))
     try:
         doc, err = write_doc(LlmClient(timeout=600), system=system, prompt=prompt, issues=issues)
     except WriterDown as e:

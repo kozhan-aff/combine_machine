@@ -24,7 +24,7 @@ def test_load_takes_every_file_in_alpha_order_for_any_lang_and_kind(gdir):
 
 def test_load_without_folder_is_empty_not_error(gdir, monkeypatch):
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(gdir / "нет-такой"))
-    assert guides.load_guides("ru", "review") == {"text": "", "files": [], "truncated": False}
+    assert guides.load_guides("ru", "review") == {"text": "", "files": [], "truncated": False, "pending": []}
 
 
 def test_limit_drops_files_from_the_end_and_flags(gdir):

@@ -6,9 +6,10 @@
   <span class="hint">твои инструкции, как писать тексты — вход машины наравне с офферами</span></h2>
 
 <p class="hint" style="margin:0 0 16px; max-width:820px">
-  Всё, что лежит здесь, целиком уходит в задание <b style="color:var(--ink)">писателю</b> и чек-листом —
-  <b style="color:var(--ink)">критику</b>, для всех сайтов, языков и типов страниц. Одна папка, без
-  подпапок: порядок — по имени файла (<code>10-тон.md</code>, <code>20-структура.md</code>).
+  Одна папка на все сайты, языки и типы страниц. В задание идут не сами файлы, а их
+  <b style="color:var(--ink)">выжимки</b>: машина один раз читает файл и оставляет только требования,
+  применимые к нашим страницам. Одни правила получает <b style="color:var(--ink)">писатель</b>, другие —
+  <b style="color:var(--ink)">критик</b>; файл без выжимки в задание не попадает.
   {% if not guides %}<br><b style="color:var(--acc2)">Сейчас правил нет — тексты пишутся только по досье конкурентов
   и фактам бренда.</b>{% endif %}
 </p>
@@ -21,32 +22,64 @@
         <input type="file" name="file" accept=".md,.txt" multiple></label>
       <label class="f">или папка целиком <span class="note">возьмём из неё только .md и .txt</span>
         <input type="file" name="file" webkitdirectory></label>
-      <button class="btn-acc" title="сохранить в content_guides/; файл с тем же именем заменится">↑ Загрузить</button>
+      <button class="btn-acc" title="сохранить в content_guides/; файл с тем же именем заменится, его выжимку и роль машина назначит заново">↑ Загрузить</button>
     </form>
   </div>
   <details class="what"><summary>можно и без панели</summary>
     <div class="what-body">Это обычная папка <code>content_guides/</code> в корне репозитория — на боксе
       <code>D:\combine_machine\content_guides\</code>. Положи файлы туда руками — машина увидит их сразу,
-      без перезапуска. Имена — буквы, цифры, точка, дефис, подчёркивание.</div></details>
+      без перезапуска; в задание они пойдут после «Сжать правила». Имена — буквы, цифры, точка, дефис, подчёркивание.</div></details>
 </div>
+
+{% if guides %}
+<div class="row" style="max-width:920px; margin:0 0 6px">
+  <form class="row" method="post" action="/guides/digest">
+    <button class="btn-acc" title="машина один раз читает каждый файл и оставляет только применимые к нашим страницам требования; повторно — только изменённые файлы">Сжать правила</button>
+    <label class="hint" title="сжать заново и те файлы, что не менялись, — нужно после смены ниши сайтов (Ключи и доступы → «Ниша сайтов»). Выжимки, которые ты правил сам, останутся"><input type="checkbox" name="force" value="1"> все файлы заново</label>
+  </form>
+  <span class="hint" title="столько символов правил получит каждый при следующем прогоне{{ '; часть файлов не влезла в лимит — файлы с конца списка отброшены' if writer.truncated or critic.truncated }}">писателю уйдёт {{ '{:,}'.format(writer.text|length).replace(',', ' ') }} симв., критику — {{ '{:,}'.format(critic.text|length).replace(',', ' ') }} (лимит {{ '{:,}'.format(limit).replace(',', ' ') }} на каждого)</span>
+  {% if waiting %}<b class="hint" style="color:var(--bad)" title="у этих файлов выжимки нет, она устарела или не получилась — нажми «Сжать правила» либо напиши выжимку сам (колонка «выжимка»)">{{ waiting }}</b>{% endif %}
+</div>
+<p class="hint" style="max-width:920px; margin:0 0 10px">
+  {% if run.status == 'running' %}Сжатие идёт: {{ run.done }} из {{ run.total }}{% if run.current %} — {{ run.current }}{% endif %}. Таблица обновится, когда перезагрузишь страницу.
+  {% elif run.status == 'failed' %}Последнее сжатие: <b style="color:var(--bad)">упало — {{ run.error }}</b>
+  {% elif run.status == 'cancelled' %}Последнее сжатие: остановлено на {{ run.done }} из {{ run.total }}{% if run.message %} · {{ run.message }}{% endif %}
+  {% elif run.status == 'done_warn' %}Последнее сжатие: <b style="color:var(--bad)">с замечаниями</b> — {{ run.message }}
+  {% elif run.status %}Последнее сжатие: {{ run.message or 'готово' }}
+  {% endif %}
+</p>
+{% endif %}
 
 <div class="wrap" style="max-width:920px">
 {% if guides %}
 <table>
-  <thead><tr><th>файл</th><th class="num">размер</th><th>изменён</th><th>в задании</th><th></th></tr></thead>
+  <thead><tr><th>файл</th><th class="num">размер</th>
+    <th title="кто получает правила этого файла: назначает машина при сжатии, поменять можно здесь">кому</th>
+    <th title="короткая рабочая версия файла — в задание идёт она, а не сам файл">выжимка</th><th></th></tr></thead>
   <tbody>
   {% for g in guides %}
+    {% set by_me = g.role_by == 'operator' %}
     <tr>
       <td class="dom">{{ g.rel }}</td>
-      <td class="num">{{ '%.1f'|format(g.size / 1024) }} КБ</td>
-      <td class="hint">{{ g.mtime.replace('T', ' ')[:16] }}</td>
-      <td>{% if g.used %}<span class="led led-ok"></span>да
-          {% else %}<span class="led led-todo"></span><span class="hint" style="color:var(--bad)"
-            title="все правила вместе длиннее лимита — файлы с конца списка в задание не попадают; сократи или объедини">не влез в лимит</span>{% endif %}</td>
+      <td class="num" title="{{ g.chars }} симв.">{{ '%.1f'|format(g.size / 1024) }} КБ</td>
+      <td><form class="inline" method="post" action="/guides/role">
+        <input type="hidden" name="rel" value="{{ g.rel }}">
+        <select name="role" onchange="this.form.submit()"
+                title="{{ 'выбрано тобой — при сжатии не меняется' if by_me else (g.why or 'назначила машина') if g.role else 'назначит машина при сжатии; можно выбрать самому' }}">
+          {% if not g.role %}<option value="" selected disabled>не назначено</option>{% endif %}
+          {% for key, ru in roles.items() %}<option value="{{ key }}" {{ 'selected' if g.role == key }}>{{ ru }}</option>{% endfor %}
+        </select></form></td>
+      <td>{% set href = '/guides/digest/' ~ (g.rel|urlencode) %}
+          {% if g.state == 'ok' %}<span class="led led-ok"></span><a href="{{ href }}" title="посмотреть и поправить выжимку">{{ g.digest_chars }} симв.</a>
+          {% elif g.role == 'skip' and by_me %}<span class="led led-off"></span><a href="{{ href }}" title="выжимки нет: файл помечен «не использовать», машина его не сжимает">нет</a>
+          {% elif g.state == 'stale' %}<span class="led led-warn"></span><a href="{{ href }}" style="color:var(--bad)" title="файл изменился после сжатия: выжимка снята с прежнего текста и в задание не идёт — нажми «Сжать правила»">устарела</a>
+          {% elif g.state == 'error' %}<span class="led led-bad"></span><a href="{{ href }}" style="color:var(--bad)" title="{{ g.error }}">ошибка</a>
+          {% else %}<span class="led led-todo"></span><a href="{{ href }}" title="выжимки ещё нет — нажми «Сжать правила» или напиши её сам">нет</a>{% endif %}
+          {% if g.edited %}<span class="hint" title="выжимку правил ты: машина не перезапишет её, пока не изменится сам файл">правлена</span>{% endif %}</td>
       <td><form class="inline" method="post" action="/guides/delete"
                 onsubmit="return confirm('Удалить {{ g.rel }}?')">
         <input type="hidden" name="rel" value="{{ g.rel }}">
-        <button class="btn-sm btn-bad" title="удалить файл правил">✕ удалить</button></form></td>
+        <button class="btn-sm btn-bad" title="удалить файл правил вместе с его выжимкой">✕ удалить</button></form></td>
     </tr>
   {% endfor %}
   </tbody>
@@ -55,9 +88,5 @@
 <div class="empty">Файлов нет. Загрузи свои рекомендации — стиль, тон, структура, запреты, примеры удачных текстов.</div>
 {% endif %}
 </div>
-{% if guides %}
-<p class="hint" style="max-width:920px">Всего {{ chars }} символов из {{ limit }} допустимых в одном задании.
-  {% if cut %}<b style="color:var(--bad)">Не влезли: {{ cut|join(', ') }}.</b>{% endif %}</p>
-{% endif %}
 
 {% endblock %}
