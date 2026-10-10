@@ -20,6 +20,8 @@ TEXTS = {
         "alt_hero": "Abstract illustration for the page “{title}”",
         "facts_title": "Network size at a glance", "facts_servers": "Servers",
         "alt_chart": "Bar chart comparing the number of servers of popular VPN services",
+        "q_review": "{brand} review", "q_comparison": "{brand} vs alternatives",
+        "q_howto": "how to set up {brand}", "q_market": "best VPN {country}",
     },
     "ru": {
         "disclosure": ("Раскрытие: страница содержит партнёрские ссылки. Мы можем получить "
@@ -34,6 +36,8 @@ TEXTS = {
         "alt_hero": "Абстрактная иллюстрация к странице «{title}»",
         "facts_title": "Размер сети в цифрах", "facts_servers": "Серверы",
         "alt_chart": "Столбчатая диаграмма: число серверов популярных VPN-сервисов",
+        "q_review": "{brand} обзор", "q_comparison": "{brand} против конкурентов",
+        "q_howto": "как настроить {brand}", "q_market": "лучший VPN {country}",
     },
     "de": {
         "disclosure": ("Hinweis: Diese Seite enthält Affiliate-Links. Wir erhalten ggf. eine "
@@ -48,6 +52,8 @@ TEXTS = {
         "alt_hero": "Abstrakte Illustration zur Seite „{title}“",
         "facts_title": "Netzwerkgröße im Überblick", "facts_servers": "Server",
         "alt_chart": "Balkendiagramm: Serveranzahl beliebter VPN-Dienste",
+        "q_review": "{brand} Test", "q_comparison": "{brand} Vergleich",
+        "q_howto": "{brand} einrichten", "q_market": "bester VPN {country}",
     },
     "es": {
         "disclosure": ("Aviso: esta página contiene enlaces de afiliado. Podemos recibir una "
@@ -63,6 +69,8 @@ TEXTS = {
         "alt_hero": "Ilustración abstracta para la página «{title}»",
         "facts_title": "El tamaño de la red de un vistazo", "facts_servers": "Servidores",
         "alt_chart": "Gráfico de barras: número de servidores de servicios VPN populares",
+        "q_review": "{brand} opiniones", "q_comparison": "{brand} vs alternativas",
+        "q_howto": "cómo configurar {brand}", "q_market": "mejor VPN {country}",
     },
     "fr": {
         "disclosure": ("Information : cette page contient des liens d'affiliation. Nous pouvons "
@@ -79,6 +87,8 @@ TEXTS = {
         "alt_hero": "Illustration abstraite pour la page « {title} »",
         "facts_title": "La taille du réseau en un coup d'œil", "facts_servers": "Serveurs",
         "alt_chart": "Diagramme en barres : nombre de serveurs des VPN populaires",
+        "q_review": "{brand} avis", "q_comparison": "{brand} comparatif",
+        "q_howto": "configurer {brand}", "q_market": "meilleur VPN {country}",
     },
     "nl": {
         "disclosure": ("Vermelding: deze pagina bevat affiliatelinks. Wij kunnen een commissie "
@@ -93,6 +103,8 @@ TEXTS = {
         "alt_hero": "Abstracte illustratie bij de pagina “{title}”",
         "facts_title": "De netwerkgrootte in één oogopslag", "facts_servers": "Servers",
         "alt_chart": "Staafdiagram: aantal servers van populaire VPN-diensten",
+        "q_review": "{brand} review", "q_comparison": "{brand} vergelijking",
+        "q_howto": "{brand} instellen", "q_market": "beste VPN {country}",
     },
     "pt": {
         "disclosure": ("Aviso: esta página contém links de afiliado. Podemos receber uma comissão "
@@ -108,6 +120,8 @@ TEXTS = {
         "alt_hero": "Ilustração abstrata para a página «{title}»",
         "facts_title": "O tamanho da rede num relance", "facts_servers": "Servidores",
         "alt_chart": "Gráfico de barras: número de servidores de VPNs populares",
+        "q_review": "{brand} análise", "q_comparison": "{brand} comparação",
+        "q_howto": "como configurar {brand}", "q_market": "melhor VPN {country}",
     },
     "it": {
         "disclosure": ("Avviso: questa pagina contiene link di affiliazione. Potremmo ricevere una "
@@ -123,9 +137,19 @@ TEXTS = {
         "alt_hero": "Illustrazione astratta per la pagina «{title}»",
         "facts_title": "La dimensione della rete in sintesi", "facts_servers": "Server",
         "alt_chart": "Grafico a barre: numero di server dei VPN più diffusi",
+        "q_review": "{brand} recensione", "q_comparison": "{brand} confronto",
+        "q_howto": "come configurare {brand}", "q_market": "miglior VPN {country}",
     },
 }
 DEFAULT_LANG = "en"
+
+# Названия стран для запроса «лучший VPN {страна}» — на языке запроса. Неизвестное сочетание -> ISO-код.
+COUNTRY_NAMES = {
+    "ru": {"RU": "Россия", "KZ": "Казахстан", "BY": "Беларусь", "UA": "Украина", "DE": "Германия",
+           "US": "США", "GB": "Великобритания"},
+    "en": {"US": "United States", "GB": "UK", "DE": "Germany", "RU": "Russia", "NL": "Netherlands",
+           "MX": "Mexico", "ES": "Spain"},
+}
 
 # английское название языка — для инструкции LLM («write in German»)
 LANG_NAMES = {"en": "English", "ru": "Russian", "de": "German", "es": "Spanish",
@@ -166,3 +190,10 @@ def resolve_lang(*candidates: str | None) -> str:
 def t(lang: str | None, key: str, **fmt) -> str:
     s = TEXTS[norm_lang(lang)][key]
     return s.format(**fmt) if fmt else s
+
+
+def country_name(lang: str | None, code: str | None) -> str:
+    """Название страны на языке запроса; неизвестное — ISO-код как есть, пусто — ''."""
+    if not code:
+        return ""
+    return COUNTRY_NAMES.get(norm_lang(lang), {}).get(code.upper(), code.upper())

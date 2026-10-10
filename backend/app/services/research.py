@@ -1,0 +1,295 @@
+"""Досье конкурентов для сайта (спека 2026-10-10 §4): выдача по 4 запросам на языке рынка -> 5 живых
+страниц на запрос -> текст/структура/факты/CSS-токены (+ скриншоты по тумблеру) -> site_research.
+Логика здесь; транспорт — A-Parser, SearXNG, Browserless. Пустое досье = причина словами, не исключение.
+
+Два нюанса живой выдачи и безопасности:
+- A-Parser (SE::Google) отдаёт только редиректы `https://www.google.com/goto?url=…` — хост у всех один,
+  поэтому шум/бренд/дедуп по такому URL судить нельзя: сначала скачиваем, реальный домен берём со страницы
+  (canonical / og:url), и уже по нему фильтруем.
+- URL приходят из выдачи (чужой ввод) и уходят в A-Parser/Browserless, которые стоят в LAN бокса —
+  перед любым запросом URL проходит `_safe_url` (SSRF-гард): только http(s), не localhost/.local/.internal,
+  не приватный/loopback/link-local IP-литерал. Небезопасный URL молча пропускается, как шум."""
+import ipaddress
+import logging
+import re
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+from app.config import settings
+from app.services.competitor import _NOISE, _norm
+from app.services.locales import t, country_name, supported
+from app.services import research_extract as rx
+
+log = logging.getLogger(__name__)
+KINDS = ("review", "comparison", "howto", "market")
+PER_QUERY = 5
+MIN_WORDS = 300
+_EXTRA_NOISE = ("apps.apple.", "play.google.", "chrome.google.", "github.", "amazon.", "aliexpress.")
+
+_TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
+_A_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["'](https?://[^"'\s>]+)""", re.I)
+
+
+def _aparser():
+    from app.integrations.aparser import AParserClient
+    return AParserClient()
+
+
+def _searxng():
+    from app.integrations.searxng import SearxngClient
+    return SearxngClient()
+
+
+def _browserless():
+    from app.integrations.browserless import BrowserlessClient
+    return BrowserlessClient()
+
+
+def queries_for(brand: str, lang: str, country: str | None) -> list[tuple[str, str]]:
+    if not supported(lang):
+        raise ValueError(f"язык «{lang}» без словаря запросов — добавь в services/locales.py")
+    c = country_name(lang, country)          # пустая страна -> «лучший VPN» без хвоста, дефолтов не плодим
+    return [("review", t(lang, "q_review", brand=brand)),
+            ("comparison", t(lang, "q_comparison", brand=brand)),
+            ("howto", t(lang, "q_howto", brand=brand)),
+            ("market", t(lang, "q_market", country=c).strip())]
+
+
+def _safe_url(url: str) -> bool:
+    """SSRF-гард: можно ли отдавать этот URL A-Parser/Browserless (они сидят в LAN бокса)."""
+    try:
+        u = urlparse((url or "").strip())
+        host = (u.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if u.scheme not in ("http", "https") or not host:
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # 2130706433 / 0x7f000001 / 127.1 — числовые формы IP, которые ip_address не разбирает, но резолвер съест
+        return not re.fullmatch(r"[0-9.]+|0x[0-9a-f.]+", host)
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
+def _serp(query: str, lang: str) -> list[str]:
+    urls: list[str] = []
+    try:
+        urls = _aparser().serp_urls(query, limit=10)
+    except Exception as e:  # noqa: BLE001
+        log.warning("research: A-Parser SERP %r: %s", query, e)
+    if not urls:
+        try:
+            urls = [r.get("url") for r in _searxng().search(query, language=lang) if r.get("url")]
+        except Exception as e:  # noqa: BLE001
+            log.warning("research: SearXNG %r: %s", query, e)
+    return urls[:10]
+
+
+def _host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_goto(url: str) -> bool:
+    """Редирект выдачи A-Parser: хост ничего не говорит о реальной странице."""
+    u = urlparse(url)
+    return (u.hostname or "").lower().endswith("google.com") and u.path.startswith("/goto")
+
+
+def _blocked_host(host: str, brand_key: str, own_host: str) -> bool:
+    """Шум (соцсети, магазины приложений…), сайт самого бренда или домен оффера — не конкурент."""
+    if not host:
+        return True
+    if any(n.rstrip(".") in host for n in _NOISE + _EXTRA_NOISE):
+        return True
+    if own_host and (host == own_host or host.endswith("." + own_host)):
+        return True
+    return bool(brand_key) and brand_key in _norm(host)
+
+
+def _attr(tag: str, name: str) -> str | None:
+    m = re.search(rf"""\b{name}\s*=\s*(?:"([^"]*)"|'([^']*)')""", tag, re.I)
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def _real_page(html: str, url: str) -> tuple[str, str, bool]:
+    """(домен, final_url, надёжно?) реальной страницы за goto-редиректом.
+    Надёжно — только canonical / og:url. Домен «чаще всего встречающийся в ссылках» — лишь ярлык: обзор
+    бренда ссылается на сайт бренда не меньше трёх раз, и судить по нему шум/бренд/дедуп нельзя."""
+    for m in _TAG_RE.finditer(html or ""):
+        tag = m.group(0)
+        if tag.lower().startswith("<link") and (_attr(tag, "rel") or "").lower() == "canonical":
+            href = _attr(tag, "href")
+        elif tag.lower().startswith("<meta") and (_attr(tag, "property") or "").lower() == "og:url":
+            href = _attr(tag, "content")
+        else:
+            continue
+        if href and href.startswith(("http://", "https://")) and _host(href):
+            return _host(href), href, True
+    hosts = Counter(h for h in (_host(u) for u in _A_HREF_RE.findall(html or "")) if h and not h.endswith("google.com"))
+    if hosts:
+        host, n = hosts.most_common(1)[0]
+        if n >= 3:
+            return host, url, False
+    return "", url, False
+
+
+def _css_for(ap, html: str, url: str) -> list[str]:
+    out = []
+    for link in rx.stylesheet_links(html, url):
+        if not _safe_url(link):          # ссылки на стили — тоже чужой ввод; LAN/loopback не тянем
+            continue
+        try:
+            css = ap.fetch_html(link)
+        except Exception:  # noqa: BLE001
+            css = None
+        if css and len(css) <= 300_000:
+            out.append(css)
+    return out
+
+
+def _shot(bl, url: str, site_id: int, kind: str, rank: int) -> tuple[str | None, str | None]:
+    """(путь, замечание). Browserless вниз — замечание, досье без скриншота."""
+    try:
+        png = bl.screenshot(url, width=1366, height=768, full_page=True)
+        d = Path(settings.RESEARCH_DIR) / str(site_id)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{kind}-{rank}.png"
+        p.write_bytes(png)
+        return str(p), None
+    except Exception as e:  # noqa: BLE001
+        return None, f"скриншот не снят: {type(e).__name__}: {e}"[:200]
+
+
+def is_fresh(db, site_id: int) -> bool:
+    from sqlalchemy import select, func
+    from app.models.research import SiteResearch
+    newest = db.scalar(select(func.max(SiteResearch.fetched_at)).where(SiteResearch.site_id == site_id))
+    if newest is None:
+        return False
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - newest < timedelta(days=settings.RESEARCH_MAX_AGE_DAYS)
+
+
+def dossier(db, site_id: int) -> list:
+    from sqlalchemy import select
+    from app.models.research import SiteResearch
+    rows = db.execute(select(SiteResearch).where(SiteResearch.site_id == site_id)).scalars().all()
+    order = {k: i for i, k in enumerate(KINDS)}
+    return sorted(rows, key=lambda r: (order.get(r.kind, 9), r.rank))
+
+
+def summary(db, site_id: int) -> dict:
+    rows = dossier(db, site_id)
+    kinds: dict = {}
+    for r in rows:
+        kinds[r.kind] = kinds.get(r.kind, 0) + 1
+    return {"rows": len(rows), "kinds": kinds, "fresh": is_fresh(db, site_id) if rows else False,
+            "fetched_at": max((r.fetched_at for r in rows), default=None),
+            "screenshots": sum(1 for r in rows if r.screenshot_path)}
+
+
+def build_dossier(site_id: int, *, force: bool = False) -> dict:
+    from app.db import SessionLocal
+    from app.models.site import Site
+    from app.models.domain import Domain
+    from app.models.research import SiteResearch
+    from app.services import jobs
+    from app.services.content import site_offer
+    from app.services.locales import resolve_lang
+
+    with SessionLocal() as db:
+        site = db.get(Site, site_id)
+        if site is None:
+            raise ValueError(f"site {site_id} not found")
+        if not force and is_fresh(db, site_id):
+            return {"status": "fresh", "rows": summary(db, site_id)["rows"], "reason": None, "warnings": []}
+        offer = site_offer(db, site)
+        if offer is None:
+            raise ValueError(f"сайт #{site_id}: оффер не привязан — досье не по чему собирать")
+        dom = db.get(Domain, site.domain_id)
+        lang = resolve_lang(None, dom.market_lang if dom else None, offer.language)
+        brand, country, aff = offer.brand, offer.country, offer.affiliate_link
+    queries = queries_for(brand, lang, country)
+    brand_key = _norm(brand)
+    own_host = _host(aff or "").removeprefix("www.")
+    shots_on = str(settings.RESEARCH_SCREENSHOTS).strip().lower() in ("1", "true", "yes", "on")
+    ap = _aparser()
+    bl = _browserless() if shots_on else None
+    warnings: list[str] = []
+    rows: list[dict] = []
+    was_cancelled = False
+
+    with jobs.track("research", trigger="manual") as run:
+        jobs.report(run, done=0, total=len(queries))
+        try:
+            for qi, (kind, query) in enumerate(queries):
+                if jobs.cancelled(run):
+                    raise jobs.Cancelled()
+                jobs.report(run, done=qi, total=len(queries), current=query)
+                seen_domains: set[str] = set()
+                rank = 0
+                for url in _serp(query, lang):
+                    if rank >= PER_QUERY:
+                        break
+                    if not _safe_url(url):
+                        continue
+                    goto = _is_goto(url)
+                    host = _host(url)
+                    if not goto:                       # обычный URL: шум/бренд/дедуп — ДО скачивания
+                        if _blocked_host(host, brand_key, own_host) or host in seen_domains:
+                            continue
+                    try:
+                        html = ap.fetch_html(url)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("research: fetch %s: %s", url, e)
+                        html = None
+                    if not html:
+                        continue
+                    final_url, reliable = url, True
+                    if goto:                           # редирект: судим по реальной странице
+                        host, final_url, reliable = _real_page(html, url)
+                        if reliable and (_blocked_host(host, brand_key, own_host) or host in seen_domains):
+                            continue
+                    data = rx.extract_all(html, _css_for(ap, html, final_url))
+                    if data["words"] < MIN_WORDS:
+                        continue
+                    rank += 1
+                    if reliable:
+                        seen_domains.add(host)
+                    else:                              # домен не установлен -> ярлык, дедуп по нему не делаем
+                        host = host or f"goto{rank}"
+                    shot_url = final_url if _safe_url(final_url) else url
+                    shot, note = _shot(bl, shot_url, site_id, kind, rank) if bl else (None, None)
+                    if note:
+                        warnings.append(f"{kind}#{rank}: {note}")
+                    rows.append({"site_id": site_id, "kind": kind, "query": query, "rank": rank, "url": url,
+                                 "final_url": final_url, "domain": host[:255], "screenshot_path": shot,
+                                 "note": note, **data})
+                if rank == 0:
+                    warnings.append(f"{kind}: по запросу «{query}» ни одной живой страницы")
+            jobs.report(run, done=len(queries), total=len(queries), current="")
+        except jobs.Cancelled:
+            was_cancelled = True
+            raise
+
+    if was_cancelled:        # track глотает Cancelled; прежнее досье не трогаем, недособранное не сохраняем
+        return {"status": "empty", "rows": 0, "reason": "сборка досье отменена оператором — прежние данные не тронуты",
+                "warnings": warnings}
+    if not rows:
+        return {"status": "empty", "rows": 0, "reason": "ни одной живой страницы конкурентов ни по одному запросу "
+                "(SERP пуст или страницы не скачались) — генерация без досье не идёт", "warnings": warnings}
+    with SessionLocal() as db:
+        db.query(SiteResearch).filter(SiteResearch.site_id == site_id).delete()
+        db.add_all(SiteResearch(**r) for r in rows)
+        db.commit()
+    return {"status": "done", "rows": len(rows), "reason": None, "warnings": warnings}

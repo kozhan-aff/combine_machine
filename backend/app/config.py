@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     LLM_CLASSIFY_MODEL: str = ""                      # W5: тема/язык снимков; пусто -> LLM_MODEL
     LLM_CLASSIFY_FALLBACK_MODEL: str = ""             # W5: запасная модель при 401/403/404/429/5xx основной; пусто -> без запасной
     CONTENT_GUIDES_DIR: str = ""      # пусто -> /repo/content_guides (бокс) или <репо>/content_guides
+    RESEARCH_DIR: str = "/workspace/combine/research"   # общая папка со шлюзом :3033 (скриншоты для дизайнера)
+    RESEARCH_SCREENSHOTS: bool = False                  # Browserless: снимать первый экран конкурентов
+    RESEARCH_MAX_AGE_DAYS: int = 30
 
     # searxng — free SERP (локальный бокс)
     SEARXNG_URL: str = "http://192.168.1.77:8080"    # ponytail: dev-box default, override via .env

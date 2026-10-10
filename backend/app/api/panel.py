@@ -51,7 +51,7 @@ router = APIRouter()
 # и ЕСТЬ money-gate (заказ провайдеру отсюда не уходит). См. CLAUDE.md, правило 2.
 _MANUAL_STATUSES = {"approved", "rejected", "purchased"}
 
-_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists", "domain_ranks")   # известные джобы реестра
+_JOBS = ("discovery", "score", "recheck", "sweep", "cf_sync", "generate", "domain_lists", "domain_ranks", "research")   # известные джобы реестра
 
 
 def _back(url: str, msg: str | None = None, err: str | None = None) -> RedirectResponse:
