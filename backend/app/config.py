@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     # searxng — free SERP (локальный бокс)
     SEARXNG_URL: str = "http://192.168.1.77:8080"    # ponytail: dev-box default, override via .env
 
+    # browserless — скриншоты/проверка вёрстки (из контейнера backend доступен только по LAN-адресу, не 127.0.0.1)
+    BROWSERLESS_URL: str = "http://192.168.1.77:3000"
+    BROWSERLESS_TOKEN: str = ""
+
     # a-parser — whois/SERP/keywords (локальный бокс)
     APARSER_URL: str = "http://192.168.1.77:9091"
     APARSER_API_KEY: str = ""
