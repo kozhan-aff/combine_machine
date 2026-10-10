@@ -351,6 +351,15 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 `price` совпадает с `getPrices[zone].registration` за год, `renew` — продление (`.xyz` 2.79 / 17.29). Отказ «цена за 10 лет»
 убран. Фикстура `tests/fixtures/namesilo_check_availability_live.json`. Бокс на `fd198a6`.
 
+**Первый живой прогон M2→M4 (2026-10-10, `tunnelnotes.xyz`, сайт #1):** `registerDomain` 2.79 USD по кнопке
+«✓ купить не дороже» (потолок 3) → `caught`/`purchased`, карточка сайта и оффер (единственный активный, ru) встали сами;
+Provision: зона CF → `changeNameServers` NameSilo живьём ОК → реестр .xyz опубликовал делегирование через ~27 мин (whois
+показывал NS раньше, чем `x.nic.xyz` отвечал NOERROR) → `activation_check` → повторный Provision: aaPanel `AddDomain`, DNS apex+www,
+origin проверен, SSL flexible (HTTPS на origin нет). Universal SSL Cloudflare выпустился ~30 мин после активации — до этого
+HTTPS 000 и publish-проверка не прошла бы. Токен CF НЕ читает `ssl/universal/settings` (403 9109) — статус SSL смотрим
+снаружи `curl`. Генерация 3 страниц на sonnet ≈ 3.5 мин, по ~700 слов. Автопилот выключен: Provision/Generate жали руками.
+Дальше: редактура (человек) → Publish → Check-index.
+
 **Комбайн переведён на шлюз `:3033` (2026-10-10, после `claude login` оператора в контейнере):** `LLM_BASE_URL=
 http://192.168.1.77:3033`, `LLM_MODEL=sonnet` (контент), `LLM_CLASSIFY_MODEL=haiku` (W5, JSON чистый, ~3.5 с),
 `LLM_CLASSIFY_FALLBACK_MODEL=ollama/qwen3.5:9b-q8_0` (поле добавлено на `/settings/keys`). Шлюз сам падает по цепочке
