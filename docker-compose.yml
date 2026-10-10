@@ -105,6 +105,10 @@ services:
     volumes:
       - ./backend:/app
       - ${RESEARCH_HOST_DIR:-./research_data}:/workspace/combine
+      # правила письма (services/guides.py читает /repo/content_guides): воркер гонит research/generate
+      # в автопилоте, но весь репо в /repo смонтирован только у backend — без этого тома писатель
+      # из воркера шёл бы без правил. Только чтение: загрузка правил — с панели (backend).
+      - ./content_guides:/repo/content_guides:ro
     # watchfiles (в образе через uvicorn[standard]) перезапускает шедулер при правке *.py в /app —
     # код воркера подхватывается после git-pull живьём, без пересборки/рестарта контейнера.
     command: watchfiles 'python -m app.workers.scheduler' /app

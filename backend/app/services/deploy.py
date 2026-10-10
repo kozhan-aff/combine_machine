@@ -46,7 +46,7 @@ def deploy_status() -> dict:
             return {"error": _scrub((head.stderr or "git error").strip())[:150]}
         h, subject, date = (head.stdout.strip().split("\n") + ["", "", ""])[:3]
         branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=10).stdout.strip() or "—"
-        dirty = bool(_git(["status", "--porcelain"], timeout=10).stdout.strip())
+        dirty = bool(_git(["status", "--porcelain", "--untracked-files=no"], timeout=10).stdout.strip())
         ahead = behind = 0
         ab = _git(["rev-list", "--left-right", "--count", "HEAD...origin/main"], timeout=10)
         parts = ab.stdout.split() if ab.returncode == 0 else []

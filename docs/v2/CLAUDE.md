@@ -302,6 +302,23 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 - **Ahrefs** у оператора доступен и через MCP в Claude: удобно снимать живые образцы ответов для
   фикстур (`subscription-info` бесплатный, `public-domain-rating-free` — 0 units).
 
+## План А влит 2026-10-10: досье конкурентов и правила письма
+
+План `docs/superpowers/plans/2026-10-10-research-dossier-and-guides.md`, спека
+`docs/superpowers/specs/2026-10-10-content-design-from-competitors-design.md`, живые форматы
+`docs/v2/research/research-live-formats-2026-10.md`.
+- **Появилось:** таблица `site_research` + `services/research.py` (4 запроса на языке рынка → до 5 живых страниц
+  конкурентов, SSRF-гард, отсев шума/бренда/площадок по og:site_name); `content_guides/` (корень/язык/тип) +
+  загрузка правил на `/settings`; транспорт `integrations/browserless.py` (скриншот первого экрана по тумблеру
+  `RESEARCH_SCREENSHOTS`); стадия `research` в автопилоте перед `generate`; блок «Досье конкурентов» на карточке
+  сайта. Тумблеры `/autopilot`: `auto_research` работает, `auto_design`/`auto_edit` — пока без эффекта и в UI
+  выключены (планы В/Б). Гейт `edited` не тронут.
+- **На боксе после pull:** `docker compose up -d` (новые bind-тома у backend/worker: папка скриншотов и
+  `content_guides` у воркера); в `D:\combine_machine\.env` задать `RESEARCH_HOST_DIR=D:/claude-code/workspace/combine`,
+  проверить `docker compose config -q`; на `/offers` завести Durev VPN (ru/RU, `https://durevpn.com`); на карточке
+  tunnelnotes.xyz привязать оффер → «Собрать досье». Живьём сверить, отдаёт ли A-Parser Net::HTTP конечный URL
+  после редиректа (спека §4.2), и записать результат в `research-live-formats-2026-10.md`.
+
 ## Швы полного цикла (2026-10-10, ветка `fix/seams-2026-10-10` → main, 1686 passed)
 
 Полный обзор репо (4 агента по M1/M2/M3–M5/ops + сверка): модули добротные, цикл рвался на швах. Склеено:
