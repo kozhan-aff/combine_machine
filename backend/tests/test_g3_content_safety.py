@@ -330,7 +330,7 @@ def test_panel_generate_refusal_and_attach_sets_site_offer(client, monkeypatch):
 def test_generate_stage_reports_site_without_offer():
     sid = _site()
     done, errs, _ = orch._stage_generate(5)
-    assert done == 0 and errs == [f"site#{sid}: оффер не привязан — генерация пропущена"]
+    assert done == 0 and errs == [f"оффер не привязан, генерация пропущена — сайтов: 1 (#{sid})"]
 
 
 # ── F8-07 / S6-11 / S7-14: генерация — джоб, коммит по странице ───────────────

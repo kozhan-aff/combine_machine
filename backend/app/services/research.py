@@ -276,6 +276,14 @@ def recently_checked(db, site_id: int) -> bool:
     return datetime.now(timezone.utc) - checked < timedelta(hours=EMPTY_RETRY_HOURS)
 
 
+def has_dossier(db, site_id: int) -> bool:
+    """Есть ли у сайта хоть одна строка досье. Дешёвая проверка для тех, кому сами строки не нужны:
+    `dossier()` грузит тексты страниц конкурентов целиком."""
+    from sqlalchemy import select
+    from app.models.research import SiteResearch
+    return db.scalar(select(SiteResearch.id).where(SiteResearch.site_id == site_id).limit(1)) is not None
+
+
 def dossier(db, site_id: int) -> list:
     from sqlalchemy import select
     from app.models.research import SiteResearch

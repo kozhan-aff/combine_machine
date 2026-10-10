@@ -5,7 +5,11 @@
 см. докстринг run_sweep. Гейт редактуры двигает только стадия «вычитка» и только когда оператор сам
 включил тумблер auto_edit: одобряет критик, тем же единственным путём (content.mark_edited).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# Вычитка не состоялась (критик не ответил, упала проверка) — раньше этого срока автопилот страницу
+# критику снова не показывает: шлюз модели за час сам не поднимется, а каждый таймаут — минуты.
+EDIT_RETRY_HOURS = 6
 
 
 def _start_run(trigger: str) -> int:
@@ -260,6 +264,12 @@ def _stage_research(cap):
     return done, errs, extra
 
 
+def _skipped(why: str, ids: list[int]) -> str:
+    """Одна строка на причину пропуска за свип, а не по строке на сайт; номеров — не больше десяти."""
+    shown = ", ".join(f"#{i}" for i in ids[:10]) + (" …" if len(ids) > 10 else "")
+    return f"{why} — сайтов: {len(ids)} ({shown})"
+
+
 def _stage_generate(cap):
     """Сайты status=content, где страниц МЕНЬШЕ ожидаемого -> generate_site (писатель по досье).
 
@@ -273,8 +283,9 @@ def _stage_generate(cap):
     недостающие, а не дублирует (а гонку двух процессов на одном пути дополнительно ловит
     `uq_page_per_path`, миграция 0014 — см. content.generate_site/IntegrityError).
 
-    Без досье конкурентов сайт не пишется (спека 2026-10-10 §4.5): писать не по чему. Это не ошибка
-    стадии, а отдельный счётчик `generate_no_dossier` + строка словами — как `research_empty`.
+    Без досье конкурентов сайт не пишется (спека 2026-10-10 §4.5): писать не по чему. Сайты без досье
+    и без оффера стадия обходит и называет ОДНОЙ строкой на причину (`_skipped`), а не строкой на сайт:
+    это состояние базы, оно не меняется от свипа к свипу. Счётчик — `generate_no_dossier`.
     Сайт, по которому писатель вернул 0 при недостающих страницах (шлюз модели лежит, ответы мимо
     схемы), «сделанным» не считается: счётчик `generate_empty`, причина — из итога задачи `generate`."""
     from sqlalchemy import select, func
@@ -283,7 +294,7 @@ def _stage_generate(cap):
     from app.services import content, jobs, research
 
     expected = len(content.scaffold(""))   # число страниц/сайт — фиксировано scaffold(), не зависит от бренда
-    done, errs, no_dossier, empty = 0, [], 0, 0
+    done, errs, empty = 0, [], 0
     with SessionLocal() as db:
         page_counts = (
             select(Page.site_id, func.count(Page.id).label("n"))
@@ -299,21 +310,19 @@ def _stage_generate(cap):
         # Legacy-сайт с SiteOffer, но без offer_id, generate_site сам разрешит через site_offer().
         # Кап — на сайты, которые реально пойдут писателю, а не LIMIT в SQL: иначе сайты без оффера
         # или досье (сами они оттуда не уходят) занимали бы весь кап каждый свип — как грязь в _stage_queue.
-        ids = []
+        ids, no_offer, no_dossier = [], [], []
         for sid, oid in rows:
-            if len(ids) >= cap:
-                break
-            if oid is None:
-                site = db.get(Site, sid)
-                if content.site_offer(db, site) is None:
-                    errs.append(f"site#{sid}: оффер не привязан — генерация пропущена")
-                    continue
-            if not research.dossier(db, sid):
-                no_dossier += 1
-                errs.append(f"site#{sid}: нет досье — генерация пропущена "
-                            "(стадия «досье» или кнопка на карточке сайта)")
-                continue
-            ids.append(sid)
+            if oid is None and content.site_offer(db, db.get(Site, sid)) is None:
+                no_offer.append(sid)
+            elif not research.has_dossier(db, sid):
+                no_dossier.append(sid)
+            elif len(ids) < cap:
+                ids.append(sid)
+    if no_offer:
+        errs.append(_skipped("оффер не привязан, генерация пропущена", no_offer))
+    if no_dossier:
+        errs.append(_skipped("нет досье, генерация пропущена (стадия «досье» или кнопка на карточке сайта)",
+                             no_dossier))
     for sid in ids:
         try:
             written = content.generate_site(sid)
@@ -335,47 +344,68 @@ def _stage_generate(cap):
         done += 1
     extra = {}
     if no_dossier:
-        extra["generate_no_dossier"] = no_dossier
+        extra["generate_no_dossier"] = len(no_dossier)
     if empty:
         extra["generate_empty"] = empty
     return done, errs, extra
 
 
 def _stage_edit(cap):
-    """Сайты с ещё не вычитанным черновиком -> content_critic.edit_site (критик вычитывает, слабое
-    переписывает, прошедшее одобряет). Стадия идёт только при тумблере auto_edit — и сама его
-    перечитывает перед каждым сайтом: вычитка сайта длится минуты, и оператор, снявший тумблер
-    посреди стадии, вправе ждать, что дальше критик ничего не одобрит.
+    """Сайты с черновиком, которому нужна вычитка -> content_critic.edit_site (критик вычитывает,
+    слабое переписывает, прошедшее одобряет — если тумблер auto_edit включён в момент одобрения: его
+    перечитывает сам критик). Стадия идёт только при тумблере и сверяется с ним перед каждым сайтом:
+    без него критик не зовётся вовсе.
 
-    «Не вычитан» = draft с пустым critic_checked_at: страница с замечаниями остаётся человеку и не
-    крутится в стадии вечно. Берём и живые сайты (published|monitoring) — там черновики появляются
-    после переписывания. Замечания — не ошибка стадии, а счётчик `edit_failed`."""
+    Вычитка нужна странице, которую критик ещё не читал, и странице, чья вычитка не состоялась
+    (`critic_notes["error"]`: модель не ответила), — но не раньше чем через EDIT_RETRY_HOURS. Страница
+    с настоящими замечаниями остаётся человеку и в стадии не крутится. Черновиков мало — отбор идёт в
+    Python. Очередь сайтов — по самой давней попытке среди таких страниц (ни разу не читанные —
+    первыми), затем по id: сайт, на котором критик раз за разом не отвечает, уходит в хвост и не
+    занимает кап вечно (тот же приём, что в _stage_publish).
+
+    Модель недоступна — стадия останавливается: следующий сайт ждал бы тот же таймаут. Оператор нажал
+    «стоп» у задачи вычитки — следующий сайт не начинаем. Замечания — счётчик `edit_failed`, не ошибка."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.site import Site, Page
-    from app.services import content_critic, jobs
+    from app.services import content_critic, jobs, publish
     from app.services.autonomy import get_autonomy
 
     done, errs, failed = 0, [], 0
+    never = datetime.min.replace(tzinfo=timezone.utc)
+    retry_before = datetime.now(timezone.utc) - timedelta(hours=EDIT_RETRY_HOURS)
+    oldest: dict[int, datetime] = {}
     with SessionLocal() as db:
-        unread = select(Page.site_id).where(Page.status == "draft", Page.critic_checked_at.is_(None))
-        # ponytail: общий кап с генерацией; свой — когда вычитка станет узким местом
-        ids = [r[0] for r in db.execute(
-            select(Site.id).where(Site.status.in_(("content", "published", "monitoring")),
-                                  Site.id.in_(unread))
-            .order_by(Site.id).limit(cap)).all()]
+        for sid, at, notes in db.execute(
+                select(Page.site_id, Page.critic_checked_at, Page.critic_notes)
+                .join(Site, Site.id == Page.site_id)
+                .where(Page.status == "draft",
+                       Site.status.in_(("content", "published", "monitoring")))).all():
+            at = publish._aware(at)             # SQLite отдаёт время без пояса — это UTC
+            if at is None:
+                at = never
+            elif not (isinstance(notes, dict) and notes.get("error") and at < retry_before):
+                continue                        # вердикт есть либо пауза ещё не вышла
+            oldest[sid] = min(at, oldest.get(sid, at))
+    # ponytail: общий кап с генерацией; свой — когда вычитка станет узким местом
+    ids = [sid for sid, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))][:cap]
     for sid in ids:
         if get_autonomy()["auto_edit"] is not True:
             break                       # тумблер снят — ни вычитки, ни одобрения
         try:
-            out = content_critic.edit_site(sid, auto_edit=True)
+            out = content_critic.edit_site(sid)
         except jobs.AlreadyRunning:
             raise                       # ручная вычитка идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
             errs.append(f"site#{sid}: {type(e).__name__}: {e}")
             continue
-        done += 1
         failed += out.get("failed", 0)
+        if out.get("down"):
+            errs.append(f"site#{sid}: модель недоступна — вычитка остановлена")
+            break
+        if out.get("cancelled"):
+            break                       # «стоп» у задачи вычитки: следующий сайт не начинаем
+        done += 1
     return done, errs, {"edit_failed": failed} if failed else {}
 
 

@@ -812,30 +812,28 @@ def queue_view(request: Request):
     })
 
 
-def _remarks_ru(n: int) -> str:
-    """«1 замечание», «2 замечания», «5 замечаний»."""
-    if n % 10 == 1 and n % 100 != 11:
-        return f"{n} замечание"
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return f"{n} замечания"
-    return f"{n} замечаний"
-
-
 def _critic_cell(page) -> dict | None:
-    """Вердикт критика для строки таблицы страниц: {"ok", "label", "title"}; None — страницу не вычитывали
-    (или заметки в формате до плана Б — их показывает редактор страницы)."""
+    """Вердикт критика для строки таблицы страниц: {"led", "label", "title"} и необязательная вторая строка
+    "sub"; None — страницу не вычитывали (или заметки в формате до плана Б — их показывает редактор
+    страницы). Подпись — одна короткая строка, подробности — в `title`: таблица обязана умещаться по ширине."""
     from app.services.content_critic import MAX_ROUNDS
     notes = page.critic_notes
     if page.critic_checked_at is None or not isinstance(notes, dict):
         return None
+    if notes.get("error"):
+        # вердикта нет: критик не ответил или упала проверка — это не «замечания к тексту»
+        return {"led": "led-warn", "label": "не проверена", "title": f"вычитка не состоялась: {notes['error']}"}
     if notes.get("pass") is True:
-        return {"ok": True, "label": "прошла", "title": "у проверок кодом и у редактора-модели замечаний нет"}
+        if notes.get("note"):
+            # прошла, но критик её сам не одобряет (правлена руками, старый способ) — почему, в заметке
+            return {"led": "led-ok", "label": "прошла", "sub": "одобряешь ты", "title": str(notes["note"])}
+        return {"led": "led-ok", "label": "прошла", "title": "у проверок кодом и у редактора-модели замечаний нет"}
     issues = [str(x) for x in notes.get("issues") or []]
     title = "; ".join(issues[:3]) + (f" … и ещё {len(issues) - 3}" if len(issues) > 3 else "")
     rounds = notes.get("round")
     if type(rounds) is int and rounds > 0:
         title += f" · переписана по замечаниям: {rounds} из {MAX_ROUNDS}"
-    return {"ok": False, "label": _remarks_ru(len(issues)) if issues else "не прошла", "title": title}
+    return {"led": "led-todo", "label": f"{len(issues)} замеч." if issues else "не прошла", "title": title}
 
 
 @router.get("/sites/{site_id}", response_class=HTMLResponse)
@@ -861,7 +859,7 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
     from app.models.offer import OfferSettings
     _os_row = db.get(OfferSettings, 1)
     reserve_configured = bool(_os_row and _os_row.reserve_offer_url)
-    from app.services import jobs, research
+    from app.services import jobs, publish, research
     from app.services.autonomy import get_autonomy
     return templates.TemplateResponse(request, "site.html", {
         "active": "dash",
@@ -871,9 +869,10 @@ def site_view(request: Request, site_id: int, db: Session = Depends(get_session)
         "research": research.summary(db, site_id), "research_rows": research.dossier(db, site_id),
         "research_last": jobs.last("research"),
         "critic": {p.id: _critic_cell(p) for p in pages}, "auto_edit": get_autonomy()["auto_edit"],
-        # «живые» — у которых есть файл на сайте (то же правило, что publish.live_clause): переписанная
-        # страница — draft в базе, но сайт от этого неопубликованным не стал
-        "n_live": sum(1 for p in pages if p.published_at is not None or p.status == "published"),
+        # «живые» — у которых есть файл на сайте (publish.live_clause): переписанная страница — draft
+        # в базе, но сайт от этого неопубликованным не стал
+        "n_live": db.scalar(select(func.count()).select_from(Page).where(
+            Page.site_id == site_id, publish.live_clause())) or 0,
     })
 
 
@@ -1462,7 +1461,7 @@ def _writer_refusal(db: Session, site_id: int) -> RedirectResponse | None:
     if not has_offer:
         return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
                      "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
-    if not research.dossier(db, site_id):
+    if not research.has_dossier(db, site_id):
         # спека 2026-10-10 §4.5: темы, факты и цифры писатель берёт из досье — без него только выдумывать
         return _back(f"/sites/{site_id}", err="Сначала собери досье конкурентов (шаг 3½): без него писать не по чему.")
     return None

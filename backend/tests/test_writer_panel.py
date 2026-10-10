@@ -1,20 +1,25 @@
 """Панель под писателя и критика (план Б, задача 7): тексты пишутся только по досье, кнопки «Переписать
 тексты» и «Вычитать критиком» уходят в фон, карточка сайта показывает вердикт критика, тумблер
 «критик сам одобряет тексты» на экране автопилота включается."""
+import json
 import re
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
+import pytest
+
 import app.db as db
+from app.config import settings
 from app.models.domain import Domain
 from app.models.offer import Offer
 from app.models.research import SiteResearch
 from app.models.site import Page, Site
-from app.services import autonomy, content, content_critic, jobs
+from app.services import autonomy, content, content_critic, jobs, page_doc
 
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
 CONFIRM = ("Переписать тексты сайта? Опубликованные страницы останутся на сайте в прежнем виде, "
-           "пока не опубликуешь новые.")
+           "пока не опубликуешь новые. Одобренные, но ещё не опубликованные страницы тоже вернутся в черновики.")
+SENT = "Durev VPN работает стабильно, подключается быстро и помогает спокойно смотреть любимые сериалы в поездках. "
 
 
 def _site(dossier: bool = True, status: str = "content", offer: bool = True) -> int:
@@ -172,21 +177,60 @@ def test_edit_spawns_critic_and_leaves_the_toggle_to_the_service(client, monkeyp
     assert "одобрит сам" in _flash(client.post(f"/sites/{sid}/edit", follow_redirects=False))
 
 
-def test_edit_button_never_approves_while_toggle_is_off(client, monkeypatch):
-    """Сквозной прогон без подмены критика: вердикт «прошла» записан, страница осталась черновиком."""
-    import json
-    autonomy.update_autonomy(auto_edit=False)
-    sid = _site()
-    pid = _page(sid)
+def _passing_draft(site_id: int) -> int:
+    """Черновик писателя, который вычитку ПРОХОДИТ (как в test_critic_gate): структура `blocks`, тело — её
+    рендер, оффер записан, бренд назван, язык русский, объём в границах обзора, чисел нет."""
+    doc = {"meta": {"title": "Durev VPN: обзор и честный тест",
+                    "description": "Проверили скорость и приватность Durev VPN — кому он подойдёт, а кому нет."},
+           "sections": [{"h2": "Скорость", "paragraphs": [SENT * 60]},
+                        {"h2": "Приватность", "paragraphs": [SENT * 60]}]}
+    body = content._sanitize(page_doc.render_blocks(page_doc.PageDoc.model_validate(doc), "review", "ru"))
+    with db.SessionLocal() as s:
+        offer_id = s.get(Site, site_id).offer_id
+    return _page(site_id, "/", title=doc["meta"]["title"], body=body, blocks=doc, offer_id=offer_id)
+
+
+@pytest.fixture
+def critic_says_pass(tmp_path, monkeypatch):
+    """Кнопка идёт до конца без подмены критика: задача выполняется на месте, модель отвечает «прошла»,
+    правила письма — из пустой папки. -> список вызовов `content.mark_edited` (настоящая функция работает)."""
+    monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "guides"))
     monkeypatch.setattr(jobs, "spawn", lambda name, target: target() or True)
     monkeypatch.setattr("app.integrations.llm.LlmClient.complete",
                         lambda self, system, prompt, **kw: json.dumps({"pass": True, "score": 90, "issues": []}))
-    monkeypatch.setattr(content, "mark_edited",
-                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("гейт редактуры тронут")))
+    seen, real = [], content.mark_edited
+
+    def spy(*a, **kw):
+        seen.append((a, kw))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(content, "mark_edited", spy)
+    return seen
+
+
+def test_edit_button_never_approves_while_toggle_is_off(client, critic_says_pass):
+    """Ворота кнопки: страница вычитку ПРОШЛА (вердикт записан), а статус не тронут — одобряет человек."""
+    autonomy.update_autonomy(auto_edit=False)
+    sid = _site()
+    pid = _passing_draft(sid)
     client.post(f"/sites/{sid}/edit", follow_redirects=False)
     with db.SessionLocal() as s:
         page = s.get(Page, pid)
-        assert page.status == "draft" and page.critic_checked_at is not None
+        assert page.critic_notes["pass"] is True, page.critic_notes     # без этого тест ничего не доказывал бы
+        assert page.status == "draft"
+    assert critic_says_pass == []
+
+
+def test_edit_button_approves_a_passing_page_when_toggle_is_on(client, critic_says_pass):
+    """Зеркало: та же страница, тумблер включён — критик одобряет её, и только через mark_edited."""
+    autonomy.update_autonomy(auto_edit=True)
+    sid = _site()
+    pid = _passing_draft(sid)
+    client.post(f"/sites/{sid}/edit", follow_redirects=False)
+    with db.SessionLocal() as s:
+        page = s.get(Page, pid)
+        assert page.critic_notes["pass"] is True and page.status == "edited"
+    assert len(critic_says_pass) == 1 and critic_says_pass[0][0][0] == pid
 
 
 def test_edit_refusals_and_busy(client, monkeypatch):
@@ -207,6 +251,16 @@ def test_edit_job_is_known_to_the_registry_routes(client):
     assert "edit:\'Вычитка текстов\'" in client.get("/autopilot").text
 
 
+def test_dashboard_lists_the_edit_job_among_last_runs(client):
+    from app.models.job import JobRun
+    with db.SessionLocal() as s:
+        s.add(JobRun(name="edit", status="done", message="вычитано 3, одобрено 2", started_at=NOW,
+                     updated_at=NOW, finished_at=NOW))
+        s.commit()
+    html = client.get("/").text
+    assert "<b style=\"min-width:190px\">Вычитка текстов</b>" in html and "вычитано 3, одобрено 2" in html
+
+
 # --- карточка сайта ---
 
 def test_card_buttons_and_their_states(client):
@@ -218,6 +272,8 @@ def test_card_buttons_and_their_states(client):
     assert f'action="/sites/{sid}/rewrite"' in html and "disabled" not in _button(html, "✎ Переписать тексты")
     form = _tag(html, f'action="/sites/{sid}/rewrite"')
     assert CONFIRM in form.replace("&#39;", "'")
+    assert 'class="row"' in form and "display:flex" not in form      # разметка — существующим классом
+    assert "вычитка: ты или критик" in html and "только человек" not in html
     box = _tag(html, 'name="overwrite_manual"')
     assert "checked" not in box and "и правленные вручную" in html
     assert "страницы, которые ты правил руками, обычно не трогаются" in html
@@ -237,6 +293,16 @@ def test_card_blocks_writing_until_dossier_is_there(client):
     assert "✎ Переписать тексты" not in html and "disabled" in _button(html, "✓ Вычитать критиком")   # страниц нет
 
 
+def _rows(html: str) -> dict:
+    """{путь: остаток строки таблицы страниц}."""
+    return dict(re.findall(r'<td class="dom">([^<]+)</td>(.*?)</tr>', html, re.S))
+
+
+def _critic_td(row: str) -> str:
+    """Ячейка «критик» — третья после пути: заголовок, статус, критик."""
+    return re.findall(r"<td.*?</td>", row, re.S)[2]
+
+
 def test_card_shows_critic_verdict_per_page(client):
     sid = _site()
     _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": True, "issues": [], "round": 0})
@@ -245,21 +311,34 @@ def test_card_shows_critic_verdict_per_page(client):
     _page(sid, "/setup")
     html = client.get(f"/sites/{sid}").text
     assert "<th>критик</th>" in html
-    rows = dict(re.findall(r'<td class="dom">([^<]+)</td>(.*?)</tr>', html, re.S))
-    assert 'led-ok' in rows["/"] and "прошла" in rows["/"]
-    assert "2 замечания" in rows["/vs"] and "led-todo" in rows["/vs"]
+    rows = {path: _critic_td(row) for path, row in _rows(html).items()}
+    assert "led-ok" in rows["/"] and ">прошла</td>" in rows["/"]
+    assert ">2 замеч.</td>" in rows["/vs"] and "led-todo" in rows["/vs"]
     assert "мало конкретики про скорость; нет цены" in rows["/vs"] and "переписана по замечаниям: 1 из 2" in rows["/vs"]
-    assert "прошла" not in rows["/setup"] and "замечани" not in rows["/setup"]
+    assert rows["/setup"] == '<td><span class="hint">—</span></td>'
     assert "вычитано (человеком или критиком)" in html
 
 
-def test_card_counts_remarks_in_plain_russian(client):
+def test_card_critic_cell_keeps_long_lists_in_the_tooltip(client):
     sid = _site()
-    for path, n in (("/", 1), ("/vs", 5), ("/setup", 21)):
-        _page(sid, path, critic_checked_at=NOW, critic_notes={"pass": False, "issues": [f"з{i}" for i in range(n)]})
-    html = client.get(f"/sites/{sid}").text
-    assert "1 замечание<" in html and "5 замечаний<" in html and "21 замечание<" in html
-    assert "з0; з1; з2 … и ещё 2" in html
+    _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": False, "issues": [f"з{i}" for i in range(5)]})
+    cell = _critic_td(_rows(client.get(f"/sites/{sid}").text)["/"])
+    assert ">5 замеч.</td>" in cell and 'title="з0; з1; з2 … и ещё 2"' in cell
+
+
+def test_card_critic_cell_tells_passed_for_human_from_not_reviewed(client):
+    """«Прошла, но всё ещё черновик» и «вычитка не состоялась» — разные состояния, и оба не «замечания»."""
+    sid = _site()
+    note = "одобряет человек: текст правился вручную или написан старым способом"
+    _page(sid, "/", critic_checked_at=NOW, critic_notes={"pass": True, "issues": [], "note": note})
+    _page(sid, "/vs", critic_checked_at=NOW,
+          critic_notes={"pass": False, "issues": ["критик не ответил: ReadTimeout"], "error": "ReadTimeout"})
+    rows = {path: _critic_td(row) for path, row in _rows(client.get(f"/sites/{sid}").text).items()}
+    # «прошла» — основной строкой, «одобряешь ты» — второй: одной строкой колонка не умещалась на 1024px
+    assert '></span>прошла<div class="hint">одобряешь ты</div></td>' in rows["/"]
+    assert f'title="{note}"' in rows["/"] and "led-ok" in rows["/"]
+    assert ">не проверена</td>" in rows["/vs"] and "led-warn" in rows["/vs"]
+    assert 'title="вычитка не состоялась: ReadTimeout"' in rows["/vs"] and "замеч" not in rows["/vs"]
 
 
 def test_card_marks_rewritten_page_that_is_still_live(client):
@@ -269,8 +348,9 @@ def test_card_marks_rewritten_page_that_is_still_live(client):
     _page(sid, "/", status="draft", published_at=NOW)
     _page(sid, "/vs", status="draft")
     html = client.get(f"/sites/{sid}").text
-    rows = dict(re.findall(r'<td class="dom">([^<]+)</td>(.*?)</tr>', html, re.S))
-    assert "на сайте прежняя версия" in rows["/"] and "на сайте прежняя версия" not in rows["/vs"]
+    rows = _rows(html)
+    assert re.search(r'<div class="hint"[^>]*>на сайте прежняя версия</div>', rows["/"])    # отдельной строкой
+    assert "на сайте прежняя версия" not in rows["/vs"]
     check = _button(html, "▶ Проверить индексацию")
     assert "disabled" not in check and "нечего проверять" not in check
 
@@ -298,6 +378,8 @@ def test_autopilot_auto_edit_is_live_and_auto_design_still_locked(client):
     assert html.count('name="auto_edit"') == 1
     assert "disabled" in _tag(html, 'name="auto_design"')
     assert "критик сам одобряет тексты" in html and "Стадия · Вычитка" in html
+    assert "редактура всегда за тобой" not in html
+    assert "деньги тратятся только после твоего подтверждения; тексты одобряешь ты или критик — если включишь" in html
     assert "включится с планом Б" not in html
     # стадия стоит на своём месте конвейера: после черновиков, перед публикацией
     assert html.index("Стадия · Черновики") < html.index("Стадия · Вычитка") < html.index("Стадия · Публикация")

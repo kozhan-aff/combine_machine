@@ -31,7 +31,7 @@
   </div>
   {% for key, ru in [('discovery','Поиск дропов'), ('score','Проверка'),
                      ('recheck','Перепроверка занятости'), ('generate','Генерация контента'),
-                     ('sweep','Свип автопилота')] %}
+                     ('edit','Вычитка текстов'), ('sweep','Свип автопилота')] %}
     {% set r = last_runs.get(key) %}
     <div class="row">
       <b style="min-width:190px">{{ ru }}</b>
