@@ -34,6 +34,11 @@
       <input type="number" name="sweep_interval_min" min="5" max="1440" value="{{ a.sweep_interval_min }}"
              style="width:90px; padding:2px 8px">
     </div>
+    <div class="go" style="display:grid; gap:6px">
+      <label><input type="checkbox" name="auto_edit" {{ 'checked' if a.auto_edit }}> критик ставит <b>edited</b> сам (план Б — пока без эффекта)</label>
+      <label><input type="checkbox" name="auto_design" {{ 'checked' if a.auto_design }}> рисовать макет автоматом (план В — пока без эффекта)</label>
+      <input type="hidden" name="cap_design" value="{{ a.cap_design }}">
+    </div>
   </div>
 
   {% set stages = [
@@ -41,6 +46,7 @@
     ('score','Проверка','прогнать шесть волн скоринга; проверенные придут к тебе на решение (scored) — одобряешь ты','до гейта курации', a.cap_score),
     ('queue','В очередь выкупа','поставить одобренные в очередь заказов','до денежного гейта', a.cap_queue),
     ('provision','Провижн','поднять сайт: Cloudflare + aaPanel (идемпотентно)','provisioning → content', a.cap_provision),
+    ('research','Досье конкурентов','собрать выдачу и 5 страниц конкурентов на запрос: текст, структура, факты, CSS','content, без свежего досье', a.cap_research),
     ('generate','Черновики','сгенерировать AI-черновики страниц','до гейта редактуры', a.cap_generate),
     ('publish','Публикация','выложить страницы','только уже edited', a.cap_publish),
     ('check_index','Индексация','проверить попадание в индекс (site:)','обновить статус', a.cap_check_index)

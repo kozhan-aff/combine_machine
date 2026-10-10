@@ -1653,16 +1653,20 @@ def autopilot_settings_save(
         auto_discovery: str = Form(""), auto_score: str = Form(""), auto_queue: str = Form(""),
         auto_provision: str = Form(""), auto_generate: str = Form(""), auto_publish: str = Form(""),
         auto_check_index: str = Form(""),
+        auto_research: str = Form(""), auto_design: str = Form(""), auto_edit: str = Form(""),
         cap_score: int = Form(20), cap_queue: int = Form(10), cap_provision: int = Form(5),
-        cap_generate: int = Form(5), cap_publish: int = Form(5), cap_check_index: int = Form(20)):
+        cap_generate: int = Form(5), cap_publish: int = Form(5), cap_check_index: int = Form(20),
+        cap_research: int = Form(5), cap_design: int = Form(3)):
     from app.services.autonomy import update_autonomy
     update_autonomy(
         autopilot_on=bool(autopilot_on), sweep_interval_min=sweep_interval_min,
         auto_discovery=bool(auto_discovery), auto_score=bool(auto_score), auto_queue=bool(auto_queue),
         auto_provision=bool(auto_provision), auto_generate=bool(auto_generate),
         auto_publish=bool(auto_publish), auto_check_index=bool(auto_check_index),
+        auto_research=bool(auto_research), auto_design=bool(auto_design), auto_edit=bool(auto_edit),
         cap_score=cap_score, cap_queue=cap_queue, cap_provision=cap_provision,
-        cap_generate=cap_generate, cap_publish=cap_publish, cap_check_index=cap_check_index)
+        cap_generate=cap_generate, cap_publish=cap_publish, cap_check_index=cap_check_index,
+        cap_research=cap_research, cap_design=cap_design)
     return _back("/autopilot", msg="Настройки автопилота сохранены")
 
 

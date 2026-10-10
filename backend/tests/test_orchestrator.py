@@ -179,3 +179,48 @@ def test_skipped_sweep_leaves_no_trace_in_the_journal():
     with db.SessionLocal() as s:
         assert s.scalar(select(func.count()).select_from(AutonomyRun)) == 0
     assert orch.last_finished_sweep_at() is None      # throttle шедулера не сдвинут
+
+
+def _content_site() -> int:
+    """Сайт status=content с оффером, без страниц и без досье."""
+    with db.SessionLocal() as s:
+        d = Domain(domain="r.ru", source="backorder", status="purchased")
+        s.add(d); s.commit()
+        site = Site(domain_id=d.id, status="content", offer_id=_offer_id())
+        s.add(site); s.commit()
+        return site.id
+
+
+def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossier(monkeypatch):
+    from app.services import orchestrator, research
+    keys = [s[0] for s in orchestrator.STAGES]
+    assert keys.index("research") == keys.index("generate") - 1 and keys.index("research") > keys.index("provision")
+    assert orchestrator.STAGE_RU["research"] == "досье"
+    sid = _content_site()
+    calls = []
+    monkeypatch.setattr(research, "build_dossier", lambda s, force=False: calls.append(s) or {"status": "done", "rows": 4, "warnings": []})
+    done, errs, extra = orchestrator._stage_research(cap=5)
+    assert done == 1 and errs == [] and calls == [sid]
+    monkeypatch.setattr(research, "build_dossier", lambda s, force=False: {"status": "empty", "rows": 0, "reason": "пусто", "warnings": []})
+    done, errs, extra = orchestrator._stage_research(cap=5)
+    assert done == 0 and extra.get("research_empty") == 1 and "пусто" in errs[0]
+    assert orchestrator.COUNT_RU["research_empty"] == "досье пустое"
+
+
+def test_research_stage_propagates_already_running(monkeypatch):
+    import pytest
+    from app.services import jobs, orchestrator, research
+    _content_site()
+    monkeypatch.setattr(research, "build_dossier",
+                        lambda s, force=False: (_ for _ in ()).throw(jobs.AlreadyRunning("research")))
+    with pytest.raises(jobs.AlreadyRunning):
+        orchestrator._stage_research(cap=5)
+
+
+def test_autopilot_form_saves_new_toggles(client):
+    r = client.post("/autopilot/settings", data={"auto_research": "on", "cap_research": "7", "auto_edit": "on",
+                                                 "cap_design": "2"}, follow_redirects=False)
+    assert r.status_code == 303
+    a = autonomy.get_autonomy()
+    assert a["auto_research"] is True and a["cap_research"] == 7 and a["auto_edit"] is True and a["cap_design"] == 2
+    assert a["auto_design"] is False

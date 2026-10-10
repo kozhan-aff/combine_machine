@@ -227,6 +227,36 @@ def _stage_provision(cap):
     return succeeded, errs, extra
 
 
+def _stage_research(cap):
+    """Сайты status=content без свежего досье -> research.build_dossier (спека 2026-10-10 §4, §8).
+    «Пустое» досье — не ошибка стадии, а отдельный счётчик research_empty + причина словами: сайт
+    остаётся в content, генерация его не возьмёт (план Б), оператор видит почему на карточке."""
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models.site import Site
+    from app.services import research, jobs
+
+    done, errs, empty = 0, [], 0
+    with SessionLocal() as db:
+        ids = [sid for (sid,) in db.execute(select(Site.id).where(Site.status == "content").order_by(Site.id)).all()
+               if not research.is_fresh(db, sid)][:cap]
+    for sid in ids:
+        try:
+            out = research.build_dossier(sid)
+        except jobs.AlreadyRunning:
+            raise                       # ручная сборка идёт — стадия пропущена целиком, честно
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            continue
+        if out["status"] == "empty":
+            empty += 1
+            errs.append(f"site#{sid}: досье пустое — {out['reason']}")
+        else:
+            done += 1
+    extra = {"research_empty": empty} if empty else {}
+    return done, errs, extra
+
+
 def _stage_generate(cap):
     """Сайты status=content, где страниц МЕНЬШЕ ожидаемого -> generate_site(use_competitor=True).
 
@@ -380,13 +410,14 @@ STAGES = [
     ("score", "auto_score", "cap_score", _stage_score),
     ("queue", "auto_queue", "cap_queue", _stage_queue),
     ("provision", "auto_provision", "cap_provision", _stage_provision),
+    ("research", "auto_research", "cap_research", _stage_research),
     ("generate", "auto_generate", "cap_generate", _stage_generate),
     ("publish", "auto_publish", "cap_publish", _stage_publish),
     ("check_index", "auto_check_index", "cap_check_index", _stage_check_index),
 ]
 
 STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "очередь",
-            "provision": "провижн", "generate": "контент", "publish": "публикация",
+            "provision": "провижн", "research": "досье", "generate": "контент", "publish": "публикация",
             "check_index": "индексация"}
 
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
@@ -395,7 +426,8 @@ STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "оч
 # `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат),
 # `provision_awaiting` — сколько сайтов ждут смены NS у регистратора (не успех, не отказ — F19).
 COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
-            "index_unknown": "индекс не выяснен", "gsc_fallback": "GSC недоступен", "provision_awaiting": "провижн: ждёт NS"}
+            "index_unknown": "индекс не выяснен", "gsc_fallback": "GSC недоступен", "provision_awaiting": "провижн: ждёт NS",
+            "research_empty": "досье пустое"}
 
 
 def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
