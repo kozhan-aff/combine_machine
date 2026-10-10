@@ -76,6 +76,9 @@ def _check_name(filename: str) -> str:
     if not _NAME_RE.match(name) or ".." in name or "/" in name or "\\" in name \
             or name.startswith(".") or not name.lower().endswith(ALLOWED_EXT):
         raise ValueError("имя файла: только буквы/цифры/._-, расширение .md или .txt")
+    if name.lower().startswith("readme."):
+        # README папки в промпт не попадает (_files_in) — загрузка под этим именем тихо пропала бы
+        raise ValueError("README — инструкция, не правило: назови файл иначе")
     return name
 
 

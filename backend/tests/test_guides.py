@@ -58,3 +58,11 @@ def test_readme_is_not_a_guide(gdir):
     r = guides.load_guides(None, None)
     assert r["files"] == ["10-тон.md"] and "как раскладывать" not in r["text"]
     assert [g["rel"] for g in guides.list_guides()] == ["10-тон.md"]
+
+
+@pytest.mark.parametrize("name", ["README.md", "readme.txt", "ReadMe.md"])
+def test_readme_upload_is_rejected_not_silently_dropped(gdir, name):
+    """Загрузка README.* тихо пропала бы из промпта (_files_in его пропускает) — отказ словами."""
+    with pytest.raises(ValueError, match="README"):
+        guides.save_guide("ru", name, b"x")
+    assert not (gdir / "ru" / name).exists()

@@ -35,8 +35,8 @@
              style="width:90px; padding:2px 8px">
     </div>
     <div class="go" style="display:grid; gap:6px">
-      <label><input type="checkbox" name="auto_edit" {{ 'checked' if a.auto_edit }}> критик ставит <b>edited</b> сам (план Б — пока без эффекта)</label>
-      <label><input type="checkbox" name="auto_design" {{ 'checked' if a.auto_design }}> рисовать макет автоматом (план В — пока без эффекта)</label>
+      <label title="включится с планом Б (критик) — до реализации взвести нельзя"><input type="checkbox" name="auto_edit" {{ 'checked' if a.auto_edit }} disabled> критик ставит <b>edited</b> сам — <span class="hint">включится с планом Б (критик)</span></label>
+      <label title="включится с планом В (дизайн) — до реализации взвести нельзя"><input type="checkbox" name="auto_design" {{ 'checked' if a.auto_design }} disabled> рисовать макет автоматом — <span class="hint">включится с планом В (дизайн)</span></label>
       <input type="hidden" name="cap_design" value="{{ a.cap_design }}">
     </div>
   </div>

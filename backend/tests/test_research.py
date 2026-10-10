@@ -1,6 +1,7 @@
 """Досье конкурентов: запросы по языку, SERP с запасным SearXNG, фильтры, порог слов, свежесть, скриншоты,
 пустое досье — причина словами (спека §4)."""
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import socket
 
@@ -17,6 +18,8 @@ from app.services import jobs, research
 LONG = "<html><body><h2>Цена</h2><p>" + "слово " * 350 + "5.99 $ в месяц</p><table><tr><th>a</th></tr><tr><td>b</td></tr></table></body></html>"
 LONG_PRIVATE_CSS = LONG.replace("<body>", '<head><link rel="stylesheet" href="http://192.168.1.77:8000/x.css"></head><body>')
 SHORT = "<html><body><p>мало слов</p></body></html>"
+FIXTURES = Path(__file__).parent / "fixtures" / "research"
+_REAL_RESOLVE = research._resolve       # до autouse-подмены: проверяем настоящий шов
 
 
 def _canon(url: str) -> str:
@@ -49,10 +52,10 @@ class FakeSX:
 
 
 class FakeBL:
-    def __init__(self, boom=False): self.boom, self.shots = boom, []
+    def __init__(self, boom=False): self.boom, self.shots, self.kw = boom, [], []
     def screenshot(self, url, **kw):
         if self.boom: raise RuntimeError("down")
-        self.shots.append(url); return b"\x89PNG"
+        self.shots.append(url); self.kw.append(kw); return b"\x89PNG"
 
 
 @pytest.fixture(autouse=True)
@@ -146,12 +149,54 @@ def test_goto_without_canonical_is_kept_with_placeholder_domain(wire):
         assert r.domain == "goto1" and r.final_url == g
 
 
+def test_goto_live_telegram_feed_with_relative_canonical_is_noise(wire):
+    """Живая фикстура: лента t.me/s/durevvpn за goto — canonical относительный (`/s/durevvpn?before=…`),
+    og:url нет, зато og:site_name="Telegram". Раньше шла в досье конкурентом №1 под заглушкой goto1."""
+    sid = _site()
+    g = "https://www.google.com/goto?url=tg"
+    html = (FIXTURES / "competitor_1.html").read_text(encoding="utf-8")
+    wire(FakeAP([g], {g: html}))
+    out = research.build_dossier(sid)
+    assert out["status"] == "empty" and out["rows"] == 0
+    assert any("ни одной живой страницы" in w for w in out["warnings"])
+    with db.SessionLocal() as s:
+        assert research.dossier(s, sid) == []
+
+
+@pytest.mark.parametrize("meta", ['<meta property="og:site_name" content="Telegram">',
+                                  '<meta name="twitter:site" content="@YouTube">',
+                                  '<meta property="og:site_name" content="Durev VPN — официальный блог">'])
+def test_goto_without_canonical_platform_or_brand_site_name_is_dropped(wire, meta):
+    sid = _site()
+    g = "https://www.google.com/goto?url=sn"
+    wire(FakeAP([g], {g: LONG.replace("<body>", f"<head>{meta}</head><body>")}))
+    assert research.build_dossier(sid)["status"] == "empty"
+
+
+def test_relative_canonical_resolves_against_absolute_og_url():
+    html = ('<link rel="canonical" href="/review/durev"><meta property="og:url" content="https://rev.com/x">'
+            '<meta property="og:site_name" content="Rev">')
+    assert research._real_page(html, "g")[:2] == ("rev.com", "https://rev.com/review/durev")
+    assert research._real_page('<link rel="canonical" href="https://www.b.com/p">', "g") == ("b.com", "https://www.b.com/p", [])
+
+
+def test_resolver_is_late_bound_and_failure_is_unsafe(monkeypatch):
+    """`_resolve` не ссылка на socket.getaddrinfo, захваченная при импорте (та обходила рубильник сети)."""
+    assert _REAL_RESOLVE is not socket.getaddrinfo
+    def boom(*a, **kw):
+        raise socket.gaierror("nx")
+    monkeypatch.setattr(socket, "getaddrinfo", boom)      # так же подменяет резолвер и рубильник conftest
+    monkeypatch.setattr(research, "_resolve", _REAL_RESOLVE)
+    assert research._safe_url("http://example.com/") is False
+
+
 def test_safe_url_guard():
     ok = ["https://a.com/x", "http://sub.example.org/"]
     bad = ["ftp://a.com/x", "http://localhost/x", "http://127.0.0.1/", "http://192.168.1.77:8000/", "http://10.0.0.5/",
            "http://169.254.169.254/latest", "http://[::1]/", "http://printer.local/", "http://db.internal/",
            "http://2130706433/", "http:///x", "javascript:alert(1)", "",
-           "http://x.lan-bad.test/", "http://x.v6map.test/", "http://x.nxdomain.test/"]
+           "http://x.lan-bad.test/", "http://x.v6map.test/", "http://x.nxdomain.test/",
+           "http://100.64.1.1/", "http://[::ffff:10.0.0.1]/", "http://0.0.0.0/"]
     assert all(research._safe_url(u) for u in ok)
     assert not any(research._safe_url(u) for u in bad)
 
@@ -199,6 +244,8 @@ def test_screenshots_when_enabled_and_browserless_down_is_warning(wire, monkeypa
     research.build_dossier(sid)
     assert jobs.last("research")["status"] == "done" and "4" in jobs.last("research")["message"]
     assert bl.shots == ["https://a.com/1"] * 4
+    # только первый экран: полностраничный PNG выходит за потолок шлюза 2000×2000 (live-formats §2–3)
+    assert all(kw.get("full_page") is False for kw in bl.kw)
     with db.SessionLocal() as s:
         r = research.dossier(s, sid)[0]
         assert r.screenshot_path.endswith(".png") and (tmp_path / str(sid)).exists()

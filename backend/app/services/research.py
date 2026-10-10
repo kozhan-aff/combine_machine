@@ -16,7 +16,7 @@ import re
 import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from app.config import settings
 from app.services.competitor import _NOISE, _norm
@@ -29,10 +29,21 @@ PER_QUERY = 5
 MIN_WORDS = 300
 _EXTRA_NOISE = ("apps.apple.", "play.google.", "chrome.google.", "github.", "amazon.", "aliexpress.")
 
-_resolve = socket.getaddrinfo      # шов для тестов: офлайн-сьют подменяет резолвер
+# Резолвер — функция, а не `_resolve = socket.getaddrinfo`: ссылка, захваченная при импорте, обходила бы
+# подмену `socket.getaddrinfo` рубильником сети в тестах (conftest). Шов для тестов остаётся.
+def _resolve(*a, **kw):
+    return socket.getaddrinfo(*a, **kw)
+
+
 _EMPTY_REASON = ("ни одной живой страницы конкурентов ни по одному запросу "
                  "(SERP пуст или страницы не скачались) — генерация без досье не идёт")
 _TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
+# og:site_name / twitter:site площадок, чьи страницы не конкуренты (лента канала, видео, пост). Сравнение — по
+# `_norm` целиком: «Telegram», «@Telegram», «Яндекс Дзен» -> telegram / яндексдзен.
+_PLATFORMS = frozenset(_norm(x) for x in (
+    "telegram", "youtube", "vk", "vkontakte", "reddit", "facebook", "twitter", "x", "tiktok", "instagram",
+    "dzen", "яндекс дзен", "pikabu", "habr"))
+_MAX_HTML = 600_000      # потолок перед extract_all: faq() квадратичен на патологическом HTML (мегабайты без тегов)
 
 
 def _aparser():
@@ -78,8 +89,9 @@ def _safe_url(url: str) -> bool:
         if re.fullmatch(r"[0-9.]+|0x[0-9a-f.]+", host):
             return False
         return _resolves_global(host)
-    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified)
+    ip = getattr(ip, "ipv4_mapped", None) or ip
+    # то же правило, что для имён: только глобальный адрес (is_private не ловит CGNAT 100.64/10)
+    return ip.is_global and not ip.is_multicast
 
 
 def _resolves_global(host: str) -> bool:
@@ -141,21 +153,49 @@ def _attr(tag: str, name: str) -> str | None:
     return (m.group(1) or m.group(2)) if m else None
 
 
-def _real_page(html: str, url: str) -> tuple[str, str]:
-    """(домен, final_url) реальной страницы за goto-редиректом — только по canonical / og:url.
+def _absolute(href: str | None) -> bool:
+    return bool(href) and href.startswith(("http://", "https://")) and bool(_host(href))
+
+
+def _real_page(html: str, url: str) -> tuple[str, str, list[str]]:
+    """(домен, final_url, имена площадки) реальной страницы за goto-редиректом — по canonical / og:url.
     Домен «из ссылок» не берём: обзор бренда ссылается на сайт бренда не меньше трёх раз.
-    Нет ни того ни другого -> ("", url): страница считается живой, домен — заглушка goto{rank}."""
+    Относительный canonical (живой случай: лента t.me/s/durevvpn отдаёт `/s/durevvpn?before=…`) резолвится
+    `urljoin` от абсолютного og:url; нет ни того ни другого -> ("", url, …): домен — заглушка goto{rank}.
+    Имена площадки (og:site_name, twitter:site) отдаются наружу, только когда canonical пуст/относителен, —
+    по ним `_platform_or_brand` отсеивает страницу, чей домен по canonical не установлен."""
+    canonical = og_url = None
+    names: list[str] = []
     for m in _TAG_RE.finditer(html or ""):
         tag = m.group(0)
-        if tag.lower().startswith("<link") and (_attr(tag, "rel") or "").lower() == "canonical":
-            href = _attr(tag, "href")
-        elif tag.lower().startswith("<meta") and (_attr(tag, "property") or "").lower() == "og:url":
-            href = _attr(tag, "content")
-        else:
+        low = tag.lower()
+        if low.startswith("<link"):
+            if canonical is None and (_attr(tag, "rel") or "").lower() == "canonical":
+                canonical = (_attr(tag, "href") or "").strip()
             continue
-        if href and href.startswith(("http://", "https://")) and _host(href):
-            return _host(href), href
-    return "", url
+        key = (_attr(tag, "property") or _attr(tag, "name") or "").lower()
+        val = (_attr(tag, "content") or "").strip()
+        if key == "og:url" and og_url is None:
+            og_url = val
+        elif key in ("og:site_name", "twitter:site") and val:
+            names.append(val)
+    if _absolute(canonical):              # домен установлен — судят фильтры по хосту, имена площадки не нужны
+        return _host(canonical), canonical, []
+    if _absolute(og_url):
+        final = urljoin(og_url, canonical) if canonical else og_url
+        if _absolute(final):
+            return _host(final), final, names
+        return _host(og_url), og_url, names
+    return "", url, names
+
+
+def _platform_or_brand(names: list[str], brand_key: str) -> bool:
+    """og:site_name / twitter:site — площадка (Telegram, YouTube…) или сам бренд -> не конкурент."""
+    for n in names:
+        k = _norm(n)
+        if k and (k in _PLATFORMS or (brand_key and brand_key in k)):
+            return True
+    return False
 
 
 def _css_for(ap, html: str, url: str) -> list[str]:
@@ -175,7 +215,10 @@ def _css_for(ap, html: str, url: str) -> list[str]:
 def _shot(bl, url: str, site_id: int, kind: str, rank: int) -> tuple[str | None, str | None]:
     """(путь, замечание). Browserless вниз — замечание, досье без скриншота."""
     try:
-        png = bl.screenshot(url, width=1366, height=768, full_page=True)
+        # только первый экран: полностраничный PNG длинной страницы выходит за потолок шлюза 2000×2000 px и
+        # не читается критиком (docs/v2/research/research-live-formats-2026-10.md §2–3); подпись на /settings/keys
+        # тоже обещает «первый экран»
+        png = bl.screenshot(url, width=1366, height=768, full_page=False)
         d = Path(settings.RESEARCH_DIR) / str(site_id)
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"{kind}-{rank}.png"
@@ -273,10 +316,13 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                         continue
                     final_url, reliable = url, True
                     if goto:                           # редирект: судим по реальной странице
-                        host, final_url = _real_page(html, url)
+                        host, final_url, names = _real_page(html, url)
                         reliable = bool(host)
+                        if _platform_or_brand(names, brand_key):     # лента канала / страница бренда
+                            continue
                         if reliable and (_blocked_host(host, brand_key, own_host) or host in seen_domains):
                             continue
+                    html = html[:_MAX_HTML]
                     data = rx.extract_all(html, _css_for(ap, html, final_url))
                     if data["words"] < MIN_WORDS:
                         continue
