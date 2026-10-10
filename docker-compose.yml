@@ -107,6 +107,30 @@ services:
     # код воркера подхватывается после git-pull живьём, без пересборки/рестарта контейнера.
     command: watchfiles 'python -m app.workers.scheduler' /app
 
+  backup:
+    # Ежедневный pg_dump в ./backups на хосте (D:\combine_machine\backups на боксе), хранятся 14 последних.
+    # Первый дамп — сразу при старте сервиса. Откат v2 -> v1 и любой откат миграции возможны ТОЛЬКО из дампа
+    # (docs/DEPLOY.md, «Бэкап и откат»). Ручной дамп перед обновлением:
+    #   docker compose run --rm backup sh -c 'pg_dump -h db -U portfolio portfolio | gzip > /backups/manual.sql.gz'
+    image: postgres:16
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: portfolio
+    volumes:
+      - ./backups:/backups
+    networks:
+      - combine
+    command: >
+      sh -c 'while true; do
+        f=/backups/portfolio-$$(date -u +%Y%m%d-%H%M%S).sql.gz;
+        if pg_dump -h db -U portfolio portfolio | gzip > "$$f"; then echo "[backup] $$f"; else echo "[backup] FAILED"; rm -f "$$f"; fi;
+        ls -1t /backups/portfolio-*.sql.gz 2>/dev/null | tail -n +15 | xargs -r rm -f;
+        sleep 86400; done'
+
   aapanel-tunnel:
     # SSH-туннель бокс -> VPS: aaPanel видит запросы с 127.0.0.1 и whitelist по публичному IP бокса не
     # нужен. ОПЦИОНАЛЕН (профиль tunnel): `docker compose --profile tunnel up -d --build aapanel-tunnel`;

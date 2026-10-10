@@ -302,7 +302,43 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 - **Ahrefs** у оператора доступен и через MCP в Claude: удобно снимать живые образцы ответов для
   фикстур (`subscription-info` бесплатный, `public-domain-rating-free` — 0 units).
 
+## Швы полного цикла (2026-10-10, ветка `fix/seams-2026-10-10` → main, 1686 passed)
+
+Полный обзор репо (4 агента по M1/M2/M3–M5/ops + сверка): модули добротные, цикл рвался на швах. Склеено:
+- **Регистрация у регистратора = покупка.** Успешный `registerDomain` (и сверка `_poll_registrar` с
+  вердиктом «зарегистрирован») ставит заказ `caught`, домен `purchased` — без ручного «✓ пойман». Ставка на
+  аукционе по-прежнему `ordered` до итога. Денежный гейт не тронут: тот же `confirm_order` → claim.
+- **Куплен → карточка сайта сразу** (`acquisition._site_after_purchase` → `provisioning.create_site_for`)
+  из execute, `mark_caught` и обеих сверок. Сбой создания сайта не откатывает покупку.
+- **Оффер по умолчанию** при создании сайта: активный оффер с языком `Domain.market_lang`, иначе единственный
+  активный; несколько кандидатов без совпадения — оператор выбирает сам (`provisioning.default_offer_id`).
+- **NS Cloudflare записывает провижн** на шаге `await_ns` через `get_registrar().set_nameservers` (NameSilo
+  `changeNameServers`), раз в час вместе с `activation_check`; регистратор не настроен/сбой — прежняя подсказка
+  «пропиши руками» (`provisioning._push_ns_to_registrar`).
+- **Одна кнопка «✓ подтвердить и купить»** на `/queue` для канала registrar (`POST /queue/{id}/buy` =
+  confirm + execute); отдельное «✓ только подтвердить» осталось.
+- **Сервис `backup`** в compose: ежедневный `pg_dump` в `./backups` (14 последних); DEPLOY.md «Бэкап и откат».
+- **Уборка:** мёртвые ключи v1 (DataForSEO/SerpAPI/Wordstat/reg.ru/Browserless/n8n) убраны из конфига и
+  `/settings/keys`; заглушка reg.ru `RegistrarClient` удалена; `.env.example` дополнен NAMESILO_*/LLM_THINK/
+  LLM_CLASSIFY_FALLBACK_MODEL/INDEXNOW_SECRET; тесты герметичны к `AAPANEL_CA_BUNDLE`/`CLOUDFLARE_ACCOUNT_ID`
+  из локального `.env`; iCloud-дубль теста и чужие NZ-доки из `docs/` убраны; слитые worktree удалены.
+
+**Не сделано (нужен оператор или живой бокс):** ToS DropCatch / включить `namesilo_auction` (иначе .com-потока нет);
+веса `rd`/`anchor_quality`/`traffic_history` → 0 в `/settings`, пока нет Ahrefs; `LLM_CLASSIFY_MODEL`;
+`WEBRISK_API_KEY`; живая сверка `SetSSL`/`AddDomain`/`DeleteFile` и включение `ORIGIN_CA_AUTO`; ротация CF-аккаунтов;
+очередь `queued` (ручные задачи в воркер); расширение scaffold сайта; онбординг GSC по API. Ни один метод NameSilo
+живьём не снят (инвариант 7) — первый выкуп делать на дешёвом домене и смотреть `/queue`.
+
+### Где настройки (ответ на частый вопрос)
+- **Ключи и адреса сервисов** (NameSilo, Ahrefs, Web Risk, Cloudflare, aaPanel, LLM, GSC, IndexNow, GitHub):
+  экран **`/settings/keys`** панели — пишет в таблицу `secret_override` (миграция 0026), побеждает `.env`, без
+  рестарта. Либо `.env` на боксе: `D:\combine_machine\.env` (шаблон — `.env.example`); после правки `.env` нужен
+  `docker compose up -d`. На боксе до обновления (миграции 0026+) экрана `/settings/keys` ещё нет — только `.env`.
+- **Пороги и веса воронки, источники, таблица зона→канал выкупа (`zone_channels`)** — `/settings`.
+- **Автопилот и капы стадий** — `/autopilot`. **Cloudflare-аккаунты** (зеркало) — `/settings/cloudflare`.
+- Что НЕ редактируется из панели намеренно: `DATABASE_URL`, `APP_ENV`, `PANEL_USER`/`PANEL_PASS`.
+
 ## Волна 2 (2026-10-08, влита в main f1a161f, 1675 passed)
 think:false для ollama/* (LLM_THINK); клиент NameSilo (Registrar, аукционы просроченных, регистрация без ретраев, write-ahead, ключ маскируется); списки UT1/blocklistproject (миграция 0033, мягкий сигнал); ранги Common Crawl (0034) вместо DR; SSH-туннель к aaPanel (сайдкар `tunnel/`, `docs/v2/aapanel-tunnel-runbook.md`); индексация GSC + IndexNow.
-Хвосты (minor): домен в JS-атрибуте queue.html; .env.example без NAMESILO_*/LLM_THINK/INDEXNOW_SECRET; без рангов authority=0.5 (может сдвинуть порог approve); bid() шлёт потолок как proxy-ставку — живой bidAuction не проверен; httpx.Client NameSilo не закрывается.
+Хвосты (minor): домен в JS-атрибуте queue.html; ~~.env.example без NAMESILO_*/LLM_THINK/INDEXNOW_SECRET~~ (сделано 2026-10-10); без рангов authority=0.5 (может сдвинуть порог approve); bid() шлёт потолок как proxy-ставку — живой bidAuction не проверен; httpx.Client NameSilo не закрывается.
 Бокс НЕ обновлён: дамп БД → стоп автопилота → «Обновить из git» (миграции 0026–0034) → ключи на /settings/keys → `docker compose up -d --build` (туннель).

@@ -1096,6 +1096,34 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
         return _back("/queue", err=f"подтверждение: {e}")
 
 
+@router.post("/queue/{order_id}/buy")
+def queue_buy_action(order_id: int, bid_rub: float = Form(0)):
+    """Один клик вместо двух: confirm_order (денежный гейт — ЧЕЛОВЕК только что нажал) и сразу
+    execute_confirmed_order. Гейт не ослаблен: confirmed_by_human ставит тот же confirm_order, а
+    execute проверяет его тем же SQL-условием claim; просто между ними нет второй кнопки.
+    Любой отказ confirm — заказ остаётся как был; отказ execute — обычный failed с причиной."""
+    from app.services import acquisition
+    try:
+        r = acquisition.confirm_order(order_id, bid_rub or None)
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"подтверждение: {e}")
+    try:
+        x = acquisition.execute_confirmed_order(order_id)
+    except Exception as e:  # noqa: BLE001
+        return _back("/queue", err=f"заказ #{order_id} подтверждён, но отправка упала: {e} — «↻ повторить»")
+    if x.get("error"):
+        return _back("/queue", err=f"заказ #{order_id} подтверждён, отправка: {x['error']}")
+    if x.get("status") == "failed":
+        return _back("/queue", err=f"заказ #{order_id}: {x.get('error') or 'провайдер отверг заказ'}")
+    bid, cur = r.get("bid_rub"), r.get("currency")
+    paid = f" ({bid:.2f} {cur})" if bid and cur else ""
+    if x.get("status") == "caught":
+        return _back("/queue", msg=f"Домен куплен{paid}: заказ #{order_id} — purchased, карточка сайта создана. "
+                                   "Дальше — Provision на карточке сайта (NS в Cloudflare запишем сами).")
+    return _back("/queue", msg=f"Заказ #{order_id} подтверждён и отправлен{paid} — статус {x.get('status')}. "
+                               "Итог проверь «↻ обновить статусы».")
+
+
 @router.post("/queue/{order_id}/execute")
 def queue_execute_action(order_id: int):
     from app.services import acquisition
@@ -1158,7 +1186,9 @@ def queue_poll_action():
 def queue_caught_action(order_id: int):
     from app.services import acquisition
     try:
-        acquisition.mark_caught(order_id)
+        r = acquisition.mark_caught(order_id)
+        if r.get("site_id"):
+            return _back(f"/sites/{r['site_id']}", msg=f"Заказ #{order_id}: домен куплен (purchased), карточка сайта создана — запусти Provision.")
         return _back("/queue", msg=f"Заказ #{order_id}: домен помечен пойманным (purchased) — можно создавать сайт.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"поймать: {e}")

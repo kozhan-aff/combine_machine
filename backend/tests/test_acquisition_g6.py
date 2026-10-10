@@ -433,8 +433,10 @@ def test_registrar_channel_runs_through_the_same_gate(monkeypatch):
     oid = _registrar_flow(monkeypatch, fake)
     o = _order(oid)
     assert o.provider == "registrar" and o.cost_currency == "USD" and float(o.cost) == 10.0
-    assert acquisition.execute_confirmed_order(oid)["status"] == "ordered"
+    assert acquisition.execute_confirmed_order(oid)["status"] == "caught"     # регистрация синхронна = куплен
     assert fake.registered == [("intl.com", 1)]
+    with db.SessionLocal() as s:
+        assert s.get(Domain, _order(oid).domain_id).status == "purchased"
 
 
 def test_registrar_gate_unconfirmed_never_registers(monkeypatch):

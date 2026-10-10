@@ -158,7 +158,7 @@ def test_page_links_present(client):
     ("v_LLM_MODEL", "tab\x00null"),
     ("v_LLM_MODEL", "a" * 513),
     ("v_VPS_ORIGIN_IP", "not-an-ip"),
-    ("v_SEO_DATA_PROVIDER", "bing"),
+    ("v_LLM_THINK", "maybe"),
     ("v_LLM_BASE_URL", "http://[::1"),                          # urlsplit -> ValueError, не 500
     ("v_GSC_SERVICE_ACCOUNT_JSON", '{"a":' + "[" * 5000),     # RecursionError в json.loads
     ("v_GSC_SERVICE_ACCOUNT_JSON", "not json"),
@@ -174,7 +174,7 @@ def test_validation_rejects(client, ak, field, value):
 def test_validation_accepts_good_values(client, ak):
     big_json = '{"type": "service_account",\n "k": "' + "x" * 3000 + '"}'
     r = _post(client, v_LLM_BASE_URL="https://llm.example/v1", v_VPS_ORIGIN_IP="203.0.113.5",
-              v_DNS_RESOLVER="10.0.0.2", v_SEO_DATA_PROVIDER="serpapi",
+              v_DNS_RESOLVER="10.0.0.2", v_LLM_THINK="true",
               v_GSC_SERVICE_ACCOUNT_JSON=big_json)
     assert r.status_code == 303
     assert _rows()["GSC_SERVICE_ACCOUNT_JSON"] == big_json        # переводы строк внутри JSON допустимы

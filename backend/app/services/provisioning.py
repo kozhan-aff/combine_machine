@@ -1,9 +1,9 @@
 """M3 — Provisioning. Cloudflare (zone -> NS -> SSL-режим -> proxied A) + aaPanel (vhost). Idempotent.
 
 Every step checks-before-creates and stores ids on the Site, so re-running is safe.
-The NS change at the registrar is external/async: the first run returns the CF name
-servers to set (manually, or via reg.ru later); re-run once the zone is active to
-finish DNS + vhost + SSL. See BUILD_SPEC §7 M3 and docs/PIPELINE.md.
+The NS change at the registrar is async: the first run pushes the CF name servers to the
+registrar (NameSilo, when configured) and returns them for a manual fallback; re-run once the
+zone is active to finish DNS + vhost + SSL. See BUILD_SPEC §7 M3 and docs/PIPELINE.md.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -21,8 +21,27 @@ def docroot_for(domain: str) -> str:
     return f"{DOCROOT_BASE}/{domain}"
 
 
+def default_offer_id(db, domain) -> int | None:
+    """Оффер по умолчанию для нового сайта — чтобы генерация не ждала ручной привязки (скрытый
+    четвёртый гейт: стадия generate молча пропускала сайт без оффера). Правило простое и
+    предсказуемое: активный оффер с языком рынка домена (`Domain.market_lang`), иначе —
+    единственный активный оффер портфеля. Несколько кандидатов без совпадения языка — None:
+    выбор за оператором (карточка сайта), машина не гадает. Оператор вправе переназначить."""
+    from sqlalchemy import select
+    from app.models.offer import Offer
+
+    offers = db.execute(select(Offer).where(Offer.active.is_(True)).order_by(Offer.id)).scalars().all()
+    lang = (getattr(domain, "market_lang", None) or "").strip().lower()
+    if lang:
+        same = [o for o in offers if (o.language or "").strip().lower() == lang]
+        if same:
+            return same[0].id
+    return offers[0].id if len(offers) == 1 else None
+
+
 def create_site_for(domain_id: int) -> int:
-    """Make a Site row for a purchased domain (idempotent). Returns site_id."""
+    """Make a Site row for a purchased domain (idempotent). Returns site_id.
+    Оффер подставляется по умолчанию (default_offer_id), если сайт создаётся впервые."""
     from sqlalchemy import select
     from app.db import SessionLocal
     from app.models.domain import Domain
@@ -37,11 +56,33 @@ def create_site_for(domain_id: int) -> int:
         site = db.execute(select(Site).where(Site.domain_id == domain_id)).scalar_one_or_none()
         if site is None:
             site = Site(domain_id=domain_id, status="provisioning",
-                        origin_ip=settings.VPS_ORIGIN_IP or None, doc_root=docroot_for(d.domain))
+                        origin_ip=settings.VPS_ORIGIN_IP or None, doc_root=docroot_for(d.domain),
+                        offer_id=default_offer_id(db, d))
             db.add(site)
             db.commit()
             db.refresh(site)
         return site.id
+
+
+def _push_ns_to_registrar(domain: str, ns: list[str]) -> str | None:
+    """Записать NS Cloudflare у регистратора через шов Registrar (NameSilo). Денег не тратит.
+    Возвращает строку для подсказки оператору или None, если регистратор не настроен (тогда NS
+    остаются ручным шагом — подсказка прежняя). Любой сбой (домен не в этом аккаунте, 301, сеть) —
+    тоже строка, не исключение: ожидание NS не должно падать из-за регистратора."""
+    if len(ns) < 2:
+        return None
+    try:
+        from app.integrations.registrar import get_registrar
+        r = get_registrar()
+        if not getattr(r, "configured", False):
+            return None
+        out = r.set_nameservers(domain, ns)
+        if out.get("verified"):
+            return f"NS записаны у регистратора ({getattr(r, 'name', 'registrar')}), ждём активацию зоны Cloudflare"
+        return (f"NS отправлены регистратору ({getattr(r, 'name', 'registrar')}), но сверка показала "
+                f"{', '.join(out.get('nameservers') or []) or 'пусто'} — проверь в кабинете")
+    except Exception as e:  # noqa: BLE001
+        return f"NS у регистратора не записались ({type(e).__name__}: {str(e)[:120]}) — пропиши руками"
 
 
 # --- origin: проба и сертификат ---------------------------------------------------------
@@ -242,11 +283,14 @@ def provision(site_id: int) -> dict:
             last = site.ns_checked_at
             if last is not None and last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
+            ns_note = None
             if last is None or now - last >= NS_CHECK_EVERY:
-                # Просим CF перепроверить NS сейчас (иначе его плановый опрос — часы). Не чаще раза
-                # в час; сбой не фатален — NS всё равно ждут человека. Автопилотный свип доезжает сюда
-                # сам: ожидание — это повторные вызовы provision(), а не блокирующий цикл.
+                # Сначала сами записываем NS у регистратора (NameSilo changeNameServers; идемпотентно,
+                # не настроен/не наш домен — просто подсказка человеку), потом просим CF перепроверить
+                # NS сейчас (иначе его плановый опрос — часы). Не чаще раза в час; сбой не фатален.
+                # Автопилотный свип доезжает сюда сам: ожидание — это повторные вызовы provision().
                 site.ns_checked_at = now
+                ns_note = _push_ns_to_registrar(domain, zone.get("name_servers") or [])
                 try:
                     cf.activation_check(zone["id"])
                     status = (cf.get_zone(zone["id"]) or {}).get("status", status)
@@ -257,6 +301,8 @@ def provision(site_id: int) -> dict:
                 waited = _hours(site.ns_waiting_since)
                 ns = ", ".join(zone.get("name_servers") or [])
                 hint = f"пропиши у регистратора NS Cloudflare: {ns} — дальше провижн сам заметит активацию"
+                if ns_note:
+                    hint = f"{ns_note}; NS Cloudflare: {ns}"
                 if waited >= NS_STALE_AFTER.total_seconds() // 3600:
                     hint += (f". ⚠ Ждём уже {waited} ч — проверь, что NS у регистратора записаны верно "
                              "(pending-зона Cloudflare удаляется через неделю)")

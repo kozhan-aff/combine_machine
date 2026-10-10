@@ -108,9 +108,7 @@ GROUPS = [
             "сайте NameSilo: Account → Contact Profiles). Пусто — профиль по умолчанию."),
       Field("NAMESILO_ALLOW_PREMIUM", "NameSilo · премиум-домены", "true — разрешить покупку доменов с "
             "premium=1 (цена в десятки раз выше обычной). По умолчанию false: такой домен — отказ.",
-            kind="choice", choices=("false", "true")),
-      Field("REGRU_USERNAME", "reg.ru · логин", "Логин API reg.ru (для смены NS у регистратора)."),
-      Field("REGRU_PASSWORD", "reg.ru · пароль", "Пароль API reg.ru.", secret=True)]),
+            kind="choice", choices=("false", "true"))]),
     ("m3", "M3 · Cloudflare и aaPanel",
      "Провижн сайта: зона и DNS в Cloudflare, vhost и SSL в aaPanel.",
      [Field("CLOUDFLARE_API_TOKEN", "Cloudflare · API-токен", "dash.cloudflare.com → My Profile → API Tokens "
@@ -144,15 +142,6 @@ GROUPS = [
             "Пусто — берётся модель для текстов. Рекомендуется тот же ollama/qwen3.5:9b-q8_0."),
       Field("SEARXNG_URL", "SearXNG · адрес", "Локальный мета-поиск, например http://192.168.1.77:8080. "
             "Нужен для проверки индексации (site:).", kind="url"),
-      Field("SEO_DATA_PROVIDER", "Провайдер SERP/ключевых слов", "Какой платный провайдер использовать, "
-            "когда он нужен: dataforseo или serpapi.", kind="choice", choices=("dataforseo", "serpapi")),
-      Field("DATAFORSEO_LOGIN", "DataForSEO · логин", "Логин API DataForSEO (app.dataforseo.com → API Access).",
-            secret=True),
-      Field("DATAFORSEO_PASSWORD", "DataForSEO · пароль", "Пароль API DataForSEO (не пароль от аккаунта).",
-            secret=True),
-      Field("SERPAPI_KEY", "SerpAPI · ключ", "serpapi.com → Dashboard → API key.", secret=True),
-      Field("YANDEX_WORDSTAT_TOKEN", "Яндекс Вордстат · токен", "OAuth-токен API Яндекс Вордстат.",
-            secret=True),
       Field("GSC_SERVICE_ACCOUNT_JSON", "Google Search Console · JSON сервис-аккаунта",
             "Содержимое JSON-ключа сервис-аккаунта целиком (Google Cloud → IAM → Service accounts → Keys). "
             "Аккаунт нужно добавить в свойство GSC каждого сайта (доменное sc-domain: или префикс URL). "
@@ -171,12 +160,9 @@ GROUPS = [
       Field("INDEXNOW_URL", "IndexNow · адрес API", "По умолчанию https://api.indexnow.org/indexnow. "
             "Менять не нужно.", kind="url")]),
     ("infra", "Инфраструктура",
-     "Самообновление из git и опциональные локальные сервисы.",
+     "Самообновление из git.",
      [Field("GITHUB_TOKEN", "GitHub · токен", "Fine-grained PAT с правом чтения Contents (Settings → "
-            "Developer settings). Нужен для кнопки «Обновить из git».", secret=True),
-      Field("BROWSERLESS_URL", "Browserless · адрес", "Опциональный headless-браузер, например "
-            "http://192.168.1.77:3000.", kind="url"),
-      Field("N8N_URL", "n8n · адрес", "Опциональный адрес n8n.", kind="url")]),
+            "Developer settings). Нужен для кнопки «Обновить из git».", secret=True)]),
 ]
 
 # Смена адреса сервиса отправит ключ на новый хост — говорим об этом в подсказке КАЖДОГО url-поля
