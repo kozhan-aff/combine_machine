@@ -500,8 +500,17 @@ def test_find_auction_filters_by_domain_name_first(make):
     assert srv.n("listAuctions")[0][1]["domainName"] == "swaydboots.com" and len(srv.n("listAuctions")) == 1
 
 
-def test_bid_steps_over_current_bid_when_lot_has_bids(make):
+def test_bid_refuses_ended_lot_before_sending(make, monkeypatch):
+    c, srv = make(listAuctions=LIVE_AUCTIONS, bidAuction=ok())
+    monkeypatch.setattr(ns, "_utcnow", lambda: datetime(2026, 10, 10, tzinfo=timezone.utc))   # все лоты фикстуры в прошлом
+    with pytest.raises(NameSiloError, match="завершён"):
+        c.bid("swaydboots.com", 30.0)
+    assert srv.n("bidAuction") == []
+
+
+def test_bid_steps_over_current_bid_when_lot_has_bids(make, monkeypatch):
     c, srv = make(listAuctions=LIVE_AUCTIONS, bidAuction=ok(body={"auctionId": 19016942, "bid": 2, "proxyBid": 30}))
+    monkeypatch.setattr(ns, "_utcnow", lambda: datetime(2026, 3, 1, tzinfo=timezone.utc))      # лот ещё идёт
     res = c.bid("swaydboots.com", 30.0)
     p = [x for x in srv.n("bidAuction")][0][1]
     assert p["bid"] == "2.00" and p["proxyBid"] == "30.00" and res["bid_now"] == 2.0

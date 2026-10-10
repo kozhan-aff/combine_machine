@@ -474,6 +474,9 @@ class NameSiloClient:
         (execute_confirmed_order). Потолок = подтверждённая сумма: текущая ставка выше -> отказ ДО отправки.
         Без ретраев. [не сверено] имена параметров auctionId/bid — неверное имя даст чистый отказ 105/106."""
         a = self.find_auction(domain)
+        if a.get("end") and a["end"] < _utcnow():
+            raise NameSiloError(f"{domain}: аукцион уже завершён ({a['end']:%Y-%m-%d %H:%M} UTC) — ставка не "
+                                "отправлена; сними заявку или дождись нового лота")
         if a["bid"] > float(max_bid):
             raise NameSiloError(f"{domain}: ставка на аукционе выросла ({a['bid']:.2f} > подтверждённых "
                                 f"{float(max_bid):.2f} {CURRENCY}) — подтверди заказ заново")
