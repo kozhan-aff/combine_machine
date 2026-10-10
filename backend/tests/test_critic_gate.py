@@ -1,6 +1,7 @@
 """Гейт редактуры под критиком (план Б, задача 6): `edit_site` — вычитка черновиков, круги переписывания
 и одобрение через `content.mark_edited`. Отказ закрытый: сбой, молчание или мусор вместо вердикта, любое
-замечание кода или модели, изменившаяся страница — «не прошла». LLM — только подмена LlmClient.complete;
+замечание кода или модели, изменившаяся страница — «не прошла». Сам критик одобряет только страницу, чьё
+тело — рендер проверенной структуры, и одним условным UPDATE. LLM — только подмена LlmClient.complete;
 писателя и критика различаем по модели вызова."""
 import json
 import re
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import event
 
 import app.db as db
 from app.config import settings
@@ -79,6 +81,15 @@ def _page(pid: int) -> Page:
         return s.get(Page, pid)
 
 
+def _set(pid: int, **fields) -> None:
+    """Прямая запись в строку страницы — «другая сессия» (редактор панели, другой прогон писателя)."""
+    with db.SessionLocal() as s:
+        page = s.get(Page, pid)
+        for name, value in fields.items():
+            setattr(page, name, value)
+        s.commit()
+
+
 def _llm(monkeypatch, *critic, writer=(), critic_default=PASS, during=None) -> dict:
     """Подмена LlmClient.complete: у критика и писателя свои очереди ответов (дальше — ответ по умолчанию),
     исключение в очереди бросается. `during(who, n)` зовётся внутри вызова. -> {"critic": [...], "writer": [...]}."""
@@ -123,9 +134,10 @@ def test_pass_with_auto_edit_marks_edited_via_mark_edited(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
-    assert seen == [((ids["/"],), {})]                               # один вызов, без тела: одобрено как лежит
+    assert out == {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0, "manual": 0}
     p = _page(ids["/"])
+    # один вызов, и не «одобрить как лежит», а «одобрить, если тело всё ещё ровно то, что читал критик»
+    assert seen == [((ids["/"],), {"expected_body": p.body})]
     assert p.status == "edited" and p.blocks_stale is False
     assert p.critic_notes == {"pass": True, "issues": [], "code": [], "model": [], "round": 0}
     assert p.critic_score == 0.9 and p.critic_checked_at is not None
@@ -140,7 +152,7 @@ def test_pass_without_auto_edit_keeps_draft(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     _llm(monkeypatch)
     out = content_critic.edit_site(site_id, auto_edit=False)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0, "manual": 0}
     assert seen == []
     p = _page(ids["/"])
     assert p.status == "draft" and p.critic_notes["pass"] is True    # вердикт есть, одобряет человек
@@ -184,7 +196,7 @@ def test_fail_rewrites_then_passes(monkeypatch):
     site_id, ids = _site()
     calls = _llm(monkeypatch, FAIL, PASS)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 1, "rewritten": 1, "failed": 0}
+    assert out == {"reviewed": 1, "edited": 1, "rewritten": 1, "failed": 0, "manual": 0}
     assert len(calls["critic"]) == 2 and len(calls["writer"]) == 1
     assert "мало конкретики про скорость" in calls["writer"][0]["prompt"]      # замечание дошло до писателя
     p = _page(ids["/"])
@@ -198,7 +210,7 @@ def test_two_rounds_then_stop(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch, critic_default=FAIL)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 2, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 2, "failed": 1, "manual": 0}
     assert len(calls["writer"]) == content_critic.MAX_ROUNDS == 2 and len(calls["critic"]) == 3
     p = _page(ids["/"])
     assert p.status == "draft" and seen == []
@@ -209,7 +221,7 @@ def test_two_rounds_then_stop(monkeypatch):
     assert last["status"] == "done_warn" and "переписано 2, с замечаниями 1" in last["message"]
     # повторный прогон круги не обнуляет: страницу вычитывают, но больше не переписывают
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["writer"]) == 2 and _page(ids["/"]).critic_notes["round"] == 2
 
 
@@ -218,7 +230,7 @@ def test_failed_rewrite_stops_the_round_and_keeps_the_page(monkeypatch):
     before = _page(ids["/"]).body
     calls = _llm(monkeypatch, critic_default=FAIL, writer=["не JSON", "снова не JSON"])
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 1                                 # текст не менялся — перечитывать нечего
     p = _page(ids["/"])
     assert p.status == "draft" and p.body == before and p.critic_notes["round"] == 0
@@ -233,7 +245,7 @@ def test_stale_blocks_page_is_reviewed_but_not_rewritten(monkeypatch, over):
     before = _page(ids["/"]).body
     calls = _llm(monkeypatch, critic_default=FAIL)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 1 and not calls["writer"]
     p = _page(ids["/"])
     assert p.status == "draft" and p.body == before and p.critic_notes["pass"] is False
@@ -243,7 +255,7 @@ def test_unknown_kind_page_is_reviewed_but_not_rewritten(monkeypatch):
     site_id, ids = _site(paths=("/bonus",))
     calls = _llm(monkeypatch, critic_default=FAIL)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 1 and not calls["writer"]
     assert "Тип страницы: не определён" in calls["critic"][0]["prompt"]
 
@@ -255,7 +267,7 @@ def test_code_issue_blocks_pass_even_if_model_passes(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     _llm(monkeypatch)                                                # модель довольна
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == []
     assert p.critic_notes["pass"] is False and p.critic_notes["model"] == []
@@ -269,7 +281,7 @@ def test_critic_silent_is_closed_failure(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch, RuntimeError("модель сломалась"), RuntimeError("модель сломалась"))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 2, "edited": 0, "rewritten": 0, "failed": 2}
+    assert out == {"reviewed": 2, "edited": 0, "rewritten": 0, "failed": 2, "manual": 0}
     assert seen == [] and len(calls["critic"]) == 2
     for pid in ids.values():
         p = _page(pid)
@@ -289,7 +301,7 @@ def test_garbage_instead_of_verdict_is_closed_failure(monkeypatch, answer):
     seen = _spy_mark_edited(monkeypatch)
     _llm(monkeypatch, critic_default=answer)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == []
     assert p.critic_notes["pass"] is False and p.critic_notes["model"][0].startswith("критик не ответил: ")
@@ -302,7 +314,7 @@ def test_pass_true_with_issues_is_not_edited(monkeypatch):
     _llm(monkeypatch, critic_default=json.dumps({"pass": True, "score": 99, "issues": ["вода во вступлении"]},
                                                 ensure_ascii=False))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == []
     assert p.critic_notes["pass"] is False and p.critic_notes["model"] == ["вода во вступлении"]
@@ -318,7 +330,7 @@ def test_code_checks_exception_is_closed_failure(monkeypatch):
 
     monkeypatch.setattr(content_critic, "code_checks", boom)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == []
     assert p.critic_notes["pass"] is False and p.critic_notes["code"] == ["проверки кодом не выполнены: KeyError"]
@@ -330,15 +342,15 @@ def test_body_changed_during_review_is_not_edited(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch, during=lambda who, n: content.save_draft(ids["/"], OTHER_BODY))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == [] and p.body == OTHER_BODY
     assert p.critic_notes["pass"] is False and p.critic_notes["issues"] == ["страница изменилась во время вычитки"]
     assert p.critic_score is None and not calls["writer"]            # чужую правку не переписываем
 
 
-def test_body_changed_between_review_and_approval_is_not_edited(monkeypatch):
-    """Вердикт «pass» уже записан, но перед одобрением текст другой: одобрять то, чего критик не читал, нельзя."""
+def test_operator_edit_after_review_is_left_to_the_human(monkeypatch):
+    """Вердикт «pass» записан, а оператор тут же сохранил правку: страница правлена руками — не одобряем."""
     site_id, ids = _site()
     seen = _spy_mark_edited(monkeypatch)
     _llm(monkeypatch)
@@ -351,28 +363,171 @@ def test_body_changed_between_review_and_approval_is_not_edited(monkeypatch):
 
     monkeypatch.setattr(content_critic, "_review", review_then_operator_saves)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0, "manual": 1}
     p = _page(ids["/"])
     assert p.status == "draft" and seen == [] and p.body == OTHER_BODY
+
+
+def _approval_interrupted_by(monkeypatch, pid: int, **fields) -> list:
+    """Между решением критика и самим одобрением строку меняет другая сессия: подмена mark_edited сначала
+    пишет `fields` в страницу, потом зовёт настоящую функцию. -> журнал вызовов."""
+    seen, real = [], content.mark_edited
+
+    def mark(*args, **kwargs):
+        seen.append((args, kwargs))
+        _set(pid, **fields)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(content, "mark_edited", mark)
+    return seen
+
+
+def test_body_changed_in_another_session_before_approval_is_not_edited(monkeypatch):
+    """Окно между вычиткой и одобрением закрыто условным UPDATE: тело уже не то, что читал критик, —
+    страница остаётся черновиком, вердикт «pass» отозван."""
+    site_id, ids = _site()
+    _llm(monkeypatch)
+    reviewed = _page(ids["/"]).body
+    seen = _approval_interrupted_by(monkeypatch, ids["/"], body=OTHER_BODY)
+    out = content_critic.edit_site(site_id, auto_edit=True)
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
+    assert seen == [((ids["/"],), {"expected_body": reviewed})]
+    p = _page(ids["/"])
+    assert p.status == "draft" and p.body == OTHER_BODY
     assert p.critic_notes["pass"] is False
-    assert p.critic_notes["issues"] == ["страница изменилась во время вычитки"]
+    assert p.critic_notes["issues"] == ["страница изменилась во время вычитки — не одобрена"]
     assert jobs.last("edit")["status"] == "done_warn"
+
+
+@pytest.mark.parametrize("status", ["edited", "published"])
+def test_status_changed_in_another_session_before_approval_is_not_touched(monkeypatch, status):
+    """Страницей уже распорядился человек (одобрил, опубликовал): критик её статус не переписывает."""
+    site_id, ids = _site()
+    _llm(monkeypatch)
+    _approval_interrupted_by(monkeypatch, ids["/"], status=status)
+    out = content_critic.edit_site(site_id, auto_edit=True)
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
+    assert _page(ids["/"]).status == status
 
 
 def test_mark_edited_refusal_is_a_failure_with_a_note(monkeypatch):
     site_id, ids = _site()
     _llm(monkeypatch)
 
-    def refuse(page_id, body=None):
+    def refuse(page_id, body=None, **kw):
         raise ValueError("в тексте страницы 0 симв.")
 
     monkeypatch.setattr(content, "mark_edited", refuse)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "draft" and p.critic_notes["pass"] is False
-    assert p.critic_notes["issues"] == ["одобрение отклонено: в тексте страницы 0 симв."]
+    assert p.critic_notes["issues"] == ["в тексте страницы 0 симв."]
     assert jobs.last("edit")["status"] == "done_warn"
+
+
+# --- сам критик одобряет только рендер проверенной структуры ---
+
+def _one_char_off(doc: dict) -> str:
+    return _body(doc).replace("Приватность", "Приватность.", 1)
+
+
+@pytest.mark.parametrize("over", [
+    {"blocks_stale": True},                                          # тело правили руками
+    {"blocks": None},                                                # старый путь: структуры нет
+    {"body": _one_char_off(_doc())},                                 # тело на один знак не рендер структуры
+    {"blocks": {"meta": {"title": "Durev VPN: обзор и честный тест"}}},      # структура не проходит схему
+    {"blocks": ["не", "структура"]},
+], ids=["stale", "no-blocks", "one-char-off", "invalid-blocks", "junk-blocks"])
+def test_passing_page_that_is_not_a_render_of_its_blocks_is_left_to_the_human(monkeypatch, over):
+    """Критик читает видимый текст, а на сайт уходит HTML. Сам он одобряет только страницу, чьё тело —
+    рендер проверенной структуры; остальные получают вердикт и ждут человека."""
+    site_id, ids = _site(**over)
+    seen = _spy_mark_edited(monkeypatch)
+    _llm(monkeypatch)                                                # и код, и модель довольны
+    out = content_critic.edit_site(site_id, auto_edit=True)
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0, "manual": 1}
+    p = _page(ids["/"])
+    assert p.status == "draft" and seen == []
+    assert p.critic_notes["pass"] is True and p.critic_notes["issues"] == []
+    assert p.critic_notes["note"] == "одобряет человек: текст правился вручную или написан старым способом"
+    last = jobs.last("edit")
+    assert last["status"] == "done"
+    assert "одобряет человек (текст правился вручную или написан старым способом): 1" in last["message"]
+    assert publish.publish_site(site_id)["status"] == "no_edited_pages"
+
+
+def test_hidden_link_in_hand_edited_body_cannot_be_auto_approved(monkeypatch):
+    """Ради чего правило: адрес ссылки в видимом тексте не виден — критик прочёл бы такую страницу как чистую."""
+    doc = _doc()
+    body = _body(doc).replace("Скорость</h2>", 'Скорость</h2><p><a href="https://evil.example/">Durev VPN</a></p>', 1)
+    site_id, ids = _site(body=content._sanitize(body))
+    seen = _spy_mark_edited(monkeypatch)
+    _llm(monkeypatch)
+    out = content_critic.edit_site(site_id, auto_edit=True)
+    assert out["edited"] == 0 and out["manual"] == 1 and seen == []
+    assert _page(ids["/"]).status == "draft"
+
+
+def test_manual_note_is_not_written_without_auto_edit(monkeypatch):
+    site_id, ids = _site(blocks_stale=True)
+    _llm(monkeypatch)
+    out = content_critic.edit_site(site_id, auto_edit=False)
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0, "manual": 0}
+    assert "note" not in _page(ids["/"]).critic_notes
+    assert "ждут одобрения человеком: 1" in jobs.last("edit")["message"]
+
+
+# --- content.mark_edited(expected_body=…): одобрение одним условным UPDATE ---
+
+def test_mark_edited_expected_body_approves_matching_draft():
+    site_id, ids = _site()
+    body = _page(ids["/"]).body
+    assert content.mark_edited(ids["/"], expected_body=body) == {"page_id": ids["/"], "status": "edited"}
+    p = _page(ids["/"])
+    assert p.status == "edited" and p.body == body and p.blocks_stale is False
+
+
+def test_mark_edited_expected_body_is_one_conditional_update():
+    """Без чтения перед записью: единственный оператор — UPDATE с условиями на статус и тело."""
+    site_id, ids = _site()
+    body = _page(ids["/"]).body
+    engine, seen = db.SessionLocal().get_bind(), []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        content.mark_edited(ids["/"], expected_body=body)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert len(seen) == 1 and seen[0].lstrip().upper().startswith("UPDATE")
+    where = seen[0].upper().split("WHERE", 1)[1]
+    assert "STATUS" in where and "BODY" in where and "ID" in where
+
+
+@pytest.mark.parametrize("fields", [{"body": OTHER_BODY}, {"status": "edited"}, {"status": "published"}],
+                         ids=["body", "edited", "published"])
+def test_mark_edited_expected_body_refuses_changed_page(fields):
+    site_id, ids = _site()
+    body = _page(ids["/"]).body
+    _set(ids["/"], **fields)
+    with pytest.raises(ValueError, match="страница изменилась во время вычитки — не одобрена"):
+        content.mark_edited(ids["/"], expected_body=body)
+    p = _page(ids["/"])
+    assert p.status == fields.get("status", "draft") and p.body == fields.get("body", body)
+
+
+def test_mark_edited_expected_body_other_refusals():
+    site_id, ids = _site(body="<p>коротко</p>")
+    with pytest.raises(ValueError, match="нужно хотя бы"):           # гейт минимума текста — тот же
+        content.mark_edited(ids["/"], expected_body="<p>коротко</p>")
+    with pytest.raises(ValueError, match="вместе не передаются"):
+        content.mark_edited(ids["/"], _body(_doc()), expected_body=_body(_doc()))
+    with pytest.raises(ValueError, match="не одобрена"):             # страницы нет — нет и строки под UPDATE
+        content.mark_edited(999999, expected_body=_body(_doc()))
+    assert _page(ids["/"]).status == "draft"
 
 
 # --- какие страницы трогаем ---
@@ -386,7 +541,7 @@ def test_published_and_edited_pages_untouched(monkeypatch):
     before = {pid: _page(pid).body for pid in ids.values()}
     calls = _llm(monkeypatch, critic_default=FAIL)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 2, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 2, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 3
     for path, status in (("/vs", "edited"), ("/setup", "published")):
         p = _page(ids[path])
@@ -403,7 +558,7 @@ def test_site_without_drafts_does_nothing(monkeypatch):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 0, "edited": 0, "rewritten": 0, "failed": 0}
+    assert out == {"reviewed": 0, "edited": 0, "rewritten": 0, "failed": 0, "manual": 0}
     assert seen == [] and not calls["critic"] and not calls["writer"]
     assert [_page(pid).status for pid in ids.values()] == ["edited", "published"]
     last = jobs.last("edit")
@@ -416,7 +571,7 @@ def test_page_approved_by_hand_meanwhile_is_left_alone(monkeypatch):
     calls = _llm(monkeypatch, critic_default=FAIL,
                  during=lambda who, n: n == 0 and content.mark_edited(ids["/vs"]))
     out = content_critic.edit_site(site_id, auto_edit=False)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     p = _page(ids["/vs"])
     assert p.status == "edited" and p.critic_notes is None and len(calls["critic"]) == 1
 
@@ -427,7 +582,7 @@ def test_page_approved_by_hand_during_review_is_not_rewritten(monkeypatch):
     before = _page(ids["/"]).body
     calls = _llm(monkeypatch, critic_default=FAIL, during=lambda who, n: content.mark_edited(ids["/"]))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 0, "manual": 0}
     p = _page(ids["/"])
     assert p.status == "edited" and p.body == before and not calls["writer"]
 
@@ -447,7 +602,7 @@ def test_critic_gateway_down_stops_the_batch(monkeypatch, failure):
     seen = _spy_mark_edited(monkeypatch)
     calls = _llm(monkeypatch, failure)
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 1 and not calls["writer"] and seen == []
     first, second = _page(ids["/"]), _page(ids["/vs"])
     assert first.status == "draft" and first.critic_notes["pass"] is False
@@ -459,10 +614,11 @@ def test_critic_gateway_down_stops_the_batch(monkeypatch, failure):
 
 
 def test_critic_4xx_fails_one_page_and_the_batch_continues(monkeypatch):
-    site_id, ids = _site(paths=("/", "/vs"), blocks_stale=True)
+    site_id, ids = _site(paths=("/", "/vs"))
+    _set(ids["/"], blocks_stale=True)                                # первую не переписываем — только читаем
     calls = _llm(monkeypatch, _http_error(422))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 2, "edited": 1, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 2, "edited": 1, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 2
     assert _page(ids["/"]).status == "draft" and _page(ids["/vs"]).status == "edited"
 
@@ -471,7 +627,7 @@ def test_writer_gateway_down_stops_the_batch(monkeypatch):
     site_id, ids = _site(paths=("/", "/vs"))
     calls = _llm(monkeypatch, critic_default=FAIL, writer=[httpx.ConnectError("шлюз лежит")])
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1}
+    assert out == {"reviewed": 1, "edited": 0, "rewritten": 0, "failed": 1, "manual": 0}
     assert len(calls["critic"]) == 1 and len(calls["writer"]) == 1
     assert _page(ids["/vs"]).critic_checked_at is None
     last = jobs.last("edit")
@@ -491,10 +647,10 @@ def test_rewrite_page_marks_gateway_failure_as_down(monkeypatch):
 # --- отмена и сообщение задачи ---
 
 def test_cancel_between_pages_keeps_what_is_done(monkeypatch):
-    site_id, ids = _site(paths=("/", "/vs"), blocks_stale=True)
+    site_id, ids = _site(paths=("/", "/vs"))
     calls = _llm(monkeypatch, during=lambda who, n: jobs.request_cancel("edit"))
     out = content_critic.edit_site(site_id, auto_edit=True)
-    assert out == {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0}
+    assert out == {"reviewed": 1, "edited": 1, "rewritten": 0, "failed": 0, "manual": 0}
     assert len(calls["critic"]) == 1
     assert _page(ids["/"]).status == "edited" and _page(ids["/vs"]).critic_checked_at is None
     last = jobs.last("edit")

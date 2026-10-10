@@ -673,13 +673,35 @@ def save_draft(page_id: int, body: str) -> dict:
         return {"page_id": page_id, "status": p.status}
 
 
-def mark_edited(page_id: int, body: str | None = None) -> dict:
+def mark_edited(page_id: int, body: str | None = None, *, expected_body: str | None = None) -> dict:
     """HUMAN gate: draft -> edited (the ONLY path to 'edited'). Optionally save edited body.
 
     Принимает только draft/edited-страницу (published не разжалуется молча, S7-11) и тело с
-    видимым текстом не короче MIN_BODY_TEXT (после sanitize). body=None — одобрить как лежит."""
+    видимым текстом не короче MIN_BODY_TEXT (после sanitize). body=None — одобрить как лежит.
+
+    `expected_body` — одобрение критиком: «одобрить, только если страница — черновик и её тело ровно
+    это». Один условный UPDATE, без чтения перед записью: между вычиткой и одобрением страницу мог
+    изменить редактор панели или другой прогон писателя, и окна на это здесь нет. Ни одной строки не
+    обновлено -> ValueError, страница не тронута. Тело при этом не пишется (`body` вместе с
+    `expected_body` — отказ)."""
+    from sqlalchemy import update
     from app.db import SessionLocal
     from app.models.site import Page
+
+    if expected_body is not None:
+        if body is not None:
+            raise ValueError("mark_edited: body и expected_body вместе не передаются")
+        n = _visible_len(expected_body)
+        if n < MIN_BODY_TEXT:
+            raise ValueError(f"в тексте страницы {n} симв. — нужно хотя бы {MIN_BODY_TEXT}: "
+                             "пустую страницу одобрить нельзя")
+        with SessionLocal() as db:
+            done = db.execute(update(Page).where(Page.id == page_id, Page.status == "draft",
+                                                 Page.body == expected_body).values(status="edited")).rowcount
+            db.commit()
+        if done != 1:
+            raise ValueError("страница изменилась во время вычитки — не одобрена")
+        return {"page_id": page_id, "status": "edited"}
 
     with SessionLocal() as db:
         p = db.get(Page, page_id)
