@@ -51,6 +51,10 @@
            margin-right:9px; flex:none; }
   .rl.on { background:var(--acc-soft); border-color:#c9dbf7; }
   .rl.on, .rl.on .n { color:var(--acc2); }
+  .rl.sub { padding:4px 10px 4px 24px; font-size:12.5px; font-weight:500; color:var(--mut); }
+  .rail-h { font-family:var(--mono); font-size:9.5px; letter-spacing:.8px; text-transform:uppercase;
+            color:var(--dim); padding:14px 10px 4px; }
+  .rail-h:first-child { padding-top:2px; }
   .side .gates { margin-top:auto; padding:12px 10px 0; border-top:1px solid var(--line);
     font-size:10.5px; color:var(--mut); line-height:1.6; }
   .side .gates b { color:var(--ink); font-weight:600; }
@@ -62,6 +66,8 @@
                  align-items:center; border-right:0; border-bottom:1px solid var(--line); }
     .brand-sub { border:0; margin:0; }
     nav.rail { flex-direction:row; flex-wrap:wrap; }
+    .rail-h { display:none; }
+    .rl.sub { padding-left:10px; }
     .side .gates { display:none; }
     main { padding:18px 16px 60px; }
   }
@@ -390,29 +396,33 @@
 <div class="shell">
 <aside class="side">
   <div class="brand">КОМ<b>БАЙН</b></div>
-  <div class="brand-sub">конвейер VPN-портфеля · M1→M5</div>
+  <div class="brand-sub">конвейер VPN-сайтов</div>
+  {# Меню по смыслу, а не по номерам модулей: что делаю каждый день / чем кормлю машину / как она настроена.
+     Вложенные пункты (.rl.sub) — экраны внутри раздела. Подсветка — по адресу страницы. #}
+  {% set _p = request.url.path if request is defined and request else '' %}
   <nav class="rail">
-    <a class="rl {{ 'on' if active=='dash' }}" href="/" title="сводка воронки + что делать дальше">
-      <span class="n">00</span>Пульт</a>
-    <a class="rl {{ 'on' if active=='offers' }}" href="/offers" title="бренды и партнёрские ссылки — вход машины">
-      <span class="n">01</span>Офферы</a>
-    <a class="rl {{ 'on' if active=='domains' }}" href="/domains" title="поиск дропов, скоринг, отбор, покупка">
-      <span class="n">02</span>Домены · M1</a>
-    <a class="rl {{ 'on' if active=='queue' }}" href="/queue" title="очередь заказов + подтверждение выкупа">
-      <span class="n">M2</span>Выкуп</a>
-    <a class="rl" href="/#sites" title="провижн → контент → редактура → публикация">
-      <span class="n">03</span>Сайты · M3–M5</a>
-    <a class="rl {{ 'on' if active=='diag' }}" href="/diag" title="связь с сервисами + обновление кода">
-      <span class="n">◉</span>Диагностика</a>
-    <a class="rl {{ 'on' if active=='settings' }}" href="/settings" title="пороги воронки и источники">
-      <span class="n">⚙</span>Настройки</a>
-    <a class="rl {{ 'on' if active=='autopilot' }}" href="/autopilot" title="тумблеры стадий, капы, «ждёт тебя»">
-      <span class="n">✈</span>Автопилот</a>
+    <div class="rail-h">Работа</div>
+    <a class="rl {{ 'on' if _p == '/' }}" href="/" title="что происходит сейчас и что ждёт твоего решения">Пульт</a>
+    <a class="rl {{ 'on' if _p == '/domains' }}" href="/domains" title="найденные домены: что купить, что отклонить">Домены</a>
+    <a class="rl sub {{ 'on' if _p.startswith('/domains/pool') }}" href="/domains/pool" title="все найденные домены с причинами отказа — для разбора, не для ежедневной работы">Весь список</a>
+    <a class="rl {{ 'on' if _p.startswith('/queue') }}" href="/queue" title="домены к покупке: цена, у кого берём, подтверждение">Покупка</a>
+    <a class="rl {{ 'on' if _p.startswith('/sites') or _p.startswith('/pages') }}" href="/#sites" title="купленные домены: поднять сайт, написать тексты, опубликовать">Сайты</a>
+
+    <div class="rail-h">Что продвигаем</div>
+    <a class="rl {{ 'on' if _p.startswith('/offers') }}" href="/offers" title="бренды, партнёрские ссылки и промокоды">Офферы</a>
+    <a class="rl {{ 'on' if _p.startswith('/guides') }}" href="/guides" title="твои инструкции, как писать тексты">Правила письма</a>
+
+    <div class="rail-h">Система</div>
+    <a class="rl {{ 'on' if _p.startswith('/autopilot') }}" href="/autopilot" title="что машина делает сама и сколько за один проход">Автопилот</a>
+    <a class="rl {{ 'on' if _p == '/settings' }}" href="/settings" title="пороги отбора доменов и источники">Настройки</a>
+    <a class="rl sub {{ 'on' if _p.startswith('/settings/keys') }}" href="/settings/keys" title="ключи и адреса внешних сервисов">Ключи и доступы</a>
+    <a class="rl sub {{ 'on' if _p.startswith('/settings/cloudflare') }}" href="/settings/cloudflare" title="зоны и аккаунт Cloudflare">Cloudflare</a>
+    <a class="rl {{ 'on' if _p.startswith('/diag') }}" href="/diag" title="связь с сервисами и обновление программы">Диагностика</a>
   </nav>
   <div class="gates">
-    <b>Гейты машины</b><br>
-    выкуп — подтверждает человек<br>
-    публикация — только edited
+    <b>Два правила машины</b><br>
+    деньги тратятся только после твоего подтверждения<br>
+    на сайт попадает только вычитанный текст
   </div>
 </aside>
 

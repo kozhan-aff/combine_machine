@@ -275,25 +275,7 @@
   </div>
 </form>
 
-<div class="station" style="max-width:760px; margin-top:14px">
-  <div class="plate">M4 · Правила письма — <b>{{ guides|length }} файлов</b></div>
-  <details class="what"><summary>зачем это</summary>
-    <div class="what-body">Твои рекомендации, как писать тексты: склеиваются в системный промпт писателя
-    и критика. Корень — на всё, подпапка языка — на язык вывода, подпапка типа — на тип страницы.
-    Порядок — по имени файла (префикс 10-, 20-). Лежат в <code>content_guides/</code> репо.</div></details>
-  {% if guides %}
-  <table style="margin:8px 0"><thead><tr><th>файл</th><th>размер</th><th>изменён</th><th></th></tr></thead>
-  <tbody>{% for g in guides %}<tr><td>{{ g.rel }}</td><td>{{ g.size }} Б</td><td>{{ g.mtime }}</td>
-    <td><form class="inline" method="post" action="/settings/guides/delete"><input type="hidden" name="rel" value="{{ g.rel }}">
-      <button class="btn-sm" title="удалить файл правил">✕</button></form></td></tr>{% endfor %}</tbody></table>
-  {% endif %}
-  <form class="go" method="post" action="/settings/guides/upload" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:center">
-    <select name="subdir" title="куда: корень — на всё; язык; тип страницы">
-      {% for s in guide_subdirs %}<option value="{{ s }}">{{ s or 'корень (на всё)' }}</option>{% endfor %}</select>
-    <input type="file" name="file" accept=".md,.txt" required>
-    <button class="btn-sm btn-acc" title="загрузить .md/.txt до 200 КБ">↑ Загрузить</button>
-  </form>
-</div>
+<p class="hint" style="margin-top:14px">Правила письма для текстов переехали в отдельный пункт меню — <a href="/guides">Правила письма</a>.</p>
 <form id="settings-reset" method="post" action="/settings/reset"
       onsubmit="return confirm('Сбросить все пороги к дефолтам?')"></form>
 <form id="lists-refresh" method="post" action="/settings/lists/refresh"></form>
