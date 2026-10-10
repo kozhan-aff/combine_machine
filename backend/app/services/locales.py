@@ -22,6 +22,9 @@ TEXTS = {
         "alt_chart": "Bar chart comparing the number of servers of popular VPN services",
         "q_review": "{brand} review", "q_comparison": "{brand} vs alternatives",
         "q_howto": "how to set up {brand}", "q_market": "best VPN {country}",
+        "lbl_score": "Score", "lbl_for": "Best for", "lbl_not_for": "Not for",
+        "lbl_pros": "Pros", "lbl_cons": "Cons",
+        "lbl_steps": "Step by step", "lbl_faq": "FAQ",
     },
     "ru": {
         "disclosure": ("Раскрытие: страница содержит партнёрские ссылки. Мы можем получить "
@@ -38,6 +41,9 @@ TEXTS = {
         "alt_chart": "Столбчатая диаграмма: число серверов популярных VPN-сервисов",
         "q_review": "{brand} обзор", "q_comparison": "{brand} против конкурентов",
         "q_howto": "как настроить {brand}", "q_market": "лучший VPN {country}",
+        "lbl_score": "Оценка", "lbl_for": "Кому подойдёт", "lbl_not_for": "Кому не подойдёт",
+        "lbl_pros": "Плюсы", "lbl_cons": "Минусы",
+        "lbl_steps": "Пошагово", "lbl_faq": "Вопросы и ответы",
     },
     "de": {
         "disclosure": ("Hinweis: Diese Seite enthält Affiliate-Links. Wir erhalten ggf. eine "
@@ -54,6 +60,9 @@ TEXTS = {
         "alt_chart": "Balkendiagramm: Serveranzahl beliebter VPN-Dienste",
         "q_review": "{brand} Test", "q_comparison": "{brand} Vergleich",
         "q_howto": "{brand} einrichten", "q_market": "bester VPN {country}",
+        "lbl_score": "Bewertung", "lbl_for": "Geeignet für", "lbl_not_for": "Weniger geeignet für",
+        "lbl_pros": "Vorteile", "lbl_cons": "Nachteile",
+        "lbl_steps": "Schritt für Schritt", "lbl_faq": "Häufige Fragen",
     },
     "es": {
         "disclosure": ("Aviso: esta página contiene enlaces de afiliado. Podemos recibir una "
@@ -71,6 +80,9 @@ TEXTS = {
         "alt_chart": "Gráfico de barras: número de servidores de servicios VPN populares",
         "q_review": "{brand} opiniones", "q_comparison": "{brand} vs alternativas",
         "q_howto": "cómo configurar {brand}", "q_market": "mejor VPN {country}",
+        "lbl_score": "Puntuación", "lbl_for": "Ideal para", "lbl_not_for": "No recomendado para",
+        "lbl_pros": "Ventajas", "lbl_cons": "Inconvenientes",
+        "lbl_steps": "Paso a paso", "lbl_faq": "Preguntas frecuentes",
     },
     "fr": {
         "disclosure": ("Information : cette page contient des liens d'affiliation. Nous pouvons "
@@ -89,6 +101,9 @@ TEXTS = {
         "alt_chart": "Diagramme en barres : nombre de serveurs des VPN populaires",
         "q_review": "{brand} avis", "q_comparison": "{brand} comparatif",
         "q_howto": "configurer {brand}", "q_market": "meilleur VPN {country}",
+        "lbl_score": "Note", "lbl_for": "Idéal pour", "lbl_not_for": "Déconseillé pour",
+        "lbl_pros": "Avantages", "lbl_cons": "Inconvénients",
+        "lbl_steps": "Étape par étape", "lbl_faq": "Questions fréquentes",
     },
     "nl": {
         "disclosure": ("Vermelding: deze pagina bevat affiliatelinks. Wij kunnen een commissie "
@@ -105,6 +120,9 @@ TEXTS = {
         "alt_chart": "Staafdiagram: aantal servers van populaire VPN-diensten",
         "q_review": "{brand} review", "q_comparison": "{brand} vergelijking",
         "q_howto": "{brand} instellen", "q_market": "beste VPN {country}",
+        "lbl_score": "Score", "lbl_for": "Geschikt voor", "lbl_not_for": "Minder geschikt voor",
+        "lbl_pros": "Voordelen", "lbl_cons": "Nadelen",
+        "lbl_steps": "Stap voor stap", "lbl_faq": "Veelgestelde vragen",
     },
     "pt": {
         "disclosure": ("Aviso: esta página contém links de afiliado. Podemos receber uma comissão "
@@ -122,6 +140,9 @@ TEXTS = {
         "alt_chart": "Gráfico de barras: número de servidores de VPNs populares",
         "q_review": "{brand} análise", "q_comparison": "{brand} comparação",
         "q_howto": "como configurar {brand}", "q_market": "melhor VPN {country}",
+        "lbl_score": "Pontuação", "lbl_for": "Ideal para", "lbl_not_for": "Não recomendado para",
+        "lbl_pros": "Vantagens", "lbl_cons": "Desvantagens",
+        "lbl_steps": "Passo a passo", "lbl_faq": "Perguntas frequentes",
     },
     "it": {
         "disclosure": ("Avviso: questa pagina contiene link di affiliazione. Potremmo ricevere una "
@@ -139,6 +160,9 @@ TEXTS = {
         "alt_chart": "Grafico a barre: numero di server dei VPN più diffusi",
         "q_review": "{brand} recensione", "q_comparison": "{brand} confronto",
         "q_howto": "come configurare {brand}", "q_market": "miglior VPN {country}",
+        "lbl_score": "Valutazione", "lbl_for": "Ideale per", "lbl_not_for": "Sconsigliato per",
+        "lbl_pros": "Vantaggi", "lbl_cons": "Svantaggi",
+        "lbl_steps": "Passo dopo passo", "lbl_faq": "Domande frequenti",
     },
 }
 DEFAULT_LANG = "en"
