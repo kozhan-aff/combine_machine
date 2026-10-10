@@ -50,3 +50,11 @@ def test_save_and_delete_are_confined_to_whitelist(gdir):
     assert guides.list_guides() == []
     with pytest.raises(ValueError):
         guides.delete_guide("../README.md")
+
+
+def test_readme_is_not_a_guide(gdir):
+    (gdir / "README.md").write_text("как раскладывать")
+    (gdir / "10-тон.md").write_text("правило")
+    r = guides.load_guides(None, None)
+    assert r["files"] == ["10-тон.md"] and "как раскладывать" not in r["text"]
+    assert [g["rel"] for g in guides.list_guides()] == ["10-тон.md"]

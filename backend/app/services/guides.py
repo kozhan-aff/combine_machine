@@ -34,7 +34,9 @@ def _files_in(sub: str) -> list[Path]:
     d = guides_dir() / sub if sub else guides_dir()
     if not d.is_dir():
         return []
-    return sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXT and not p.name.startswith("."))
+    # README папки — инструкция оператору, не правило: в промпт не попадает
+    return sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXT
+                  and not p.name.startswith(".") and not p.name.lower().startswith("readme"))
 
 
 def _rel(p: Path) -> str:
