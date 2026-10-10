@@ -96,6 +96,31 @@
     </li>
 
     <li>
+      <span class="st"><span class="led {{ 'led-ok' if research.rows else ('led-todo' if prov_done else 'led-off') }}"></span></span>
+      <div class="body"><div class="t">3½ · Досье конкурентов <small>M4 · SERP</small></div>
+        <div class="h">{% if research.rows %}Источников: {{ research.rows }}
+          ({% for k, n in research.kinds.items() %}{{ k }}: {{ n }}{{ ', ' if not loop.last }}{% endfor %}),
+          скриншотов: {{ research.screenshots }}, собрано {{ research.fetched_at.strftime('%d.%m %H:%M') if research.fetched_at }}{{ '' if research.fresh else ' — устарело, пересобрать' }}.
+          {% else %}досье не собрано: выдача по 4 запросам на языке рынка, до 5 живых страниц на запрос —
+          текст, заголовки, таблицы, FAQ, цифры, CSS-токены. Без досье генерация не идёт.{% endif %}</div>
+        {% if research_rows %}<details class="what"><summary>источники</summary><div class="what-body">
+          <table><thead><tr><th>тип</th><th>#</th><th>домен</th><th>слов</th><th>заголовков</th><th></th></tr></thead><tbody>
+          {% for r in research_rows %}<tr><td>{{ r.kind }}</td><td>{{ r.rank }}</td>
+            <td><a href="{{ r.url }}" rel="noopener" target="_blank">{{ r.domain }}</a></td><td>{{ r.words }}</td>
+            <td>{{ r.headings|length if r.headings else 0 }}</td><td>{{ '📷' if r.screenshot_path }}{{ r.note or '' }}</td></tr>{% endfor %}
+          </tbody></table></div></details>{% endif %}
+      </div>
+      <div class="act">
+        <form class="inline" method="post" action="/sites/{{ site.id }}/research">
+          {% if research.rows %}<input type="hidden" name="force" value="1">{% endif %}
+          <button class="btn-sm {{ '' if research.rows else 'btn-acc' }}" {{ 'disabled' if not prov_done }}
+                  title="собрать досье конкурентов по выдаче (A-Parser → SearXNG){{ '' if prov_done else ' — сначала провижн' }}">
+            {{ '⟳ пересобрать досье' if research.rows else '▶ Собрать досье' }}</button>
+        </form>
+      </div>
+    </li>
+
+    <li>
       <span class="st"><span class="led {{ 'led-ok' if has_pages else ('led-todo' if prov_done else 'led-off') }}"></span></span>
       <div class="body"><div class="t">4 · Генерация черновиков <small>M4 · LLM</small></div>
         <div class="h">{% if has_pages %}Создано страниц: {{ pages|length }}. Повторный запуск дозаполнит
