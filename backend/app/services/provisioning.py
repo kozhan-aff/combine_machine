@@ -24,18 +24,19 @@ def docroot_for(domain: str) -> str:
 def default_offer_id(db, domain) -> int | None:
     """Оффер по умолчанию для нового сайта — чтобы генерация не ждала ручной привязки (скрытый
     четвёртый гейт: стадия generate молча пропускала сайт без оффера). Правило простое и
-    предсказуемое: активный оффер с языком рынка домена (`Domain.market_lang`), иначе —
-    единственный активный оффер портфеля. Несколько кандидатов без совпадения языка — None:
-    выбор за оператором (карточка сайта), машина не гадает. Оператор вправе переназначить."""
+    предсказуемое: активный оффер с языком рынка домена (`Domain.market_lang`); язык рынка неизвестен —
+    единственный активный оффер портфеля. Иначе None: выбор за оператором (карточка сайта), машина не
+    гадает и не подставляет оффер чужого гео. Оператор вправе переназначить."""
     from sqlalchemy import select
     from app.models.offer import Offer
 
     offers = db.execute(select(Offer).where(Offer.active.is_(True)).order_by(Offer.id)).scalars().all()
     lang = (getattr(domain, "market_lang", None) or "").strip().lower()
     if lang:
+        # язык рынка известен: только оффер этого языка. Чужое гео не навязываем (один домен = одно
+        # гео/язык) — нет совпадения, значит выбирает оператор
         same = [o for o in offers if (o.language or "").strip().lower() == lang]
-        if same:
-            return same[0].id
+        return same[0].id if same else None
     return offers[0].id if len(offers) == 1 else None
 
 

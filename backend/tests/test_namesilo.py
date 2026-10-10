@@ -681,6 +681,10 @@ def test_poll_adopts_order_when_domain_turns_out_registered(monkeypatch, make):
     o = _order(oid)
     assert o.status == "caught" and "maybe_sent" not in o.result and out["errors"] == {}
     assert len(srv.n("registerDomain")) == sent      # поллинг ничего не отправляет
+    from app.models.site import Site
+    with db.SessionLocal() as s:                     # сверка «зарегистрирован» = куплен + карточка сайта
+        assert s.get(Domain, o.domain_id).status == "purchased"
+        assert s.query(Site).filter_by(domain_id=o.domain_id).count() == 1
 
 
 def test_poll_verified_not_registered_drops_confirmation_and_unlocks_cancel(monkeypatch, make):

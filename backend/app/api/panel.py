@@ -1097,28 +1097,40 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
 
 
 @router.post("/queue/{order_id}/buy")
-def queue_buy_action(order_id: int, bid_rub: float = Form(0)):
+def queue_buy_action(order_id: int, max_price: float = Form(...)):
     """Один клик вместо двух: confirm_order (денежный гейт — ЧЕЛОВЕК только что нажал) и сразу
     execute_confirmed_order. Гейт не ослаблен: confirmed_by_human ставит тот же confirm_order, а
     execute проверяет его тем же SQL-условием claim; просто между ними нет второй кнопки.
+
+    СУММА ВИДНА ЧЕЛОВЕКУ ДО СПИСАНИЯ: оператор задаёт потолок `max_price` (валюта регистратора, USD).
+    confirm_order замораживает котировку регистратора; выше потолка — НЕ отправляем, заказ остаётся
+    подтверждённым с видимой ценой (строка /queue), дальше решает человек («▶ отправить» или снять).
     Любой отказ confirm — заказ остаётся как был; отказ execute — обычный failed с причиной."""
     from app.services import acquisition
+    if not max_price or max_price <= 0:
+        return _back("/queue", err="укажи потолок цены (USD) — без него в один клик не покупаем")
     try:
-        r = acquisition.confirm_order(order_id, bid_rub or None)
+        r = acquisition.confirm_order(order_id)
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
+    cost, cur = r.get("bid_rub"), r.get("currency")
+    if cost is None:
+        return _back("/queue", err=f"заказ #{order_id} подтверждён, но цену регистратор не назвал — отправка "
+                                   "в один клик отменена; смотри строку заказа")
+    if float(cost) > max_price:
+        return _back("/queue", err=f"заказ #{order_id}: цена регистратора {float(cost):.2f} {cur or ''} выше потолка "
+                                   f"{max_price:.2f} — НЕ отправлен. Цена заморожена в заказе: отправь кнопкой "
+                                   "«▶ отправить», если согласен, или сними заявку")
     try:
         x = acquisition.execute_confirmed_order(order_id)
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"заказ #{order_id} подтверждён, но отправка упала: {e} — «↻ повторить»")
     if x.get("error"):
         return _back("/queue", err=f"заказ #{order_id} подтверждён, отправка: {x['error']}")
-    if x.get("status") == "failed":
-        return _back("/queue", err=f"заказ #{order_id}: {x.get('error') or 'провайдер отверг заказ'}")
-    bid, cur = r.get("bid_rub"), r.get("currency")
-    paid = f" ({bid:.2f} {cur})" if bid and cur else ""
+    paid = f" ({float(cost):.2f} {cur})" if cur else f" ({float(cost):.2f})"
     if x.get("status") == "caught":
-        return _back("/queue", msg=f"Домен куплен{paid}: заказ #{order_id} — purchased, карточка сайта создана. "
+        site = f" карточка сайта #{x['site_id']} создана" if x.get("site_id") else " карточку сайта создай кнопкой"
+        return _back("/queue", msg=f"Домен куплен{paid}: заказ #{order_id} — purchased,{site}. "
                                    "Дальше — Provision на карточке сайта (NS в Cloudflare запишем сами).")
     return _back("/queue", msg=f"Заказ #{order_id} подтверждён и отправлен{paid} — статус {x.get('status')}. "
                                "Итог проверь «↻ обновить статусы».")

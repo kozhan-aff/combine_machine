@@ -81,17 +81,19 @@ ssh box 'cd ~/vpn-portfolio && git pull && docker compose up -d --build'
 
 ### Бэкап и откат
 
-Сервис `backup` снимает `pg_dump` раз в сутки (и сразу при старте) в `./backups/portfolio-<UTC>.sql.gz`,
-хранит 14 последних. Перед любым обновлением с миграциями — ручной дамп (PowerShell, одинарные кавычки
-обязательны, иначе PowerShell подставит свои переменные):
+Сервис `backup` снимает `pg_dump -Fc` раз в сутки (и сразу при старте) в `./backups/portfolio-<UTC>.dump`,
+хранит 14 суток. Упавший дамп файла не оставляет (пишется во временный, затем переименовывается). Перед любым
+обновлением с миграциями — ручной дамп (PowerShell, из `D:\combine_machine`; вложенных кавычек в командах
+нет намеренно — PowerShell 5.1 их ломает):
 ```powershell
-docker compose run --rm backup sh -c 'pg_dump -h db -U portfolio portfolio | gzip > /backups/manual-before-update.sql.gz'
+docker compose run --rm backup pg_dump -h db -U portfolio -Fc -f /backups/manual-before-update.dump portfolio
 ```
 Восстановление из дампа (стоп backend/worker, чтобы никто не писал в БД):
 ```powershell
 docker compose stop backend worker
-docker compose run --rm backup sh -c 'psql -h db -U portfolio -d postgres -c "DROP DATABASE portfolio" -c "CREATE DATABASE portfolio"'
-docker compose run --rm backup sh -c 'gunzip -c /backups/manual-before-update.sql.gz | psql -h db -U portfolio portfolio'
+docker compose run --rm backup dropdb -h db -U portfolio portfolio
+docker compose run --rm backup createdb -h db -U portfolio portfolio
+docker compose run --rm backup pg_restore -h db -U portfolio -d portfolio /backups/manual-before-update.dump
 docker compose start backend worker
 ```
 Откат кода без миграций — `git revert` + `up -d --build`. Откат с миграциями — только восстановлением

@@ -122,12 +122,17 @@ def test_default_offer_prefers_market_language_then_single_active():
         d_xx = Domain(domain="b.com", source="list", status="purchased", market_lang="pl")
         s.add_all([d_es, d_xx])
         s.commit()
+        d_unknown = Domain(domain="c.com", source="list", status="purchased", market_lang=None)
+        s.add(d_unknown)
+        s.commit()
         assert provisioning.default_offer_id(s, d_es) is None            # офферов нет
         en = _offer("A", "en")
-        assert provisioning.default_offer_id(s, d_es) == en              # единственный активный
+        assert provisioning.default_offer_id(s, d_unknown) == en         # язык рынка неизвестен -> единственный активный
+        assert provisioning.default_offer_id(s, d_es) is None            # язык известен, совпадения нет — чужое гео не навязываем
         es = _offer("B", "ES")
         assert provisioning.default_offer_id(s, d_es) == es              # язык рынка, регистр не важен
-        assert provisioning.default_offer_id(s, d_xx) is None            # два кандидата, языка нет — оператор
+        assert provisioning.default_offer_id(s, d_unknown) is None       # два активных без языка — оператор
+        assert provisioning.default_offer_id(s, d_xx) is None            # pl: совпадения нет
         _offer("C", "pl", active=False)
         assert provisioning.default_offer_id(s, d_xx) is None            # выключенный не считается
 
@@ -221,12 +226,28 @@ def test_buy_route_confirms_and_executes_in_one_click(client, monkeypatch):
     update_settings(zone_channels={"com": "registrar"})
     did = _approved("one.com")
     oid = acquisition.create_order(did)
-    r = client.post(f"/queue/{oid}/buy", follow_redirects=False)
+    r = client.post(f"/queue/{oid}/buy", data={"max_price": "12"}, follow_redirects=False)
     assert r.status_code == 303 and fake.registered == ["one.com"]
     with db.SessionLocal() as s:
         o = s.get(AcquisitionOrder, oid)
         assert o.status == "caught" and o.confirmed_by_human is True
         assert s.get(Domain, did).status == "purchased"
+
+
+def test_buy_route_above_ceiling_confirms_but_does_not_send(client, monkeypatch):
+    fake = _Reg()                                                     # котировка 10 USD
+    monkeypatch.setattr(registrar, "get_registrar", lambda: fake)
+    update_settings(zone_channels={"com": "registrar"})
+    did = _approved("three.com")
+    oid = acquisition.create_order(did)
+    r = client.post(f"/queue/{oid}/buy", data={"max_price": "5"}, follow_redirects=False)
+    assert r.status_code == 303 and "выше потолка" in r.headers["location"] or fake.registered == []
+    assert fake.registered == []
+    with db.SessionLocal() as s:
+        o = s.get(AcquisitionOrder, oid)
+        assert o.status == "pending_confirm" and o.confirmed_by_human is True and float(o.cost) == 10.0
+    r = client.post(f"/queue/{oid}/buy", follow_redirects=False)        # без потолка — отказ формы, ничего не ушло
+    assert r.status_code in (303, 422) and fake.registered == []
 
 
 def test_buy_route_refusal_at_confirm_sends_nothing(client, monkeypatch):
@@ -236,7 +257,7 @@ def test_buy_route_refusal_at_confirm_sends_nothing(client, monkeypatch):
     did = _approved("two.com")
     oid = acquisition.create_order(did)
     monkeypatch.setattr(acquisition, "confirm_order", lambda *a, **k: (_ for _ in ()).throw(ValueError("нет")))
-    r = client.post(f"/queue/{oid}/buy", follow_redirects=False)
+    r = client.post(f"/queue/{oid}/buy", data={"max_price": "50"}, follow_redirects=False)
     assert r.status_code == 303 and fake.registered == []
     with db.SessionLocal() as s:
         assert s.get(AcquisitionOrder, oid).status == "pending_confirm"
