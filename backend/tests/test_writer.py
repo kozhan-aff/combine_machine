@@ -73,6 +73,16 @@ def _add_pages(site_id: int, status="published", **over) -> dict:
         return {p.url_path: p.id for p in rows}
 
 
+def _http_error(code: int, message: str = "") -> httpx.HTTPStatusError:
+    """Отказ шлюза, как его бросает httpx.raise_for_status: в тексте исключения — ссылка на MDN,
+    слова самого шлюза — только в теле ответа."""
+    req = httpx.Request("POST", "http://llm.example/v1/chat/completions")
+    resp = httpx.Response(code, json={"error": {"message": message}} if message else {}, request=req)
+    return httpx.HTTPStatusError(f"Client error '{code}' for url '{req.url}'\nFor more information check: "
+                                 f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{code}",
+                                 request=req, response=resp)
+
+
 def _llm(monkeypatch, *answers, default=VALID, during=None) -> list[dict]:
     """Подмена LlmClient.complete: ответы по очереди, дальше `default`; исключение в очереди — бросается.
     `during(n)` зовётся внутри вызова №n (с нуля) — «пока модель пишет». -> журнал вызовов."""
@@ -186,6 +196,52 @@ def test_client_failure_stops_the_batch_and_keeps_written_pages(monkeypatch):
     assert "не начато страниц: 1" in last["message"] and "/vs — писатель не ответил: ReadTimeout" in last["message"]
 
 
+def test_http_4xx_fails_one_page_and_the_batch_continues(monkeypatch):
+    """Отказ 4xx — про ЭТУ страницу (промпт длинен, 422): порядок scaffold() постоянный, и остановка
+    пачки на «/» навсегда закрыла бы «/vs» и «/setup»."""
+    site_id = _site()
+    calls = _llm(monkeypatch, _http_error(400, "prompt is too long: 250000 tokens"))
+    assert content.generate_site(site_id) == 2
+    assert len(calls) == 3                                          # отказ не повторяем, остальные пишем
+    assert [p.url_path for p in _pages(site_id)] == ["/vs", "/setup"]
+    last = jobs.last("generate")
+    assert last["status"] == "done_warn" and "написано 2 из 3" in last["message"]
+    assert "/ — модель отклонила запрос: HTTP 400: prompt is too long: 250000 tokens" in last["message"]
+    assert "mozilla" not in last["message"] and "модель недоступна" not in last["message"]
+
+
+@pytest.mark.parametrize("code", [503, 500, 429, 408])
+def test_http_5xx_and_throttling_stop_the_batch(monkeypatch, code):
+    site_id = _site()
+    calls = _llm(monkeypatch, VALID, _http_error(code, "upstream is down"))
+    assert content.generate_site(site_id) == 1 and len(calls) == 2
+    last = jobs.last("generate")
+    assert last["status"] == "done_warn" and "модель недоступна — прогон остановлен" in last["message"]
+    assert f"/vs — писатель не ответил: HTTP {code}: upstream is down" in last["message"]
+    assert "mozilla" not in last["message"]
+
+
+def test_batch_message_fits_registry_limit_by_trimming_reasons():
+    """Реестр режет message до 400 символов вслепую. Худший случай — все пометки и длинные причины —
+    обязан уложиться сам: под нож идут причины (каждая — с хвоста, с «…»), не счётчики."""
+    failed = [("/", "первая причина " + "а" * 600), ("/vs", "вторая причина " + "б" * 600),
+              ("/setup", "короткая причина")]
+    msg = content._batch_message(0, 3, down=True, not_started=2, hand_edited=3, truncated=True, failed=failed)
+    assert len(msg) <= 400
+    for part in ("написано 0 из 3", "не начато страниц: 2", "правлены вручную: 3", "правила письма обрезаны",
+                 "/ — первая причина ааа", "/vs — вторая причина ббб", "/setup — короткая причина"):
+        assert part in msg, part
+    assert msg.count("…") == 2                                      # короткая причина цела, место отдано длинным
+    assert len(msg) > 380                                           # и место не пропадает зря
+
+    one = content._batch_message(0, 1, down=False, not_started=0, hand_edited=0, truncated=False,
+                                 failed=[("/", "в" * 900)])
+    assert len(one) == 400 and one.endswith("…")
+    short = content._batch_message(2, 3, down=False, not_started=0, hand_edited=0, truncated=False,
+                                   failed=[("/", "причина")])
+    assert short == "написано 2 из 3; не написаны: / — причина"
+
+
 def test_reasons_survive_cancel(monkeypatch):
     site_id = _site()
     _llm(monkeypatch, "мусор", "мусор",                             # «/» провалена, на «/vs» жмут «стоп»
@@ -258,6 +314,14 @@ def test_write_doc_client_failure_is_not_retried(monkeypatch):
     with pytest.raises(content.WriterDown, match="шлюз упал"):
         content.write_doc(LlmClient(), system="SYS", prompt="PROMPT")
     assert len(calls) == 2
+
+
+def test_write_doc_4xx_is_a_page_failure_not_writer_down(monkeypatch):
+    (doc, err), calls = _write(monkeypatch, _http_error(422, "context length exceeded"))
+    assert doc is None and err == "модель отклонила запрос: HTTP 422: context length exceeded"
+    assert len(calls) == 1                                          # тот же запрос даст тот же отказ
+    (doc, err), _ = _write(monkeypatch, _http_error(404))           # шлюз без тела ошибки
+    assert err == "модель отклонила запрос: HTTP 404"
 
 
 def test_write_doc_puts_remarks_and_retry_note_above_the_brief(monkeypatch):

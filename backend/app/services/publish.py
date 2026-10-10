@@ -103,10 +103,13 @@ def publish_site(site_id: int) -> dict:
     failed. Непроверенная страница остаётся `edited` — повтор идемпотентен (write_file
     перезаписывает).
 
-    `published` ставится условно: только строке, которая всё ещё `edited` и несёт ТО ЖЕ тело, что
-    ушло в файл. Страницы читаются один раз и держатся всю выгрузку; если за это время писатель
-    переписал страницу (или редактор её поправил), отметка легла бы на текст, которого на сайте нет
-    и которого никто не читал, — такая страница уходит в `failed` с причиной.
+    Ворота держатся на свежем чтении, а не на снимке, сделанном при отборе: выгрузка идёт минуты, и
+    писатель или редактор коммитят всё это время. Перед записью КАЖДОГО файла строка перечитывается —
+    в файл идёт только тело, которое в этот момент `edited` (у соседей ради меню — `published`).
+    `published` ставится условным UPDATE: строке, которая всё ещё `edited` и несёт ТО ЖЕ тело, что
+    ушло в файл; иначе отметка легла бы на текст, которого на сайте нет и которого никто не читал, —
+    такая страница уходит в `failed` с причиной. Отметка коммитится сразу, вместе со статусом сайта и
+    домена: блокировка строки не держит редактор панели до конца выгрузки.
     """
     from sqlalchemy import select, update
     from app.config import settings
@@ -233,6 +236,15 @@ def publish_site(site_id: int) -> dict:
 
         # ── фаза 3: страницы ──────────────────────────────────────────────────────────────────
         for p, offer, lang in ready:
+            # Свежее чтение прямо перед рендером: страницу отобрали в начале, а с тех пор её могли
+            # переписать (-> draft, непрочитанный текст) или одобрить заново (edited, новое вычитанное
+            # тело — публикуем его). От настройки expire_on_commit это не зависит: читаем явно.
+            db.refresh(p)
+            if p.status != "edited":
+                failed[p.url_path] = ("страница изменилась до записи файла — в этом прогоне не выложена, "
+                                      "вычитай и опубликуй её ещё раз")
+                continue
+            body = p.body                        # ровно это тело уходит в файл — по нему и ставим отметку
             bid = build_id_of(render_html(p, offer, lang=lang, reserve_url=reserve_url, ctx=ctx))
             doc = render_html(p, offer, lang=lang, reserve_url=reserve_url, build_id=bid, ctx=ctx)
             try:
@@ -250,12 +262,23 @@ def publish_site(site_id: int) -> dict:
                     unverified[p.url_path] = why
                     continue
             # `published` — только после подтверждения панелью И (если включено) самим доменом,
-            # и только если строка всё ещё edited с тем телом, что ушло в файл (условный UPDATE: p прочитан
-            # до выгрузки, а писатель/редактор коммитят в своих сессиях).
+            # и только если строка всё ещё edited с тем телом, что ушло в файл (условный UPDATE: запись
+            # и проверка домена шли секунды, а писатель/редактор коммитят в своих сессиях).
             stamped = db.execute(
-                update(Page).where(Page.id == p.id, Page.status == "edited", Page.body == p.body)
+                update(Page).where(Page.id == p.id, Page.status == "edited", Page.body == body)
                 .values(status="published", published_at=now)
                 .execution_options(synchronize_session=False)).rowcount
+            if stamped == 1:
+                # Коммит сразу: на PostgreSQL UPDATE держит блокировку строки до конца транзакции, и
+                # сохранение этой страницы из панели висело бы всю оставшуюся выгрузку. Статус сайта и
+                # домена — тем же коммитом: опубликованная страница без опубликованного сайта не
+                # остаётся, что бы ни случилось со следующими.
+                if site.status != "monitoring":
+                    site.status = "published"
+                site.published_at = now
+                if dom.status == "purchased":    # S7-10: первая живая публикация -> домен live
+                    dom.status = "live"
+                db.commit()
             db.refresh(p)                        # дальше функция видит строку как в БД, а не как прочитали
             if stamped != 1:
                 failed[p.url_path] = ("страница изменилась во время публикации — на сайте записана прежняя "
@@ -270,6 +293,7 @@ def publish_site(site_id: int) -> dict:
             for q in live:
                 if q.id in run_ids:
                     continue
+                db.refresh(q)                    # свежее чтение перед рендером — как у страниц прогона
                 if q.status != "published":
                     # файл живой, но строку переписали (draft/edited): её нынешнее тело никто не
                     # публиковал — на сайт его не несём. Прежний файл остаётся со старым меню до
@@ -304,13 +328,7 @@ def publish_site(site_id: int) -> dict:
                 except Exception as e:  # noqa: BLE001 — не критично для страниц, но видно оператору
                     warnings.append(f"{rel} не записан: {type(e).__name__}: {e}"[:200])
 
-        if published:
-            if site.status != "monitoring":
-                site.status = "published"
-            site.published_at = now
-            if dom.status == "purchased":        # S7-10: первая живая публикация -> домен live
-                dom.status = "live"
-        db.commit()
+        db.commit()                              # статус сайта и домена уже записан вместе с отметками страниц
         if blocked is not None:
             raise blocked
         _indexnow_ping(domain, published, written_files, warnings)

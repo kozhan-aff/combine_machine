@@ -196,9 +196,10 @@ def writer_system(lang: str, country: str | None, guides_text: str | None) -> st
 
 
 class WriterDown(RuntimeError):
-    """Клиент модели не ответил: таймаут, HTTP-ошибка шлюза, LlmEmptyContent. Отдельно от «ответ мимо
-    схемы»: тот лечится повтором, а этот — нет (POST к модели ждёт до 10 минут), и следующие страницы
-    пачки упрутся в тот же шлюз. Текст исключения — причина словами для оператора."""
+    """Модель недоступна: таймаут, обрыв связи, 5xx/408/429 шлюза, LlmEmptyContent. Отдельно от «ответ
+    мимо схемы»: тот лечится повтором, а этот — нет (POST к модели ждёт до 10 минут), и следующие
+    страницы пачки упрутся в тот же шлюз. Текст исключения — причина словами для оператора.
+    Отказ 4xx сюда НЕ относится: это ответ шлюза про конкретный запрос — см. write_doc."""
 
 
 def write_doc(llm, *, system: str, prompt: str,
@@ -207,10 +208,13 @@ def write_doc(llm, *, system: str, prompt: str,
 
     Ответ, не прошедший схему (ограду и текст вокруг JSON снимает page_doc.parse), и пустой ответ
     повторяются ОДИН раз; после ошибки схемы — с её текстом. Исключение клиента не повторяется:
-    WriterDown, страница провалена сразу.
+    страница провалена сразу. Отказ 4xx (кроме 408/429) — провал ЭТОЙ страницы: `(None, причина)`,
+    слова шлюза — в причине (промпт длинен, 422…); остальное — WriterDown, модель недоступна.
     `issues` — замечания критика при переписывании. И они, и просьба о повторе стоят ВЫШЕ брифа:
     бриф кончается данными конкурентов и закрывающим напоминанием о них — после него нашего текста нет."""
+    import httpx
     from app.config import settings
+    from app.integrations.llm import _err_text
     model = settings.LLM_WRITER_MODEL or settings.LLM_MODEL
     head = ("## Замечания редактора, которые нужно устранить\n"
             + "\n".join(f"- {x}" for x in issues) + "\n\n") if issues else ""
@@ -219,7 +223,14 @@ def write_doc(llm, *, system: str, prompt: str,
         try:
             raw = llm.complete(system, head + retry + prompt, model=model)
         except Exception as e:  # noqa: BLE001 — любая осечка клиента = причина словами, не трейс в сводке
-            raise WriterDown(f"писатель не ответил: {type(e).__name__}: {e}"[:300]) from e
+            why = f"{type(e).__name__}: {e}"
+            if isinstance(e, httpx.HTTPStatusError):
+                # текст исключения httpx — URL и ссылка на MDN; что не так, шлюз пишет в теле ответа
+                code = e.response.status_code
+                why = f"HTTP {code}{_err_text(e.response)}"
+                if 400 <= code < 500 and code not in (408, 429):
+                    return None, f"модель отклонила запрос: {why}"
+            raise WriterDown(f"писатель не ответил: {why}"[:300]) from e
         if not (raw or "").strip():
             reason = "писатель вернул пустой ответ"
             continue
@@ -443,12 +454,16 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
 REWRITE_STATUSES = frozenset({"draft", "edited", "published"})
 
 
+MESSAGE_MAX = 400      # длина JobRun.message: jobs.report режет по ней вслепую, с хвоста
+
+
 def _batch_message(written: int, total: int, *, down: bool, not_started: int, hand_edited: int,
                    truncated: bool, failed: list) -> str | None:
-    """Итог прогона писателя одной строкой — или None, если сказать нечего. Реестр режет message до
-    400 символов: короткие счётчики идут первыми, одинаковые причины схлопываются в одну со списком
-    путей, оставшееся место причины делят поровну."""
-    notes = []
+    """Итог прогона писателя одной строкой — или None, если сказать нечего. Укладывается в MESSAGE_MAX
+    сам: одинаковые причины схлопнуты в одну со списком путей, а под нож идут только тексты причин
+    (хвост заменяет «…») — счётчики и пути остаются целыми. Место делится от коротких причин к
+    длинным: чего не взяла короткая, достаётся длинной."""
+    notes = [f"написано {written} из {total}"]
     if down:
         notes.append(f"модель недоступна — прогон остановлен, не начато страниц: {not_started}")
     if hand_edited:
@@ -458,11 +473,19 @@ def _batch_message(written: int, total: int, *, down: bool, not_started: int, ha
     by_reason: dict[str, list[str]] = {}
     for path, err in failed:
         by_reason.setdefault(err, []).append(path)
-    if by_reason:
-        cut = 240 // len(by_reason)
-        notes.append("не написаны: " + "; ".join(f"{', '.join(paths)} — {err[:cut]}"
-                                                 for err, paths in by_reason.items()))
-    return f"написано {written} из {total}; " + "; ".join(notes) if notes else None
+    if len(notes) == 1 and not by_reason:
+        return None
+    if not by_reason:
+        return "; ".join(notes)
+    heads = {err: ", ".join(paths) + " — " for err, paths in by_reason.items()}
+    lead = "; ".join(notes) + "; не написаны: "
+    room = MESSAGE_MAX - len(lead) - sum(map(len, heads.values())) - 2 * (len(heads) - 1)
+    shown = {}
+    for left, err in zip(range(len(heads), 0, -1), sorted(heads, key=len)):
+        take = min(len(err), max(room, 0) // left)
+        shown[err] = err if take == len(err) else err[:max(take - 1, 0)] + "…"
+        room -= take
+    return lead + "; ".join(heads[err] + shown[err] for err in heads)
 
 
 def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bool, overwrite_manual: bool,

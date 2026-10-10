@@ -62,6 +62,15 @@ def writes(monkeypatch):
     return log
 
 
+@pytest.fixture(params=[False, True], ids=["expire_off", "expire_on"])
+def session_mode(request):
+    """Ворота публикации не должны держаться на настройке сессии: при expire_on_commit=True объекты
+    после каждого commit перечитываются из БД, при False — остаются снимком момента чтения."""
+    db.SessionLocal.configure(expire_on_commit=request.param)
+    yield request.param
+    db.SessionLocal.configure(expire_on_commit=False)
+
+
 def _serp_empty(monkeypatch):
     payload = {"results": [{"url": "https://other.example/"}], "unresponsive_engines": []}
     monkeypatch.setattr("app.integrations.searxng.SearxngClient.search_full",
@@ -109,6 +118,103 @@ def test_unchanged_page_is_published_as_before(writes):
     assert out["status"] == "published" and out["pages"] == ["/"] and out["failed"] == {}
     assert _page(ids["/"]).status == "published" and _page(ids["/"]).published_at is not None
     assert _page(ids["/vs"]).status == "draft"
+
+
+# --- ворота: в write_file уходит только вычитанное тело, при любой настройке сессии ---
+
+def test_page_rewritten_before_its_file_is_written_never_reaches_the_site(writes, session_mode):
+    ids = _site([("/", "edited", None), ("/vs", "edited", None)])
+    done = []
+
+    def rewrite_vs_early(path):                                     # первый же ассет: до файлов страниц
+        if not done:
+            done.append(_rewrite(ids["/vs"]))
+    writes.hook = rewrite_vs_early
+    out = publish.publish_site(ids["site"])
+    assert out["pages"] == ["/"] and out["status"] == "partial"
+    assert "изменилась" in out["failed"]["/vs"] and "/vs" not in out["written"]
+    assert not any("Model rewrite" in body for _, body in writes)   # непрочитанный текст не ушёл никуда
+    assert f"{ROOT}/vs/index.html" not in dict(writes)              # вычитанного тела у «/vs» уже нет — не пишем
+    vs = _page(ids["/vs"])
+    assert vs.status == "draft" and vs.published_at is None and vs.body == REWRITTEN.format(path="/vs")
+    assert _page(ids["/"]).status == "published"
+
+
+def test_published_neighbour_rewritten_during_upload_is_not_rerendered(writes, session_mode):
+    ids = _site([("/", "published", STAMP), ("/vs", "edited", None)])
+    # набор живых страниц уже выбран, идёт запись «/vs» — в этот момент писатель переписывает «/»
+    writes.hook = lambda path: path == f"{ROOT}/vs/index.html" and _rewrite(ids["/"])
+    out = publish.publish_site(ids["site"])
+    assert out["pages"] == ["/vs"]
+    assert not any("Model rewrite" in body for _, body in writes)
+    assert f"{ROOT}/index.html" not in dict(writes)                 # сосед уже draft — его файл не трогаем
+    assert "rw.com/</loc>" in dict(writes)[f"{ROOT}/sitemap.xml"]   # но адрес живой и из sitemap не уходит
+    assert _page(ids["/"]).status == "draft"
+
+
+def test_reapproved_page_publishes_its_new_approved_body(writes, session_mode):
+    """Обратная сторона ворот: тело, одобренное человеком уже после выбора страниц, — вычитанное.
+    Публикуется оно, а не снимок, который успели прочитать."""
+    ids = _site([("/", "edited", None), ("/vs", "edited", None)])
+    approved = "<p>Second approved text of the comparison page, read by a human.</p>"
+    done = []
+
+    def reapprove_vs_early(path):
+        if not done:
+            done.append(content.mark_edited(ids["/vs"], approved))
+    writes.hook = reapprove_vs_early
+    out = publish.publish_site(ids["site"])
+    assert sorted(out["pages"]) == ["/", "/vs"] and out["failed"] == {}
+    assert "Second approved text" in dict(writes)[f"{ROOT}/vs/index.html"]
+    assert _page(ids["/vs"]).status == "published" and _page(ids["/vs"]).body == approved
+
+
+def test_stamp_is_committed_at_once_with_site_and_domain_status(writes, monkeypatch):
+    """Отметка коммитится сразу (блокировка строки не висит всю выгрузку) и вместе со статусом сайта и
+    домена: что бы ни случилось со следующей страницей, опубликованная остаётся опубликованной, а сайт
+    с опубликованной страницей — опубликованным."""
+    ids = _site([("/", "edited", None), ("/vs", "edited", None)])
+    with db.SessionLocal() as s:
+        site = s.get(Site, ids["site"])
+        site.status = "content"
+        s.get(Domain, site.domain_id).status = "purchased"
+        s.commit()
+    real = content.render_html
+
+    def render(page, *a, **kw):
+        if page.url_path == "/vs":
+            raise RuntimeError("шаблон сломан")                      # не отказ записи, а авария посреди фазы 3
+        return real(page, *a, **kw)
+    monkeypatch.setattr(content, "render_html", render)
+    with pytest.raises(RuntimeError, match="шаблон сломан"):
+        publish.publish_site(ids["site"])
+    assert _page(ids["/"]).status == "published" and _page(ids["/"]).published_at is not None
+    assert _page(ids["/vs"]).status == "edited"
+    with db.SessionLocal() as s:
+        site = s.get(Site, ids["site"])
+        assert site.status == "published" and site.published_at is not None
+        assert s.get(Domain, site.domain_id).status == "live"
+
+
+def test_later_page_failure_keeps_per_page_outcome_and_site_status(writes):
+    ids = _site([("/", "edited", None), ("/vs", "edited", None), ("/setup", "edited", None)])
+    with db.SessionLocal() as s:
+        site = s.get(Site, ids["site"])
+        site.status = "content"
+        s.get(Domain, site.domain_id).status = "purchased"
+        s.commit()
+
+    def fail_vs(path):
+        if path == f"{ROOT}/vs/index.html":
+            raise RuntimeError("disk full")
+    writes.hook = fail_vs
+    out = publish.publish_site(ids["site"])
+    assert out["pages"] == ["/", "/setup"] and out["status"] == "partial" and "disk full" in out["failed"]["/vs"]
+    assert out["written"] == ["/", "/setup"] and out["unverified"] == {}
+    assert _page(ids["/vs"]).status == "edited" and _page(ids["/setup"]).status == "published"
+    with db.SessionLocal() as s:
+        site = s.get(Site, ids["site"])
+        assert site.status == "published" and s.get(Domain, site.domain_id).status == "live"
 
 
 # --- (3) живая, но переписанная страница остаётся в меню, sitemap и проверке индекса ---
