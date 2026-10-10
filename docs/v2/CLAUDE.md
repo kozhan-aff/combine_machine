@@ -337,6 +337,12 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 `LLM_MODEL` и `LLM_CLASSIFY_MODEL` = `ollama/qwen3.5:9b-q8_0`, `LLM_THINK=false`. После перезагрузки бокса Ollama должен
 стартовать сам (приложение в автозагрузке); если `/diag` снова покажет «Cannot connect … 11434» — запустить
 `ollama serve` или приложение Ollama. Сервис `backup` на боксе уже поднят оператором (первый дамп снят 2026-10-10 13:29 UTC).
+**Комбайн переведён на шлюз `:3033` (2026-10-10, после `claude login` оператора в контейнере):** `LLM_BASE_URL=
+http://192.168.1.77:3033`, `LLM_MODEL=sonnet` (контент), `LLM_CLASSIFY_MODEL=haiku` (W5, JSON чистый, ~3.5 с),
+`LLM_CLASSIFY_FALLBACK_MODEL=ollama/qwen3.5:9b-q8_0` (поле добавлено на `/settings/keys`). Шлюз сам падает по цепочке
+sonnet→mistral→ollama/qwen при протухшем OAuth CLI; у haiku цепочки нет — его подстраховывает запасная модель комбайна.
+Оговорка: `ollama/*` через шлюз идёт БЕЗ `think:false` (шлюз собирает тело сам) — запасной путь медленнее (~40 с),
+таймаут классификатора 60 с. Если OAuth снова протух: `docker exec -it claude-code claude login` на боксе.
 **На боксе есть второй LLM-шлюз `:3033`** (`claude-code-server` v10, OpenAI-совместимый: `/v1/models`, `/v1/chat/completions`;
 модели `sonnet`/`opus`/`haiku` через `claude --print` по подписке Max, `mistral*` и `ollama/*` через LiteLLM `:4000`, с цепочкой
 фолбэков sonnet→mistral→ollama). Проба 2026-10-10 с Mac: шлюз отвечает, но ВСЕ апстримы мертвы — `claude --print` падает
