@@ -96,6 +96,15 @@ def as_list(x) -> list:
     return x if isinstance(x, list) else [x]
 
 
+def _rows(x) -> list:
+    """checkRegisterAvailability (живой образец 2026-10-10, fixtures/namesilo_check_availability_live.json):
+    один домен — ``{"domain": {...строка...}}`` у available и ``{"domain": "name"}`` у unavailable/invalid,
+    несколько — список без обёртки. Снимаем обёртку одного элемента."""
+    if isinstance(x, dict) and isinstance(x.get("domain"), dict):
+        return [x["domain"]]
+    return as_list(x)
+
+
 def _f(v) -> float | None:
     try:
         return float(v)
@@ -249,7 +258,7 @@ class NameSiloClient:
         for i in range(0, len(names), BATCH):
             part = names[i:i + BATCH]
             reply = self._call("checkRegisterAvailability", {"domains": ",".join(part)})
-            for row in as_list(reply.get("available")):
+            for row in _rows(reply.get("available")):
                 if not isinstance(row, dict) or not row.get("domain"):
                     continue
                 out[str(row["domain"]).lower()] = {
@@ -257,7 +266,7 @@ class NameSiloClient:
                     "premium": 1 if str(row.get("premium", "0")) in ("1", "true", "True") else 0,
                     "duration": int(_f(row.get("duration")) or 0) or None}
             for key in ("unavailable", "invalid"):
-                for row in as_list(reply.get(key)):
+                for row in _rows(reply.get(key)):
                     d = row.get("domain") if isinstance(row, dict) else row
                     if d:
                         out.setdefault(str(d).lower(), {"status": key})
@@ -268,7 +277,8 @@ class NameSiloClient:
 
     def price(self, domain: str, auction: bool = False) -> Money:
         """Цена регистрации на 1 год в USD (свежая котировка checkRegisterAvailability). Отказ, если
-        домен не доступен, премиум (без флага оператора) или цена дана за другой срок.
+        домен не доступен или премиум (без флага оператора). ``duration`` в живом ответе = 10 у всех зон
+        (максимальный срок, не срок цены): price совпадает с getPrices.registration за год — по нему не судим.
         `auction=True` — домен с аукциона просроченных: котировка = текущая ставка."""
         d = domain.strip().lower()
         if auction:
@@ -283,8 +293,6 @@ class NameSiloClient:
                                 f"разрешить можно флагом NAMESILO_ALLOW_PREMIUM на экране ключей")
         if row["price"] is None or row["price"] <= 0:
             raise NameSiloError(f"{d}: в котировке нет цены")
-        if row["duration"] != 1:
-            raise NameSiloError(f"{d}: цена дана за {row['duration']} лет, а регистрируем на 1 год — не сверить")
         return Money(row["price"], CURRENCY)
 
     def renew_price(self, domain: str) -> Money:

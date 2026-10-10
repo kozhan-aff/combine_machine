@@ -1,0 +1,10 @@
+{
+  "_note": "ЖИВЫЕ образцы 2026-10-10, GET /apibatch/checkRegisterAvailability. Один элемент в available/unavailable/invalid приходит ОБЪЕКТОМ с ключом domain (у available — вложенный объект), несколько — списком без обёртки. duration=10 у ВСЕХ зон: это не срок цены (price == getPrices.registration за 1 год, renew — продление).",
+  "one_available": {"code": 300, "detail": "success", "available": {"domain": {"domain": "tunnelnotes.xyz", "price": 2.79, "renew": 17.29, "premium": 0, "duration": 10}}},
+  "many_available": {"code": 300, "detail": "success", "available": [{"domain": "tunnelnotes-q1.com", "price": 17.29, "renew": 17.29, "premium": 0, "duration": 10}, {"domain": "tunnelnotes-q1.co.uk", "price": 6.49, "renew": 6.49, "premium": 0, "duration": 10}]},
+  "one_unavailable": {"code": 300, "detail": "success", "unavailable": {"domain": "google.com"}},
+  "many_unavailable": {"code": 300, "detail": "success", "unavailable": ["google.com", "facebook.com"]},
+  "one_invalid": {"code": 300, "detail": "success", "invalid": {"domain": "tunnelnotes.zzzzzz"}},
+  "mix": {"code": 300, "detail": "success", "available": {"domain": {"domain": "tunnelnotes.xyz", "price": 2.79, "renew": 17.29, "premium": 0, "duration": 10}}, "unavailable": {"domain": "google.com"}, "invalid": {"domain": "tunnelnotes.zzzzzz"}},
+  "get_prices_xyz": {"registration": "2.79", "renew": "17.29", "transfer": "14.75"}
+}

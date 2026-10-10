@@ -222,13 +222,40 @@ def test_price_refuses_premium_without_operator_flag(make, monkeypatch):
     assert c2.price("good.com").amount == 2500
 
 
-def test_price_refuses_other_duration_and_unavailable(make):
+def test_price_refuses_unavailable_and_ignores_duration(make):
+    # duration=10 — у всех зон в живом ответе, это не срок цены (см. LIVE_AVAIL): цена принимается
     c, _ = make(checkRegisterAvailability=ok(available={"domain": "good.com", "price": 90, "premium": 0, "duration": 10}))
-    with pytest.raises(NameSiloError, match="10 лет"):
-        c.price("good.com")
+    assert c.price("good.com").amount == 90
     c2, _ = make(checkRegisterAvailability=ok(unavailable={"domain": "good.com"}))
     with pytest.raises(NameSiloError, match="недоступен"):
         c2.price("good.com")
+
+
+LIVE_AVAIL = json.loads((Path(__file__).parent / "fixtures" / "namesilo_check_availability_live.json").read_text())
+
+
+def _live(name):
+    return {"reply": LIVE_AVAIL[name]}
+
+
+def test_check_many_live_single_element_shapes(make):
+    """2026-10-10 на боксе: tunnelnotes.xyz был доступен, а гейт говорил «нет в ответе» — один домен
+    приходит объектом {"domain": {...}}, разбор брал строку целиком. Образцы — живые."""
+    c, _ = make(checkRegisterAvailability=_live("one_available"))
+    assert c.check_many(["tunnelnotes.xyz"]) == {
+        "tunnelnotes.xyz": {"status": "available", "price": 2.79, "premium": 0, "duration": 10}}
+    assert c.check_available("tunnelnotes.xyz") is True
+    assert c.price("tunnelnotes.xyz") == registrar.Money(2.79, "USD")
+    c, _ = make(checkRegisterAvailability=_live("mix"))
+    r = c.check_many(["tunnelnotes.xyz", "google.com", "tunnelnotes.zzzzzz"])
+    assert r["tunnelnotes.xyz"]["status"] == "available"
+    assert r["google.com"] == {"status": "unavailable"} and r["tunnelnotes.zzzzzz"] == {"status": "invalid"}
+    c, _ = make(checkRegisterAvailability=_live("many_unavailable"))
+    assert c.check_many(["google.com", "facebook.com"]) == {"google.com": {"status": "unavailable"},
+                                                            "facebook.com": {"status": "unavailable"}}
+    c, _ = make(checkRegisterAvailability=_live("many_available"))
+    r = c.check_many(["tunnelnotes-q1.com", "tunnelnotes-q1.co.uk"])
+    assert r["tunnelnotes-q1.co.uk"]["price"] == 6.49 and c.check_available("tunnelnotes-q1.com")
 
 
 # --- регистрация (ДЕНЬГИ) -----------------------------------------------------------------------
