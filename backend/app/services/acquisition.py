@@ -1371,6 +1371,43 @@ def list_orders() -> list[dict]:
     return out
 
 
+REGISTRAR_RU = {"namesilo": "NameSilo"}
+
+
+def registrar_quotes(orders: list[dict]) -> dict:
+    """Котировки фикс-цены для строк очереди: {домен: {"registrar", "amount", "currency"} | {"error"}}.
+
+    Только чтение (checkRegisterAvailability), денег не тратит. Спрашиваем лишь те строки, где человек
+    ещё решает: канал registrar, не аукцион, не подтверждена, не грязная. Среди регистраторов с ключом
+    берётся НИЗШАЯ цена.
+    # ponytail: регистратор с ключом один (NameSilo) — выбирать не из кого; появится второй клиент —
+    # вернуть его из списка ниже и запомнить выбранного в заказе (execute сегодня зовёт get_registrar())."""
+    from app.integrations.registrar import get_registrar
+    names = [o["domain"].lower() for o in orders
+             if o["provider"] == "registrar" and o.get("source") != AUCTION_SOURCE and not o.get("dirty")
+             and o["status"] in ("pending_confirm", "failed") and not o["confirmed"]]
+    out: dict = {}
+    if not names:
+        return out
+    for r in (x for x in (get_registrar(),) if x.configured):
+        try:
+            rows = r.check_many(names)
+        except Exception as e:  # noqa: BLE001 — котировка информационная: экран живёт и без неё
+            for d in names:
+                out.setdefault(d, {"error": _scrub_text(f"{type(e).__name__}: {e}")[:160]})
+            continue
+        for d in names:
+            row = rows.get(d) or {}
+            if row.get("status") != "available" or not row.get("price"):
+                out.setdefault(d, {"error": f"недоступен для регистрации ({row.get('status') or 'нет в ответе'})"})
+                continue
+            q = {"registrar": r.name, "amount": float(row["price"]), "currency": "USD",
+                 "premium": bool(row.get("premium"))}
+            if "amount" not in out.get(d, {}) or q["amount"] < out[d]["amount"]:
+                out[d] = q
+    return out
+
+
 def channel_status(orders: list[dict] | None = None, deadline: float = 10.0) -> dict:
     """Баланс/доступность каналов, кроме backorder (его грузит сам экран вместе с сеткой тарифов), для
     шапки /queue (S3-09, S3-04). Сеть — только у настроенного канала (ключ задан или по нему есть заказы),

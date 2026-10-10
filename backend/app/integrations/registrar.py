@@ -39,6 +39,9 @@ class Registrar(Protocol):
     configured: bool
 
     def check_available(self, domain: str) -> bool: ...
+    def check_many(self, domains: list[str]) -> dict:
+        """{домен: {"status": available|unavailable|invalid, "price", "premium"}} — одна котировка на пачку."""
+        ...
     def price(self, domain: str, auction: bool = False) -> Money:
         """Свежая котировка в ЯВНОЙ валюте. auction=True — лот аукциона: котировка = текущая ставка."""
         ...
@@ -69,7 +72,7 @@ class NotConfiguredRegistrar:
             "международный регистратор не настроен: провайдер выбирает оператор "
             "(пока домен покупается руками — «купил руками» на экране Домены)")
 
-    check_available = price = renew_price = bid = reconcile = register = set_nameservers = balance = _no
+    check_available = check_many = price = renew_price = bid = reconcile = register = set_nameservers = balance = _no
 
 
 def get_registrar() -> Registrar:

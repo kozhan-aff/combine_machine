@@ -17,7 +17,8 @@
     <tr>
       <td class="num hint">{{ o.id }}</td>
       <td class="dom">{{ o.brand }}</td>
-      <td>{{ o.promo_code or '—' }}</td>
+      <td>{{ o.promo_code or '—' }}
+        {% if o.promo_code %}<div class="hint" style="max-width:240px">{{ o.promo_terms or '⚠ условия не заданы — допиши в «изменить»' }}</div>{% endif %}</td>
       <td class="hint" style="max-width:340px; overflow:hidden; text-overflow:ellipsis">{{ o.affiliate_link }}</td>
       <td>{{ o.country or '—' }}</td>
       <td>{{ o.language or '—' }}</td>
@@ -31,6 +32,17 @@
           <button class="btn-sm btn-ok" title="снова разрешить машине использовать этот оффер в генерации и публикации">⏻ включить</button>
           {% endif %}
         </form>
+        <details>
+          <summary class="hint" title="поменять ссылку, промокод и его условия; бренд, гео и язык не меняются — под них уже написаны страницы">изменить</summary>
+          <form method="post" action="/offers/{{ o.id }}/update" style="display:flex; flex-direction:column; gap:6px; margin-top:6px">
+            <input name="affiliate_link" required value="{{ o.affiliate_link }}" title="партнёрская ссылка" style="width:300px">
+            <input name="promo_code" value="{{ o.promo_code or '' }}" placeholder="промокод (необязательно)" style="width:300px"
+                   oninput="this.form.promo_terms.required=!!this.value.trim(); this.form.promo_terms.hidden=!this.value.trim()">
+            <input name="promo_terms" value="{{ o.promo_terms or '' }}" placeholder="что даёт промокод: -65% на 2 года" style="width:300px"
+                   {{ 'required' if o.promo_code else 'hidden' }}>
+            <button class="btn-sm" title="сохранить; на сайтах изменится при следующей публикации">сохранить</button>
+          </form>
+        </details>
       </td>
     </tr>
   {% endfor %}
@@ -47,7 +59,8 @@
   <div class="plate">＋ Новый оффер — добавить бренд в машину <span class="mod">вход конвейера</span></div>
   <div class="what">Оффер = что рекламируем и куда ведём. <b>Бренд</b> задаёт тему всего контента сайта;
     <b>ссылка</b> встаёт в страницы как кнопка перехода (с <code>rel="sponsored nofollow"</code> и
-    обязательным disclosure); <b>промокод</b> печатается рядом со ссылкой; <b>гео/язык</b> помечают,
+    обязательным disclosure); <b>промокод</b> (необязателен) печатается рядом со ссылкой вместе с
+    <b>условиями</b> — что он даёт; по условиям же пишется текст, сам бонусов машина не выдумывает; <b>гео/язык</b> помечают,
     какому сайту оффер подходит — один домен = одно гео/один язык (чистый footprint).</div>
   <div class="go">
     <form method="post" action="/offers/create" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
@@ -55,8 +68,11 @@
         <input name="brand" required placeholder="NordVPN" style="width:160px"></label>
       <label class="f">партнёрская ссылка * <span class="note">куда ведут кнопки на страницах</span>
         <input name="affiliate_link" required placeholder="https://…/?aff=…" style="width:300px"></label>
-      <label class="f">промокод <span class="note">покажется читателю рядом со ссылкой</span>
-        <input name="promo_code" placeholder="SAVE65" style="width:110px"></label>
+      <label class="f">промокод <span class="note">необязательно; покажется рядом со ссылкой</span>
+        <input name="promo_code" placeholder="SAVE65" style="width:110px"
+               oninput="var t=this.form.promo_terms; t.required=!!this.value.trim(); t.closest('label').hidden=!this.value.trim()"></label>
+      <label class="f" hidden>условия промокода * <span class="note">что он даёт: по этому пишется текст и подпись у кнопки</span>
+        <input name="promo_terms" placeholder="-65% на 2 года + 3 месяца бесплатно" style="width:300px"></label>
       <label class="f">гео <span class="note">страна аудитории</span>
         <input name="country" placeholder="RU" maxlength="8" style="width:64px"></label>
       <label class="f">язык <span class="note">язык контента</span>

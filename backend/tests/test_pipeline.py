@@ -153,7 +153,7 @@ def _provisioned(site_id: int) -> None:
 def test_edit_gate_and_publish(client, monkeypatch):
     # offer (the machine's input); JSON API lives under /api
     offer_id = client.post("/api/offers", json={
-        "brand": "NordVPN", "affiliate_link": "https://ex.com/aff", "promo_code": "SAVE10"
+        "brand": "NordVPN", "affiliate_link": "https://ex.com/aff", "promo_code": "SAVE10", "promo_terms": "-10%"
     }).json()["id"]
 
     # domain -> HUMAN purchase -> site
@@ -297,7 +297,7 @@ def test_panel_screens_render(client, monkeypatch):
         _add(Domain(domain=f"screen-{st}.ru", source="backorder", status=st,
                     referring_domains=10 + i))
     offer_id = client.post("/api/offers", json={
-        "brand": "TestVPN", "affiliate_link": "https://ex.com/a", "promo_code": "T10"}).json()["id"]
+        "brand": "TestVPN", "affiliate_link": "https://ex.com/a", "promo_code": "T10", "promo_terms": "-10%"}).json()["id"]
     with db.SessionLocal() as s:
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.status == "purchased")).scalar_one()
@@ -351,7 +351,7 @@ def test_deactivated_offer_shows_badge_on_site_card(client, monkeypatch):
     _add(Domain(domain="offer-badge.ru", source="backorder", status="purchased",
                 referring_domains=10))
     offer_id = client.post("/api/offers", json={
-        "brand": "DeadVPN", "affiliate_link": "https://ex.com/dead", "promo_code": "X1"}).json()["id"]
+        "brand": "DeadVPN", "affiliate_link": "https://ex.com/dead", "promo_code": "X1", "promo_terms": "-10%"}).json()["id"]
     with db.SessionLocal() as s:
         from sqlalchemy import select
         did = s.execute(select(Domain.id).where(Domain.domain == "offer-badge.ru")).scalar_one()

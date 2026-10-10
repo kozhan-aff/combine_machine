@@ -261,3 +261,62 @@ def test_buy_route_refusal_at_confirm_sends_nothing(client, monkeypatch):
     assert r.status_code == 303 and fake.registered == []
     with db.SessionLocal() as s:
         assert s.get(AcquisitionOrder, oid).status == "pending_confirm"
+
+
+# --- очередь: провайдер и цена видны в строке; оффер: условия промокода -------------------------
+
+def test_queue_row_shows_registrar_name_and_fixed_price(client, monkeypatch):
+    """Фикс-цена и имя провайдера — в строке ДО клика; кнопка подписана суммой и шлёт её потолком."""
+    fake = _Reg()
+    fake.name, fake.check_many = "namesilo", lambda names: {n: {"status": "available", "price": 2.79, "premium": 0}
+                                                          for n in names}
+    monkeypatch.setattr(registrar, "get_registrar", lambda: fake)
+    update_settings(zone_channels={"com": "registrar"})
+    acquisition.create_order(_approved("one.com"))
+    html = client.get("/queue").text
+    assert "NameSilo" in html and "регистрация · фикс. цена" in html
+    assert "✓ купить за 2.79 USD" in html and 'name="max_price" value="2.79"' in html
+
+
+def test_queue_row_without_quote_keeps_manual_ceiling(client, monkeypatch):
+    fake = _Reg()
+    fake.name, fake.check_many = "namesilo", lambda names: {}
+    monkeypatch.setattr(registrar, "get_registrar", lambda: fake)
+    update_settings(zone_channels={"com": "registrar"})
+    acquisition.create_order(_approved("one.com"))
+    html = client.get("/queue").text
+    assert "недоступен для регистрации" in html and "✓ купить не дороже" in html
+
+
+def test_offer_promo_terms_required_only_with_promo(client):
+    from app.models.offer import Offer
+    base = {"brand": "Durev VPN", "affiliate_link": "https://ex.com/a"}
+    r = client.post("/offers/create", data={**base, "promo_code": "DUR"}, follow_redirects=False)
+    assert "err=" in r.headers["location"]
+    client.post("/offers/create", data={**base, "promo_code": "DUR", "promo_terms": "-50% на год"})
+    client.post("/offers/create", data={**base, "promo_terms": "без кода условия не нужны"})
+    with db.SessionLocal() as s:
+        rows = s.query(Offer).order_by(Offer.id).all()
+        assert [(o.promo_code, o.promo_terms) for o in rows] == [("DUR", "-50% на год"), (None, None)]
+        oid = rows[1].id
+    r = client.post(f"/offers/{oid}/update", data={**base, "promo_code": "NEW"}, follow_redirects=False)
+    assert "err=" in r.headers["location"]
+    client.post(f"/offers/{oid}/update", data={"affiliate_link": "https://ex.com/b", "promo_code": "NEW",
+                                               "promo_terms": "3 месяца бесплатно"})
+    with db.SessionLocal() as s:
+        o = s.get(Offer, oid)
+        assert (o.affiliate_link, o.promo_code, o.promo_terms) == ("https://ex.com/b", "NEW", "3 месяца бесплатно")
+
+
+def test_promo_terms_reach_prompt_and_page():
+    from types import SimpleNamespace as N
+    from app.services import content
+    p = content._page_prompt({"title": "Обзор", "kind": "review"}, "Durev VPN", None, None, "ru",
+                             ("DUR", "-50% на год"))
+    assert "DUR" in p and "-50% на год" in p and "ONLY bonus" in p
+    assert "Promo code" not in content._page_prompt({"title": "Обзор", "kind": "review"}, "Durev VPN", None,
+                                                    None, "ru", (None, None))
+    off = N(brand="Durev VPN", affiliate_link="https://ex.com/a", promo_code="DUR", promo_terms="-50% на год",
+            active=True)
+    doc = content.render_html(N(title="Обзор", body="<p>текст</p>"), off, lang="ru")
+    assert "<b>DUR</b> — -50% на год." in doc

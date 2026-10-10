@@ -34,6 +34,7 @@ class OfferIn(BaseModel):
     brand: str
     affiliate_link: str
     promo_code: str | None = None
+    promo_terms: str | None = None
     network: str | None = None
     country: str | None = None
     language: str | None = None
@@ -59,7 +60,12 @@ def create_offer(o: OfferIn, db: Session = Depends(get_session)):
     # предостерегает; закрываем и вход, а не только выход.
     if not is_safe_url(o.affiliate_link):
         raise HTTPException(400, "affiliate_link: разрешены только http/https")
-    offer = Offer(**o.model_dump())
+    from app.models.offer import promo_pair
+    try:
+        code, terms = promo_pair(o.promo_code, o.promo_terms)
+    except ValueError as e:
+        raise HTTPException(400, f"promo_terms: {e}")
+    offer = Offer(**{**o.model_dump(), "promo_code": code, "promo_terms": terms})
     db.add(offer)
     db.commit()
     db.refresh(offer)

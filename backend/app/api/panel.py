@@ -781,8 +781,13 @@ def queue_view(request: Request):
             balance = c.balance()
         except Exception as e:  # noqa: BLE001 — баланс информационный, подтверждать не мешает
             bo_err = (bo_err + " · " if bo_err else "") + f"баланс: {type(e).__name__}"[:80]
+    from app.integrations.registrar import get_registrar
+    reg = get_registrar()
     return templates.TemplateResponse(request, "queue.html", {
         "active": "queue", "orders": orders, "grids": grids,
+        # кто продаёт и почём — видно в строке ДО клика (фикс-цена регистратора; аукцион — ставка лота)
+        "quotes": acquisition.registrar_quotes(orders),
+        "reg_name": acquisition.REGISTRAR_RU.get(reg.name, reg.name) if reg.configured else None,
         "balance": balance, "bo_err": bo_err,
         "channels": acquisition.channel_status(orders),
         # Сколько машина ЖДЁТ, прежде чем счесть отправку оборвавшейся. Из константы, а не числом
@@ -1258,10 +1263,16 @@ def queue_cancel_action(order_id: int):
 
 @router.post("/offers/create")
 def offer_create_action(brand: str = Form(...), affiliate_link: str = Form(...),
-                        promo_code: str = Form(""), country: str = Form(""),
+                        promo_code: str = Form(""), promo_terms: str = Form(""),
+                        country: str = Form(""),
                         language: str = Form(""), db: Session = Depends(get_session)):
+    from app.models.offer import promo_pair
     if not brand.strip() or not affiliate_link.strip():
         return _back("/offers", err="бренд и партнёрская ссылка обязательны")
+    try:
+        code, terms = promo_pair(promo_code, promo_terms)
+    except ValueError as e:
+        return _back("/offers", err=str(e))
     # F28 (аудит 2026-07-14): affiliate_link уходит в href опубликованной страницы почти как есть
     # (content.render_html только html.escape() — экранирует спецсимволы, НЕ схему). Без этой
     # проверки "javascript:alert(1)" сохранялся бы как валидный оффер и исполнялся по клику на
@@ -1271,11 +1282,32 @@ def offer_create_action(brand: str = Form(...), affiliate_link: str = Form(...),
     if not is_safe_url(affiliate_link.strip()):
         return _back("/offers", err="партнёрская ссылка: разрешены только http/https")
     o = Offer(brand=brand.strip(), affiliate_link=affiliate_link.strip(),
-              promo_code=promo_code.strip() or None, country=country.strip() or None,
+              promo_code=code, promo_terms=terms, country=country.strip() or None,
               language=language.strip() or None)
     db.add(o)
     db.commit()
     return _back("/offers", msg=f"Оффер «{o.brand}» добавлен")
+
+
+@router.post("/offers/{offer_id}/update")
+def offer_update_action(offer_id: int, affiliate_link: str = Form(...), promo_code: str = Form(""),
+                        promo_terms: str = Form(""), db: Session = Depends(get_session)):
+    """Правка ссылки и промокода готового оффера. Бренд/гео/язык не меняем: под них уже написаны
+    страницы (offer_id — факт истории, F26). Новые значения встанут при следующей публикации."""
+    from app.models.offer import promo_pair
+    from app.services.content import is_safe_url
+    o = db.get(Offer, offer_id)
+    if o is None:
+        return _back("/offers", err=f"оффер #{offer_id} не найден")
+    if not is_safe_url(affiliate_link.strip()):
+        return _back("/offers", err="партнёрская ссылка: разрешены только http/https")
+    try:
+        o.promo_code, o.promo_terms = promo_pair(promo_code, promo_terms)
+    except ValueError as e:
+        return _back("/offers", err=str(e))
+    o.affiliate_link = affiliate_link.strip()
+    db.commit()
+    return _back("/offers", msg=f"Оффер «{o.brand}» обновлён — на сайтах изменится при следующей публикации")
 
 
 @router.post("/offers/{offer_id}/toggle")

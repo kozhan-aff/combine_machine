@@ -113,7 +113,8 @@ def _system_prompt(lang: str, country: str | None = None) -> str:
 
 
 def _page_prompt(spec: dict, brand: str, vertical_data: str | None,
-                 competitor: list[str] | None = None, lang: str = "en") -> str:
+                 competitor: list[str] | None = None, lang: str = "en",
+                 promo: tuple[str, str] | None = None) -> str:
     # блок фактов приходит на русском (vertical_data) — модель переводит его в язык вывода
     data = ("\n\nReal vertical data (use it as facts; it is written in Russian — translate it into "
             f"the output language, keep numbers and dates exact):\n{vertical_data}") if vertical_data else ""
@@ -122,8 +123,12 @@ def _page_prompt(spec: dict, brand: str, vertical_data: str | None,
         topics = "\n".join(f"- {h}" for h in competitor)
         comp = ("\n\nTopics covered by the top competitor (for completeness; do NOT copy the wording, "
                 f"pick what is relevant to this page):\n{topics}")
+    # условия промокода — единственный бонус, о котором можно писать: без них модель сочиняет скидки
+    deal = (f"\n\nPromo code for readers: {promo[0]}. What it gives (the ONLY bonus you may mention; "
+            f"translate into the output language, do not invent other discounts or terms): {promo[1]}"
+            ) if promo and promo[0] and promo[1] else ""
     return (f"Topic: {spec['title']} (type: {spec['kind']}). Brand: {brand}. Output language: "
-            f"{LANG_NAMES[norm_lang(lang)]}. Make a coherent draft with a heading structure.{data}{comp}")
+            f"{LANG_NAMES[norm_lang(lang)]}. Make a coherent draft with a heading structure.{data}{comp}{deal}")
 
 
 def _clean(body: str) -> str:
@@ -229,6 +234,7 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run) -> int:
                 f"сайт #{site_id}: оффер не привязан (или выключен) — сначала привяжи активный "
                 "оффер на карточке сайта: без него страницы получились бы про чужой бренд")
         brand, offer_id, niche = offer.brand, offer.id, site.niche
+        promo = (offer.promo_code, offer.promo_terms)
         dom = db.get(Domain, site.domain_id)
         lang = resolve_lang(lang, dom.market_lang if dom else None, offer.language)
         country = offer.country
@@ -255,7 +261,7 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run) -> int:
             raise jobs.Cancelled()           # уже записанные страницы остаются (коммит по странице)
         jobs.report(run, done=i, total=len(todo), current=spec["title"])
         body = _sanitize(_clean(llm.complete(_system_prompt(lang, country),
-                                             _page_prompt(spec, brand, vertical_data, competitor, lang))))
+                                             _page_prompt(spec, brand, vertical_data, competitor, lang, promo))))
         if not body.strip():
             continue  # empty LLM output (null/blocked): skip page, don't crash the batch
         # ФАЗА 2 — коммит КАЖДОЙ страницы сразу: осечка на 3-й не выбрасывает оплаченные токены
@@ -376,7 +382,11 @@ def render_html(page, offer=None, lang: str = "en", reserve_url: str | None = No
     disc = html.escape(t(lang, "disclosure"))
     offer_block = ""
     if link:
-        promo = (f" {html.escape(t(lang, 'promo'))}: <b>{html.escape(offer.promo_code)}</b>."
+        # условия рядом с кодом и кнопкой: читатель видит, ЧТО даёт промокод (SimpleNamespace в тестах и
+        # офферы до 0037 — без поля, отсюда getattr)
+        terms = getattr(offer, "promo_terms", None)
+        promo = (f" {html.escape(t(lang, 'promo'))}: <b>{html.escape(offer.promo_code)}</b>"
+                 f"{' — ' + html.escape(terms.rstrip('.')) if terms else ''}."
                  if offer.promo_code else "")
         cta = html.escape(t(lang, "cta", brand=offer.brand))
         # раскрытие — В блоке оффера, рядом со ссылкой, не только в подвале (S6-07)

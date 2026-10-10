@@ -15,6 +15,9 @@ class Offer(Base):
     brand: Mapped[str] = mapped_column(String(128))                 # e.g. NordVPN
     network: Mapped[str | None] = mapped_column(String(128))        # affiliate network/program
     promo_code: Mapped[str | None] = mapped_column(String(64))
+    # что даёт промокод («-65% на 2 года»): идёт в промпт писателя и в подпись у кнопки. Обязателен,
+    # если промокод задан (promo_pair) — иначе модель придумывает бонус сама.
+    promo_terms: Mapped[str | None] = mapped_column(Text)
     affiliate_link: Mapped[str] = mapped_column(Text)
     country: Mapped[str | None] = mapped_column(String(8))          # ISO geo, null = default/global
     language: Mapped[str | None] = mapped_column(String(8))         # ISO lang
@@ -22,6 +25,15 @@ class Offer(Base):
     payout_value: Mapped[str | None] = mapped_column(String(64))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
+
+
+def promo_pair(promo_code: str | None, promo_terms: str | None) -> tuple[str | None, str | None]:
+    """(промокод, условия) в каноническом виде. Промокод без условий — ValueError; условия без
+    промокода не хранятся: описывать нечего."""
+    code, terms = (promo_code or "").strip() or None, (promo_terms or "").strip() or None
+    if code and not terms:
+        raise ValueError("у промокода нет условий: напиши, что он даёт (бонус, на что действует, срок)")
+    return code, (terms if code else None)
 
 
 class SiteOffer(Base):
