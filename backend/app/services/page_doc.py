@@ -8,7 +8,7 @@ import html
 import json
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator, field_validator
 
 from app.services.locales import t
 
@@ -91,6 +91,15 @@ class Verdict(_Model):
     # оценка необязательна: число без методологии оценки — «число без опоры» по правилам оператора; живой
     # критик (2026-10-11) требовал убрать «6/10» с каждой страницы, а схема заставляла писателя его ставить
     score: float | None = Field(default=None, ge=1, le=10)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _score_or_none(cls, v):
+        """Оценка — необязательное украшение: негодное значение («нет», «8/10», 0, 99) не должно сжигать
+        единственный повтор писателя — оно просто не оценка."""
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        return v if 1 <= v <= 10 else None
     summary: str = Field(min_length=1)
     for_whom: str = Field(min_length=1)
     not_for_whom: str = Field(min_length=1)

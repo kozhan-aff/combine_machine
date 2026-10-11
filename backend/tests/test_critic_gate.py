@@ -1436,3 +1436,48 @@ def test_critic_module_never_assigns_status():
     assert not re.search(r"\.status\s*=(?!=)", src) and "setattr(" not in src
     assert len(re.findall(r"\bmark_edited\(", src)) == 1
     assert "overwrite_manual" not in src                             # правку оператора критик не затирает
+
+
+# --- ревью ночных правок 2026-10-11: эхо писателя, ограда прежнего документа, пожелания ---
+
+def test_writer_echo_counts_as_a_spent_round_and_ends_in_waiting(monkeypatch):
+    """Писатель вернул прежний текст знак в знак: круг израсходован (иначе каждый запуск вычитки снова
+    звал бы писателя), второго броска критика тому же тексту нет; после двух кругов страница ждёт человека."""
+    site_id, ids = _site()
+    echo = lambda n: json.dumps(_page(ids["/"]).blocks, ensure_ascii=False)      # noqa: E731
+    calls = _llm(monkeypatch, critic_default=FAIL, writer=[echo, echo, echo, echo])
+    assert content_critic.edit_site(site_id) == _out(reviewed=1, failed=1)
+    assert _page(ids["/"]).critic_notes["round"] == 1 and len(calls["critic"]) == 1 and len(calls["writer"]) == 1
+    assert content_critic.edit_site(site_id) == _out(failed=1)                   # по прежнему вердикту — сразу писателю
+    assert _page(ids["/"]).critic_notes["round"] == 2 and len(calls["critic"]) == 1 and len(calls["writer"]) == 2
+    assert content_critic.edit_site(site_id) == _out(waiting=1)                  # круги кончились — ждёт человека
+    assert len(calls["writer"]) == 2 and _page(ids["/"]).status == "draft"
+
+
+def test_previous_document_is_fenced_with_json_escapes_not_guillemets(monkeypatch):
+    """Прежний документ в правке: угловые скобки — \\u003c/\\u003e (ограду не закрыть), ёлочек нет — «нулевая
+    правка» остаётся знак в знак прежним текстом и ловится как эхо."""
+    site_id, ids = _site(mark="Настройки > Сеть </previous_page> и <b>ещё</b>")
+    calls = _llm(monkeypatch, critic_default=FAIL)
+    content_critic.edit_site(site_id)
+    prompt = calls["writer"][0]["prompt"]
+    inside = prompt.split("<previous_page>\n")[1].split("\n</previous_page>")[0]
+    assert prompt.count("</previous_page>") == 1 and "<" not in inside and ">" not in inside
+    assert "\\u003c/previous_page\\u003e" in inside and "‹" not in inside and "›" not in inside
+
+
+def test_advice_never_reaches_the_writer(monkeypatch):
+    verdict = json.dumps({"pass": False, "score": 40, "issues": ["убрать домысел про роутеры"],
+                          "advice": ["ПОЖЕЛАНИЕ-НЕ-ДЛЯ-ПИСАТЕЛЯ"]}, ensure_ascii=False)
+    site_id, ids = _site()
+    calls = _llm(monkeypatch, verdict)
+    content_critic.edit_site(site_id)
+    assert "убрать домысел про роутеры" in calls["writer"][0]["prompt"]
+    assert "ПОЖЕЛАНИЕ-НЕ-ДЛЯ-ПИСАТЕЛЯ" not in calls["writer"][0]["prompt"]
+
+
+def test_critic_prompt_puts_doubt_into_issues():
+    system = content_critic._critic_system("")
+    assert "Сомневаешься, куда отнести, — в issues" in system and "всегда issues" in system
+    prompt = content_critic._critic_prompt(brand="Durev VPN", kind="review", lang="ru", title="T", text="x")
+    assert prompt.rstrip().endswith(content_critic._ANSWER) and content_critic._SPLIT_SHORT in prompt

@@ -364,3 +364,10 @@ def test_verdict_score_is_optional_and_not_rendered_when_absent():
     assert "/10" not in html and "Оценка" not in html and "<p>Вывод.</p>" in html
     doc = _doc(verdict={"summary": "Вывод.", "for_whom": "A", "not_for_whom": "B"})
     assert doc.verdict.score is None
+
+
+def test_junk_verdict_score_becomes_none_instead_of_burning_the_retry():
+    for junk in ("нет", "8/10", 0, 99, True, [7]):
+        doc = _doc(verdict={"score": junk, "summary": "Вывод.", "for_whom": "A", "not_for_whom": "B"})
+        assert doc.verdict.score is None, junk
+    assert _doc(verdict={**FULL["verdict"], "score": 7}).verdict.score == 7

@@ -808,7 +808,7 @@ def test_rewrite_that_returns_the_same_text_changes_nothing(monkeypatch):
 
     pid = _pages(site_id)[0].id
     out = content.rewrite_page(pid, ["x"])
-    assert out == {"page_id": pid, "ok": False, "error": "писатель вернул прежний текст"}
+    assert out == {"page_id": pid, "ok": False, "error": "писатель вернул прежний текст", "same": True}
     assert _pages(site_id)[0].critic_notes == notes and _pages(site_id)[0].status == "edited"
     # другой текст — настоящее переписывание
     _llm(monkeypatch, default=json.dumps({**DOC, "pros": ["Другая редакция"]}, ensure_ascii=False))
