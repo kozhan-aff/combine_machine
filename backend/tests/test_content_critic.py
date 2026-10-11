@@ -392,11 +392,12 @@ def test_review_page_remarks_are_only_real_remarks(monkeypatch):
 
 
 def test_review_page_volume_counts_the_body_only(monkeypatch):
-    """Заголовок в объём не входит: тело в 1496 слов коротко, хотя с заголовком набралось бы 1500+."""
+    """Заголовок в объём не входит: тело в 599 слов коротко, хотя с заголовком набралось бы 600+."""
     _llm(monkeypatch)
-    body = f"<h2>Скорость</h2><p>{SENT * 115}</p>"                  # 1 + 13 × 115 = 1496 слов; над ним ещё 11
+    body = f"<h2>Скорость</h2><p>{SENT * 46}</p>"                   # 1 + 13 × 46 = 599 слов; над ним ещё 8
     pid = _seed_page(body=body, title="NordVPN: большой обзор сервиса для дома и работы")
-    assert content_critic.review_page(pid)["code"] == ["объём 1496 слов, нужно 1500–2200"]
+    assert content_critic.review_page(pid)["code"] == [
+        "объём 599 слов — мало для такой страницы: допустимо 600–3300 (ориентир 1500–2200)"]
 
 
 def test_review_page_copy_of_faq_answer_is_flagged(monkeypatch):

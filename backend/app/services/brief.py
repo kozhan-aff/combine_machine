@@ -14,7 +14,7 @@
 import re
 import string
 
-from app.services.page_doc import WORDS
+from app.services.page_doc import WORDS, WORDS_HARD
 from app.services.research_extract import NUM_RE, number_value
 
 MAX_CHARS = 24_000            # потолок брифа; сверх него режутся структуры конкурентов, затем факты
@@ -236,7 +236,9 @@ def _render(brief: dict, outlines: list, facts: list, *, brand: str, kind: str, 
         ("Факты бренда", [facts_of_brand or
                           "По бренду нет проверенных данных — не выдумывай характеристики (серверы, страны, "
                           "цены, протоколы): опирайся только на факты из источников этого брифа."]),
-        ("Объём", [f"От {WORDS[kind][0]} до {WORDS[kind][1]} слов по сумме текста страницы."]
+        ("Объём", [f"Ориентир — от {WORDS[kind][0]} до {WORDS[kind][1]} слов по сумме текста страницы. Это "
+                   "ориентир, а не цель: если проверенных фактов мало, пиши короче — добивать объём общими "
+                   f"словами нельзя. Короче {WORDS_HARD[kind][0]} слов страница не принимается."]
          if kind in WORDS else []),
         ("Как пользоваться данными конкурентов", usage),
     ]) + ([BOUNDARY] if data else [])       # граница — последняя строка перед открывающим тегом

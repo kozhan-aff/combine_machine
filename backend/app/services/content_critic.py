@@ -29,7 +29,7 @@ import nh3
 
 from app.services.brief import _KIND_RU, defang, norm_number
 from app.services.locales import LANG_NAMES, norm_lang, supported
-from app.services.page_doc import WORDS
+from app.services.page_doc import WORDS, WORDS_HARD
 from app.services.research_extract import NUM_RE
 
 # Раскрытие партнёрства добавляет render_html на КАЖДУЮ публикуемую страницу детерминированно
@@ -236,13 +236,17 @@ def _lang_issues(text: str, lang: str) -> list[str]:
 
 
 def _volume_issues(text: str, kind: str | None) -> list[str]:
-    """Число слов против границ типа страницы (`page_doc.WORDS`). Тип без границ или неизвестный путь
+    """Число слов против ЖЁСТКИХ границ типа страницы (`page_doc.WORDS_HARD`; `WORDS` — лишь ориентир
+    писателю: добивать объём правила оператора запрещают). Тип без границ или неизвестный путь
     (`kind is None`) — проверка пропускается: мерить не с чем."""
     if not isinstance(kind, str) or kind not in WORDS:
         return []
-    lo, hi = WORDS[kind]
+    lo, hi = WORDS_HARD[kind]
     n = len(_WORD_RE.findall(text))
-    return [] if lo <= n <= hi else [f"объём {n} слов, нужно {lo}–{hi}"]
+    if lo <= n <= hi:
+        return []
+    return [f"объём {n} слов — {'мало' if n < lo else 'много'} для такой страницы: допустимо {lo}–{hi} "
+            f"(ориентир {WORDS[kind][0]}–{WORDS[kind][1]})"]
 
 
 def _scaled(value: str, power: int) -> str:
