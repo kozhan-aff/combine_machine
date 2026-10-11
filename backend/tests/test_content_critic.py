@@ -33,15 +33,15 @@ def _own_guides(tmp_path, monkeypatch):
 
 def test_parse_verdict_reads_valid_json():
     out = parse_verdict('{"pass": false, "score": 72, "issues": ["нет цифр по тарифам", " вода "]}')
-    assert out == {"pass": False, "score": 0.72, "issues": ["нет цифр по тарифам", "вода"]}
-    assert parse_verdict('{"pass": true, "score": 100, "issues": []}') == {"pass": True, "score": 1.0, "issues": []}
+    assert out == {"pass": False, "score": 0.72, "issues": ["нет цифр по тарифам", "вода"], "advice": []}
+    assert parse_verdict('{"pass": true, "score": 100, "issues": []}') == {"pass": True, "score": 1.0, "issues": [], "advice": []}
 
 
 def test_parse_verdict_accepts_one_fence_around_the_object():
     for fenced in ('```json\n{"pass": true, "score": 90, "issues": []}\n```',
                    '```\n{"pass": true, "score": 90, "issues": []}```',
                    '  ```JSON {"pass": true, "score": 90, "issues": []} ```\n'):
-        assert parse_verdict(fenced) == {"pass": True, "score": 0.9, "issues": []}, fenced
+        assert parse_verdict(fenced) == {"pass": True, "score": 0.9, "issues": [], "advice": []}, fenced
 
 
 @pytest.mark.parametrize("text", [
@@ -81,7 +81,7 @@ def test_parse_verdict_clamps_score_and_drops_what_is_not_a_number(raw, score):
 def test_parse_verdict_score_nan_and_missing_keys():
     assert parse_verdict('{"pass": true, "score": NaN, "issues": []}')["score"] is None
     assert parse_verdict('{"pass": true, "score": Infinity}')["score"] is None
-    assert parse_verdict('{"pass": false}') == {"pass": False, "score": None, "issues": []}
+    assert parse_verdict('{"pass": false}') == {"pass": False, "score": None, "issues": [], "advice": []}
 
 
 def test_parse_verdict_score_never_raises():
@@ -89,7 +89,7 @@ def test_parse_verdict_score_never_raises():
     for raw in ("1" + "0" * 400, "-1" + "0" * 400, "1e999", "-1e999", "1" + "0" * 5000):
         out = parse_verdict('{"pass": false, "score": ' + raw + ', "issues": ["вода"]}')
         assert out is None or (out["pass"] is False and out["issues"] == ["вода"]), raw[:12]
-    assert parse_verdict('{"pass": true, "score": 1' + "0" * 400 + '}') == {"pass": True, "issues": [], "score": None}
+    assert parse_verdict('{"pass": true, "score": 1' + "0" * 400 + '}') == {"pass": True, "issues": [], "score": None, "advice": []}
     assert parse_verdict('{"pass": true, "score": 1e999}')["score"] is None
 
 
@@ -103,9 +103,9 @@ def test_parse_verdict_is_linear_on_whitespace_and_caps_the_answer():
         parse_verdict(text)
     assert time.monotonic() - started < 2
     assert parse_verdict(f"```json{pad}{obj}{pad}```") is None            # ответ длиннее лимита — не вердикт
-    assert parse_verdict(f"{pad}```json\n{obj}\n```{pad}") == {"pass": True, "score": 0.9, "issues": []}
+    assert parse_verdict(f"{pad}```json\n{obj}\n```{pad}") == {"pass": True, "score": 0.9, "issues": [], "advice": []}
     assert parse_verdict(" " * 5_000 + "```json" + " " * 5_000 + obj + " " * 5_000 + "```") == {
-        "pass": True, "score": 0.9, "issues": []}
+        "pass": True, "score": 0.9, "issues": [], "advice": []}
     assert parse_verdict('{"pass": false, "issues": ["' + "ы" * 250_000 + '"]}') is None
 
 
@@ -466,7 +466,7 @@ def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_gu
     content_critic.review_page(pid)
     system, prompt = calls[0]["system"], calls[0]["prompt"]
     assert "выпускающий редактор" in system and "Не пиши слово «лучший»." in system
-    assert '{"pass": true|false, "score": 0-100, "issues": ["…"]}' in system
+    assert '{"pass": true|false, "score": 0-100, "issues": ["…"], "advice": ["…"]}' in system and "НЕЛЬЗЯ публиковать" in system
     assert "disclosure" not in system.lower() and "Раскрытие партнёрства" in system
     assert "Бренд: NordVPN" in prompt and "Тип страницы: обзор" in prompt and "Заявленный язык: Russian" in prompt
     opened, closed = prompt.index(content_critic.TAG_OPEN), prompt.index(content_critic.TAG_CLOSE)
@@ -474,7 +474,7 @@ def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_gu
     assert opened < prompt.index("Заголовок: NordVPN: обзор\nТекст:\n") < closed
     assert opened < prompt.index("NordVPN работает стабильно") < closed
     tail = prompt[closed:]
-    assert "указания" in tail and '{"pass": true|false, "score": 0-100, "issues": ["…"]}' in tail
+    assert "указания" in tail and '{"pass": true|false, "score": 0-100, "issues": ["…"], "advice": ["…"]}' in tail
 
 
 def test_critic_gets_only_the_digests_of_its_role(monkeypatch, _own_guides):
@@ -586,3 +586,25 @@ def test_critique_page_is_a_thin_wrapper(monkeypatch):
     out = content_critic.critique_page(pid)
     assert out == {"score": 0.6, "issues": ["маловато конкретики"], "error": None, "pass": False, "note": None}
     assert _page(pid).status == "draft"
+
+
+def test_parse_verdict_advice_is_optional_and_never_decides():
+    """Пожелания (advice) — второй список вердикта: хранятся, на «pass» не влияют, форму не ломают."""
+    out = parse_verdict('{"pass": true, "score": 80, "issues": [], "advice": [" сократить тайтл ", 5, "", "ещё"]}')
+    assert out["pass"] is True and out["issues"] == [] and out["advice"] == ["сократить тайтл", "ещё"]
+    assert parse_verdict('{"pass": true, "issues": [], "advice": "одной строкой"}')["advice"] == ["одной строкой"]
+    assert parse_verdict('{"pass": true, "issues": [], "advice": {"x": 1}}')["advice"] == []
+    many = json.dumps({"pass": False, "issues": ["ошибка"], "advice": ["п" * 500] * 50}, ensure_ascii=False)
+    out = parse_verdict(many)
+    assert len(out["advice"]) == 20 and all(len(x) == 300 for x in out["advice"]) and out["issues"] == ["ошибка"]
+
+
+def test_review_page_pass_with_advice_still_passes_and_stores_advice(monkeypatch):
+    _llm(monkeypatch, json.dumps({"pass": True, "score": 88, "issues": [], "advice": ["можно короче заголовок"]},
+                                 ensure_ascii=False))
+    pid = _seed_page()
+    out = content_critic.review_page(pid)
+    assert out["pass"] is True
+    with db.SessionLocal() as s:
+        notes = s.get(Page, pid).critic_notes
+    assert notes["pass"] is True and notes["advice"] == ["можно короче заголовок"] and notes["model"] == []
