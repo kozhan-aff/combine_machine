@@ -86,49 +86,89 @@ SCREEN_STOP = STOP + [(re.compile(rx, re.I), what) for rx, what in (
     (r"\bфид(а|е|у|ом|ы)?\b", "фид"), (r"\bкап(а|у|ом|ы|ов)?\b", "кап"), (r"disclosure", "disclosure"),
     (r"footprint", "footprint"), (r"идемпотент", "идемпотентно"), (r"read-only", "read-only"),
     (r"\bsync\b", "sync"), (r"\bdrift\b", "drift"), (r"инбокс", "инбокс"))]
+# Аббревиатуры на экране — только в скобках после слов: «ссылающихся сайтов (RD)». С учётом регистра:
+# бейдж источника `emd` и «Domain Rating» — не они.
+SCREEN_STOP.append((re.compile(r"\b(RD|DR|EMD)\b"), "аббревиатура без скобок"))
+_BRACKETED = re.compile(r"\((RD|DR|EMD)\)")
+HINT_ATTRS = ("title", "placeholder", "onsubmit")       # подсказки и диалоги — такой же текст для человека
 
 
 class _Visible(HTMLParser):
-    """Текст, который видит человек: без тегов, атрибутов и содержимого script/style/code."""
+    """Текст, который видит человек: без тегов и без содержимого script/style/code. Вырезаются только
+    ЗАКРЫТЫЕ пары: незакрытый <code> не прячет от стража остаток страницы. Отдельно собираются тексты
+    подсказок и диалогов (HINT_ATTRS) — их человек читает так же, как подписи."""
     _SKIP = {"script", "style", "code"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self._depth, self.parts = 0, []
+        self.parts, self.hints = [], []
+        self._open, self._held = [], []      # открытые вырезаемые теги и текст внутри них — до закрытия
 
     def handle_starttag(self, tag, attrs):
+        self.hints += [v for k, v in attrs if k in HINT_ATTRS and v]
         if tag in self._SKIP:
-            self._depth += 1
+            self._open.append(tag)
 
     def handle_endtag(self, tag):
-        if tag in self._SKIP and self._depth:
-            self._depth -= 1
+        if tag in self._open:
+            while self._open.pop() != tag:
+                pass
+            if not self._open:
+                self._held.clear()
 
     def handle_data(self, data):
-        if not self._depth:
-            self.parts.append(data)
+        (self._held if self._open else self.parts).append(data)
+
+    def close(self):
+        super().close()
+        self.parts += self._held             # пара так и не закрылась — это видимый текст
+        self._held = []
 
 
-def visible_text(html: str) -> str:
+def _parsed(html: str) -> _Visible:
     p = _Visible()
     p.feed(html)
     p.close()
-    return re.sub(r"\s+", " ", " ".join(p.parts))
+    return p
+
+
+def visible_text(html: str) -> str:
+    return re.sub(r"\s+", " ", " ".join(_parsed(html).parts))
+
+
+def hint_texts(html: str) -> list[str]:
+    """Тексты подсказок, плейсхолдеров и диалогов подтверждения."""
+    return _parsed(html).hints
 
 
 def stop_hits(text: str, screen: bool = False) -> list[str]:
     """Найденные стоп-слова с куском текста вокруг — чтобы по сообщению теста было видно, где.
-    `screen` — текст целого экрана: к нему список строже (SCREEN_STOP)."""
+    `screen` — текст экрана: к нему список строже (SCREEN_STOP), аббревиатуры допустимы только в скобках."""
     out = []
+    if screen:
+        text = _BRACKETED.sub("", text)
     for rx, what in (SCREEN_STOP if screen else STOP):
         for m in rx.finditer(text):
             out.append(f"{what}: …{text[max(0, m.start() - 40):m.end() + 40]}…")
     return out
 
 
+def screen_hits(html: str) -> list[str]:
+    """Стоп-слова экрана: в видимом тексте и в подсказках, плейсхолдерах, диалогах подтверждения."""
+    out = stop_hits(visible_text(html), screen=True)
+    for text in hint_texts(html):
+        out += [f"[подсказка] {hit}" for hit in stop_hits(text, screen=True)]
+    return out
+
+
 # --- сид: каждое состояние экранов -------------------------------------------------------------
 
-NOW = datetime.now(timezone.utc)
+def _now() -> datetime:
+    """«Сейчас» берётся в момент теста, а не при импорте модуля: к концу долгого прогона «свежая»
+    отметка из импорта успела бы устареть (сердцебиение, срок подтверждения, снимок диагностики)."""
+    return datetime.now(timezone.utc)
+
+
 CHECKED = {"errors": [], "deep_checked": True, "history_evidence": [
     {"ts": "20190101000000", "url": "http://example.com/", "cats": []}]}
 REJECT_REASONS = ["low_rd", "feed_flag", "too_young", "rkn", "blacklist", "history_dirty", "low_score",
@@ -156,6 +196,7 @@ def _seed_diag(monkeypatch, **deploy_state) -> None:
     """Диагностика без сети: каждая настоящая роль сервиса — в каждом статусе, словами самой проверки
     (`_run_one` и `run_diagnostics` зовём настоящие, подменяем только сам поход в сеть)."""
     from app.services import deploy, diag_cache, diagnostics
+    NOW = _now()
 
     def down():
         raise RuntimeError("connection refused")
@@ -179,6 +220,7 @@ def _offline_screens(tmp_path, monkeypatch):
     сервисы) и своя папка правил письма (иначе экран читал бы настоящие файлы оператора)."""
     from app.config import settings
     from app.services import deploy, diag_cache, guides
+    NOW = _now()
     monkeypatch.setattr(diag_cache, "_checks", [])
     monkeypatch.setattr(diag_cache, "_checked_at", NOW)
     monkeypatch.setattr(deploy, "deploy_status", lambda: dict(DEPLOY_OK))
@@ -202,6 +244,7 @@ def seed_panel(monkeypatch) -> None:
     from app.services.scoring import FUNNEL_STAGES
     monkeypatch.setattr(registrar, "get_registrar", lambda: _Registrar())
     _seed_diag(monkeypatch)
+    NOW = _now()
     soon, past = NOW + timedelta(days=2), NOW - timedelta(days=30)
     clean = dict(wayback_checked=True, prior_flags={}, age_years=9.0, score_breakdown=CHECKED)
     with db.SessionLocal() as s:
@@ -404,6 +447,16 @@ def test_guard_is_not_blind():
     html = ('<p title="код: low_rd, статус scored">занят <code>AHREFS_API_KEY scored</code></p>'
             '<script>const M1 = "provision";</script><style>.b-approved{}</style>')
     assert visible_text(html).strip() == "занят"
+    # подсказка — тоже текст для человека: сырой статус в `title` страж видит
+    assert hint_texts(html) == ["код: low_rd, статус scored"] and screen_hits(html)
+    assert screen_hits('<input placeholder="кап за свип">') and screen_hits('<form onsubmit="return confirm(\'гейт\')">')
+    assert not screen_hits('<th title="Сколько сайтов ссылается на домен (RD).">ссылающихся сайтов</th>')
+    assert screen_hits('<th title="RD из Ahrefs">ссылки</th>') and screen_hits("<th>DR</th>") and screen_hits("<b>EMD</b>")
+    assert not screen_hits("<span>emd</span> Domain Rating by Ahrefs, из ключевых слов (EMD)")
+    # вырезаются только закрытые пары: незакрытый <code> не прячет остаток страницы
+    broken = "<p>до <code>AHREFS_API_KEY</code> после</p><p><code>ключ без закрытия</p><p>дальше гейт</p>"
+    assert "AHREFS_API_KEY" not in visible_text(broken) and "дальше гейт" in visible_text(broken)
+    assert screen_hits(broken)
 
 
 @pytest.mark.parametrize("url", SCREENS)
@@ -411,7 +464,7 @@ def test_screen_has_no_internal_words(client, monkeypatch, url):
     seed_panel(monkeypatch)
     r = client.get(url)
     assert r.status_code == 200
-    assert stop_hits(visible_text(r.text), screen=True) == []
+    assert screen_hits(r.text) == []
 
 
 @pytest.mark.parametrize("url", SCREENS)
@@ -419,7 +472,7 @@ def test_empty_screen_has_no_internal_words(client, url):
     """Пустая база — свои тексты («Сайтов пока нет», «Решать нечего»): их тоже читает человек."""
     r = client.get(url)
     assert r.status_code == 200
-    assert stop_hits(visible_text(r.text), screen=True) == []
+    assert screen_hits(r.text) == []
 
 
 def test_seed_really_fills_every_branch(client, monkeypatch):
@@ -472,7 +525,7 @@ def test_seed_fills_site_editor_and_system_screens(client, monkeypatch):
                      "Последняя проверка ничего не выяснила", "не проверялось", "в индексе", "не в индексе",
                      "Cloudflare в режиме strict", "▶ Проверить индексацию"),
         "/pages/1": ("💾 Сохранить", "✓ Одобрить", "🔍 Вычитать критиком", "← Назад к сайту",
-                     "«Сохранить» оставляет черновик, «Одобрить» отправляет на публикацию"),
+                     "«Сохранить» оставляет черновик, «Одобрить» делает страницу готовой к публикации"),
         "/pages/7": ("критик: прошла", "90/100"),
         "/pages/8": ("критик: прошла", "одобряет человек"),
         "/pages/9": ("критик: замечания", "40/100", "круг 1 из", "проверки кодом:", "редактор-модель:",
@@ -523,15 +576,115 @@ def test_diag_update_block_is_plain_in_every_state(client, monkeypatch, state, t
     r = client.get("/diag")
     assert r.status_code == 200
     text = visible_text(r.text)
-    assert stop_hits(text, screen=True) == []
+    assert screen_hits(r.text) == []
     assert ("⇩ Обновить программу" in text and "⚠ Обновить принудительно" in text) if token else "Кнопки выключены" in text
 
 
 def test_guides_screen_without_folder_is_plain(client, monkeypatch, tmp_path):
     from app.config import settings
     monkeypatch.setattr(settings, "CONTENT_GUIDES_DIR", str(tmp_path / "nowhere"))
-    text = visible_text(client.get("/guides").text)
-    assert "Папка правил не найдена" in text and stop_hits(text, screen=True) == []
+    html = client.get("/guides").text
+    assert "Папка правил не найдена" in visible_text(html) and screen_hits(html) == []
+
+
+class _Forms(HTMLParser):
+    """Формы экрана: адрес, текст диалога (`onsubmit`) и кнопки с их подсказками."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms, self._form, self._button = [], None, None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self._form = {"action": a.get("action", ""), "onsubmit": a.get("onsubmit") or "", "buttons": []}
+            self.forms.append(self._form)
+        elif tag == "button" and self._form is not None:
+            self._button = {"text": "", "title": a.get("title") or ""}
+            self._form["buttons"].append(self._button)
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._form = None
+        elif tag == "button":
+            self._button = None
+
+    def handle_data(self, data):
+        if self._button is not None:
+            self._button["text"] += data
+
+
+def test_money_dialogs_name_domain_amount_and_charge(client, monkeypatch):
+    """Последнее, что человек читает перед деньгами. У каждой денежной формы «Покупки» диалог называет
+    домен, говорит, откуда сумма (число из формы, цена с кнопки или «узнаем сейчас»), и когда спишутся
+    деньги: сразу — либо отдельной кнопкой «Отправить заказ», если форма только подтверждает."""
+    seed_panel(monkeypatch)
+    with db.SessionLocal() as s:
+        orders = {s.get(Domain, o.domain_id).domain: o.id for o in s.query(AcquisitionOrder).all()}
+    parser = _Forms()
+    parser.feed(client.get("/queue").text)
+
+    def form(domain, kind, button):
+        found = [(f, b) for f in parser.forms if f["action"] == f"/queue/{orders[domain]}/{kind}"
+                 for b in f["buttons"] if b["text"].strip().startswith(button)]
+        assert len(found) == 1, (domain, kind, button)
+        return found[0]
+
+    send = "нажмёшь «Отправить заказ»"
+    cases = [   # домен, действие, кнопка, откуда сумма, что сказано о списании
+        ("bo-p.ru", "confirm", "✓ Подтвердить ставку",                    # ставка backorder: сумма из списка
+         "this.bid_rub.options[this.bid_rub.selectedIndex].text", ("спишутся", send)),
+        ("auction-q.com", "confirm", "✓ Ставка до (USD)",                  # аукцион: потолок из поля
+         "this.bid_rub.value", ("спишется не больше этой суммы плюс год продления", send)),
+        ("quote-r.com", "buy", "✓ Купить за 2.79 USD",                     # один клик, цена известна
+         "за 2.79 USD", ("спишется с баланса сразу",)),
+        ("silent-s.com", "buy", "✓ Купить не дороже",                      # один клик, предел задаёт человек
+         "this.max_price.value", ("спишется с баланса сразу",)),
+        ("silent-s.com", "confirm", "✓ Зафиксировать цену",                # регистратор: только подтвердить
+         "сумму узнаем сейчас", ("спишутся", send)),
+        ("opt-t.ru", "confirm", "✓ Зафиксировать цену",                    # optimizator: только подтвердить
+         "сумму узнаем у провайдера сейчас", ("спишутся", send)),
+    ]
+    for domain, kind, button, amount, charge in cases:
+        f, _b = form(domain, kind, button)
+        text = f["onsubmit"]
+        assert text.startswith("return confirm(") and domain in text, (button, text)
+        low = text.lower()
+        assert amount.lower() in low, (button, text)
+        for words in charge:
+            assert words.lower() in low, (button, words, text)
+        if send in charge:                       # форма только подтверждает — «Купить» в диалоге было бы обещанием
+            assert "купить" not in low, (button, text)
+    # «Отправить заказ» и «Повторить» диалога не имеют (заказ уже подтверждён человеком): о списании
+    # говорит подсказка самой кнопки
+    f, b = form("sure-u.ru", "execute", "▶ Отправить заказ")
+    assert not f["onsubmit"] and "спишутся с баланса" in b["title"]
+    f, b = form("retry-w.ru", "execute", "↻ Повторить")
+    assert not f["onsubmit"] and "дважды не заплатим" in b["title"]
+    head = visible_text(client.get("/queue").text)
+    assert "Деньги тратятся только после твоего клика — «Купить», «Отправить заказ» или «Повторить»." in head
+
+
+def test_confirm_flash_calls_a_fixed_price_a_sum_not_a_bid(client, monkeypatch):
+    """Флеш после подтверждения. «Ставка» — только там, где её задал человек (тариф backorder, потолок
+    аукциона). Фиксированную цену optimizator и обычной регистрации ставкой не зовём и года продления ей
+    не приписываем: ни торга, ни продления там нет."""
+    from app.services import acquisition
+    cases = [   # что прислала форма, что ответил сервис, что обязано быть во флеше, чего быть не должно
+        ({"bid_rub": "190"}, {"bid_rub": 190.0, "currency": "RUB"}, "подтверждён, ставка 190 ₽.", ()),
+        ({}, {"bid_rub": 590.0, "currency": "RUB"}, "подтверждён, сумма 590 ₽.", ("ставк",)),
+        ({"bid_rub": "20"}, {"bid_rub": 22.99, "currency": "USD"},
+         "подтверждён, к списанию до 22.99 USD (ставка + год продления).", ()),
+        ({}, {"bid_rub": 2.79, "currency": "USD"}, "подтверждён, к списанию не больше 2.79 USD.",
+         ("ставк", "продлен")),
+        ({}, {"bid_rub": None, "currency": None}, "Заказ #7 подтверждён. Теперь", ("ставк", "сумма", "списан")),
+    ]
+    for data, answer, must, never in cases:
+        monkeypatch.setattr(acquisition, "confirm_order", lambda order_id, bid=None, answer=answer: answer)
+        text = _flash(client.post("/queue/7/confirm", data=data, follow_redirects=False))
+        assert must in text and "Теперь нажми «Отправить заказ»." in text, text
+        for word in never:
+            assert word not in text, (word, text)
 
 
 def _flash(resp) -> str:
@@ -580,6 +733,11 @@ def test_flash_messages_of_work_screens_are_plain(client, monkeypatch):
     for text in seen:
         assert stop_hits(text) == [], text
     assert "found-a.com проверен: отклонён (мало ссылающихся сайтов), оценка 0.0" in seen[-1]
+    # у домена из ключевых слов оценки нет — флеш о ней молчит, а не пишет «оценка None»
+    monkeypatch.setattr(scoring, "score_domain", lambda domain_id: {"domain": "found-a.com", "status": "scored",
+                                                                    "score": None})
+    said = post(f"/domains/{ids['found-a.com']}/score")
+    assert said == "found-a.com проверен: ждёт решения" and "None" not in said
 
 
 def _said(resp) -> str:

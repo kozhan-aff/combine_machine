@@ -150,7 +150,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
            title="Открыть историю домена в Wayback." style="opacity:.6">⌛</a>
         <div class="hint">
           оценка <b>{{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</b> ·
-          <span title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг Ahrefs <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b></span> ·
+          <span title="Рейтинг домена по Ahrefs (DR) — Domain Rating by Ahrefs.">рейтинг Ahrefs <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b></span> ·
           <span title="Сколько сайтов ссылается на домен (RD).">ссылающихся сайтов <b>{{ d.referring_domains if d.referring_domains is not none else '—' }}</b></span> ·
           {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }}&nbsp;лет
           {% if d.market_lang %}· язык <b>{{ d.market_lang }}</b>{% endif %}

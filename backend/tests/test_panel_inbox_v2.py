@@ -194,7 +194,7 @@ def test_dr_is_attributed_to_ahrefs_in_inbox_and_pool(client):
     assert "рейтинг Ahrefs <b>33</b>" in client.get("/domains").text
     pool = client.get("/domains/pool").text
     assert '<td class="num">33</td>' in pool
-    assert 'title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг<br>Ahrefs</th>' in pool
+    assert 'title="Рейтинг домена по Ahrefs (DR) — Domain Rating by Ahrefs.">рейтинг<br>Ahrefs</th>' in pool
     assert ">Domain Rating by Ahrefs</a>" in pool
 
 
@@ -298,6 +298,6 @@ def test_inbox_row_wraps_and_dr_attribution_sits_above_the_table(client):
     inbox = html[html.index("Ждёт твоего решения"):html.index("Готовы к покупке")]
     assert inbox.count(">Domain Rating by Ahrefs</a>") == 1                 # одна подпись, не в каждой строке
     assert inbox.index(">Domain Rating by Ahrefs</a>") < inbox.index("<table>")   # и она над таблицей
-    assert ('<span title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг Ahrefs <b>33</b></span>'
+    assert ('<span title="Рейтинг домена по Ahrefs (DR) — Domain Rating by Ahrefs.">рейтинг Ahrefs <b>33</b></span>'
             in inbox)
     assert inbox.count('<td class="dom" style="white-space:normal">') == 2  # строки переносятся

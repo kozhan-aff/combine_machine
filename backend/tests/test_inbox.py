@@ -164,7 +164,7 @@ def test_expired_domain_is_marked_in_inbox_and_in_ready(client):
 
 
 def test_feed_deadline_keeps_drop_label(client):
-    """Обратная сторона: дедлайн из фида (backorder/cctld) остаётся «СРОК ДРОПА» —
+    """Обратная сторона: дата из фида (backorder/cctld) остаётся «ДАТА ДРОПА» —
     подпись не должна размыться до бессмысленной для ВСЕХ доменов."""
     soon = datetime.now(timezone.utc) + timedelta(days=5)
     _add(domain="fromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)
@@ -183,7 +183,7 @@ def test_expired_feed_deadline_still_shows_window_closed(client):
 
 
 def test_pool_keeps_plain_deadline_label_for_feed_date(client):
-    """Обратная сторона в пуле: подтверждённая дата из фида остаётся простым «дедлайн»,
+    """Обратная сторона в пуле: подтверждённая дата из фида остаётся простым «дроп»,
     без ложной пометки «прогноз»."""
     soon = datetime.now(timezone.utc) + timedelta(days=5)
     _add(domain="poolfromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)

@@ -539,7 +539,7 @@ def test_units_floor_skips_paid_wave_and_says_why(monkeypatch):
             d = s.get(Domain, did)
             assert d.status == "discovered" and d.acquirability_checked_at is None, units
     msg = jobs.last("score")["message"]
-    assert "Ahrefs: остаток units неизвестен — платные проверки пропущены" in msg, msg
+    assert "Ahrefs: остаток единиц неизвестен — платные проверки пропущены" in msg, msg
 
 
 def test_units_floor_message_and_zero_floor_means_no_floor(monkeypatch):
@@ -1535,7 +1535,7 @@ def test_daily_units_cap_paces_paid_waves_and_is_off_by_default(monkeypatch):
     ah.data["pace2.com"] = ROW
     scoring.score_pending(limit=10)
     assert ah.batches == []
-    assert "за сутки потрачено 30 000 units при суточном лимите 20 000" in jobs.last("score")["message"]
+    assert "за сутки потрачено 30 000 единиц при суточном лимите 20 000" in jobs.last("score")["message"]
     with db.SessionLocal() as s:
         assert s.get(Domain, did2).status == "discovered"   # ждёт завтра, не отклонён
     # новые сутки: вчерашняя база не действует

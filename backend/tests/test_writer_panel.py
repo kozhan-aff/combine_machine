@@ -17,8 +17,8 @@ from app.models.site import Page, Site
 from app.services import autonomy, content, content_critic, jobs, page_doc
 
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
-CONFIRM = ("Переписать тексты сайта? Все страницы вернутся в черновики. На сайте останется прежняя версия, "
-           "пока не опубликуешь новую.")
+CONFIRM = ("Переписать тексты сайта? Страницы вернутся в черновики; те, что ты правил руками, без галочки не "
+           "трогаются. На сайте останется прежняя версия, пока не опубликуешь новую.")
 SENT = "Durev VPN работает стабильно, подключается быстро и помогает спокойно смотреть любимые сериалы в поездках. "
 
 
@@ -327,7 +327,7 @@ def test_card_shows_critic_verdict_per_page(client):
     assert ">2 замеч.</td>" in rows["/vs"] and "led-todo" in rows["/vs"]
     assert "мало конкретики про скорость; нет цены" in rows["/vs"] and "переписана по замечаниям: 1 из 2" in rows["/vs"]
     assert rows["/setup"] == '<td><span class="hint">—</span></td>'
-    assert "вычитано — уйдёт при публикации" in html
+    assert "вычитано (тобой или критиком) — уйдёт при публикации" in html      # вычитать может и критик
 
 
 def test_card_critic_cell_keeps_long_lists_in_the_tooltip(client):

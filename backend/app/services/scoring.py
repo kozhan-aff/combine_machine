@@ -1351,7 +1351,7 @@ def _units_below_floor(clients: dict, st: dict) -> str | None:
     except Exception:  # noqa: BLE001 — остаток не узнать: тратить вслепую нельзя
         left = None
     if left is None:
-        return "Ahrefs: остаток units неизвестен — платные проверки пропущены"
+        return "Ahrefs: остаток единиц неизвестен — платные проверки пропущены"
     if left < floor:
         return (f"Ahrefs: остаток {left:,} ниже минимума {floor:,} — платные проверки пропущены"
                 .replace(",", " "))
@@ -1375,7 +1375,7 @@ def _units_daily_spent(clients: dict, st: dict) -> str | None:
     from app.services.settings import units_spent_today
     spent = units_spent_today(int(left))
     if spent >= cap:
-        return (f"Ahrefs: за сутки потрачено {spent:,} units при суточном лимите {cap:,} — платные "
+        return (f"Ahrefs: за сутки потрачено {spent:,} единиц при суточном лимите {cap:,} — платные "
                 f"проверки ждут завтра".replace(",", " "))
     return None
 

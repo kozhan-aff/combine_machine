@@ -1180,7 +1180,7 @@ def score_one_action(domain_id: int):
                           "домен остался в найденных",
                 "ahrefs_failed": "Ahrefs не ответил — домен остался в найденных, "
                                  "проверим в следующий раз",
-                "units_floor": "остаток units Ahrefs неизвестен или ниже минимума (см. Настройки) — "
+                "units_floor": "остаток единиц Ahrefs неизвестен или ниже минимума (см. Настройки) — "
                                "домен остался в найденных",
                 "ahrefs_missing": "Ahrefs не дал данных по домену — домен остался в найденных, "
                                   "проверим в следующий раз",
@@ -1191,8 +1191,9 @@ def score_one_action(domain_id: int):
         res = _status_ru(out.get("status"))
         if out.get("reject_reason"):
             res += f" ({_reject_ru(out['reject_reason'])})"
-        return _back("/domains", msg=f"{out.get('domain', domain_id)} проверен: {res}, "
-                                     f"оценка {out.get('score')}")
+        if out.get("score") is not None:          # у домена из ключевых слов оценки нет — не пишем «оценка None»
+            res += f", оценка {out['score']}"
+        return _back("/domains", msg=f"{out.get('domain', domain_id)} проверен: {res}")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"проверка домена #{domain_id}: {e}")
 
@@ -1257,12 +1258,18 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
     try:
         r = acquisition.confirm_order(order_id, bid_rub or None)
         bid, cur = r.get("bid_rub"), r.get("currency")
+        # «Ставка» — только там, где её задал человек в форме (тариф backorder, потолок аукциона).
+        # Фиксированная цена (optimizator, обычная регистрация) ставкой не зовётся: у неё нет ни
+        # торга, ни продления — флеш о деньгах обязан называть сумму тем, чем она является.
+        is_bid = bool(bid_rub)
         if not bid:
             tail = ""
         elif cur in (None, "RUB"):
-            tail = f", ставка {bid:.0f} ₽"
-        else:      # аукцион NameSilo: полное списание (потолок + продление) в валюте котировки
+            tail = f", ставка {bid:.0f} ₽" if is_bid else f", сумма {bid:.0f} ₽"
+        elif is_bid:   # аукцион NameSilo: полное списание (потолок + продление) в валюте котировки
             tail = f", к списанию до {bid:.2f} {cur} (ставка + год продления)"
+        else:
+            tail = f", к списанию не больше {bid:.2f} {cur}"
         return _back("/queue", msg=f"Заказ #{order_id} подтверждён{tail}. Теперь нажми «Отправить заказ».")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
