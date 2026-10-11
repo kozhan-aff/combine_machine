@@ -755,3 +755,10 @@ def test_unwritable_digest_folder_is_an_oserror_and_loses_nothing(gdir):
             call()
     assert (gdir / "a.md").read_bytes() == b"one"                   # удаление не прошло наполовину
     assert guides.save_guide("a.md", b"two") == "a.md" and (gdir / "a.md").read_bytes() == b"two"
+
+
+def test_digest_prompt_keeps_subject_neutral_rules_of_another_niche():
+    """Живой прогон 2026-10-11: сводный файл под iGaming модель вернула как skip «другая ниша»."""
+    system = guides._digest_system(guides.digest_cap(1))
+    assert "ДРУГОЙ ниши — это не причина его пропускать" in system
+    assert "НЕ skip, даже если он написан для другой ниши" in system
