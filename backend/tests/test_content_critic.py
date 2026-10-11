@@ -453,7 +453,7 @@ def test_review_page_uses_critic_model_and_timeout(monkeypatch):
     monkeypatch.setattr(settings, "LLM_CRITIC_MODEL", "critic-m")
     content_critic.review_page(pid)
     assert [c["model"] for c in calls] == ["base-m", "critic-m"]
-    assert all(c["timeout"] == 300 for c in calls)
+    assert all(c["timeout"] == content_critic._CRITIC_TIMEOUT == 600 for c in calls)
 
 
 def test_critic_prompt_has_checklist_guides_and_fenced_text(monkeypatch, _own_guides):

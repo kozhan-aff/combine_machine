@@ -301,6 +301,10 @@ def _hand_edited(page, seen_body: str | None, overwrite_manual: bool = False) ->
     return (bool(page.blocks_stale) and not overwrite_manual) or (page.body or "") != (seen_body or "")
 
 
+# Секунд на одну страницу у писателя. Живой замер 2026-10-11: длинный ответ через шлюз (headless Claude)
+# идёт ~50 знаков/с при большом задании — страница в 15 тыс. знаков JSON не укладывается в прежние 600.
+WRITER_TIMEOUT = 1200
+
 # Статусы сайта, в которых можно генерировать контент (инфраструктура уже поднята provision()).
 GENERATE_STATUSES = frozenset({"content", "published", "monitoring"})
 
@@ -554,7 +558,7 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
         elif rewrite and old.status in REWRITE_STATUSES:
             todo.append((spec, old))
 
-    llm = LlmClient(timeout=600)             # страница на 2000 слов через шлюз идёт минуты
+    llm = LlmClient(timeout=WRITER_TIMEOUT)  # страница на 2000 слов через шлюз идёт минуты
     written, failed, down, truncated, no_digest, i = 0, [], False, False, 0, 0
     jobs.report(run, done=0, total=len(todo))
     # try/finally: накопленные причины и счётчики обязаны дожить до карточки задачи и при отмене, и при
@@ -678,7 +682,7 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
     except ValueError as e:                  # папка правил не видна — отказ словами, круг не засчитан
         return out(str(e))
     try:
-        doc, err = write_doc(LlmClient(timeout=600), system=system, prompt=prompt, issues=issues)
+        doc, err = write_doc(LlmClient(timeout=WRITER_TIMEOUT), system=system, prompt=prompt, issues=issues)
     except WriterDown as e:
         # модель недоступна: зовущему (круги критика) незачем идти к следующей странице — там тот же таймаут
         return {**out(str(e)), "down": True}

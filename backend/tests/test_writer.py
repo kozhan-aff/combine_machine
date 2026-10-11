@@ -119,7 +119,7 @@ def test_generate_with_dossier_writes_blocks_and_rendered_body(monkeypatch):
         assert p.title == DOC["meta"]["title"]
         assert p.lang == "ru" and p.offer_id is not None
     assert jobs.last("generate")["status"] == "done"
-    assert all(c["timeout"] == 600 for c in calls)          # страница на 2000 слов идёт минуты
+    assert all(c["timeout"] == content.WRITER_TIMEOUT == 1200 for c in calls)   # страница на 2000 слов идёт минуты
     # бриф собран из досье: источники своего типа, факт с номером источника
     assert "https://review1.example/page" in calls[0]["prompt"] and "5.99" in calls[0]["prompt"]
     assert "https://comparison1.example/page" in calls[1]["prompt"]

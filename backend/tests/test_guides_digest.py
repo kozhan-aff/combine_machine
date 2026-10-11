@@ -74,7 +74,7 @@ def test_big_file_is_one_model_call_and_lands_in_index_and_on_disk(gdir, monkeyp
     calls = _llm(monkeypatch, "```json\n" + _answer("critic", "- не пиши воду\n- цифры только с источником",
                                                      "каталог ошибок") + "\n```")
     assert guides.build_digests() == {"built": 1, "skipped": 0, "failed": 0}
-    assert len(calls) == 1 and calls[0]["model"] == "writer-m" and calls[0]["timeout"] == 600
+    assert len(calls) == 1 and calls[0]["model"] == "writer-m" and calls[0]["timeout"] == guides.LLM_TIMEOUT == 1500
     assert "НИША-ДЛЯ-ТЕСТА" in calls[0]["system"] and "не длиннее 16000 символов" in calls[0]["system"]
     assert "<rules_file>" in calls[0]["prompt"] and "правило стиля" in calls[0]["prompt"]
     entry = _index(gdir)["20-стиль.md"]
