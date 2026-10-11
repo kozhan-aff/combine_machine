@@ -845,3 +845,29 @@ def test_vertical_block_skips_unknown_fields(monkeypatch):
     assert "- Серверы: 5500+ в 60 странах." in nord
     assert "- Цена от: $3.09/мес (2 года); возврат в течение 30 дней." in nord
     assert "- Протоколы: NordLynx (WireGuard), OpenVPN, IKEv2." in nord
+
+
+# --- круг переписывания — правка прежнего документа (живой прогон 2026-10-11) ---
+
+def test_rewrite_page_edits_the_previous_document_not_writes_anew(monkeypatch):
+    """Писатель получает свой прежний JSON и замечания: меняет указанное, остальное оставляет."""
+    site_id = _site()
+    calls = _llm(monkeypatch)
+    content.generate_site(site_id)
+    with db.SessionLocal() as s:
+        page = s.query(Page).filter_by(site_id=site_id, url_path="/").one()
+        pid, old_title = page.id, page.blocks["meta"]["title"]
+    calls.clear()
+    out = content.rewrite_page(pid, ["убери выдуманный абзац про роутеры"])
+    prompt = calls[0]["prompt"]
+    assert prompt.startswith("## Правка страницы по замечаниям редактора")
+    assert "- убери выдуманный абзац про роутеры" in prompt.split("### Предыдущая версия")[0]
+    inside = prompt.split("<previous_page>")[1].split("</previous_page>")[0]
+    assert old_title in inside and '"sections"' in inside            # прежний документ целиком, JSON
+    assert prompt.count("</previous_page>") == 1 and prompt.index("</previous_page>") < prompt.index("## Задача")
+    assert out["page_id"] == pid
+
+
+def test_writer_rules_forbid_derived_numbers_and_exclusivity():
+    system = content.writer_system("ru", "RU", "")
+    assert "Не вычисляй производные числа" in system and "Не достраивай за источник" in system

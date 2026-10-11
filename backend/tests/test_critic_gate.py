@@ -332,7 +332,9 @@ def test_remarks_for_the_writer_are_capped_and_defanged(monkeypatch):
     site_id, ids = _site()
     content_critic.edit_site(site_id)
     prompt = calls["writer"][0]["prompt"]
-    lines = [x for x in prompt.split("\n\n")[0].splitlines() if x.startswith("- замечание ")]
+    head = prompt.split("### Предыдущая версия")[0]              # круг — правка прежнего документа
+    assert head.startswith("## Правка страницы по замечаниям редактора") and "<previous_page>" in prompt
+    lines = [x for x in head.splitlines() if x.startswith("- замечание ")]
     assert len(lines) == 12 and lines[-1].startswith("- замечание 11:")
     assert all(len(x) <= 302 and "<" not in x and ">" not in x for x in lines)
 
