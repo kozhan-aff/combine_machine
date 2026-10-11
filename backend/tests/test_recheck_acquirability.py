@@ -345,7 +345,7 @@ def test_panel_recheck_runs_and_reports(client, monkeypatch):
 
 def test_panel_domains_shows_stale_counter(client, sqlite_db):
     _add(domain="never.ru", status="approved")
-    assert "не сверялись 3+ дня" in client.get("/domains").text
+    assert "не проверялись 3+ дня" in client.get("/domains").text
 
 
 @pytest.fixture(autouse=True)

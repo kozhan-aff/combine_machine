@@ -539,7 +539,7 @@ def test_units_floor_skips_paid_wave_and_says_why(monkeypatch):
             d = s.get(Domain, did)
             assert d.status == "discovered" and d.acquirability_checked_at is None, units
     msg = jobs.last("score")["message"]
-    assert "Ahrefs: остаток units неизвестен — платные волны пропущены" in msg, msg
+    assert "Ahrefs: остаток единиц неизвестен — платные проверки пропущены" in msg, msg
 
 
 def test_units_floor_message_and_zero_floor_means_no_floor(monkeypatch):
@@ -550,7 +550,7 @@ def test_units_floor_message_and_zero_floor_means_no_floor(monkeypatch):
     clients = _full_clients(FakeRdap(exists=True, registered=NOW - timedelta(days=4000)), ah, AgedWB())
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     scoring.score_pending(limit=10)
-    assert "Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены" in jobs.last("score")["message"]
+    assert "Ahrefs: остаток 100 000 ниже минимума 300 000 — платные проверки пропущены" in jobs.last("score")["message"]
     update_settings(units_floor=0)                     # 0 — пола нет: остаток даже не спрашиваем
     ah.units_calls = 0
     scoring.score_pending(limit=10)
@@ -578,7 +578,7 @@ def test_links_no_key_skips_paid_waves_but_domains_go_on(monkeypatch):
         assert d.status == "scored" and d.acquirability_checked_at is not None
         assert scoring.bulk_ok(d) is False                  # анкоры/ссылки не проверены -> пакет закрыт
     msg = jobs.last("score")["message"]
-    assert "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) пропущены" in msg, msg
+    assert "Ahrefs: ключ не задан — ссылки и спам-ссылки не проверяются" in msg, msg
 
 
 def test_score_pending_selects_non_emd_up_to_links_cap(monkeypatch):
@@ -616,7 +616,7 @@ def test_links_batch_error_reason_goes_to_job_message(monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", lambda: clients)
     scoring.score_pending(limit=10)
     msg = jobs.last("score")["message"]
-    assert "Ahrefs W4: HTTPStatusError 401 — 1 доменов ждут следующего прогона" in msg, msg
+    assert "Ahrefs (ссылки): HTTPStatusError 401 — 1 доменов ждут следующей проверки" in msg, msg
 
 
 def test_links_wave_cancel_between_batches():
@@ -634,8 +634,8 @@ def test_single_score_flash_names_paid_wave_reasons(client, monkeypatch):
     определена» — занятость тут ни при чём."""
     from urllib.parse import unquote
     did = _mk("flash.com")
-    for why, words in (("ahrefs_failed", "Ahrefs не ответил"), ("units_floor", "ниже пола"),
-                       ("ahrefs_missing", "не вернул данных"), ("ahrefs_no_key", "ключ Ahrefs")):
+    for why, words in (("ahrefs_failed", "Ahrefs не ответил"), ("units_floor", "ниже минимума"),
+                       ("ahrefs_missing", "не дал данных"), ("ahrefs_no_key", "ключ Ahrefs")):
         monkeypatch.setattr(scoring, "score_domain", lambda domain_id, why=why: {
             "domain": "flash.com", "status": "discovered", "unresolved": True, "why": why})
         loc = unquote(client.post(f"/domains/{did}/score", follow_redirects=False).headers["location"])
@@ -722,7 +722,7 @@ def test_no_key_gate_does_not_hold_domains_and_emd_still_gets_a_slot(monkeypatch
         assert s.get(Domain, emd).status != "discovered"            # EMD получил слот
         # без ключа гейт НЕ держит домены (S1-01): все 25 не-EMD оценены, а не ждут прогона
         assert all(s.get(Domain, i).status != "discovered" for i in ids)
-    assert "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) пропущены" \
+    assert "Ahrefs: ключ не задан — ссылки и спам-ссылки не проверяются" \
         in jobs.last("score")["message"]
 
 
@@ -733,7 +733,7 @@ def test_closed_gate_units_floor_still_gives_emd_a_slot_and_asks_units_once(monk
     scoring.score_pending(limit=20)
     _assert_held_and_emd_scored(ids, emd)
     assert ah.units_calls == 1 and ah.batches == [] and rdap.calls == 1
-    assert "Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены" in jobs.last("score")["message"]
+    assert "Ahrefs: остаток 100 000 ниже минимума 300 000 — платные проверки пропущены" in jobs.last("score")["message"]
 
 
 def test_open_gate_selection_unchanged_and_units_asked_once(monkeypatch):
@@ -1037,7 +1037,7 @@ def test_units_floor_skips_deep_and_says_why():
     s, ah, notes = _strong(_state("a.com")), FakeAh(anchors=CLEAN, units=100_000), []
     scoring._wave_deep([s], {"ahrefs": ah}, _st(), None, None, notes)
     assert ah.deep_calls == 0 and s.alive and s.sig["deep_checked"] is False
-    assert notes == ["Ahrefs: остаток 100 000 < пола 300 000 — платные волны пропущены"]
+    assert notes == ["Ahrefs: остаток 100 000 ниже минимума 300 000 — платные проверки пропущены"]
 
 
 def test_score_pending_takes_deep_cap_from_settings(monkeypatch):
@@ -1062,9 +1062,9 @@ def test_blind_reason_names_unchecked_anchors():
     оценённый до W6 (ключа нет), — тоже «не проверены». У EMD ссылок нет — проверять нечего."""
     base = dict(wayback_checked=True, prior_flags={}, age_years=9.0)
     d = Domain(domain="anchors.com", score=0.8, score_breakdown={"errors": [], "deep_checked": False}, **base)
-    assert "анкоры" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
+    assert "спам-ссылки НЕ проверены" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
     legacy = Domain(domain="v1.com", score=0.8, score_breakdown={"errors": []}, **base)
-    assert "анкоры" in scoring.blind_reason(legacy)
+    assert "спам-ссылки НЕ проверены" in scoring.blind_reason(legacy)
     emd = Domain(domain="emd.com", score_breakdown={"errors": [], "emd": True}, **base)
     assert scoring.blind_reason(emd) is None
 
@@ -1215,7 +1215,7 @@ def test_deep_floor_is_a_fresh_units_query_not_the_cached_gate(monkeypatch):
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.status == "scored" and d.score_breakdown["deep_checked"] is False
-    assert "остаток 100 000 < пола 300 000" in jobs.last("score")["message"]
+    assert "остаток 100 000 ниже минимума 300 000" in jobs.last("score")["message"]
 
 
 def test_trademark_domain_is_rehabilitated_after_brand_token_removed():
@@ -1295,7 +1295,7 @@ def test_e2e_null_refdomains_from_ahrefs_with_rd_in_db_stays_out_of_bulk():
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.score_breakdown["deep_checked"] is False
-        assert "анкоры" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
+        assert "спам-ссылки НЕ проверены" in scoring.blind_reason(d) and scoring.bulk_ok(d) is False
         assert panel._bulk_candidates(s, 0.0)[0] == []
 
 
@@ -1535,7 +1535,7 @@ def test_daily_units_cap_paces_paid_waves_and_is_off_by_default(monkeypatch):
     ah.data["pace2.com"] = ROW
     scoring.score_pending(limit=10)
     assert ah.batches == []
-    assert "за сутки потрачено 30 000 units >= суточного лимита 20 000" in jobs.last("score")["message"]
+    assert "за сутки потрачено 30 000 единиц при суточном лимите 20 000" in jobs.last("score")["message"]
     with db.SessionLocal() as s:
         assert s.get(Domain, did2).status == "discovered"   # ждёт завтра, не отклонён
     # новые сутки: вчерашняя база не действует

@@ -2,73 +2,71 @@
 {% block title %}Автопилот{% endblock %}
 {% block content %}
 <h2><span class="idx">✈</span> Автопилот
-  <span class="hint">комбайн двигает конвейер сам — до человеческих гейтов; деньги тратятся только после твоего подтверждения; тексты одобряешь ты или критик — если включишь</span></h2>
+  <span class="hint">машина ведёт дело сама — до мест, где решаешь ты: деньги тратятся только после твоего подтверждения; тексты одобряешь ты или критик — если включишь</span></h2>
 
 <div class="funnel" style="margin-bottom:6px">
   <div class="fgroup"><div class="fg-h">Ждёт тебя</div>
     <div class="fg-cells">
-      <a class="fcell {{ 'gate' if gates.curate }}" href="/domains" title="на курацию (гейт отбора): реши ✓ approve / ✗ reject">
-        <div class="v">{{ gates.curate }}</div><div class="k">на курацию</div></a>
-      <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="на подтверждение (денежный гейт, только ты): ждут выкупа">
-        <div class="v">{{ gates.money }}</div><div class="k">подтвердить</div></a>
-      <a class="fcell {{ 'gate' if gates.edit }}" href="/#sites" title="на редактуру (гейт редактуры): черновики, публикация возьмёт только edited">
-        <div class="v">{{ gates.edit }}</div><div class="k">на редактуру</div></a>
+      <a class="fcell {{ 'gate' if gates.curate }}" href="/domains" title="Проверенные домены ждут твоего решения: одобрить или отклонить.">
+        <div class="v">{{ gates.curate }}</div><div class="k">решить по доменам</div></a>
+      <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="Заказы ждут твоего подтверждения. Без него деньги не тратятся.">
+        <div class="v">{{ gates.money }}</div><div class="k">подтвердить покупку</div></a>
+      <a class="fcell {{ 'gate' if gates.edit }}" href="/#sites" title="Черновики ждут вычитки. Публикуются только одобренные страницы.">
+        <div class="v">{{ gates.edit }}</div><div class="k">вычитать тексты</div></a>
     </div></div>
 </div>
 
 <div id="machine"></div>
 <form method="post" action="/autopilot/run" style="margin:6px 0 18px">
-  <button class="btn-acc" title="прогнать включённые стадии один раз прямо сейчас (минует мастер-выключатель, уважает тумблеры стадий)">▶ Прогнать сейчас</button>
-  <span class="hint">разовый свип: пройдёт по включённым ниже стадиям до ближайшего гейта</span>
+  <button class="btn-acc" title="Пройти включённые стадии один раз прямо сейчас. Работает и при выключенном автопилоте.">▶ Запустить проход</button>
+  <span class="hint">один проход: по включённым ниже стадиям, до мест, где решаешь ты</span>
 </form>
 
 <form method="post" action="/autopilot/settings" style="max-width:820px; display:grid; gap:14px">
   <div class="station">
-    <div class="plate">Мастер-выключатель — <b>шедулер свипает автоматически</b></div>
-    <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Включено → воркер прогоняет включённые стадии по расписанию (throttle ниже).
-      Выключено → машина двигается только кнопкой «Прогнать сейчас». Разовый прогон мастер минует.</div></details>
+    <div class="plate">Главный выключатель — <b>автопилот работает по расписанию</b></div>
+    <div class="what hint" title="Проход идёт по стадиям, включённым ниже. Кнопка «Запустить проход» работает и при выключенном автопилоте.">Включён — машина сама запускает проходы по расписанию. Выключен — только кнопкой «Запустить проход».</div>
     <div class="go">
       <label><input type="checkbox" name="autopilot_on" {{ 'checked' if a.autopilot_on }}> автопилот включён</label>
-      <span class="hint" style="margin-left:16px">интервал между авто-свипами, мин:</span>
+      <span class="hint" style="margin-left:16px">пауза между проходами, мин:</span>
       <input type="number" name="sweep_interval_min" min="5" max="1440" value="{{ a.sweep_interval_min }}"
              style="width:90px; padding:2px 8px">
     </div>
     <div class="go" style="display:grid; gap:6px">
-      <label title="включится с планом В (дизайн) — до реализации взвести нельзя"><input type="checkbox" name="auto_design" {{ 'checked' if a.auto_design }} disabled> рисовать макет автоматом — <span class="hint">включится с планом В (дизайн)</span></label>
+      <label title="Пока не работает: включить можно будет, когда появится оформление сайтов."><input type="checkbox" name="auto_design" {{ 'checked' if a.auto_design }} disabled> рисовать макет автоматически — <span class="hint">появится позже</span></label>
       <input type="hidden" name="cap_design" value="{{ a.cap_design }}">
     </div>
   </div>
 
+  {# (ключ, имя стадии — как у кнопки и задачи на Пульте, что делает, коротко для плашки, лимит) #}
   {% set stages = [
-    ('discovery','Поиск дропов','собрать свежие домены из включённых источников','discovered', none),
-    ('score','Проверка','прогнать шесть волн скоринга; проверенные придут к тебе на решение (scored) — одобряешь ты','до гейта курации', a.cap_score),
-    ('queue','В очередь выкупа','поставить одобренные в очередь заказов','до денежного гейта', a.cap_queue),
-    ('provision','Провижн','поднять сайт: Cloudflare + aaPanel (идемпотентно)','provisioning → content', a.cap_provision),
-    ('research','Досье конкурентов','собрать выдачу и 5 страниц конкурентов на запрос: текст, структура, факты, CSS','content, без свежего досье', a.cap_research),
-    ('generate','Черновики','сгенерировать AI-черновики страниц','до гейта редактуры', a.cap_generate),
-    ('edit','Вычитка','критик читает новые тексты: сверяет с правилами письма и досье конкурентов, слабые переписывает (до двух раз). Прошедшие проверку одобряет сам, остальные ждут тебя. Публикуются по-прежнему только одобренные страницы — это правило зашито в коде','критик одобряет прошедшие проверку', none),
-    ('publish','Публикация','выложить страницы','только уже edited', a.cap_publish),
-    ('check_index','Индексация','проверить попадание в индекс (site:)','обновить статус', a.cap_check_index)
+    ('discovery','Найти домены','Собирает свежие домены из включённых источников.','свежие дропы из источников', none),
+    ('score','Проверить домены','Проверяет найденные домены. Прошедшие ждут твоего решения — одобряешь ты.','до твоего решения', a.cap_score),
+    ('queue','Поставить к покупке','Ставит одобренные домены на экран «Покупка». Покупку подтверждаешь ты.','до твоего подтверждения', a.cap_queue),
+    ('provision','Поднять сайт','Заводит купленный домен в Cloudflare и на сервере. Повторный запуск безопасен.','Cloudflare и сервер', a.cap_provision),
+    ('research','Изучить конкурентов','Находит в поиске страницы конкурентов и берёт оттуда темы, факты и цифры для текстов.','страницы конкурентов из поиска', a.cap_research),
+    ('generate','Написать тексты','Пишет черновики страниц. На сайт они не попадут, пока их не одобрят.','черновики страниц', a.cap_generate),
+    ('edit','Вычитка','Критик читает новые тексты, сверяет их с правилами письма и разбором конкурентов, слабые переписывает (до двух раз). Прошедшие проверку одобряет сам, остальные ждут тебя.','критик одобряет прошедшие проверку', none),
+    ('publish','Опубликовать','Выкладывает на сайт страницы, которые уже одобрены.','только одобренные страницы', a.cap_publish),
+    ('check_index','Проверить индексацию','Проверяет, появились ли опубликованные страницы в поиске.','страницы в поиске', a.cap_check_index)
   ] %}
   {% for key, name, what, gate, cap in stages %}
   <div class="station">
-    <div class="plate">Стадия · {{ name }} — <b>{{ gate }}</b></div>
-    <details class="what"><summary>зачем это</summary>
-      <div class="what-body">{{ what }}.</div></details>
+    <div class="plate">{{ name }} — <b>{{ gate }}</b></div>
+    <div class="what hint">{{ what }}</div>
     <div class="go">
       {% if key == 'edit' %}
-      {# у вычитки нет своего лимита (общий с черновиками), а тумблер — решение о гейте редактуры: подпись своя #}
-      <label title="включено — прошедшие проверку страницы критик одобряет без тебя; выключено — одобряешь только ты. Публикуются в любом случае только одобренные страницы: это правило зашито в коде"><input type="checkbox" name="auto_edit" {{ 'checked' if a.auto_edit }}> критик сам одобряет тексты</label>
-      <span class="hint" style="margin-left:16px">за один проход — не больше сайтов, чем у «Черновиков»</span>
+      {# у вычитки нет своего лимита (общий с текстами), а тумблер — решение о том, кто одобряет: подпись своя #}
+      <label title="Включено — прошедшие проверку страницы критик одобряет без тебя. Выключено — одобряешь только ты. Публикуются в любом случае только одобренные страницы."><input type="checkbox" name="auto_edit" {{ 'checked' if a.auto_edit }}> критик сам одобряет тексты</label>
+      <span class="hint" style="margin-left:16px">за один проход — не больше сайтов, чем у «Написать тексты»</span>
       {% else %}
       <label><input type="checkbox" name="auto_{{ key }}" {{ 'checked' if a['auto_' + key] }}> автоматом</label>
       {% if cap is not none %}
-      <span class="hint" style="margin-left:16px">кап за свип:</span>
+      <span class="hint" style="margin-left:16px">лимит за проход:</span>
       <input type="number" name="cap_{{ key }}" min="0" max="500" value="{{ cap }}"
              style="width:80px; padding:2px 8px">
       {% else %}
-      <span class="hint" style="margin-left:16px">капа нет — bulk-pull всего фида</span>
+      <span class="hint" style="margin-left:16px">лимита нет — берёт всё, что отдают источники</span>
       {% endif %}
       {% endif %}
     </div>
@@ -76,28 +74,26 @@
   {% endfor %}
 
   <div class="station">
-    <div class="plate">Применить — <b>записать конфиг автопилота</b></div>
-    <details class="what"><summary>зачем это</summary>
-      <div class="what-body">Тумблеры и капы применяются со следующего тика воркера (без рестарта).</div></details>
-    <div class="go"><button class="btn-acc" title="сохранить конфиг автопилота">Сохранить</button></div>
+    <div class="plate">Сохранить — <b>действует со следующего прохода</b></div>
+    <div class="go"><button class="btn-acc" title="Сохранить настройки автопилота.">Сохранить</button></div>
   </div>
 </form>
 
-<h2 style="margin-top:26px"><span class="idx">≡</span> Последние прогоны
-  <span class="hint">что машина сделала за свип; ошибки — если стадия споткнулась</span></h2>
+<h2 style="margin-top:26px"><span class="idx">≡</span> Последние проходы
+  <span class="hint">что машина сделала за проход; ошибки — если стадия споткнулась</span></h2>
 <div class="wrap">
 {% if runs %}
 <table>
-  <thead><tr><th>#</th><th>старт</th><th>триггер</th><th>статус</th><th>по стадиям</th><th>ошибки</th></tr></thead>
+  <thead><tr><th>#</th><th>старт</th><th>запуск</th><th>статус</th><th>по стадиям</th><th>ошибки</th></tr></thead>
   <tbody>
   {% for r in runs %}
     <tr>
       <td class="num hint">{{ r.id }}</td>
       <td class="num">{{ r.started_at.strftime('%d.%m %H:%M') if r.started_at else '' }}</td>
-      <td>{{ 'ручной' if r.trigger == 'manual' else 'по расписанию' }}</td>
+      <td>{{ 'вручную' if r.trigger == 'manual' else 'по расписанию' }}</td>
       <td><span class="badge b-{{ 'approved' if r.status == 'done' else 'rejected' if r.status == 'failed' else 'warn' if r.status == 'completed_with_errors' else 'discovered' }}"
-            title="{{ 'часть сущностей внутри стадий упала — свип не оборвался, но не идеален' if r.status == 'completed_with_errors' else '' }}">{{ 'с замечаниями' if r.status == 'completed_with_errors' else r.status }}</span></td>
-      {# «грязь пропущена: N» — не ошибка, а факт о базе: столько approved-доменов стадия очереди
+            title="{{ 'Часть шагов внутри стадий не удалась. Проход дошёл до конца, но сделано не всё.' if r.status == 'completed_with_errors' else '' }}">{{ {'done':'готово','failed':'ошибка','completed_with_errors':'с замечаниями','running':'идёт','cancelled':'остановлен'}.get(r.status, r.status) }}</span></td>
+      {# «грязные пропущены: N» — не ошибка, а факт о базе: столько одобренных доменов стадия покупки
          обошла (политика их к деньгам не пускает). Их место в счётчиках, а не в ошибках. #}
       <td class="hint">{% for k, v in (r.counts or {}).items() %}{{ count_ru.get(k, k) }}:{{ v }} {% endfor %}</td>
       <td class="hint">{{ (r.errors or [])|length }}{% if r.errors %} · {{ r.errors[0] }}{% endif %}</td>
@@ -106,7 +102,7 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty">ещё не было прогонов — нажми «▶ Прогнать сейчас» выше или включи мастер-выключатель.</div>
+<div class="empty">проходов ещё не было — нажми «▶ Запустить проход» выше или включи главный выключатель.</div>
 {% endif %}
 </div>
 

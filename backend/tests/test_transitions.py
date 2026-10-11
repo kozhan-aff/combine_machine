@@ -249,9 +249,9 @@ def test_ready_to_buy_shows_dirt_and_hides_buy_buttons(client):
     _add(domain="laundered.ru", status="approved", reject_reason="rkn", rkn_listed=True, score=0.9)
     html = client.get("/domains").text
     assert "реестр РКН" in html                          # причина названа по-русски
-    assert "выкуп запрещён" in html
-    # обе денежные кнопки для этой строки сняты (ни в очередь, ни «купил руками»)
-    assert "＋ в очередь выкупа" not in html and "🛒 купил руками" not in html
+    assert "покупать нельзя" in html
+    # обе денежные кнопки для этой строки сняты (ни «К покупке», ни «Уже купил сам»)
+    assert "＋ К покупке" not in html and "🛒 Уже купил сам" not in html
 
 
 def test_queue_shows_dirt_and_hides_confirm(client):
@@ -263,8 +263,8 @@ def test_queue_shows_dirt_and_hides_confirm(client):
                                confirmed_by_human=False))
         s.commit()
     html = client.get("/queue").text
-    assert "выкуп запрещён" in html and "реестр РКН" in html
-    assert "✓ подтвердить выкуп" not in html            # селектор ставки не предлагается
+    assert "покупать нельзя" in html and "реестр РКН" in html
+    assert "✓ Подтвердить ставку" not in html and "✓ Купить" not in html and 'name="bid_rub"' not in html   # селектор ставки не предлагается
 
 
 def test_pool_offers_rescore_instead_of_return_for_dirt(client):
@@ -272,13 +272,13 @@ def test_pool_offers_rescore_instead_of_return_for_dirt(client):
     у отклонённого ПОРОГОМ домена она остаётся."""
     _add(domain="rkn.ru", status="rejected", reject_reason="rkn", rkn_listed=True)
     dirty_html = client.get("/domains/pool?status=rejected").text
-    assert "грязь — не возвращается" in dirty_html
-    assert "↩ вернуть в approved" not in dirty_html
-    assert "▶ перепроверить" in dirty_html               # честный путь назад — через воронку
+    assert "грязный — не вернуть" in dirty_html
+    assert "↩ Вернуть в одобренные" not in dirty_html
+    assert "▶ Проверить</button>" in dirty_html                   # честный путь назад — через воронку
 
     _add(domain="weak.com", status="rejected", reject_reason="low_score", score=0.3)
     both_html = client.get("/domains/pool?status=rejected").text
-    assert "↩ вернуть в approved" in both_html           # порог — возвращается
+    assert "↩ Вернуть в одобренные" in both_html         # порог — возвращается
 
 
 def test_stage_queue_dirt_does_not_starve_the_cap():
@@ -321,7 +321,7 @@ def test_sweep_counts_report_skipped_dirt(client):
 
     out = orchestrator.run_sweep(trigger="manual")
     assert out["counts"]["queue"] == 1 and out["counts"]["queue_dirty"] == 1
-    assert client.get("/autopilot").text.count("грязь пропущена") >= 1   # по-русски, не queue_dirty
+    assert client.get("/autopilot").text.count("грязные пропущены") >= 1   # по-русски, не queue_dirty
 
 
 def test_bulk_approve_never_stamps_dirt(client):
@@ -359,15 +359,15 @@ def test_inbox_hides_approve_for_dirty_row(client):
     """
     _add(domain="scored-rkn.com", status="scored", score=0.95, rkn_listed=True, wayback_checked=True)
     html = client.get("/domains").text
-    assert "✓ одобрить" not in html
-    assert "выкуп запрещён — грязь" in html and "реестр РКН" in html
-    assert "▶ перепроверить" in html                      # честный путь назад на месте
+    assert "✓ Одобрить</button>" not in html
+    assert "покупать нельзя — грязный" in html and "реестр РКН" in html
+    assert "▶ Проверить</button>" in html                          # честный путь назад на месте
 
 
 def test_inbox_keeps_approve_for_clean_row(client):
     """ЧТО ЛОМАЕТСЯ у чистого домена: ничего — гейт курации остаётся кнопкой человека."""
     _add(domain="clean.com", status="scored", score=0.75, wayback_checked=True)
-    assert "✓ одобрить" in client.get("/domains").text
+    assert "✓ Одобрить</button>" in client.get("/domains").text
 
 
 # --- РЕГРЕССИЯ 5: КАССА (execute) не спрашивала про грязь -----------------------

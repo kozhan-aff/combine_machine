@@ -172,7 +172,7 @@ def test_diag_view_flags_critical_down(client, monkeypatch):
     html = client.get("/diag").text
     # сводку проверяем точной фразой (не «Крит где-то на странице» — метка есть и в строке
     # таблицы): crit_down = ровно [Крит], опциональный упавший Опц в критичные НЕ попал.
-    assert "критичные: Крит ✗" in html
+    assert "не работают обязательные: Крит ✗" in html
 
 
 def test_settings_preview_rd_null_passes(client):
@@ -231,7 +231,8 @@ def test_domains_localized_labels(client, sqlite_db):
     # локализацию от совпадения со старой прозой).
     assert 'b-approved">одобрен' in html and 'b-rejected">отклонён' in html
     assert '<span class="hint">ставка</span>' in html                    # лейн-ячейка по-русски
-    assert "нельзя купить <code>not_acquirable</code>" in html           # reject: фраза + код
+    # reject: на экране фраза, код — в подсказке (по нему ищут в логах)
+    assert 'title="причина отказа, код: not_acquirable">занят</span>' in html
     assert 'b-approved">approved' not in html                            # сырое значение НЕ в тексте бейджа
 
 

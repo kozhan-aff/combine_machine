@@ -1,4 +1,4 @@
-"""«Ключи и сервисы»: переопределения из БД поверх .env, экран /settings/keys, секреты не утекают."""
+"""«Ключи и доступы»: переопределения из БД поверх .env, экран /settings/keys, секреты не утекают."""
 import pathlib
 import threading
 import time
@@ -138,7 +138,7 @@ def test_source_labels(client, ak):
     html = client.get("/settings/keys").text
     assert "не задан" in html
     _post(client, v_LLM_MODEL="abc")
-    assert 'title="значение из БД, вписано в панели"' in client.get("/settings/keys").text
+    assert 'title="Значение вписано здесь, в панели."' in client.get("/settings/keys").text
 
 
 def test_page_links_present(client):

@@ -17,9 +17,10 @@ def test_funnel_stages_are_the_seven_v2_waves():
     keys = [s["key"] for s in scoring.FUNNEL_STAGES]
     assert keys == ["t0", "avail", "risk", "probe", "links", "history", "deep"]
     assert "echo" not in keys
-    # v2: риск — это Google Web Risk (РКН, Safe Browsing и эхо удалены)
+    # v2: риск — это Google Web Risk (РКН, Safe Browsing и эхо удалены); на чипе — простое слово,
+    # а не имя сервиса (проход по подписям)
     risk_stage = next(s for s in scoring.FUNNEL_STAGES if s["key"] == "risk")
-    assert "Web Risk" in risk_stage["label"]
+    assert risk_stage["label"] == "чёрные списки"
 
 
 def test_task10_job_card_shows_waterfall_for_running_score():

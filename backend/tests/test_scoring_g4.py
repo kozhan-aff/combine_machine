@@ -191,7 +191,7 @@ def test_no_key_domain_reaches_scored_without_rd_dr(monkeypatch):
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
         assert d.referring_domains is None and d.wayback_checked is True
-        assert scoring.bulk_ok(d) is False and "анкоры НЕ проверены" in scoring.blind_reason(d)
+        assert scoring.bulk_ok(d) is False and "спам-ссылки НЕ проверены" in scoring.blind_reason(d)
 
 
 def test_web_risk_unconfigured_is_a_visible_job_note():
@@ -323,4 +323,4 @@ def test_no_key_marks_paid_chips_skipped_and_waterfall(monkeypatch):
     last = jobs.last("score")
     states = {s["key"]: s.get("state") for s in last["stages"]}
     assert states["links"] == "skip" and states["deep"] == "skip" and states["history"] != "skip"
-    assert any("ссылки: пропуск (нет ключа Ahrefs)" in m for m in msgs)       # водопад живой задачи
+    assert any("ссылки: пропущено (нет ключа Ahrefs)" in m for m in msgs)       # водопад живой задачи

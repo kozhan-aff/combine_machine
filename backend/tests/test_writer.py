@@ -194,7 +194,7 @@ def test_client_failure_stops_the_batch_and_keeps_written_pages(monkeypatch):
     assert [p.url_path for p in _pages(site_id)] == ["/"]
     last = jobs.last("generate")
     assert last["status"] == "done_warn"
-    assert "написано 1 из 3" in last["message"] and "модель недоступна — прогон остановлен" in last["message"]
+    assert "написано 1 из 3" in last["message"] and "модель недоступна — запуск остановлен" in last["message"]
     assert "не начато страниц: 1" in last["message"] and "/vs — писатель не ответил: ReadTimeout" in last["message"]
 
 
@@ -218,7 +218,7 @@ def test_http_5xx_and_throttling_stop_the_batch(monkeypatch, code):
     calls = _llm(monkeypatch, VALID, _http_error(code, "upstream is down"))
     assert content.generate_site(site_id) == 1 and len(calls) == 2
     last = jobs.last("generate")
-    assert last["status"] == "done_warn" and "модель недоступна — прогон остановлен" in last["message"]
+    assert last["status"] == "done_warn" and "модель недоступна — запуск остановлен" in last["message"]
     assert f"/vs — писатель не ответил: HTTP {code}: upstream is down" in last["message"]
     assert "mozilla" not in last["message"]
 
@@ -265,10 +265,10 @@ def test_reasons_survive_insert_race(monkeypatch):
                 s.commit()
 
     _llm(monkeypatch, "мусор", "мусор", during=other_run_inserts_vs)
-    with pytest.raises(ValueError, match="создаёт другой прогон"):
+    with pytest.raises(ValueError, match="пишет другой запуск"):
         content.generate_site(site_id)
     last = jobs.last("generate")
-    assert last["status"] == "failed" and "создаёт другой прогон" in last["error"]
+    assert last["status"] == "failed" and "пишет другой запуск" in last["error"]
     assert "/ — ответ писателя не прошёл схему" in last["message"]
 
 
@@ -531,7 +531,7 @@ def test_rewrite_without_dossier_touches_nothing_and_says_so(monkeypatch):
     calls = _llm(monkeypatch)
     assert content.generate_site(site_id, rewrite=True) == 0 and calls == []
     assert all(p.body == OLD_BODY and p.status == "edited" for p in _pages(site_id))
-    assert "досье" in jobs.last("generate")["message"]
+    assert "конкурентов ещё не изучали" in jobs.last("generate")["message"]
 
 
 def test_rewrite_page_passes_issues_to_prompt(monkeypatch):
@@ -556,7 +556,7 @@ def test_rewrite_page_refuses_without_dossier_or_on_manual_edit(monkeypatch):
     calls = _llm(monkeypatch)
     bare = _add_pages(_site(dossier=False), status="draft")
     out = content.rewrite_page(bare["/"], ["x"])
-    assert out["ok"] is False and "досье" in out["error"] and out["page_id"] == bare["/"]
+    assert out["ok"] is False and "конкурентов этого сайта ещё не изучали" in out["error"] and out["page_id"] == bare["/"]
 
     with db.SessionLocal() as s:                                    # второй сайт — свой домен
         d = Domain(domain="u.xyz", source="list", status="purchased", market_lang="ru")

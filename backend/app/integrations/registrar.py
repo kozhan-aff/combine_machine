@@ -69,8 +69,8 @@ class NotConfiguredRegistrar:
 
     def _no(self, *_a, **_k):
         raise RegistrarNotConfigured(
-            "международный регистратор не настроен: провайдер выбирает оператор "
-            "(пока домен покупается руками — «купил руками» на экране Домены)")
+            "регистратор для международных зон не настроен "
+            "(пока купи домен сам и нажми «Уже купил сам» на экране Домены)")
 
     check_available = check_many = price = renew_price = bid = reconcile = register = set_nameservers = balance = _no
 

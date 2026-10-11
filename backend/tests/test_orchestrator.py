@@ -211,7 +211,7 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
     from app.services import orchestrator, research
     keys = [s[0] for s in orchestrator.STAGES]
     assert keys.index("research") == keys.index("generate") - 1 and keys.index("research") > keys.index("provision")
-    assert orchestrator.STAGE_RU["research"] == "досье"
+    assert orchestrator.STAGE_RU["research"] == "изучить конкурентов"
     sid = _content_site()
     calls = []
     monkeypatch.setattr(research, "build_dossier", lambda s, force=False: calls.append(s) or {"status": "done", "rows": 4, "warnings": []})
@@ -220,7 +220,7 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
     monkeypatch.setattr(research, "build_dossier", lambda s, force=False: {"status": "empty", "rows": 0, "reason": "пусто", "warnings": []})
     done, errs, extra = orchestrator._stage_research(cap=5)
     assert done == 0 and extra.get("research_empty") == 1 and "пусто" in errs[0]
-    assert orchestrator.COUNT_RU["research_empty"] == "досье пустое"
+    assert orchestrator.COUNT_RU["research_empty"] == "конкуренты не найдены"
 
 
 def test_stage_research_skips_recently_empty_site(monkeypatch):
@@ -328,7 +328,7 @@ def test_edit_stage_sits_between_generate_and_publish():
     assert (flag, cap) == ("auto_edit", "cap_generate")
     assert orch.STAGE_RU["edit"] == "вычитка"
     assert orch.COUNT_RU["edit_failed"] == "вычитка: замечания"
-    assert orch.COUNT_RU["generate_no_dossier"] == "нет досье"
+    assert orch.COUNT_RU["generate_no_dossier"] == "нет разбора конкурентов"
     assert orch.COUNT_RU["generate_empty"] == "тексты не написаны"
 
 
@@ -375,7 +375,7 @@ def test_stage_generate_counts_sites_without_dossier_and_names_those_without_off
     ready = _site_in("content", "ready.ru"); _dossier(ready)
     done, errs, extra = orch._stage_generate(5)
     shown = ", ".join(f"#{i}" for i in orphans[:10])
-    assert errs == [f"оффер не привязан, генерация пропущена — сайтов: 12 ({shown} …)"]
+    assert errs == [f"оффер не привязан, тексты не написаны — сайтов: 12 ({shown} …)"]
     assert done == 1 and extra == {"generate_no_dossier": 3}
 
 
@@ -388,13 +388,13 @@ def test_stage_generate_does_not_count_site_left_without_texts(monkeypatch):
 
     def down(site_id, **kw):
         with jobs.track("generate") as run:
-            jobs.report(run, message="написано 0 из 3; модель недоступна — прогон остановлен, не начато страниц: 2")
+            jobs.report(run, message="написано 0 из 3; модель недоступна — запуск остановлен, не начато страниц: 2")
         return 0
 
     monkeypatch.setattr("app.services.content.generate_site", down)
     done, errs, extra = orch._stage_generate(5)
     assert done == 0 and extra == {"generate_empty": 1}
-    assert errs == [f"site#{sid}: тексты не написаны — написано 0 из 3; модель недоступна — прогон остановлен, "
+    assert errs == [f"сайт #{sid}: тексты не написаны — написано 0 из 3; модель недоступна — запуск остановлен, "
                     "не начато страниц: 2"]
 
 
@@ -551,7 +551,7 @@ def test_stage_edit_site_that_raises_does_not_take_the_cap(monkeypatch):
     monkeypatch.setattr(content_critic, "edit_site", edit)
     done, errs, extra = orch._stage_edit(1)
     assert seen == [bad, good]                                   # лимит 1 достался следующему сайту
-    assert done == 1 and errs == [f"site#{bad}: RuntimeError: сломанная страница"]
+    assert done == 1 and errs == [f"сайт #{bad}: RuntimeError: сломанная страница"]
 
 
 def test_stage_edit_respects_cap_and_counts_remarks(monkeypatch):
@@ -574,7 +574,7 @@ def test_stage_edit_stops_when_the_model_is_down(monkeypatch):
                                     "waiting": 0, "down": True})
     done, errs, extra = orch._stage_edit(5)
     assert _sites_of(calls) == [first]
-    assert done == 0 and errs == [f"site#{first}: модель недоступна — вычитка остановлена"]
+    assert done == 0 and errs == [f"сайт #{first}: модель недоступна — вычитка остановлена"]
     assert extra == {"edit_failed": 1}
 
 
@@ -601,7 +601,7 @@ def test_stage_edit_entity_error_does_not_sink_the_stage(monkeypatch):
 
     monkeypatch.setattr(content_critic, "edit_site", edit)
     done, errs, extra = orch._stage_edit(5)
-    assert done == 1 and errs == [f"site#{bad}: RuntimeError: шлюз модели не ответил"] and extra == {}
+    assert done == 1 and errs == [f"сайт #{bad}: RuntimeError: шлюз модели не ответил"] and extra == {}
 
 
 def test_stage_edit_propagates_already_running(monkeypatch):
@@ -689,7 +689,7 @@ def test_publish_stage_reports_page_failure_in_its_own_words(monkeypatch):
     sid = _site_in("content", "pw.ru")
     _draft(sid, status="edited")
     done, errs = orch._stage_publish(5)
-    assert done == 1 and errs == [f"site#{sid}/: {why}"]
+    assert done == 1 and errs == [f"сайт #{sid}/: {why}"]
 
 
 # --- стадия «вычитка» с НАСТОЯЩИМ критиком: подменён только ответ модели ---
@@ -765,7 +765,7 @@ def test_real_critic_model_down_stops_the_stage_and_the_site_waits_out_the_pause
     b, (pb,) = _writer_site("db.xyz")
     model["answer"] = httpx.ConnectError("шлюз не отвечает")
     done, errs, extra = orch._stage_edit(5)
-    assert done == 0 and errs == [f"site#{a}: модель недоступна — вычитка остановлена"]
+    assert done == 0 and errs == [f"сайт #{a}: модель недоступна — вычитка остановлена"]
     assert _row(pa).status == "draft" and _row(pa).critic_notes["error"]
     assert _row(pb).critic_checked_at is None                    # второй сайт не начат
     asked = model["calls"]
@@ -847,7 +847,7 @@ def test_sweep_skips_a_stage_switched_off_while_the_previous_one_ran(monkeypatch
     chips = _chips()
     assert chips["generate"] == "done" and chips["publish"] == "skip"      # как выключенная с самого начала
     assert chips["score"] == "skip"
-    assert "выключены по ходу: публикация" in jobs.last("sweep")["message"]
+    assert "выключены по ходу: опубликовать" in jobs.last("sweep")["message"]
 
 
 def test_sweep_takes_caps_from_the_fresh_read(monkeypatch):
@@ -875,7 +875,7 @@ def test_scheduled_sweep_stops_when_master_is_switched_off_midway(monkeypatch):
 
 
 def test_manual_sweep_ignores_master_switched_off_midway(monkeypatch):
-    """Кнопка «Прогнать сейчас» мастер не слушает — ни на старте, ни по ходу; тумблеры стадий слушает."""
+    """Кнопка «Запустить проход» главный выключатель не слушает — ни на старте, ни по ходу; тумблеры стадий слушает."""
     published = _sweep_fixture(monkeypatch, lambda: autonomy.update_autonomy(autopilot_on=False))
     _enable(auto_generate=True, auto_publish=True)
     out = orch.run_sweep(trigger="manual", respect_master=False)

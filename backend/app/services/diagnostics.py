@@ -26,7 +26,7 @@ _SECRET_FIELDS = (
 
 
 def _secret_fields() -> tuple:
-    """Секретные поля: прежний список + все секреты экрана «Ключи и сервисы» (белый список)."""
+    """Секретные поля: прежний список + все секреты экрана «Ключи и доступы» (белый список)."""
     from app.services.api_keys import SECRET_KEYS
     return tuple(dict.fromkeys(_SECRET_FIELDS + SECRET_KEYS))
 
@@ -106,8 +106,8 @@ def _dropcatch_on() -> str:
 
 
 # Причина skip, если она не «нет ключа».
-_SKIP_WHY = {"dropcatch": "источник выключен в /settings (ToS не прочитан) — не пингуем",
-             "webrisk": "WEBRISK_API_KEY не задан — не настроено (опц.), риск в воронке не проверяется"}
+_SKIP_WHY = {"dropcatch": "источник выключен в Настройках — не проверяем",
+             "webrisk": "ключ не задан (необязателен) — риск у доменов не проверяется"}
 
 
 def _spec():
@@ -118,59 +118,59 @@ def _spec():
     отсутствие опц. зависимостей не роняло всю страницу.
     """
     return [
-        ("cloudflare", "Cloudflare", "M3 · зоны/DNS", settings.CLOUDFLARE_API_TOKEN, "M3", False,
+        ("cloudflare", "Cloudflare", "зоны и DNS", settings.CLOUDFLARE_API_TOKEN, "M3", False,
          lambda: __import__("app.integrations.cloudflare", fromlist=["x"]).CloudflareClient().ping_detail()),
-        ("aapanel", "aaPanel", "M3 · vhost/файлы", settings.AAPANEL_API_KEY, "M3", False,
+        ("aapanel", "aaPanel", "сайты и файлы на сервере", settings.AAPANEL_API_KEY, "M3", False,
          lambda: __import__("app.integrations.aapanel", fromlist=["x"]).AaPanelClient().ping()),
-        ("llm", "LiteLLM", "M4 · контент", settings.LLM_BASE_URL, "M4", True,
+        ("llm", "LiteLLM", "пишет и вычитывает тексты", settings.LLM_BASE_URL, "M4", True,
          _llm_probe),
-        ("searxng", "SearXNG", "M1/M5 · SERP/индекс", settings.SEARXNG_URL, "M5", False,
+        ("searxng", "SearXNG", "поиск: индексация и конкуренты", settings.SEARXNG_URL, "M5", False,
          _searxng_probe),
-        ("optimizator", "Optimizator", "M2 · выкуп (свободные чистые)", settings.OPTIMIZATOR_API_KEY, "M2", False,
+        ("optimizator", "Optimizator", "покупка свободных доменов", settings.OPTIMIZATOR_API_KEY, "M2", False,
          lambda: __import__("app.integrations.optimizator", fromlist=["x"]).OptimizatorClient().ping()),
         # NameSilo: getAccountBalance — чтение, денег не тратит; без ключа — skip. Не критичен.
-        ("namesilo", "NameSilo", "M2 · выкуп (международные зоны)", settings.NAMESILO_API_KEY, "M2", False,
+        ("namesilo", "NameSilo", "покупка в международных зонах", settings.NAMESILO_API_KEY, "M2", False,
          lambda: __import__("app.integrations.namesilo", fromlist=["x"]).NameSiloClient().ping()),
         # S3-03: канал выкупа v1 не должен молча дрейфовать — капча Yandex / 404 видны здесь словами.
-        ("backorder", "Backorder", "M2 · выкуп (ставка, .RU/.РФ)", settings.BACKORDER_LOGIN, "M2", False,
+        ("backorder", "Backorder", "покупка по ставке, .RU/.РФ", settings.BACKORDER_LOGIN, "M2", False,
          lambda: __import__("app.integrations.backorder", fromlist=["x"]).BackorderClient().ping()),
         # не критичен (Ruling 2026-10-08): медленный/упавший Wayback не зажигает баннер на всех
         # экранах; строка на /diag и предупреждение в роли остаются
-        ("wayback", "Wayback", "M1 · история (при сбое воронка может стоять)", "1", "M1", False,
+        ("wayback", "Wayback", "история домена (без неё проверка может стоять)", "1", "M1", False,
          lambda: __import__("app.integrations.wayback", fromlist=["x"]).WaybackClient().ping()),
-        ("aparser", "A-Parser", "M1 · whois/лейн + fetch", settings.APARSER_API_KEY, "M1", True,
+        ("aparser", "A-Parser", "whois и загрузка страниц", settings.APARSER_API_KEY, "M1", True,
          lambda: __import__("app.integrations.aparser", fromlist=["x"]).AParserClient().ping()),
         # остаток units — число: _run_one кладёт его в кэш, /settings показывает без похода в сеть.
         # Не критичен (финальное ревью): остаток 0 — это «fail» до месячного сброса, и баннер «Нет
         # связи» горел бы на всех экранах неделями. Остаток виден на /settings и в сообщении задачи
         # (`_paid_gate`), сбой W4 — там же с HTTP-кодом. Цена: настоящая недоступность Ahrefs баннером
         # не видна — только строкой здесь и в сообщении задачи скоринга.
-        ("ahrefs", "Ahrefs API", "M1 · DR / ссылки / анкоры", settings.AHREFS_API_KEY, "M1", False,
+        ("ahrefs", "Ahrefs API", "рейтинг, ссылки, спам-ссылки", settings.AHREFS_API_KEY, "M1", False,
          lambda: __import__("app.integrations.ahrefs", fromlist=["x"]).AhrefsClient().units_left()),
         # не критичен (R2-18): ping() проверяет только бутстрап IANA, при его падении W2 живёт на
         # встроенном _FALLBACK — красный баннер на всех экранах был бы ложной тревогой
-        ("rdap", "RDAP (IANA)", "M1 · доступность и возраст", "1", "M1", False,
+        ("rdap", "RDAP (IANA)", "занят ли домен и его возраст", "1", "M1", False,
          lambda: __import__("app.integrations.rdap", fromlist=["x"]).RdapClient().ping()),
         # только наличие ключа: настоящий lookup каждые 5 минут съедал бы ~8,6 тыс. из 100 тыс.
         # бесплатных вызовов в месяц. Сбой самого Web Risk видно по `webrisk:` в воронке.
-        ("webrisk", "Google Web Risk", "M1 · риск (замена Safe Browsing)", settings.WEBRISK_API_KEY, "M1", False,
+        ("webrisk", "Google Web Risk", "опасные сайты (списки Google)", settings.WEBRISK_API_KEY, "M1", False,
          lambda: __import__("app.integrations.webrisk", fromlist=["x"]).WebRiskClient().configured),
-        ("dropcatch", "DropCatch", "M1 · дропы .com/.net/.org", _dropcatch_on(), "M1", False,
+        ("dropcatch", "DropCatch", "дропы .com/.net/.org", _dropcatch_on(), "M1", False,
          lambda: __import__("app.integrations.dropcatch", fromlist=["x"]).DropCatchClient().ping()),
-        ("nominet", "Nominet", "M1 · дропы .uk", "1", "M1", False,
+        ("nominet", "Nominet", "дропы .uk", "1", "M1", False,
          lambda: __import__("app.integrations.nominet", fromlist=["x"]).NominetClient().ping()),
-        ("registry_mx", "registry.mx", "M1 · удалённые .mx", "1", "M1", False,
+        ("registry_mx", "registry.mx", "удалённые .mx", "1", "M1", False,
          lambda: __import__("app.integrations.registry_mx", fromlist=["x"]).RegistryMxClient().ping()),
-        ("blacklist", "Spamhaus DBL (только с DQS)", "M1 · спам-лист", settings.SPAMHAUS_DQS_KEY, "M1", False,
+        ("blacklist", "Spamhaus DBL (только с DQS)", "чёрный список спама", settings.SPAMHAUS_DQS_KEY, "M1", False,
          lambda: __import__("app.integrations.blacklist", fromlist=["x"]).BlacklistClient().ping()),
-        ("db", "PostgreSQL", "БД конвейера", settings.DATABASE_URL, "инфра", True, _db_ping),
+        ("db", "PostgreSQL", "база данных", settings.DATABASE_URL, "инфра", True, _db_ping),
     ]
 
 
 def _run_one(key, label, role, need_cred, module, critical, fn) -> dict:
     base = {"key": key, "label": label, "role": role, "module": module, "critical": critical}
     if not need_cred:
-        return {**base, "status": "skip", "ms": None, "error": _SKIP_WHY.get(key, "нет кредов в .env")}
+        return {**base, "status": "skip", "ms": None, "error": _SKIP_WHY.get(key, "ключ не задан")}
     t0 = time.monotonic()
     try:
         v = fn()
@@ -210,7 +210,7 @@ def run_diagnostics(specs=None) -> list[dict]:
             except FutTimeout:
                 results[i] = {"key": k, "label": lbl, "role": role, "module": mod,
                               "critical": crit, "status": "fail",
-                              "ms": int(PING_TIMEOUT * 1000), "error": f"timeout > {PING_TIMEOUT:.0f}s"}
+                              "ms": int(PING_TIMEOUT * 1000), "error": f"не ответил за {PING_TIMEOUT:.0f} с"}
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     return [results[i] for i in range(len(specs))]

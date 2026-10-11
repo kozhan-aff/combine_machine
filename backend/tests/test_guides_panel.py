@@ -230,7 +230,7 @@ def test_digest_job_is_known_to_the_panel(client, gdir):
     from app.api import panel
     assert "guides_digest" in panel._JOBS
     assert client.post("/run/guides_digest/cancel", follow_redirects=False).status_code != 404
-    assert "guides_digest:'Выжимка правил'" in client.get("/guides").text      # подпись задачи в полосе вверху
+    assert "guides_digest:'Сжать правила'" in client.get("/guides").text      # подпись задачи в полосе вверху
     assert client.get("/api/jobs/live").json()["last"]["guides_digest"] is None
 
 

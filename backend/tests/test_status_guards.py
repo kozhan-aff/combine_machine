@@ -47,7 +47,7 @@ def no_panel_writes(monkeypatch):
 
 def test_generate_refused_for_unprovisioned_site_and_status_untouched(llm):
     sid = _site("provisioning")
-    with pytest.raises(ValueError, match="сначала provision"):
+    with pytest.raises(ValueError, match="ещё не поднят .*сначала «Поднять сайт»"):
         content.generate_site(sid)
     with db.SessionLocal() as s:
         assert s.get(Site, sid).status == "provisioning"     # НЕ перескочил в content
@@ -73,7 +73,7 @@ def test_generate_keeps_content_status(llm):
 def test_publish_refused_for_unprovisioned_site(no_panel_writes):
     sid = _site("provisioning", pages=("edited",))
     out = publish.publish_site(sid)
-    assert out["status"] == "not_provisioned" and "provision" in out["hint"]
+    assert out["status"] == "not_provisioned" and "сначала «Поднять сайт»" in out["hint"]
     assert no_panel_writes == []
     with db.SessionLocal() as s:
         assert s.query(Page).one().status == "edited" and s.get(Site, sid).status == "provisioning"
@@ -103,7 +103,7 @@ def test_publish_works_for_provisioned_site(no_panel_writes):
 def test_sweep_publish_stage_reports_unprovisioned_as_error(no_panel_writes):
     _site("provisioning", pages=("edited",))
     done, errs = orchestrator._stage_publish(5)
-    assert done == 0 and len(errs) == 1 and "provision" in errs[0]
+    assert done == 0 and len(errs) == 1 and "сначала «Поднять сайт»" in errs[0]
 
 
 # --- /api ворота ----------------------------------------------------------------------------
@@ -140,17 +140,17 @@ def test_api_generate_and_publish_refusals_are_409(client, llm, no_panel_writes)
     sid = _site("provisioning", pages=("edited",))
     assert client.post(f"/api/sites/{sid}/generate").status_code == 409
     r = client.post(f"/api/sites/{sid}/publish")
-    assert r.status_code == 409 and "provision" in r.json()["detail"]
+    assert r.status_code == 409 and "сначала «Поднять сайт»" in r.json()["detail"]
 
 
 def test_panel_generate_shows_refusal(client, llm):
     sid = _site("provisioning")
     r = client.post(f"/sites/{sid}/generate", follow_redirects=False)
     from urllib.parse import unquote
-    assert r.status_code == 303 and "сначала provision" in unquote(r.headers["location"])
+    assert r.status_code == 303 and "сначала «Поднять сайт»" in unquote(r.headers["location"])
 
 
 def test_card_disables_generate_until_provisioned(client):
     sid = _site("provisioning")
     html = client.get(f"/sites/{sid}").text
-    assert "сначала шаг 3: провижн" in html
+    assert "Сначала шаг 3: подними сайт." in html

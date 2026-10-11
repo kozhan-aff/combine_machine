@@ -572,8 +572,8 @@ def test_page_held_only_by_a_missing_dossier_is_reviewed_again_when_it_appears(m
     calls = _llm(monkeypatch)
     assert content_critic.edit_site(site_id) == _out(reviewed=1, failed=1)
     p = _page(ids["/"])
-    assert p.status == "draft" and p.critic_notes["code"] == ["нет досье конкурентов — копирование и числа не проверить"]
-    assert not calls["writer"] and "сбои: / — нет досье конкурентов" in jobs.last("edit")["message"]
+    assert p.status == "draft" and p.critic_notes["code"] == ["конкурентов не изучали — копирование и числа не проверить"]
+    assert not calls["writer"] and "сбои: / — конкурентов не изучали" in jobs.last("edit")["message"]
     with db.SessionLocal() as s:
         s.add_all([SiteResearch(**row) for row in saved]); s.commit()
     assert content_critic.edit_site(site_id) == _out(reviewed=1, edited=1)
@@ -1251,7 +1251,7 @@ def test_writer_always_writes_draft_with_the_new_text(monkeypatch, path):
 
 
 def test_save_draft_always_writes_draft(monkeypatch):
-    """То же в редакторе: «Сохранить черновик» прочёл строку черновиком, её тут же одобрили — сохранённая
+    """То же в редакторе: «Сохранить» (черновиком) прочёл строку черновиком, её тут же одобрили — сохранённая
     правка всё равно черновик, и функция возвращает то, что лежит в строке."""
     site_id, ids = _site()
     _approved_under(monkeypatch, "_set_body", ids["/"])

@@ -40,7 +40,7 @@ def _resolve(*a, **kw):
 _sleep = time.sleep      # шов для тестов: пауза между попытками `_fetch`
 
 _EMPTY_REASON = ("ни одной живой страницы конкурентов ни по одному запросу "
-                 "(SERP пуст или страницы не скачались) — генерация без досье не идёт")
+                 "(поиск ничего не дал или страницы не скачались) — без них тексты не пишутся")
 _TAG_RE = re.compile(r"<(link|meta)\b[^>]*>", re.I)
 # og:site_name / twitter:site площадок, чьи страницы не конкуренты (лента канала, видео, пост). Сравнение — по
 # `_norm` целиком: «Telegram», «@Telegram», «Яндекс Дзен» -> telegram / яндексдзен.
@@ -319,7 +319,7 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
             return {"status": "fresh", "rows": summary(db, site_id)["rows"], "reason": None, "warnings": []}
         offer = site_offer(db, site)
         if offer is None:
-            raise ValueError(f"сайт #{site_id}: оффер не привязан — досье не по чему собирать")
+            raise ValueError(f"сайт #{site_id}: оффер не привязан — не по чему искать конкурентов")
         dom = db.get(Domain, site.domain_id)
         lang = resolve_lang(None, dom.market_lang if dom else None, offer.language)
         brand, country, aff = offer.brand, offer.country, offer.affiliate_link
@@ -394,11 +394,11 @@ def build_dossier(site_id: int, *, force: bool = False) -> dict:
                 jobs.report(run, message=f"{len(rows)} источников")
         except jobs.Cancelled:
             was_cancelled = True
-            jobs.report(run, message="отменено оператором — прежнее досье не тронуто")
+            jobs.report(run, message="остановлено — прежний разбор конкурентов не тронут")
             raise
 
     if was_cancelled:        # track глотает Cancelled; прежнее досье не трогаем, недособранное не сохраняем
-        return {"status": "empty", "rows": 0, "reason": "сборка досье отменена оператором — прежние данные не тронуты",
+        return {"status": "empty", "rows": 0, "reason": "изучение конкурентов остановлено — прежние данные не тронуты",
                 "warnings": warnings}
     with SessionLocal() as db:
         if rows:

@@ -252,7 +252,8 @@ def test_queue_shows_the_stuck_send(client, monkeypatch):
     html = client.get("/queue").text
     assert "отправляется" in html, "сырой `ordering` в UI — машина говорит на своём языке, не на нашем"
     assert "отправка оборвалась — исход неизвестен" in html
-    assert "↻ сверить с провайдером" in html, "из застрявшей отправки нет выхода — строка-могила"
+    # кнопка в строке зовётся так же, как в шапке (одно действие — одно название): считаем обе
+    assert html.count("↻ Обновить статусы</button>") == 2, "из застрявшей отправки нет выхода — строка-могила"
 
 
 def test_poll_report_names_both_kinds_of_stuck_send(client, monkeypatch):
@@ -270,8 +271,8 @@ def test_poll_report_names_both_kinds_of_stuck_send(client, monkeypatch):
 
     html = client.post("/queue/poll", follow_redirects=True).text
 
-    assert "застрявших отправок разобрано 1" in html, "разбор трупа прошёл молча"
-    assert "отправок в полёте 1" in html, "про нетронутую живую отправку не сказали ни слова"
+    assert "оборванных отправок 1" in html, "разбор трупа прошёл молча"
+    assert "отправляется прямо сейчас 1" in html, "про нетронутую живую отправку не сказали ни слова"
 
 
 def test_poll_does_not_clobber_the_row_a_live_retry_just_paid_for(sqlite_db, monkeypatch):

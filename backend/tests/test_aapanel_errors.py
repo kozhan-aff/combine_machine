@@ -513,7 +513,7 @@ def test_site_card_shows_ssl_error(client, monkeypatch):
         s.commit()
 
     html = client.get(f"/sites/{sid}").text
-    assert "SSL/настройках зоны Cloudflare" in html
+    assert "HTTPS в Cloudflare настроился не полностью" in html
     assert "Cloudflare 403" in html
 
 

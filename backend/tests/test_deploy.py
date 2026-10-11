@@ -102,8 +102,7 @@ def test_pull_detects_changed_compose_file(creds, monkeypatch):
     out = deploy.git_pull()
     assert out["ok"] and out["needs_rebuild"] is False
     assert "`" not in out["compose_hint"]             # обратная кавычка в PowerShell — перенос строки
-    assert out["compose_hint"] == ("изменился docker-compose.yml — нужно пересоздать контейнеры: docker compose up -d "
-                                   "(новые тома/сервисы)")
+    assert out["compose_hint"] == "изменился состав контейнеров — пересоздай их: docker compose up -d"
 
 
 def test_pull_compose_file_elsewhere_in_the_tree_is_not_ours(creds, monkeypatch):
@@ -199,7 +198,7 @@ def test_pull_refused_while_paid_job_runs(creds, monkeypatch):
     with jobs.track("score"):
         for fn in (deploy.git_pull, deploy.git_force_pull):
             out = fn()
-            assert out["ok"] is False and "score" in out["error"] and "old" not in out
+            assert out["ok"] is False and "«Проверить домены»" in out["error"] and "old" not in out
     assert r.calls == []                      # ни одной git/alembic-команды
     assert deploy.git_pull()["ok"]            # задача закончилась — обновление проходит
 
@@ -239,4 +238,4 @@ def test_run_score_during_pull_names_git_as_the_reason(client):
     finally:
         deploy._LOCK.release()
     loc = unquote_plus(r.headers["location"])
-    assert "обновление из git" in loc and "уже идёт" not in loc
+    assert "обновление программы" in loc and "уже идёт" not in loc

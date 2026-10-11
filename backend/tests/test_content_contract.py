@@ -419,14 +419,14 @@ def test_site_badge_title_mentions_reserve_when_configured(client, monkeypatch):
         s.commit()
 
     r = client.get(f"/sites/{site_id}")
-    assert "резервный URL не настроен" in r.text
+    assert "резервный адрес не задан" in r.text
 
     with db.SessionLocal() as s:
         s.add(OfferSettings(id=1, reserve_offer_url="https://reserve.example/compare"))
         s.commit()
 
     r2 = client.get(f"/sites/{site_id}")
-    assert "поведёт на резервный URL" in r2.text
+    assert "поведёт на резервный адрес" in r2.text
 
 
 @pytest.mark.parametrize("vec", [

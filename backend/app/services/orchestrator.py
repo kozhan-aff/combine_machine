@@ -117,7 +117,7 @@ def _stage_queue(cap):
     """approved-домены (у них по определению нет открытого заказа) -> create_order, до капа.
 
     ГРЯЗЬ ОТСЕИВАЕТСЯ В ВЫБОРКЕ, ДО КАПА, — и это не косметика (ревью Задачи 6, Critical 3).
-    Легаси-домены (отмытые кнопкой «↩ вернуть в approved» до фикса F9) из `approved` больше НЕ
+    Легаси-домены (отмытые кнопкой «↩ Вернуть в одобренные» до фикса F9) из `approved` больше НЕ
     УХОДЯТ: политика их отвергает, статус им никто не двигает. Они сидят в голове id-порядка
     вечно — и `LIMIT cap` по сырому `approved` выедали ВЕСЬ кап каждый свип: 10 грязных при
     cap_queue=10, и чистый домен не попадал в очередь НИКОГДА. Автопилотный выкуп вставал
@@ -152,7 +152,7 @@ def _stage_queue(cap):
         except Exception as e:  # noqa: BLE001
             # сюда попадает и отказ политики (домен стал грязным между выборкой и заявкой) —
             # стадию это не роняет: остальные домены свип обработает.
-            errs.append(f"domain#{did}: {type(e).__name__}: {e}")
+            errs.append(f"домен #{did}: {type(e).__name__}: {e}")
     return done, errs, {"queue_dirty": dirty} if dirty else {}
 
 
@@ -201,7 +201,7 @@ def _stage_provision(cap):
             provisioning.create_site_for(did)
             succeeded += 1
         except Exception as e:  # noqa: BLE001
-            errs.append(f"domain#{did}: {type(e).__name__}: {e}")
+            errs.append(f"домен #{did}: {type(e).__name__}: {e}")
     for sid in prov_ids:
         try:
             out = provisioning.provision(sid)
@@ -214,7 +214,7 @@ def _stage_provision(cap):
             if st == "error":
                 # раньше тихо считалось `done += 1` (напр. VPS_ORIGIN_IP не задан) — это отказ,
                 # а не успех: оператор обязан увидеть его в ошибках свипа, не в идеальной сводке.
-                errs.append(f"site#{sid}: {out.get('error', 'провижн вернул ошибку')}")
+                errs.append(f"сайт #{sid}: {out.get('error', 'сайт не поднялся')}")
                 continue
             succeeded += 1
             # vhost поднят (провижн не упал), а SSL-режим Cloudflare не переключился. Считать
@@ -223,7 +223,7 @@ def _stage_provision(cap):
             if out.get("ssl_error"):
                 ssl_failed += 1
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
     extra = {}
     if awaiting:
         extra["provision_awaiting"] = awaiting
@@ -253,11 +253,11 @@ def _stage_research(cap):
         except jobs.AlreadyRunning:
             raise                       # ручная сборка идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
             continue
         if out["status"] == "empty":
             empty += 1
-            errs.append(f"site#{sid}: досье пустое — {out['reason']}")
+            errs.append(f"сайт #{sid}: конкуренты не найдены — {out['reason']}")
         else:
             done += 1
     extra = {"research_empty": empty} if empty else {}
@@ -321,14 +321,14 @@ def _stage_generate(cap):
             elif len(ids) < cap:
                 ids.append(sid)
     if no_offer:
-        errs.append(_skipped("оффер не привязан, генерация пропущена", no_offer))
+        errs.append(_skipped("оффер не привязан, тексты не написаны", no_offer))
     for sid in ids:
         try:
             written = content.generate_site(sid)
         except jobs.AlreadyRunning:
             raise                       # ручная генерация идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
             continue
         if not written:
             with SessionLocal() as db:
@@ -337,7 +337,7 @@ def _stage_generate(cap):
                 # почему — писатель сказал в итоге своей задачи (она только что закрылась)
                 last = jobs.last("generate") or {}
                 empty += 1
-                errs.append(f"site#{sid}: тексты не написаны — "
+                errs.append(f"сайт #{sid}: тексты не написаны — "
                             f"{last.get('message') or last.get('error') or 'причина не записана'}")
                 continue
         done += 1
@@ -410,12 +410,12 @@ def _stage_edit(cap):
         except jobs.AlreadyRunning:
             raise                       # ручная вычитка идёт — стадия пропущена целиком, честно
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
             continue                    # упавший сайт лимит не занимает
         taken += 1
         failed += out.get("failed", 0)
         if out.get("down"):
-            errs.append(f"site#{sid}: модель недоступна — вычитка остановлена")
+            errs.append(f"сайт #{sid}: модель недоступна — вычитка остановлена")
             break
         if out.get("cancelled"):
             break                       # «стоп» посреди сайта: следующий не начинаем
@@ -453,23 +453,23 @@ def _stage_publish(cap):
             if isinstance(out, dict) and out.get("status") == "not_provisioned":
                 # edited-страницы есть, а сайт не провиженен (S5-09) — это не «сделано», а отказ:
                 # оператор должен увидеть его в ошибках свипа, а не в идеальной сводке.
-                errs.append(f"site#{sid}: {out.get('hint', 'сайт не провиженен')}")
+                errs.append(f"сайт #{sid}: {out.get('hint', 'сайт ещё не поднят')}")
                 continue
             if isinstance(out, dict):
                 # S7-18: отказ/непроверенная запись/предупреждение по странице — в ошибки свипа.
                 # Причину отказа не предваряем: «не записана» было неправдой для страницы, чей файл
                 # лёг на сайт, а отметка — нет (её переписали во время публикации).
                 for path, why in (out.get("failed") or {}).items():
-                    errs.append(f"site#{sid}{path}: {why}")
+                    errs.append(f"сайт #{sid}{path}: {why}")
                 for path, why in (out.get("unverified") or {}).items():
-                    errs.append(f"site#{sid}{path}: записана, но не подтверждена доменом — {why}")
+                    errs.append(f"сайт #{sid}{path}: записана, но не подтверждена доменом — {why}")
                 for w in out.get("warnings") or []:
-                    errs.append(f"site#{sid}{w}")
+                    errs.append(f"сайт #{sid}{w}")
                 if out.get("status") == "failed":
                     continue
             done += 1
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
     return done, errs
 
 
@@ -509,13 +509,13 @@ def _stage_check_index(cap):
                 # GSC отвалился (нет доступа к свойству/квота/битый ключ) и проверка ушла в SearXNG:
                 # без отметки оператор думал бы, что основной источник работает. Причину — в errs.
                 gsc_fb += 1
-                errs.append(f"site#{sid}: GSC недоступен, проверено через SearXNG — {out['gsc_note']}")
+                errs.append(f"сайт #{sid}: GSC недоступен, проверено через SearXNG — {out['gsc_note']}")
             if out.get("all_unknown"):
                 # движки молчат (CAPTCHA/лимит): дальнейшие запросы только раздражают поисковики —
                 # стадию откладываем до следующего свипа, страницы вернутся по cooldown
                 break
         except Exception as e:  # noqa: BLE001
-            errs.append(f"site#{sid}: {type(e).__name__}: {e}")
+            errs.append(f"сайт #{sid}: {type(e).__name__}: {e}")
     # engines_down уже виден оператору через index_unknown («индекс не выяснен»)
     counts = {}
     if blind:
@@ -538,18 +538,21 @@ STAGES = [
     ("check_index", "auto_check_index", "cap_check_index", _stage_check_index),
 ]
 
-STAGE_RU = {"discovery": "поиск", "score": "скоринг", "queue": "очередь",
-            "provision": "провижн", "research": "досье", "generate": "контент", "edit": "вычитка",
-            "publish": "публикация", "check_index": "индексация"}
+# Имена стадий — те же, что у кнопок и на экране «Автопилот» (одно действие — одно название).
+STAGE_RU = {"discovery": "найти домены", "score": "проверить домены", "queue": "поставить к покупке",
+            "provision": "поднять сайт", "research": "изучить конкурентов",
+            "generate": "написать тексты", "edit": "вычитка",
+            "publish": "опубликовать", "check_index": "проверить индексацию"}
 
 # подписи строки «по стадиям» в журнале свипов (autopilot.html). Ключи счётчиков — не только
 # стадии: `queue_dirty` рассказывает, сколько грязных доменов стадия обошла стороной,
 # `ssl_failed` — у скольких сайтов vhost поднят, а SSL-режим Cloudflare не переключился,
 # `index_unknown` — про сколько страниц проверка индексации ничего не выяснила (движки молчат),
 # `provision_awaiting` — сколько сайтов ждут смены NS у регистратора (не успех, не отказ — F19).
-COUNT_RU = {**STAGE_RU, "queue_dirty": "грязь пропущена", "ssl_failed": "SSL не переключился",
-            "index_unknown": "индекс не выяснен", "gsc_fallback": "GSC недоступен", "provision_awaiting": "провижн: ждёт NS",
-            "research_empty": "досье пустое", "generate_no_dossier": "нет досье",
+COUNT_RU = {**STAGE_RU, "queue_dirty": "грязные пропущены", "ssl_failed": "SSL не переключился",
+            "index_unknown": "индексация не выяснена", "gsc_fallback": "GSC недоступен",
+            "provision_awaiting": "сайт ждёт смены NS",
+            "research_empty": "конкуренты не найдены", "generate_no_dossier": "нет разбора конкурентов",
             "generate_empty": "тексты не написаны", "edit_failed": "вычитка: замечания"}
 
 
@@ -569,7 +572,7 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
     ТУМБЛЕРЫ ПЕРЕЧИТЫВАЮТСЯ ПЕРЕД КАЖДОЙ СТАДИЕЙ. Свип с LLM-стадиями идёт часы, и настройки,
     прочитанные один раз на старте, к середине прогона уже могут быть отменены оператором: снятая
     «публикация» всё равно выкладывала страницы. Стадия, чей тумблер снят по ходу, пропускается и
-    помечается skip, как выключенная с самого начала; мастер-выключатель, снятый по ходу свипа по
+    помечается skip, как выключенная с самого начала; главный выключатель, снятый по ходу свипа по
     расписанию, останавливает его на этом месте (оставшиеся стадии — skip), и прогон закрывается
     штатно. Ручной свип (respect_master=False) мастер не слушает ни на старте, ни по ходу. Капы —
     тоже из свежего чтения. Стадия, выключенная на старте, в этом прогоне уже не включается.
@@ -632,9 +635,9 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                         # score/discovery, и второй прогон поверх — ровно то, что мы запрещали
                         # (двое жгут квоту A-Parser). Пропустить стадию и сказать об этом честно;
                         # красить весь свип в failed = кричать волком на собственную защиту.
-                        errors.append(f"{key}: пропущена — занята ручным прогоном")
+                        errors.append(f"{STAGE_RU[key]}: пропущена — её сейчас запустили вручную")
                     except Exception as e:  # noqa: BLE001 — стадия целиком упала (не одна сущность)
-                        errors.append(f"{key}: {type(e).__name__}: {e}")
+                        errors.append(f"{STAGE_RU[key]}: {type(e).__name__}: {e}")
                         status = "failed"
                 if status == "done" and errors:
                     # НИ ОДНА стадия не упала целиком (иначе status уже "failed"), но внутри
@@ -653,13 +656,13 @@ def run_sweep(trigger: str = "cron", respect_master: bool = True) -> dict:
                     # класс лжи об успехе. AutonomyRun при этом честно пишет "failed" в finally.
                     jobs.finish(run, "failed")
                 jobs.report(run, done=total, total=total, current="",
-                            message=f"стадий пройдено: {total - len(switched_off)}"
+                            message=f"шагов пройдено: {total - len(switched_off)}"
                             + (" · выключены по ходу: " + ", ".join(STAGE_RU[k] for k in switched_off)
                                if switched_off else "")
                             + (f" · ошибок: {len(errors)}" if errors else ""))
             except jobs.Cancelled:
                 status = "cancelled"
-                errors.append("свип остановлен — стоп-кнопка или потерянный замок")
+                errors.append("проход остановлен — кнопкой «Остановить» или его перехватил другой процесс")
                 raise                      # track закроет прогон как cancelled, не как failed
             except BaseException:          # noqa: BLE001 — оборвался сам свип, а не стадия
                 status = "failed"

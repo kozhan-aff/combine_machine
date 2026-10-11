@@ -35,7 +35,7 @@ def test_pull_compose_hint_reaches_the_banner(client, monkeypatch):
                                  "compose_hint": deploy.COMPOSE_HINT, "alembic_warn": ""})
     r = client.post("/admin/pull", follow_redirects=False)
     loc = unquote(r.headers["location"])
-    assert "msg=" in loc and "изменился docker-compose.yml — нужно пересоздать контейнеры: docker compose up -d" in loc
+    assert "msg=" in loc and "изменился состав контейнеров — пересоздай их: docker compose up -d" in loc
     assert "--build" not in loc
 
 
@@ -47,7 +47,7 @@ def test_diag_renders_status(client, monkeypatch):
                         lambda: {"branch": "main", "hash": "abc", "subject": "s", "date": "2026-07-10",
                                  "dirty": False, "ahead": 0, "behind": 2, "detached": False})
     r = client.get("/diag")
-    assert r.status_code == 200 and "позади origin на 2" in r.text
+    assert r.status_code == 200 and "есть обновление: не скачано изменений — 2" in r.text
 
 
 def test_pull_noop_already_fresh(client, monkeypatch):

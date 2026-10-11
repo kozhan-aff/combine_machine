@@ -61,8 +61,7 @@ def deploy_status() -> dict:
 # Что оператору сделать руками после pull, если изменился сам состав контейнеров: панель этого не умеет,
 # а без пересоздания новый том (так воркер получает папку правил) или сервис просто не появится.
 # Команда — без обратных кавычек: вставленные в PowerShell бокса, они читаются как перенос строки.
-COMPOSE_HINT = ("изменился docker-compose.yml — нужно пересоздать контейнеры: docker compose up -d "
-                "(новые тома/сервисы)")
+COMPOSE_HINT = ("изменился состав контейнеров — пересоздай их: docker compose up -d")
 
 
 def _changed_files(old: str, new: str) -> list[str]:
@@ -94,7 +93,7 @@ def _post_update(old: str) -> dict:
         alembic_warn = "" if ok else _scrub(mig.stderr.strip())[:150]
     except FileNotFoundError:
         ok = False
-        alembic_warn = "alembic не установлен в контейнере — миграции пропущены (пересобери образ)"
+        alembic_warn = "в контейнере нет alembic — база не обновлена (пересобери контейнеры)"
     except subprocess.TimeoutExpired:
         # Миграция вышла за 120с (медленный DDL на населённой таблице / блокировка PG):
         # subprocess убивает alembic на середине. Без этой ветки TimeoutExpired улетал бы
@@ -103,7 +102,7 @@ def _post_update(old: str) -> dict:
         # которое докстринг этой функции запрещает выдавать за чистый успех. ok=False —
         # деплой честно «с проблемой», баннер объясняет что случилось.
         ok = False
-        alembic_warn = "миграция не завершилась за 120с и была прервана — проверь схему БД вручную"
+        alembic_warn = "обновление базы не завершилось за 120 с и было прервано — проверь базу вручную"
     cur = deploy_status()
     new = cur.get("hash", "")
     manual = _detect_rebuild(old, new)
@@ -129,15 +128,17 @@ def _busy_jobs() -> list[str]:
 
 
 def _busy_error(busy: list[str]) -> dict:
-    return {"ok": False, "error": "идут задачи: " + ", ".join(busy) + " — обновление оборвало бы их "
-                                  "посреди работы (перезапуск процессов). Дождись конца или нажми "
-                                  "«✕ Отменить» на карточке задачи и повтори."}
+    from app.services.labels import JOB_RU
+    names = ", ".join(f"«{JOB_RU.get(n, n)}»" for n in busy)
+    return {"ok": False, "error": f"идут задачи: {names} — обновление оборвало бы их "
+                                  "посреди работы. Дождись конца или нажми "
+                                  "«✕ Остановить» на карточке задачи и повтори."}
 
 
 def git_pull() -> dict:
     """Безопасный путь: fetch → pull --ff-only → alembic → детект. needs_force при грязи/расхождении."""
     if not settings.GITHUB_TOKEN:
-        return {"ok": False, "error": "GITHUB_TOKEN не задан в .env — нечем авторизовать git pull"}
+        return {"ok": False, "error": "токен GitHub (GITHUB_TOKEN) не задан — обновиться нечем"}
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
@@ -152,12 +153,12 @@ def git_pull() -> dict:
             pull = _git(["pull", "--ff-only", _clean_url(), "+main:refs/remotes/origin/main"],
                        timeout=120, env=_git_env())
         except FileNotFoundError:
-            return {"ok": False, "error": "git не установлен в контейнере — пересобери образ (docker compose build)"}
+            return {"ok": False, "error": "в контейнере нет git — пересобери контейнеры (docker compose build)"}
         if pull.returncode != 0:
             return {"ok": False, "needs_force": True,
-                    "error": "git pull не прошёл (дерево грязное или история разошлась): "
+                    "error": "обновление не прошло (на сервере есть свои правки или версии разошлись): "
                              + _scrub((pull.stderr or pull.stdout).strip())[:250]
-                             + ". Используй ⚠ Принудительно обновить."}
+                             + ". Нажми «Обновить принудительно»."}
         return _post_update(old)
     finally:
         _LOCK.release()
@@ -168,7 +169,7 @@ def git_force_pull() -> dict:
     checkout -f сбрасывает грязь и приводит к origin/main из ЛЮБОГО состояния; untracked
     (.env/.pem) выживают. git clean НЕ вызывается."""
     if not settings.GITHUB_TOKEN:
-        return {"ok": False, "error": "GITHUB_TOKEN не задан в .env — нечем авторизовать"}
+        return {"ok": False, "error": "токен GitHub (GITHUB_TOKEN) не задан — обновиться нечем"}
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "error": "обновление уже идёт — подожди завершения"}
     try:
@@ -181,7 +182,7 @@ def git_force_pull() -> dict:
             # не обновится и deploy_status() покажет устаревшие ahead/behind после force-pull.
             fetch = _git(["fetch", _clean_url(), "+main:refs/remotes/origin/main"], timeout=30, env=env)
         except FileNotFoundError:
-            return {"ok": False, "error": "git не установлен в контейнере — пересобери образ (docker compose build)"}
+            return {"ok": False, "error": "в контейнере нет git — пересобери контейнеры (docker compose build)"}
         if fetch.returncode != 0:
             return {"ok": False, "error": "git fetch: " + _scrub((fetch.stderr or fetch.stdout).strip())[:250]}
         co = _git(["checkout", "-f", "-B", "main", "FETCH_HEAD"], timeout=120)

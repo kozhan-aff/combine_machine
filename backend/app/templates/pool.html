@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}
-Пул доменов{% endblock %}
+Весь список{% endblock %}
 {% block content %}
 {# пейджер: query собирает panel.py (pager_qs) — пустые параметры пропущены, иначе `min_score=` → 422 #}
 {% macro pager() %}{% if pages > 1 %}
@@ -11,94 +11,70 @@
 </div>
 {% endif %}{% endmacro %}
 
-<h2><span class="idx">02</span> Полный реестр доменов
-  <span class="hint">все домены во всех статусах — для расследований;
-    ежедневная работа — <a href="/domains">инбокс M1</a></span></h2>
+<h2><span class="idx">≡</span> Весь список
+  <span class="hint">все домены во всех статусах — для разбора;
+    каждый день работай на экране <a href="/domains">Домены</a></span></h2>
 
-<details class="legend">
-  <summary>Легенда: статусы доменов и колонки таблицы</summary>
-  <div class="legend-grid">
-    <span class="badge b-discovered">{{ 'discovered'|status_ru }}</span><span class="who">машина</span>
-      <span class="desc">найден источником или добавлен списком, ещё не оценён — ждёт «▶ Оценить домены»</span>
-    <span class="badge b-scored">{{ 'scored'|status_ru }}</span><span class="who">машина</span>
-      <span class="desc">прошёл шесть волн — машина сама не одобряет ничего, решаешь ты: ✓ или ✗</span>
-    <span class="badge b-approved">{{ 'approved'|status_ru }}</span><span class="who">только ты</span>
-      {# «чистый» здесь было ЛОЖЬЮ (аудит F13): approve ставит человек — в т.ч. домену, чью
-         историю подтвердить не удалось. Статус говорит «решение принято», а не «проверено». #}
-      <span class="desc">одобрен к выкупу — купи руками у провайдера, потом отметь 🛒.
-        <b>«Одобрен» ≠ «история чистая»</b>: одобрить можно и домен, чью историю машина не
-        подтвердила. Вердикт истории и снимки — в <a href="/domains">инбоксе M1</a></span>
-    <span class="badge b-rejected">{{ 'rejected'|status_ru }}</span><span class="who">машина / ты</span>
-      <span class="desc">отклонён — причина в колонке «статус» (фраза + <code>код</code>) по волнам:
-      W0 <code>tld_closed</code> зона не наша, <code>trademark</code> чужой бренд, <code>feed_flag</code>
-      флаг источника · W2 <code>not_acquirable</code> занят · W3 <code>blacklist</code> Web Risk / Spamhaus, <code>list_hit</code> списки чистоты (казино/adult, если включено в /settings) ·
-      W4 <code>low_rd</code> мало доноров · W5 <code>history_dirty</code> грязная история,
-      <code>too_young</code> моложе порога · W6 <code>spam_anchors</code> спам-анкоры · итог
-      <code>low_score</code> низкий скор. Легаси v1: <code>legacy_ru</code> архив РФ-пула,
-      <code>rkn</code> реестр РКН, <code>safebrowsing</code> Google Safe Browsing</span>
-    <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span><span class="who">только ты</span>
-      <span class="desc">куплен вручную — money-gate: система сама деньги не тратит</span>
-    <span class="badge b-live">{{ 'live'|status_ru }}</span><span class="who">машина</span>
-      <span class="desc">сайт на домене опубликован и работает</span>
-  </div>
-  <div class="legend-grid" style="border-top:1px dashed var(--line)">
-    <span class="hint">score</span><span class="who">0–1</span>
-      <span class="desc">сводная оценка: история + тема прошлого сайта + возраст + доноры + DR + анкоры + трафик</span>
-    <span class="hint">RD</span><span class="who">Ahrefs (W4)</span>
-      <span class="desc">referring domains — сколько доменов ссылается; на дропах раздут спамом</span>
-    <span class="hint">DR</span><span class="who">Ahrefs</span>
-      <span class="desc"><a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a> —
-      главный честный сигнал на спам-дропах</span>
-    <span class="hint">флаги</span><span class="who">Wayback</span>
-      <span class="desc">красные метки грязной истории — любой флаг = отказ (метка РКН — у легаси v1)</span>
-    <span class="hint">⌛</span><span class="who">ссылка</span>
-      <span class="desc">открыть историю домена в Wayback — глянуть глазами перед решением</span>
-  </div>
-</details>
+{# Что значит статус — в title бейджа (легенда-раскрывашка убрана: проход по подписям).
+   «чистый» про approved было ЛОЖЬЮ (аудит F13): одобряет человек — в т.ч. домен, чью историю
+   подтвердить не удалось. Статус говорит «решение принято», а не «проверено» — это и в подсказке. #}
+{% set ST_TITLE = {
+  'discovered': 'Найден или добавлен списком, ещё не проверен.',
+  'scored': 'Проверен — ждёт твоего решения: одобрить или отклонить.',
+  'approved': 'Одобрен тобой к покупке. Это не значит «история чистая» — вердикт истории смотри на экране «Домены».',
+  'rejected': 'Отклонён машиной или тобой — причина рядом.',
+  'purchasing': 'Поставлен к покупке — заказ на экране «Покупка».',
+  'purchased': 'Куплен — можно создавать сайт.',
+  'live': 'Сайт на домене опубликован и работает.'} %}
 
 <div class="chips">
   <a class="chip {{ 'on' if not f_status }}" href="/domains/pool"
-     title="показать домены во всех статусах">все <b>{{ total }}</b></a>
+     title="Показать домены во всех статусах.">все <b>{{ total }}</b></a>
   <a class="chip {{ 'on' if show_all }}" href="/domains/pool?show_all=1"
-     title="показать в том числе непокупаемые (not_acquirable)">+ непокупаемые</a>
+     title="Показать и занятые домены — их уже не купить.">+ занятые</a>
   {% for st in ['discovered','scored','approved','rejected','purchased','live'] %}
     {% if counts.get(st) %}
     <a class="chip {{ 'on' if f_status==st }}" href="/domains/pool?status={{ st }}"
-       title="показать только домены в статусе {{ st }} ({{ st|status_ru }})">{{ st|status_ru }} <b>{{ counts[st] }}</b></a>
+       title="{{ ST_TITLE.get(st, '') }}">{{ st|status_ru }} <b>{{ counts[st] }}</b></a>
     {% endif %}
   {% endfor %}
   <form method="get" action="/domains/pool" style="display:flex; gap:10px; margin-left:12px; align-items:end">
     <input type="hidden" name="status" value="{{ f_status }}">
-    <label class="f">score от (0–1)
+    <label class="f">оценка от (0–1)
       <input type="number" name="min_score" step="0.05" min="0" max="1" value="{{ f_min_score }}"
              style="width:92px; padding:2px 8px"></label>
     <label class="f">показать строк
       <input type="number" name="limit" min="1" max="1000" value="{{ f_limit }}"
              style="width:80px; padding:2px 8px"></label>
-    <button class="btn-sm" title="применить фильтр по score и лимиту">применить фильтр</button>
+    <button class="btn-sm" title="Показать домены с оценкой не ниже указанной и не больше стольких строк.">Применить фильтр</button>
   </form>
 </div>
 
 <div class="station">
-  <div class="plate">Добавить домены списком — <b>то, что нашёл руками</b></div>
-  <details class="what"><summary>зачем это</summary>
-    <div class="what-body">ExpiredDomains.net и SpamZilla запрещают ботов — там ищешь сам и
-    вставляешь сюда (по одному в строке или через запятую, до 5000 за раз). Домены попадут в пул как
-    «найден» и пройдут обычную воронку: чужая зона или бренд в имени — честный отказ с причиной.</div></details>
+  <div class="plate">Добавить домены списком — <b>те, что нашёл сам</b></div>
+  <div class="what hint" title="ExpiredDomains.net и SpamZilla не пускают ботов — там ищешь сам. Чужая зона или бренд в имени — отказ с причиной.">По одному в строке или через запятую, до 5000 за раз. Станут «найден» и пройдут обычную проверку.</div>
   <form class="go" method="post" action="/domains/add-list">
     <textarea name="domains" rows="4" style="flex:1 1 320px" placeholder="example.com&#10;mejorvpn.mx"></textarea>
-    <button class="btn-acc" title="добавить в пул со статусом «найден»">Добавить</button>
+    <button class="btn-acc" title="Добавить домены в список со статусом «найден».">Добавить домены</button>
   </form>
 </div>
 
 <div class="wrap">
 {% if rows %}
-<div class="hint" style="margin-bottom:6px">DR — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
+<div class="hint" style="margin-bottom:6px">рейтинг Ahrefs — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
 {{ pager() }}
 <table>
   <thead><tr>
-    <th>домен</th><th>статус</th><th>лейн</th><th class="num">цена</th><th>score</th><th class="num">RD</th>
-    <th class="num">возраст</th><th class="num" title="Domain Rating by Ahrefs">DR</th><th>флаги истории</th><th class="num">найден</th>
+    <th>домен</th>
+    <th title="Где домен сейчас. Наведи на сам статус — увидишь, что он значит.">статус</th>
+    <th title="Как домен покупается: ставка — аукцион или перехват; свободный — обычная регистрация.">способ</th>
+    <th class="num">цена</th>
+    <th title="Сводная оценка от 0 до 1: история, тема прошлого сайта, возраст, ссылки.">оценка</th>
+    <th class="num" title="Сколько сайтов ссылается на домен (RD). У дропов число часто раздуто спамом.">ссылающихся<br>сайтов</th>
+    <th class="num" title="Возраст домена, лет.">возраст</th>
+    <th class="num" title="Рейтинг домена по Ahrefs (DR) — Domain Rating by Ahrefs.">рейтинг<br>Ahrefs</th>
+    <th title="Что плохого нашли в прошлом домена (история, чёрные списки). Любая метка — отказ.">грязь</th>
+    <th class="num" title="Когда домен найден: месяц-день.">найден</th>
     <th>следующий шаг</th>
   </tr></thead>
   <tbody>
@@ -106,12 +82,13 @@
     <tr>
       <td class="dom">
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
-          title="источник: {{ d.source|source_ru or '—' }} · лейн: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дедлайн {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · обновлено {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
+          title="источник: {{ d.source|source_ru or '—' }} · способ: {{ d.lane|lane_ru or '—' }}{% if d.acquire_deadline %} · дроп {{ d.acquire_deadline.strftime('%d.%m') }}{% endif %}{% if d.acquire_price %} · цена {{ '%.0f'|format(d.acquire_price|float) }}{% endif %}{% if d.price_checked_at %} · цена обновлена {{ d.price_checked_at.strftime('%d.%m') }}{% endif %}"
           >{{ d.source|source_badge }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
-           title="открыть историю домена в Wayback Machine" style="opacity:.6">⌛</a></td>
-      <td><span class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status|status_ru }}</span>
-        {% if d.reject_reason %}<span class="hint" title="причина отклонения (reject_reason)">{{ d.reject_reason|reject_ru }} <code>{{ d.reject_reason }}</code></span>{% endif %}</td>
+           title="Открыть историю домена в Wayback." style="opacity:.6">⌛</a></td>
+      <td><span title="{{ ST_TITLE.get(d.status, '') }}" class="badge b-{{ d.status if d.status in ['approved','scored','rejected','discovered','purchased','purchasing','live'] else 'default' }}">{{ d.status|status_ru }}</span>
+        {# код причины — в title: по нему ищут в логах, на экране ему делать нечего #}
+        {% if d.reject_reason %}<span class="hint" title="причина отказа, код: {{ d.reject_reason }}">{{ d.reject_reason|reject_ru }}</span>{% endif %}</td>
       <td><span class="hint">{{ d.lane|lane_ru or '—' }}</span></td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td>
@@ -129,81 +106,81 @@
           {% if pf.get(k) %}<span class="flag">{{ k }}</span>{% endif %}
         {% endfor %}
         {% if d.rkn_listed %}<span class="flag">РКН</span>{% endif %}
-        {% if d.blacklisted %}<span class="flag">blacklist</span>{% endif %}
+        {% if d.blacklisted %}<span class="flag">чёрные списки</span>{% endif %}
       </td>
       <td class="num hint">{{ d.discovered_at.strftime('%m-%d') if d.discovered_at else '—' }}</td>
       <td>
         {# контекстные действия: на каждом статусе видно только осмысленный следующий шаг #}
         {% if d.status == 'discovered' %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-            <button class="btn-sm" title="прогнать проверки только для этого домена (≈5 с)">▶ отскорить</button></form>
+            <button class="btn-sm" title="Проверить только этот домен — несколько секунд.">▶ Проверить</button></form>
         {% elif d.status == 'scored' %}
           {% if d.id in closed_ids %}
-            {# R2-19: зона вне белого списка — «✓ одобрить» политика отвергнет #}
-            <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке</span>
+            {# R2-19: зона вне белого списка — «✓ Одобрить» политика отвергнет #}
+            <span class="hint" title="Этой зоны нет в списке «Зоны, которые берём» (Настройки). Добавишь зону — кнопка вернётся.">зоны нет в списке</span>
           {% else %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
-            <button class="btn-sm btn-ok" title="одобрить: домен годен, пойдёт в очередь на покупку">✓ одобрить</button></form>
+            <button class="btn-sm btn-ok" title="Домен годен — появится в «Готовы к покупке» на экране «Домены».">✓ Одобрить</button></form>
           {% endif %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
-            <button class="btn-sm btn-bad" title="отклонить: домен не годится, убрать из воронки">✗ отклонить</button></form>
+            <button class="btn-sm btn-bad" title="Домен не годится — убрать из списка.">✗ Отклонить</button></form>
         {% elif d.status == 'approved' %}
           {# отмытый домен (approved с живым reject_reason: РКН/блэклист/история) — денежных
              кнопок ему не показываем: сервисы его всё равно отвергнут (services/transitions),
              а кнопка, ведущая в гарантированный отказ, — это ложное предложение купить. #}
           {% if d.id in dirty_by_id %}
             <span class="hint" style="color:var(--bad)"
-                  title="домен отклонён воронкой по объективному признаку — в выкуп он не идёт">⛔ грязь — выкуп запрещён</span>
+                  title="Домен отклонён по факту о нём (история, спам-ссылки, чёрные списки, бренд, зона) — купить его нельзя.">⛔ покупать нельзя — грязный</span>
             <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-              <button class="btn-sm" title="прогнать по воронке заново: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+              <button class="btn-sm" title="Проверить домен заново. Если проверки покажут, что он чист, отметка снимется сама.">▶ Проверить</button></form>
           {% else %}
             <form class="inline" method="post" action="/domains/{{ d.id }}/queue" style="display:flex; gap:8px; align-items:center">
-              <select name="provider" title="куда отправлять заказ: авто — канал по таблице зон (/settings); backorder — ставка на перехват (ценные дропы), optimizator — фиксированная цена (свободные чистые)">
+              <select name="provider" title="У кого покупать. Авто — по зоне домена (Настройки); backorder — ставка на перехват; optimizator — фиксированная цена.">
                 <option value="" selected>авто (по зоне)</option>
                 <option value="backorder">backorder</option>
                 <option value="optimizator">optimizator</option>
               </select>
-              <button class="btn-sm btn-acc" title="поставить в очередь выкупа (M2): заявка → подтверждение → отправка провайдеру">＋ в очередь выкупа</button></form>
+              <button class="btn-sm btn-acc" title="Поставить к покупке. Деньги спишутся только после твоего подтверждения на экране «Покупка».">＋ К покупке</button></form>
             <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
               <input type="hidden" name="status" value="purchased">
-              <button class="btn-sm btn-buy" title="быстрый путь: я уже купил домен руками у провайдера (система деньги не тратит)">🛒 отметить купленным</button></form>
+              <button class="btn-sm btn-buy" title="Отметить, что домен ты уже купил сам. Машина денег не тратит.">🛒 Уже купил сам</button></form>
           {% endif %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
-            <button class="btn-sm btn-bad" title="передумал: убрать из очереди на покупку">✗ отклонить</button></form>
+            <button class="btn-sm btn-bad" title="Передумал — убрать из готовых к покупке.">✗ Отклонить</button></form>
         {% elif d.status == 'purchasing' %}
           <a class="btn btn-sm" href="/queue"
-             title="домен в очереди выкупа — управлять заказом там">→ в очереди выкупа</a>
+             title="Домен поставлен к покупке — заказ на экране «Покупка».">Покупка →</a>
         {% elif d.status == 'purchased' %}
           {% if site_by_domain.get(d.id) %}
             <a class="btn btn-sm btn-acc" href="/sites/{{ site_by_domain[d.id] }}"
-               title="открыть карточку сайта этого домена">открыть сайт →</a>
+               title="Открыть карточку сайта этого домена.">Открыть сайт →</a>
           {% else %}
             <form class="inline" method="post" action="/domains/{{ d.id }}/make-site">
-              <button class="btn-sm btn-acc" title="завести карточку сайта: дальше провижн, контент, публикация">＋ создать сайт</button></form>
+              <button class="btn-sm btn-acc" title="Завести сайт на этом домене. Дальше — поднять, написать тексты, опубликовать.">＋ Создать сайт</button></form>
           {% endif %}
         {% elif d.status == 'rejected' %}
-          {# ЗДЕСЬ И БЫЛ ВХОД В КОРИДОР (аудит F9). Кнопка «↩ вернуть в approved» предлагалась и
+          {# ЗДЕСЬ И БЫЛ ВХОД В КОРИДОР (аудит F9). Кнопка «↩ Вернуть в одобренные» предлагалась и
              РКН-домену, а set_status_action смотрел только ЦЕЛЕВОЙ статус — один клик, и грязь
-             ехала в «Готовы к выкупу», в очередь, на ставку, ни разу не показав, что она грязь.
+             ехала в «Готовы к покупке», в очередь, на ставку, ни разу не показав, что она грязь.
              Порог («мало доноров», «молодой», «низкий скор») — другое дело: он крутится на
              /settings, и вернуть такой домен руками оператор вправе. Кто грязь — решает ПОЛИТИКА
              (services/transitions), а не список кодов в шаблоне: два места разъехались бы молча. #}
           {% if d.id in dirty_by_id %}
             <span class="hint" style="color:var(--bad)"
-                  title="Грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ (легаси v1 — реестр РКН, Safe Browsing): это факт о домене, а не наш порог. Ослабить его нечем: портфель держится на чистой истории. Единственный путь назад — перепроверка: если проверки сегодня скажут «чист», воронка сама снимет отметку.">⛔ грязь — не возвращается</span>
+                  title="Причина — факт о домене, а не наш порог. Вернуть его может только повторная проверка, если она покажет, что он чист.">⛔ грязный — не вернуть</span>
           {% elif d.id in closed_ids %}
             {# R2-19: зона вне белого списка — политика (transitions.zone_closed) в approved не пустит #}
-            <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке — не возвращается</span>
+            <span class="hint" title="Этой зоны нет в списке «Зоны, которые берём» (Настройки). Добавишь зону — кнопка вернётся.">зоны нет в списке — не вернуть</span>
           {% else %}
             <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
               <input type="hidden" name="status" value="approved">
-              <button class="btn-sm" title="отсеян порогом, а не грязью — вернуть в approved (годен к покупке)">↩ вернуть в approved</button></form>
+              <button class="btn-sm" title="Домен не прошёл порог, но не грязный — вернуть его в одобренные.">↩ Вернуть в одобренные</button></form>
           {% endif %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад для грязи: реабилитацию даёт машина по новым уликам, а не кнопка">▶ перепроверить</button></form>
+            <button class="btn-sm" title="Проверить домен заново — с сегодняшними данными и порогами.">▶ Проверить</button></form>
         {% endif %}
       </td>
     </tr>
@@ -212,9 +189,9 @@
 </table>
 {{ pager() }}
 {% else %}
-<div class="empty">Пусто{{ ' по фильтру «' + f_status + '»' if f_status }}. Начни с
-  «↻ Найти дропы» в <a href="/domains">инбоксе M1</a> (или добавь домены списком выше), затем
-  «▶ Оценить домены».</div>
+<div class="empty">Пусто{{ ' — статус «' + (f_status|status_ru) + '»' if f_status }}. Начни с
+  «Найти домены» на экране <a href="/domains">Домены</a> (или добавь домены списком выше), затем —
+  «Проверить домены».</div>
 {% endif %}
 </div>
 

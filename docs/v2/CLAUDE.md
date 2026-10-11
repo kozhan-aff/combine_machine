@@ -353,7 +353,7 @@ docker compose run --rm backend alembic revision -m "desc"        # затем �
 - **На боксе после pull:** `docker compose up -d` (новые bind-тома у backend/worker: папка скриншотов и
   `content_guides` у воркера); в `D:\combine_machine\.env` задать `RESEARCH_HOST_DIR=D:/claude-code/workspace/combine`,
   проверить `docker compose config -q`; на `/offers` завести Durev VPN (ru/RU, `https://durevpn.com`); на карточке
-  tunnelnotes.xyz привязать оффер → «Собрать досье». Живьём сверить, отдаёт ли A-Parser Net::HTTP конечный URL
+  tunnelnotes.xyz привязать оффер → «Изучить конкурентов». Живьём сверить, отдаёт ли A-Parser Net::HTTP конечный URL
   после редиректа (спека §4.2), и записать результат в `research-live-formats-2026-10.md`.
 
 ## Швы полного цикла (2026-10-10, ветка `fix/seams-2026-10-10` → main, 1686 passed)

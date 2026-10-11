@@ -64,13 +64,13 @@ def _jsonable(v):
 
 # Чипы волн в панели: ключ -> подпись. Порядок = порядок волн в _run_waves (таблица `waves`).
 FUNNEL_STAGES = [
-    {"key": "t0", "label": "фильтры (зона/бренд)"},
-    {"key": "avail", "label": "доступность (RDAP/whois)"},
-    {"key": "risk", "label": "риск (Web Risk)"},
-    {"key": "probe", "label": "архив (возраст, дёшево)"},
-    {"key": "links", "label": "ссылки (Ahrefs)"},
-    {"key": "history", "label": "история + тема"},
-    {"key": "deep", "label": "анкоры (Ahrefs)"},
+    {"key": "t0", "label": "зона и бренд"},
+    {"key": "avail", "label": "не занят ли"},
+    {"key": "risk", "label": "чёрные списки"},
+    {"key": "probe", "label": "возраст"},
+    {"key": "links", "label": "ссылки"},
+    {"key": "history", "label": "история и тема"},
+    {"key": "deep", "label": "спам-ссылки"},
 ]
 
 # Проверки, чей отказ означает «домен судили ВСЛЕПУЮ». Авто-одобрения нет (Р2): любой домен
@@ -87,13 +87,12 @@ _BLIND_RU = {
     # регистрации — вход возраста для гейта `too_young` (W5). Молчащий источник не ослаблял их,
     # он снимал их целиком: без даты сравнивать не с чем, отказа нет, и домен ехал дальше «как
     # проверенный» (аудит F6). Эта формулировка — для случая, когда возраста НЕ дал никто.
-    "whois": "доступность и возраст НЕ проверены: RDAP/whois не ответил — занятость не сверена, "
-             "гейт «слишком молодой» не применялся",
+    "whois": "НЕ проверено, свободен ли домен и сколько ему лет: RDAP/whois не ответил",
     # префикс `age:unverified` (_history_one): Wayback не ответил, а по RDAP/whois домен моложе порога
     "age": "возраст НЕ проверен: архив не ответил, а по RDAP домен моложе порога",
-    "ahrefs": "ссылочный профиль НЕ проверен: Ahrefs не ответил",
+    "ahrefs": "ссылки НЕ проверены: Ahrefs не ответил",
     "webrisk": "риск НЕ проверен: Web Risk не настроен или не ответил",
-    "blacklist": "блэклист НЕ проверен",
+    "blacklist": "чёрные списки НЕ проверены",
 }
 
 # whois упал, но возраст всё-таки известен — из Wayback (`age_source='wayback'`, волна истории).
@@ -101,8 +100,8 @@ _BLIND_RU = {
 # «слишком молодой» не применялся, — а он применялся (W5 сравнивает возраст по архиву с
 # min_age_years). Правда в другом: возраст по архиву — это НИЖНЯЯ оценка (первый снимок не
 # раньше регистрации), а вот ЗАНЯТОСТЬ домена не сверял никто.
-_BLIND_WHOIS_ARCHIVE_AGE = ("возраст по архиву (whois не ответил): гейт «слишком молодой» "
-                            "применён по первому снимку, но занятость домена НЕ сверена")
+_BLIND_WHOIS_ARCHIVE_AGE = ("возраст взят из архива (whois не ответил) — "
+                            "свободен ли домен, НЕ проверено")
 
 # Категории прошлого домена — по-русски (панель русская; улики показываются куратору).
 _CATS_RU = {"adult": "взрослое", "pharma": "фарма", "casino": "казино",
@@ -162,7 +161,7 @@ def history_evidence(d) -> list[dict]:
 
 def emd_newreg(d) -> bool:
     """EMD без единого прочитанного снимка (находка R2-14): у новорега пустой архив — норма, а не
-    «история НЕ проверена». Пометка «⚠ … ▶ перепроверить» звала бы перепроверять то, чего нет; пакет
+    «история НЕ проверена». Пометка «⚠ … ▶ Проверить» звала бы перепроверять то, чего нет; пакет
     EMD всё равно не берёт (балла нет). Снимки есть, но прочитано мало (`history_evidence`), или
     Wayback упал (`wayback:` в errors) — не сюда: тогда история и правда не проверена."""
     bd = d.score_breakdown or {}
@@ -194,7 +193,7 @@ def blind_reason(d) -> str | None:
         # отскорен ДО того, как поле стали писать (иначе не заполнено): и это тоже не «архива нет».
         if (d.score_breakdown or {}).get("sampled") == 0:
             return "история НЕ проверена: снимков нет или ни один не открылся — судить не по чему"
-        return "история НЕ проверена: улик нет в базе — перепроверь"
+        return "история НЕ проверена: снимков в базе нет — проверь заново"
     for e in errors:
         head = e.split(":", 1)[0]
         if head == "whois" and (d.score_breakdown or {}).get("age_source") == "wayback":
@@ -213,8 +212,7 @@ def blind_reason(d) -> str | None:
     # без анкоров одобрять пакетом нельзя (Р2 — гард переехал сюда из _decide). У EMD ссылок нет.
     bd = d.score_breakdown or {}
     if not bd.get("emd") and bd.get("deep_checked") is not True:
-        return ("анкоры НЕ проверены: кап W6, пол units, Ahrefs не ответил или язык прошлого сайта "
-                "неизвестен — ссылочный профиль может быть спамом")
+        return "спам-ссылки НЕ проверены: лимит Ahrefs, нет ответа или неизвестен язык сайта"
     return None
 
 
@@ -458,7 +456,7 @@ def scorable(now):
 
 def score_domain(domain_id: int, clients: dict | None = None, whois_budget=None,
                  links_budget=None, run: int | None = None, deep_budget=None) -> dict:
-    """Полная воронка для ОДНОГО домена (кнопка «▶ перепроверить»): батч из ОДНОГО FunnelState
+    """Полная воронка для ОДНОГО домена (кнопка «▶ Проверить»): батч из ОДНОГО FunnelState
     через тот же волновой конвейер, что и score_pending. Капы по умолчанию не действуют (None),
     пол остатка units — действует. Исключение: при `max_deep_per_run == 0` волна W6 выключена и
     для ручной кнопки (Budget(0))."""
@@ -564,7 +562,7 @@ def score_pending(limit: int = 100) -> int:
                                 .where(Domain.status == "discovered",
                                        Domain.acquire_deadline > now))
             if not (waiting or undated):
-                idle_msg = "оценивать нечего: найденных доменов нет — сначала «Найти дропы»"
+                idle_msg = "проверять нечего: найденных доменов нет — сначала «Найти домены»"
             else:
                 parts = []
                 if waiting:
@@ -572,13 +570,13 @@ def score_pending(limit: int = 100) -> int:
                                  + (f" (ближайший — {nearest:%d.%m})" if nearest else ""))
                 if undated:
                     parts.append(f"{undated} без даты дропа — вернусь к ним в течение суток")
-                idle_msg = "оценивать нечего: " + ", ".join(parts)
+                idle_msg = "проверять нечего: " + ", ".join(parts)
             if closed:
                 # закрытый гейт: «найденных нет» было бы враньём — домены есть, их держит гейт
                 held = db.scalar(select(func.count()).select_from(Domain)
                                  .where(Domain.status == "discovered")) or 0
                 if held:
-                    idle_msg = f"{held} доменов ждут следующего прогона"
+                    idle_msg = f"{held} доменов ждут следующей проверки"
     stages = [dict(s) for s in FUNNEL_STAGES]
     if gate is not None and gate[0] == "ahrefs_no_key":
         # ключа Ahrefs нет: платные волны честно помечены «пропущена» (не сломана, а отключена)
@@ -625,7 +623,7 @@ def score_pending(limit: int = 100) -> int:
                     ).scalar() or 0
                 raise
             done = len(results)
-            msg = " · ".join([f"прогнано {total} доменов через воронку", *notes])
+            msg = " · ".join([f"проверено доменов: {total}", *notes])
             jobs.report(run, done=total, total=total, current="", message=msg)
         # «Слепые» (Wayback упал/недочитан) возвращаются в очередь сами, без платных волн (S2-07)
         retried = retry_blind_history(max(limit - total, 0) or 25, st, clients, run)
@@ -757,13 +755,13 @@ def recheck_acquirability(limit: int = 200) -> dict:
     # free+waiting+taken+unknown; расходится ровно на домены, которые между whois и записью
     # успели уйти в выкуп (см. декремент taken по rowcount ниже) — их отбраковки не было.
     out = {"checked": 0, "free": 0, "waiting": 0, "taken": 0, "unknown": 0}
-    with jobs.track("recheck", stages=[{"key": "whois", "label": "whois по донорам"}]) as run:
+    with jobs.track("recheck", stages=[{"key": "whois", "label": "не заняты ли"}]) as run:
         jobs.report(run, stage="whois")
         budget = int(get_settings()["max_whois_per_run"])
         if budget <= 0:
             # ВНУТРИ track, а не до него: иначе прогон завершался бы, не создав строки реестра,
-            # и кнопка «Перепроверить» выглядела бы сломанной — ровно та болезнь, которую лечим.
-            jobs.report(run, message="whois-бюджет = 0, проверять нечем (см. /settings)")
+            # и кнопка «Проверить, не заняты ли» выглядела бы сломанной — ровно та болезнь, которую лечим.
+            jobs.report(run, message="лимит проверок whois = 0 — проверять нечем (см. Настройки)")
             return out
         with SessionLocal() as db:
             ids = db.execute(
@@ -829,10 +827,10 @@ def recheck_acquirability(limit: int = 200) -> dict:
         # ~40 мс. Со сводкой «проверено 0: свободны 0, ЗАНЯТЫ 0...» это неотличимо от сломанной
         # кнопки — ровно так оператор и решил, что перепроверка не работает (дебаг 2026-07-13).
         msg = (f"проверено {out['checked']}: свободны {out['free']}, "
-               f"ждут дропа {out['waiting']}, ЗАНЯТЫ {out['taken']} (отбракованы), "
+               f"ждут дропа {out['waiting']}, ЗАНЯТЫ {out['taken']} (отклонены), "
                f"не определилось {out['unknown']}") if total else (
-            "проверять нечего: нет доменов «на решении» или «одобрен». "
-            "Сначала оцени найденные — кнопка «Оценить домены»")
+            "проверять нечего: нет доменов «ждёт решения» или «одобрен». "
+            "Сначала нажми «Проверить домены»")
         jobs.report(run, done=total, total=total, current="", message=msg)
     return out
 
@@ -1108,8 +1106,8 @@ def _wave_risk(states: list, clients: dict, run, notes: list | None = None) -> N
     не поломка домена, а настройка — говорим об этом в сообщении задачи, а не только в errors."""
     wr = clients.get("webrisk")
     if notes is not None and any(s.alive for s in states) and (wr is None or not wr.configured):
-        note = ("Web Risk не настроен (WEBRISK_API_KEY) — риск доменов НЕ проверен, "
-                "пакетное одобрение закрыто, решение за человеком")
+        note = ("Web Risk не настроен (ключ — в «Ключи и доступы») — риск доменов НЕ проверен, "
+                "пакетное одобрение закрыто, решаешь ты")
         if note not in notes:
             notes.append(note)
     _run_concurrent(states, _CONCURRENCY["risk"], run, "risk", lambda s: _risk_one(s, clients))
@@ -1183,7 +1181,7 @@ def _topic_one(s: FunnelState, clients: dict, texts: list) -> None:
         try:
             t = whois_router.guarded(llm, "classify_failures",
                                      lambda: history_llm.classify_topics(s.domain, texts, llm),
-                                     "LLM (тема W5)", clients.get("_llm_lock"))
+                                     "LLM (тема прошлого сайта)", clients.get("_llm_lock"))
         except Exception as e:  # noqa: BLE001 — мягкий сигнал: сбой LLM не отклоняет и не ослепляет
             t = None
             # причина (403 tier / 429 / пустой reasoning) — оператору в сообщение задачи, а не в
@@ -1353,9 +1351,9 @@ def _units_below_floor(clients: dict, st: dict) -> str | None:
     except Exception:  # noqa: BLE001 — остаток не узнать: тратить вслепую нельзя
         left = None
     if left is None:
-        return "Ahrefs: остаток units неизвестен — платные волны пропущены"
+        return "Ahrefs: остаток единиц неизвестен — платные проверки пропущены"
     if left < floor:
-        return (f"Ahrefs: остаток {left:,} < пола {floor:,} — платные волны пропущены"
+        return (f"Ahrefs: остаток {left:,} ниже минимума {floor:,} — платные проверки пропущены"
                 .replace(",", " "))
     return None
 
@@ -1377,8 +1375,8 @@ def _units_daily_spent(clients: dict, st: dict) -> str | None:
     from app.services.settings import units_spent_today
     spent = units_spent_today(int(left))
     if spent >= cap:
-        return (f"Ahrefs: за сутки потрачено {spent:,} units >= суточного лимита {cap:,} — платные "
-                f"волны ждут завтра".replace(",", " "))
+        return (f"Ahrefs: за сутки потрачено {spent:,} единиц при суточном лимите {cap:,} — платные "
+                f"проверки ждут завтра".replace(",", " "))
     return None
 
 
@@ -1397,8 +1395,8 @@ def _paid_gate_closed(clients: dict, st: dict) -> tuple | None:
     if ah is None:
         return None
     if getattr(ah, "api_key", None) == "":             # у фейков тестов атрибута нет
-        return ("ahrefs_no_key", "Ahrefs: ключ AHREFS_API_KEY не задан — ссылки (W4) и анкоры (W6) "
-                                 "пропущены, оценка без RD/DR")
+        return ("ahrefs_no_key", "Ahrefs: ключ не задан — ссылки и спам-ссылки не проверяются, "
+                                 "оценка без данных о ссылках")
     note = _units_below_floor(clients, st) or _units_daily_spent(clients, st)
     return ("units_floor", note) if note is not None else None
 
@@ -1534,7 +1532,7 @@ def _wave_links(states: list, clients: dict, st: dict, budget, run, notes: list 
                 # 401/403 — ключ не принят, 400 — кривой запрос: код нужен оператору, не только тип
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 why = type(e).__name__ + (f" {code}" if code else "")
-                notes.append(f"Ahrefs W4: {why} — {len(rest)} доменов ждут следующего прогона")
+                notes.append(f"Ahrefs (ссылки): {why} — {len(rest)} доменов ждут следующей проверки")
             return
         for s in chunk:
             row = data.get(keys[s.domain])
@@ -1741,7 +1739,7 @@ def _commit_result(state: FunnelState, run, st: dict) -> dict:
         # То же для ИСТОРИИ, прочитанной не до конца (I2 whole-branch ревью): archive.org троттлит,
         # прочитано меньшинство снимков — classify_history отдаёт prior_flags={} и
         # wayback_checked=False. Это «не знаем», а не «чисто», но значение не None, и цикл ниже
-        # записал бы его поверх подтверждённого казино: dirty_reason -> None, «✓ одобрить» открыта.
+        # записал бы его поверх подтверждённого казино: dirty_reason -> None, «✓ Одобрить» открыта.
         # Путь, где Wayback бросил исключение, грязь сохраняет (этих ключей в sig нет вовсе) — два
         # входа в одну ситуацию обязаны вести себя одинаково. Поэтому при сохранённой грязи
         # вердикт истории и его улики не трогаем; свежая ПОЛНАЯ проверка (wayback_checked=True)
@@ -1843,7 +1841,7 @@ def _wayback_note(states: list, notes: list) -> None:
     n = sum(1 for s in states if s.unresolved_why == "wayback_down")
     notes[:] = [x for x in notes if not x.startswith("archive.org недоступен")]
     if n:
-        notes.append(f"archive.org недоступен — {n} доменов ждут следующего прогона")
+        notes.append(f"archive.org недоступен — {n} доменов ждут следующей проверки")
 
 
 def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget,
@@ -1872,18 +1870,18 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
     # правды: новая волна добавляется ОДНОЙ строкой здесь и одной в FUNNEL_STAGES.
     waves = [
         # W0 и сразу решение «пойдут ли платные волны» (R2-10) — до того, как W2/W3 потратятся
-        ("t0", "фильтры", lambda alive: (_wave_t0(alive, st), _paid_gate(alive, clients, st, notes))),
-        ("avail", "доступность", lambda alive: _wave_avail(alive, clients, whois_b, st, run)),
-        ("risk", "risk", lambda alive: (_wave_risk(alive, clients, run, notes), _wave_lists(alive, st),
+        ("t0", "зона и бренд", lambda alive: (_wave_t0(alive, st), _paid_gate(alive, clients, st, notes))),
+        ("avail", "не занят ли", lambda alive: _wave_avail(alive, clients, whois_b, st, run)),
+        ("risk", "чёрные списки", lambda alive: (_wave_risk(alive, clients, run, notes), _wave_lists(alive, st),
                                        _wave_ranks(alive, st))),
         # дешёвая проба архива ДО платной W4 (S2-06): too_young по CDX не должен стоить 25 units
-        ("probe", "архив", lambda alive: _wave_probe(alive, clients, st, run)),
+        ("probe", "возраст", lambda alive: _wave_probe(alive, clients, st, run)),
         ("links", "ссылки", lambda alive: (_wave_links(alive, clients, st, links_b, run, notes),
                                            _persist_links(alive))),
-        ("history", "history", lambda alive: (_wave_history(alive, clients, st, run),
+        ("history", "история и тема", lambda alive: (_wave_history(alive, clients, st, run),
                                               _llm_note(clients, notes),
                                               _wayback_note(states, notes))),
-        ("deep", "анкоры", lambda alive: _wave_deep(alive, clients, st, deep_b, run, notes)),
+        ("deep", "спам-ссылки", lambda alive: _wave_deep(alive, clients, st, deep_b, run, notes)),
     ]
     results, waterfall, alive = [], [], list(states)
     for i, (key, label, wave) in enumerate(waves):
@@ -1902,7 +1900,7 @@ def _run_waves(states: list, clients: dict, st: dict, whois_budget, links_budget
             after = sum(1 for s in alive if s.alive)
         # та же подпись и у последней волны: «N решено» считало бы только выживших
         skipped_paid = key in ("links", "deep") and _no_ahrefs_key(clients)
-        waterfall.append(f"{label}: пропуск (нет ключа Ahrefs)" if skipped_paid
+        waterfall.append(f"{label}: пропущено (нет ключа Ahrefs)" if skipped_paid
                          else f"{label}: {before} → {after}")
         jobs.report(run, message=" · ".join(waterfall + notes),
                     stage_key=key, stage_before=before, stage_after=after)

@@ -263,7 +263,7 @@ def test_check_index_flash_says_unknown_out_loud(monkeypatch, client):
     r = client.post(f"/sites/{sid}/check-index", follow_redirects=False)
     assert r.status_code == 303
     flash = unquote(r.headers["location"])
-    assert "не знаю (движки молчат)" in flash
+    assert "неизвестно (поисковики молчат)" in flash
     assert "unknown" not in flash
 
 

@@ -365,7 +365,7 @@ def test_queue_page_shows_optimizator_balance(client, monkeypatch):
     monkeypatch.setattr(settings, "OPTIMIZATOR_API_KEY", KEY)
     monkeypatch.setattr(OptimizatorClient, "balance", lambda self: 0.0)
     html = client.get("/queue").text
-    assert "баланс optimizator" in html and "регистратор (международный): не настроен" in html
+    assert "баланс optimizator" in html and "регистратор для .com/.net/…: не настроен" in html
 
 
 # --- S3-10: форма успеха reg_domains --------------------------------------------------------------

@@ -93,7 +93,7 @@ def test_domains_shows_last_run_failure(client):
         with jobs.track("score"):
             raise RuntimeError("A-Parser timeout")
     html = client.get("/domains").text
-    assert "Оценка упала" in html and "timeout" in html
+    assert "«Проверить домены» — ошибка" in html and "timeout" in html
 
 
 def test_empty_recheck_explains_itself(client):
@@ -104,7 +104,7 @@ def test_empty_recheck_explains_itself(client):
     out = scoring.recheck_acquirability(limit=10)
     assert out["checked"] == 0
     msg = jobs.last("recheck")["message"]
-    assert "проверять нечего" in msg and "Оценить домены" in msg
+    assert "проверять нечего" in msg and "Проверить домены" in msg
 
 
 def test_domains_nudges_when_funnel_never_ran(client):
@@ -112,7 +112,7 @@ def test_domains_nudges_when_funnel_never_ran(client):
     (в реестре score=null), а инбокс пуст — и панель об этом молчала."""
     _add(domain="raw.ru", status="discovered")
     html = client.get("/domains").text
-    assert "не запускалась" in html and "Оценить домены" in html
+    assert "ещё ни разу не" in html and "нажми «Проверить домены»" in html
 
 
 def test_domains_shows_last_run_summary(client):
@@ -131,9 +131,9 @@ def test_reject_reasons_split_threshold_from_dirt(client):
     _add(domain="b.ru", status="rejected", reject_reason="low_rd")
     _add(domain="c.ru", status="rejected", reject_reason="history_dirty")
     html = client.get("/domains").text
-    assert "Мало доноров" in html and "Грязная история" in html
-    assert "режет порог" in html and "не трогать" in html
-    assert "настроить пороги" in html
+    assert "мало ссылающихся сайтов" in html and "грязная история" in html
+    assert "не прошли порог" in html and "грязные — не вернуть" in html
+    assert "Настроить пороги" in html
 
 
 def test_expired_drop_is_not_urgent_and_not_first(client):
@@ -160,16 +160,16 @@ def test_expired_domain_is_marked_in_inbox_and_in_ready(client):
     _add(domain="deadready.ru", status="approved", score=0.9, lane="bid",
          acquire_deadline=now - timedelta(days=30))
     html = client.get("/domains").text
-    assert html.count("окно закрыто") == 2      # и в инбоксе, и в «готовы к выкупу»
+    assert html.count(">дроп прошёл<") == 2      # и в инбоксе, и в «Готовы к покупке»
 
 
 def test_feed_deadline_keeps_drop_label(client):
-    """Обратная сторона: дедлайн из фида (backorder/cctld) остаётся «СРОК ДРОПА» —
+    """Обратная сторона: дата из фида (backorder/cctld) остаётся «ДАТА ДРОПА» —
     подпись не должна размыться до бессмысленной для ВСЕХ доменов."""
     soon = datetime.now(timezone.utc) + timedelta(days=5)
     _add(domain="fromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)
     html = client.get("/domains").text
-    assert "СРОК ДРОПА" in html
+    assert "ДАТА ДРОПА" in html
     assert "ОСВОБОДИТСЯ*" not in html
 
 
@@ -179,14 +179,14 @@ def test_expired_feed_deadline_still_shows_window_closed(client):
     past = datetime.now(timezone.utc) - timedelta(days=10)
     _add(domain="sniped.ru", status="scored", score=0.7, acquire_deadline=past)
     html = client.get("/domains").text
-    assert "окно закрыто" in html
+    assert ">дроп прошёл<" in html
 
 
 def test_pool_keeps_plain_deadline_label_for_feed_date(client):
-    """Обратная сторона в пуле: подтверждённая дата из фида остаётся простым «дедлайн»,
+    """Обратная сторона в пуле: подтверждённая дата из фида остаётся простым «дроп»,
     без ложной пометки «прогноз»."""
     soon = datetime.now(timezone.utc) + timedelta(days=5)
     _add(domain="poolfromfeed.ru", status="scored", score=0.7, acquire_deadline=soon)
     html = client.get("/domains/pool").text
-    assert "дедлайн" in html
+    assert " · дроп " in html
     assert "прогноз whois" not in html

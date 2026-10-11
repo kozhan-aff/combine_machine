@@ -20,8 +20,8 @@ def _site() -> int:
 def test_card_shows_empty_dossier_and_button(client):
     sid = _site()
     html = client.get(f"/sites/{sid}").text
-    assert "Досье конкурентов" in html and f'action="/sites/{sid}/research"' in html and "досье не собрано" in html
-    assert "Без досье тексты не пишутся" in html      # с плана Б это правда: панель и автопилот без досье не пишут
+    assert "4 · Разбор конкурентов" in html and f'action="/sites/{sid}/research"' in html and "Конкурентов ещё не изучали" in html
+    assert "Без этого тексты не пишутся" in html and "▶ Изучить конкурентов" in html   # панель и автопилот без разбора не пишут
 
 
 def test_card_lists_sources_and_rebuild(client):
@@ -31,7 +31,7 @@ def test_card_lists_sources_and_rebuild(client):
                            domain="a.com", words=800, headings=[["h2", "Цена"]], screenshot_path="/r/1/review-1.png"))
         s.commit()
     html = client.get(f"/sites/{sid}").text
-    assert "a.com" in html and "800" in html and "пересобрать" in html
+    assert "a.com" in html and "800" in html and "⟳ Изучить заново" in html and "обзоры: 1" in html
 
 
 def test_button_spawns_job_and_force_passes_through(client, monkeypatch):
@@ -55,4 +55,4 @@ def test_empty_card_shows_reason_of_last_failed_run(client):
                      started_at=now, updated_at=now, finished_at=now))
         s.commit()
     html = client.get(f"/sites/{sid}").text
-    assert "Последняя сборка" in html and "ни одной живой страницы" in html
+    assert "Последняя попытка" in html and "ни одной живой страницы" in html

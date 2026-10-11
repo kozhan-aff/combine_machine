@@ -2,62 +2,64 @@
 {% block title %}Диагностика{% endblock %}
 {% block content %}
 
-<h2><span class="idx">◉</span> Диагностика интеграций
-  <span class="hint">{{ ok }} / {{ total }} на связи ·
-    {% if crit_down %}<b style="color:var(--bad)">критичные: {{ crit_down|join(', ') }} ✗</b>{% else %}<b style="color:var(--ok)">критичные: все ✓</b>{% endif %}</span></h2>
+<h2><span class="idx">◉</span> Диагностика
+  <span class="hint">работают {{ ok }} из {{ total }} сервисов ·
+    {% if crit_down %}<b style="color:var(--bad)">не работают обязательные: {{ crit_down|join(', ') }} ✗</b>{% else %}<b style="color:var(--ok)">обязательные: все ✓</b>{% endif %}</span></h2>
 
 <div class="card" style="max-width:920px; margin-bottom:14px">
-  <b>Воркер автопилота:</b> {% if worker.age_sec is none %}<span class="hint" title="воркер ни разу не бил сердце: контейнер worker не запущен или обновление ещё не накатано">воркер: нет сигнала</span>
-  {% elif worker.alive %}<span class="hint" style="color:var(--ok)">воркер: жив, последний удар {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
-  {% else %}<span class="hint" style="color:var(--bad)" title="проверь контейнер worker: docker compose ps / logs worker">воркер: НЕ отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}<br>
-  <b>Версия кода:</b>
+  {% if worker.age_sec is none %}<span class="hint" title="Фоновый процесс ещё ни разу не отозвался: он не запущен или программа не обновлена до конца (контейнер worker).">фоновый процесс: нет сигнала</span>
+  {% elif worker.alive %}<span class="hint" style="color:var(--ok)">фоновый процесс: работает, отозвался {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
+  {% else %}<span class="hint" style="color:var(--bad)" title="Автопилот и задачи по расписанию стоят. Перезапусти контейнер worker на сервере.">фоновый процесс: не отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}<br>
+  <b>Версия программы:</b>
   {% if status.error %}<span style="color:var(--bad)">git недоступен — {{ status.error }}</span>
   {% else %}<code>{{ status.hash }}</code> · {{ status.subject }} · <span class="hint">{{ status.date }}</span>
   <br><b>Ветка:</b> <code>{{ status.branch }}</code> ·
-    {% if status.detached %}<span style="color:var(--bad)">detached HEAD — нужна ⚠ Принудительно обновить</span>
-    {% elif status.dirty %}<span style="color:var(--bad)">⚠ грязно (есть локальные правки — обычный pull откажет)</span>
-    {% elif status.ahead and status.behind %}<span style="color:var(--bad)">⚠ разошлось (впереди {{ status.ahead }}, позади {{ status.behind }})</span>
-    {% elif status.behind %}<span style="color:var(--acc2)">позади origin на {{ status.behind }}</span>
-    {% elif status.ahead %}<span class="hint">впереди origin на {{ status.ahead }}</span>
-    {% else %}<span style="color:var(--ok)">✓ чисто · актуально</span>{% endif %}
+    {% if status.detached %}<span style="color:var(--bad)" title="Программа не на основной ветке (detached HEAD).">⚠ программа не на основной ветке — нажми «Обновить принудительно»</span>
+    {% elif status.dirty %}<span style="color:var(--bad)">⚠ на сервере есть свои правки — обычное обновление откажет</span>
+    {% elif status.ahead and status.behind %}<span style="color:var(--bad)">⚠ версии разошлись (своих изменений {{ status.ahead }}, не скачано {{ status.behind }})</span>
+    {% elif status.behind %}<span style="color:var(--acc2)">есть обновление: не скачано изменений — {{ status.behind }}</span>
+    {% elif status.ahead %}<span class="hint">своих изменений на сервере: {{ status.ahead }}</span>
+    {% else %}<span style="color:var(--ok)">✓ версия свежая</span>{% endif %}
   {% endif %}
   {% if can_pull %}
   <form method="post" action="/admin/check-updates" style="display:inline; margin-left:12px">
-    <button class="btn" title="git ls-remote — сравнить с origin/main">проверить обновления</button>
+    <button class="btn" title="Узнать, вышла ли новая версия программы. Ничего не меняет.">Проверить обновления</button>
   </form>{% endif %}
 </div>
 
 <div class="toolbar">
   <form method="post" action="/diag/refresh">
-    <button class="btn-acc" title="пропинговать все сервисы ещё раз (до {{ timeout|int }} с); LLM и SearXNG — заново, не из 10-минутного кэша">↻ Проверить все сервисы снова</button>
+    <button class="btn-acc" title="Опросить все сервисы заново (до {{ timeout|int }} с). Модель и поиск тоже спросим заново, а не возьмём запомненный ответ.">↻ Проверить связь</button>
   </form>
-  <span class="hint">{% if checked_at %}снимок от {{ checked_at.strftime('%H:%M:%S') }} UTC · {% endif %}страница показывает кэш (фон обновляет раз в 5 минут), живой прогон — только кнопкой</span>
+  <span class="hint">{% if checked_at %}снимок от {{ checked_at.strftime('%H:%M:%S') }} UTC · {% endif %}страница показывает последний снимок (обновляется раз в 5 минут), свежая проверка — кнопкой</span>
 </div>
 
-{% set mod_titles = {'M1':'M1 — поиск и скоринг','M2':'M2 — выкуп','M3':'M3 — провижн','M4':'M4 — контент','M5':'M5 — публикация','инфра':'Инфраструктура'} %}
-{% for mod in ['M1','M2','M3','M4','M5','инфра'] %}
-  {% set group = checks|selectattr('module','equalto',mod)|list %}
+{# ключ группы в данных (module) — внутренний; на экране — название по смыслу #}
+{% for title, mods in [('Поиск и проверка доменов', ['M1']), ('Покупка', ['M2']), ('Хостинг и DNS', ['M3']),
+                       ('Тексты и индексация', ['M4', 'M5']), ('Прочее', ['инфра'])] %}
+  {% set group = checks|selectattr('module','in',mods)|list %}
   {% if group %}
-  <h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">{{ mod_titles[mod] }}</h2>
+  <h2 style="font-size:13px; margin:20px 0 8px; color:var(--mut)">{{ title }}</h2>
   <div class="wrap" style="margin-bottom:8px">
   <table>
     <thead><tr>
-      <th>сервис</th><th>зачем он конвейеру</th><th>статус</th><th class="num">отклик</th><th>детали ошибки</th>
+      <th>сервис</th><th>зачем нужен</th><th>статус</th><th class="num">отклик</th><th>подробности</th>
     </tr></thead>
     <tbody>
     {% for c in group %}
       <tr>
-        <td class="dom">{{ c.label }}{% if c.critical %}<span class="hint" title="критичная зависимость конвейера" style="color:var(--acc2)"> ●</span>{% endif %}</td>
-        <td class="hint">{{ c.role }}</td>
-        <td>
-          {% if c.status == 'ok' %}<span class="led led-ok"></span>OK
-          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="пинг не выполнялся — причина в колонке справа (нет кредов в .env или источник выключен)">пропущен</span>
-          {% elif c.critical %}<span class="led led-bad"></span><b style="color:var(--bad)">FAIL</b>
-          {% else %}<span class="led led-bad"></span><span class="hint" title="опциональная зависимость — деградируемо">FAIL (опц.)</span>{% endif %}
+        <td class="dom">{{ c.label }}{% if c.critical %}<span class="hint" title="Обязательный сервис: без него машина стоит." style="color:var(--acc2)"> ●</span>{% endif %}</td>
+        {# white-space:normal — как у ячеек карточки сайта: длинное «зачем нужен» иначе выталкивает таблицу за карточку на 1024px #}
+        <td class="hint" style="white-space:normal; min-width:150px">{{ c.role }}</td>
+        <td style="white-space:normal">
+          {% if c.status == 'ok' %}<span class="led led-ok"></span>работает
+          {% elif c.status == 'skip' %}<span class="led led-off"></span><span class="hint" title="Проверка не делалась: не задан ключ или источник выключен. Причина — справа.">не настроен</span>
+          {% elif c.critical %}<span class="led led-bad"></span><b style="color:var(--bad)">не работает</b>
+          {% else %}<span class="led led-bad"></span><span class="hint" title="Необязательный сервис: машина работает и без него, но часть проверок пропускается.">не работает (необязателен)</span>{% endif %}
         </td>
         <td class="num">
           {% if c.ms is not none %}<span class="hint">{{ c.ms }} мс</span>
-            <span class="meter" style="width:48px" title="доля от таймаута пинга ({{ timeout|int }} с)"><i class="m-mid" style="width:{{ [ (c.ms/(timeout*10))|round|int, 100]|min }}%"></i></span>
+            <span class="meter" style="width:48px" title="Доля от времени, которое ждём ответа ({{ timeout|int }} с)."><i class="m-mid" style="width:{{ [ (c.ms/(timeout*10))|round|int, 100]|min }}%"></i></span>
           {% else %}<span class="hint">—</span>{% endif %}
         </td>
         <td class="hint" style="max-width:420px; overflow:hidden; text-overflow:ellipsis">{{ c.error or c.note or '' }}</td>
@@ -68,33 +70,35 @@
   </div>
   {% endif %}
 {% endfor %}
-<p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>OK — отвечает и креды верны ·
-  <span class="led led-bad"></span>FAIL — не отвечает/отверг (текст справа) ·
-  <span class="led led-off"></span>пропущен — заполни креды в <code>.env</code> ·
-  <span style="color:var(--acc2)">●</span> критичная зависимость (без неё конвейер стоит).</p>
+<p class="hint" style="margin:0 0 22px"><span class="led led-ok"></span>работает — отвечает, ключ верный ·
+  <span class="led led-bad"></span>не работает — причина справа ·
+  <span class="led led-off"></span>не настроен — задай ключ на экране <a href="/settings/keys">Ключи и доступы</a> ·
+  <span style="color:var(--acc2)">●</span> обязательный сервис (без него машина стоит).</p>
 
 <div class="station" style="max-width:920px">
-  <div class="plate">⇩ Обновить из git — подтянуть свежий код <span class="mod">{{ repo }}</span></div>
-  <div class="what"><b>⇩ Обновить</b> = <b>git pull --ff-only</b> из main + <b>alembic upgrade head</b>
-    прямо в контейнере; backend и worker подхватят код авто-релоадом — консоль не нужна. Если дерево
-    грязное/история разошлась — обычный pull откажет, тогда <b>⚠ Принудительно обновить</b> (fetch +
-    reset до origin/main; локальные правки потеряются, <code>.env</code> и ключи — нет). Смена
-    <b>requirements.txt/Dockerfile</b> всё равно требует <code>docker compose up -d --build</code>
-    (баннер предупредит). LAN-панель с деструктивной кнопкой стоит закрыть Basic-auth
-    (<code>PANEL_USER</code>/<code>PANEL_PASS</code> в .env).</div>
+  <div class="plate">⇩ Обновить программу <span class="mod">{{ repo }}</span></div>
+  <div class="what hint">Скачивает новую версию программы и обновляет базу.</div>
+  <details class="what"><summary>подробнее</summary>
+    <div class="what-body"><b>Обновить программу</b> скачивает новую версию из ветки <code>main</code> и
+    обновляет базу данных; изменения программа подхватит сама. Если на сервере есть свои правки или версии
+    разошлись, обычное обновление откажет — тогда <b>Обновить принудительно</b>: правки на сервере пропадут,
+    <code>.env</code> и ключи останутся. После некоторых обновлений нужно пересобрать контейнеры командой
+    <code>docker compose up -d --build</code> — сообщение сверху скажет об этом. Панель с такой кнопкой держи
+    под паролем (<code>PANEL_USER</code> и <code>PANEL_PASS</code> в <code>.env</code>).</div></details>
   <div class="go">
     {% if can_pull %}
     <form method="post" action="/admin/pull"
-          onsubmit="return confirm('Забрать свежий код из git (main) и применить миграции?')">
-      <button class="btn-acc" title="git pull --ff-only + alembic upgrade head; результат — баннером сверху">⇩ Обновить из git</button>
+          onsubmit="return confirm('Обновить программу до новой версии?')">
+      <button class="btn-acc" title="Скачать новую версию и обновить базу. Итог появится сообщением сверху.">⇩ Обновить программу</button>
     </form>
     <form method="post" action="/admin/force-pull"
-          onsubmit="return confirm('Принудительно привести код к origin/main. Локальные правки на боксе будут потеряны (.env и ключи сохранятся). Продолжить?')">
-      <button class="btn-bad" title="git fetch + checkout -f -B main до origin/main — чинит грязное/разошедшееся/detached дерево, когда обычный pull отказал">⚠ Принудительно обновить</button>
+          onsubmit="return confirm('Обновить принудительно? Правки на сервере пропадут, .env и ключи останутся.')">
+      <button class="btn-bad" title="Привести программу к последней версии, даже если обычное обновление отказало. Правки на сервере пропадут.">⚠ Обновить принудительно</button>
     </form>
     {% else %}
-    <span class="hint">Кнопки выключены: задай <b>GITHUB_TOKEN</b> (fine-grained PAT, read-only Contents)
-      в <code>.env</code> и смонтируй репозиторий (<code>.:/repo</code>) — см. docs/DEPLOY.md.</span>
+    <span class="hint">Кнопки выключены: задай токен GitHub (<code>GITHUB_TOKEN</code>) на экране
+      <a href="/settings/keys">Ключи и доступы</a> и подключи папку программы к контейнеру
+      (<code>.:/repo</code>) — см. <code>docs/DEPLOY.md</code>.</span>
     {% endif %}
   </div>
 </div>

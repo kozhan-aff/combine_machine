@@ -403,7 +403,7 @@ def test_blacklist_none_goes_to_errors_and_downgrades(monkeypatch):
     assert scoring._decide(0.9, sig_err, 0.4) == "scored"
     d = Domain(domain="bl.ru", wayback_checked=True, prior_flags={}, age_years=8,
                score_breakdown={"errors": sig_err["errors"], "history_evidence": []})
-    assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
+    assert scoring.blind_reason(d) == "чёрные списки НЕ проверены" and scoring.bulk_ok(d) is False
 
 
 # ---------- M9: status-gate — рескорится только discovered/scored/rejected ----------

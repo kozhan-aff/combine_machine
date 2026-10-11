@@ -4,97 +4,97 @@
 
 <div class="card" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:14px">
   <span class="badge b-{{ 'approved' if autopilot.autopilot_on else 'discovered' }}"
-        title="мастер-выключатель автопилота">✈ Автопилот: {{ 'вкл' if autopilot.autopilot_on else 'выкл' }}</span>
-  <span class="hint">последний свип:
+        title="главный выключатель автопилота — меняется на экране «Автопилот»">✈ Автопилот: {{ 'вкл' if autopilot.autopilot_on else 'выкл' }}</span>
+  <span class="hint">последний проход:
     <b>{{ last_sweep.strftime('%d.%m %H:%M') if last_sweep else '—' }}</b></span>
   <span class="hint">ждёт тебя —
-    курация: <b>{{ gates.curate }}</b> ·
-    подтверждение: <b>{{ gates.money }}</b> ·
-    редактура: <b>{{ gates.edit }}</b></span>
-  <a class="btn" href="/autopilot" title="открыть кокпит автопилота: тумблеры стадий, капы, прогоны"
+    решить по доменам: <b>{{ gates.curate }}</b> ·
+    подтвердить покупку: <b>{{ gates.money }}</b> ·
+    вычитать тексты: <b>{{ gates.edit }}</b></span>
+  <a class="btn" href="/autopilot" title="что машина делает сама, лимиты и последние проходы"
      style="margin-left:auto">→ Автопилот</a>
 </div>
 
 <h2><span class="idx">◐</span> Машина сейчас
-  <span class="hint">что крутится прямо сейчас — в реальном времени</span></h2>
+  <span class="hint">что идёт прямо сейчас</span></h2>
 
-{# карточки активных задач рисует поллер из base.html; пока пусто — показываем итоги прогонов #}
+{# карточки активных задач рисует поллер из base.html; пока пусто — показываем итоги запусков #}
 <div id="machine"></div>
 
 <div class="card" id="machine-idle">
   <div class="row" style="border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:8px">
     <span class="badge b-default">Простаивает</span>
-    <span class="hint">задач в работе нет — ниже последние прогоны</span>
-    {% if worker.age_sec is none %}<span class="hint" title="воркер ни разу не бил сердце: контейнер worker не запущен или обновление ещё не накатано">воркер: нет сигнала</span>
-      {% elif worker.alive %}<span class="hint" style="color:var(--ok)">воркер: жив, последний удар {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
-      {% else %}<span class="hint" style="color:var(--bad)" title="проверь контейнер worker: docker compose ps / logs worker">воркер: НЕ отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}
+    <span class="hint">задач нет — ниже итоги последних запусков</span>
+    {% if worker.age_sec is none %}<span class="hint" title="Фоновый процесс ещё ни разу не отозвался: он не запущен или программа не обновлена до конца (контейнер worker).">фоновый процесс: нет сигнала</span>
+      {% elif worker.alive %}<span class="hint" style="color:var(--ok)">фоновый процесс: работает, отозвался {{ worker.age_sec }} с назад{% if worker.note %} · {{ worker.note }}{% endif %}</span>
+      {% else %}<span class="hint" style="color:var(--bad)" title="Автопилот и задачи по расписанию стоят. Перезапусти контейнер worker на сервере.">фоновый процесс: не отвечает уже {{ (worker.age_sec // 60) }} мин</span>{% endif %}
   </div>
-  {% for key, ru in [('discovery','Поиск дропов'), ('score','Проверка'),
-                     ('recheck','Перепроверка занятости'), ('generate','Генерация контента'),
-                     ('edit','Вычитка текстов'), ('sweep','Свип автопилота')] %}
+  {% for key, ru in [('discovery','Найти домены'), ('score','Проверить домены'),
+                     ('recheck','Проверить, не заняты ли'), ('generate','Написать тексты'),
+                     ('edit','Вычитка'), ('sweep','Проход автопилота')] %}
     {% set r = last_runs.get(key) %}
     <div class="row">
       <b style="min-width:190px">{{ ru }}</b>
       {% if r %}
         <span class="hint" style="flex:1">
-          {% if r.status == 'failed' %}<span style="color:var(--bad)">упала: {{ r.error }}</span>
-          {% elif r.status == 'cancelled' %}остановлена на {{ r.done }} / {{ r.total }}
+          {% if r.status == 'failed' %}<span style="color:var(--bad)">ошибка: {{ r.error }}</span>
+          {% elif r.status == 'cancelled' %}остановлено на {{ r.done }} / {{ r.total }}
           {% elif r.status == 'done_warn' %}<span class="badge b-warn" title="{{ r.message }}">с замечаниями</span>
           {% else %}{{ r.message or 'готово' }}{% endif %}
         </span>
         <span class="hint num">{{ (r.finished_at[8:10] + '.' + r.finished_at[5:7] + ' ' + r.finished_at[11:16]) if r.finished_at else '—' }}</span>
       {% else %}
-        <span class="hint" style="flex:1">ни разу не запускалась</span>
+        <span class="hint" style="flex:1">ещё не запускали</span>
       {% endif %}
     </div>
   {% endfor %}
   <div class="row" style="margin-top:10px">
     <form method="post" action="/run/discovery" class="inline">
-      <button class="btn btn-acc btn-sm" title="собрать свежие дропы из включённых источников">↻ Найти дропы</button>
+      <button class="btn btn-acc btn-sm" title="Собрать свежие домены из включённых источников. Ничего не покупает.">↻ Найти домены</button>
     </form>
     <form method="post" action="/run/score" class="inline">
       <input type="hidden" name="n" value="5">
-      <button class="btn btn-sm" title="прогнать 5 доменов через воронку скоринга">▶ Запустить проверку</button>
+      <button class="btn btn-sm" title="Проверить 5 найденных доменов. Годные придут к тебе на решение.">▶ Проверить домены</button>
     </form>
   </div>
 </div>
 
-<h2><span class="idx">◈</span> Воронка конвейера
-  <span class="hint">каждая плитка кликабельна — открывает список этой стадии</span></h2>
+<h2><span class="idx">◈</span> Воронка
+  <span class="hint">нажми на плитку — откроется список</span></h2>
 <div class="funnel">
-  <div class="fgroup"><div class="fg-h">M1 · Добыча</div>
+  <div class="fgroup"><div class="fg-h">Домены</div>
     <div class="fg-cells">
-      <a class="fcell" href="/offers" title="офферы: бренды и партнёрские ссылки — вход машины">
+      <a class="fcell" href="/offers" title="Бренды и партнёрские ссылки, под которые делаем сайты.">
         <div class="v">{{ offers_active }}</div><div class="k">офферы</div></a>
-      <a class="fcell" href="/domains/pool?status=discovered" title="найдены в фиде, ещё не оценены — ждут ▶ Проверку">
+      <a class="fcell" href="/domains/pool?status=discovered" title="Найдены, но ещё не проверены — нажми «Проверить домены».">
         <div class="v">{{ dc.get('discovered', 0) }}</div><div class="k">найдено</div></a>
-      <a class="fcell {{ 'gate' if dc.get('scored') }}" href="/domains" title="оценены машиной — ждут твоего ✓/✗">
-        <div class="v">{{ dc.get('scored', 0) }}</div><div class="k">на решении</div></a>
-      <a class="fcell" href="/domains" title="одобрены — купить руками у провайдера">
+      <a class="fcell {{ 'gate' if dc.get('scored') }}" href="/domains" title="Проверены машиной — одобри или отклони.">
+        <div class="v">{{ dc.get('scored', 0) }}</div><div class="k">ждут решения</div></a>
+      <a class="fcell" href="/domains" title="Одобрены — поставь к покупке или купи сам.">
         <div class="v">{{ dc.get('approved', 0) }}</div><div class="k">одобрено</div></a>
-      <a class="fcell" href="/domains/pool?status=purchased" title="куплены — дальше создать сайт">
+      <a class="fcell" href="/domains/pool?status=purchased" title="Куплены — дальше создать сайт.">
         <div class="v">{{ dc.get('purchased', 0) }}</div><div class="k">куплено</div></a>
     </div></div>
-  <div class="fgroup"><div class="fg-h">M2 · Выкуп</div>
+  <div class="fgroup"><div class="fg-h">Покупка</div>
     <div class="fg-cells">
-      <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="заказы ждут твоего подтверждения выкупа (денежный гейт)">
-        <div class="v">{{ gates.money }}</div><div class="k">подтвердить</div></a>
+      <a class="fcell {{ 'gate' if gates.money }}" href="/queue" title="Заказы ждут твоего подтверждения. Без него деньги не тратятся.">
+        <div class="v">{{ gates.money }}</div><div class="k">подтвердить покупку</div></a>
     </div></div>
-  <div class="fgroup"><div class="fg-h">M3–M5 · Сайты</div>
+  <div class="fgroup"><div class="fg-h">Сайты</div>
     <div class="fg-cells">
-      <a class="fcell" href="/#sites" title="карточки сайтов: провижн → контент → публикация">
+      <a class="fcell" href="/#sites" title="Карточки сайтов — список ниже.">
         <div class="v">{{ sites|length }}</div><div class="k">сайтов</div></a>
-      <span class="fcell {{ 'gate' if pc.get('draft') }}" title="AI-черновики: не публикуются, пока не вычитаешь (гейт редактуры)">
+      <span class="fcell {{ 'gate' if pc.get('draft') }}" title="Тексты от машины. На сайт не попадут, пока их не вычитают.">
         <div class="v">{{ pc.get('draft', 0) }}</div><div class="k">черновики</div></span>
-      <span class="fcell" title="вычитаны человеком — публикация возьмёт только их">
-        <div class="v">{{ pc.get('edited', 0) }}</div><div class="k">edited</div></span>
-      <span class="fcell" title="опубликованы — следи за попаданием в индекс">
-        <div class="v">{{ pc.get('published', 0) }}</div><div class="k">опубл.</div></span>
+      <span class="fcell" title="Вычитаны и одобрены — можно публиковать.">
+        <div class="v">{{ pc.get('edited', 0) }}</div><div class="k">вычитано</div></span>
+      <span class="fcell" title="Опубликованы — следи, попали ли в поиск.">
+        <div class="v">{{ pc.get('published', 0) }}</div><div class="k">на сайте</div></span>
     </div></div>
 </div>
 
 <h2><span class="idx">→</span> Что дальше
-  <span class="hint">живой чек-лист: пересчитывается по состоянию базы, кликни — попадёшь куда нужно</span></h2>
+  <span class="hint">шаги по порядку — нажми, и попадёшь куда нужно</span></h2>
 <div class="card">
   <ol class="steps">
     {% for s in steps %}
@@ -103,7 +103,7 @@
   </ol>
 </div>
 
-<h2 id="sites"><span class="idx">03</span> Сайты <span class="hint">M3 провижн → M4 контент → M5 публикация</span></h2>
+<h2 id="sites"><span class="idx">▦</span> Сайты <span class="hint">поднять сайт → написать тексты → опубликовать</span></h2>
 {% if sites %}
 <div class="grid">
   {% for s in sites %}
@@ -111,21 +111,21 @@
     <div class="d">{{ s.domain }}</div>
     <div class="row">
       <span class="badge b-{{ s.site.status if s.site.status in ['provisioning','content','published'] else 'default' }}"
-            title="{{ {'provisioning':'ждёт провижна: Cloudflare + vhost','content':'инфраструктура готова — этап контента','published':'страницы опубликованы'}.get(s.site.status, s.site.status) }}">{{ s.site.status|status_ru }}</span>
+            title="{{ {'provisioning':'Сайт ещё не поднят — нажми «Поднять сайт» в карточке.','content':'Сайт поднят — пишутся и вычитываются тексты.','published':'Страницы опубликованы.'}.get(s.site.status, s.site.status) }}">{{ s.site.status|site_status_ru }}</span>
       <span class="hint">
         стр.: {{ s.pages.get('draft', 0) }} черновик ·
         {{ s.pages.get('edited', 0) }} вычитано ·
-        {{ s.pages.get('published', 0) }} опубликовано ·
+        {{ s.pages.get('published', 0) }} на сайте ·
         {{ s.indexed }} в индексе
       </span>
     </div>
     <div class="row"><a class="btn btn-acc btn-sm" href="/sites/{{ s.site.id }}"
-      title="чек-лист сайта: провижн, генерация, редактура, публикация, индексация">Открыть карточку →</a></div>
+      title="Все шаги сайта: поднять, написать тексты, вычитать, опубликовать.">Открыть сайт →</a></div>
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="card empty">Сайтов пока нет. Путь: домен со статусом <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span> → кнопка «＋ создать сайт» на экране <a href="/domains">Домены</a>.</div>
+<div class="card empty">Сайтов пока нет. Сайт заводится у купленного домена: статус <span class="badge b-purchased">{{ 'purchased'|status_ru }}</span> → кнопка «Создать сайт» на экране <a href="/domains/pool?status=purchased">Весь список</a>.</div>
 {% endif %}
 
 {% endblock %}

@@ -137,7 +137,7 @@ def test_threshold_reject_outside_allowlist_cannot_return_to_approved():
     def d(name):
         return NS(domain=name, status="rejected", reject_reason="low_score", rkn_listed=None,
                   blacklisted=None, prior_flags={}, wayback_checked=True, score_breakdown=None)
-    with pytest.raises(transitions.TransitionDenied, match="белом списке"):
+    with pytest.raises(transitions.TransitionDenied, match="нет в списке зон"):
         transitions.check(d("weak.ru"), "approved")
     transitions.check(d("weak.com"), "approved")      # зона в списке — порог возвращается руками
     update_settings(tld_allowlist="com ru")

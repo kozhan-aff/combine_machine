@@ -8,8 +8,8 @@ from app.services import autonomy
 def test_autopilot_renders(client):
     r = client.get("/autopilot")
     assert r.status_code == 200
-    assert "Мастер-выключатель" in r.text     # станция мастера (не сайдбар — контент экрана)
-    assert "на курацию" in r.text             # блок «ждёт тебя»
+    assert "Главный выключатель" in r.text    # станция выключателя (не сайдбар — контент экрана)
+    assert "решить по доменам" in r.text      # блок «ждёт тебя»
 
 
 def test_autopilot_settings_save(client):
@@ -68,7 +68,7 @@ def test_dashboard_shows_autopilot_strip(client):
     autonomy.update_autonomy(autopilot_on=True)
     html = client.get("/").text
     assert "✈ Автопилот: вкл" in html          # бейдж мастера в полоске
-    assert "последний свип" in html and "ждёт тебя" in html
+    assert "последний проход" in html and "ждёт тебя" in html
 
 
 def test_domains_filter_chips_localized(client):

@@ -357,7 +357,7 @@ def test_settings_page_shows_counter_of_candidates_that_would_be_hit(client):
     assert c == {"hard": 1, "any": 2}
     html = client.get("/settings").text
     assert 'name="hard_reject_lists"' in html and "CC BY-SA 4.0" in html
-    assert "под отказ попало бы кандидатов пула: <b>1</b>" in html
+    assert "под отказ попало бы доменов: <b>1</b>" in html
 
 
 def test_settings_page_without_lists_says_so(client):

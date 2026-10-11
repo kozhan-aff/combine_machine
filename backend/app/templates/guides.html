@@ -3,7 +3,7 @@
 {% block content %}
 
 <h2><span class="idx">✎</span> Правила письма
-  <span class="hint">твои инструкции, как писать тексты — вход машины наравне с офферами</span></h2>
+  <span class="hint">твои инструкции, как писать тексты</span></h2>
 
 <p class="hint" style="margin:0 0 16px; max-width:820px">
   Одна папка на все сайты, языки и типы страниц. В задание идут не сами файлы, а их
@@ -11,9 +11,9 @@
   применимые к нашим страницам. Одни правила получает <b style="color:var(--ink)">писатель</b>, другие —
   <b style="color:var(--ink)">критик</b>; файл без выжимки в задание не попадает.
   {% if missing %}<br><b style="color:var(--bad)">Папка правил не найдена: <code>{{ guides_dir }}</code>.</b>
-  Панель её не видит (том не подключён к контейнеру или неверный путь в CONTENT_GUIDES_DIR) — это не
-  «правил нет»: в задание правила не попадают вовсе. Загрузка файла отсюда создаст папку по этому пути.
-  {% elif not guides %}<br><b style="color:var(--acc2)">Сейчас правил нет — тексты пишутся только по досье конкурентов
+  Панель её не видит (папка не подключена к контейнеру или неверный путь в <code>CONTENT_GUIDES_DIR</code>) —
+  правила в задание не попадают вовсе. Загрузка файла отсюда создаст папку по этому пути.
+  {% elif not guides %}<br><b style="color:var(--acc2)">Сейчас правил нет — тексты пишутся только по разбору конкурентов
   и фактам бренда.</b>{% endif %}
 </p>
 
@@ -25,24 +25,24 @@
         <input type="file" name="file" accept=".md,.txt" multiple></label>
       <label class="f">или папка целиком <span class="note">возьмём из неё только .md и .txt</span>
         <input type="file" name="file" webkitdirectory></label>
-      <button class="btn-acc" title="сохранить в content_guides/; файл с тем же именем заменится: выжимку машина сделает заново, выбранное тобой «кому» останется">↑ Загрузить</button>
+      <button class="btn-acc" title="Сохранить в папку правил. Файл с тем же именем заменится: выжимку машина сделает заново, твоё «кому» останется.">↑ Загрузить</button>
     </form>
   </div>
   <details class="what"><summary>можно и без панели</summary>
-    <div class="what-body">Это обычная папка <code>content_guides/</code> в корне репозитория — на боксе
-      <code>D:\combine_machine\content_guides\</code>. Положи файлы туда руками — машина увидит их сразу,
+    <div class="what-body">Это обычная папка <code>content_guides/</code> в папке программы — на сервере
+      <code>D:\combine_machine\content_guides\</code>. Положи файлы туда сам — машина увидит их сразу,
       без перезапуска; в задание они пойдут после «Сжать правила». Имена — буквы, цифры, точка, дефис, подчёркивание.</div></details>
 </div>
 
 {% if guides %}
 <div class="row" style="max-width:920px; margin:0 0 6px">
   <form class="row" method="post" action="/guides/digest">
-    <button class="btn-acc" title="машина один раз читает каждый файл и оставляет только применимые к нашим страницам требования; повторно — только изменённые файлы">Сжать правила</button>
-    <label class="hint" title="сжать заново и те файлы, что не менялись, — нужно после смены ниши сайтов (Ключи и доступы → «Ниша сайтов»). Выжимки, которые ты правил сам, останутся"><input type="checkbox" name="force" value="1"> все файлы заново</label>
+    <button class="btn-acc" title="Машина читает каждый файл и оставляет только требования, применимые к нашим страницам. Повторно — только изменённые файлы.">Сжать правила</button>
+    <label class="hint" title="Сжать заново и те файлы, что не менялись. Нужно после смены ниши сайтов (Ключи и доступы → «Ниша сайтов»). Выжимки, которые правил ты, останутся."><input type="checkbox" name="force" value="1"> все файлы заново</label>
   </form>
-  <span class="hint" title="столько символов правил получит каждый при следующем прогоне{{ '; часть файлов не влезла в лимит — файлы с конца списка отброшены' if writer.truncated or critic.truncated }}">писателю уйдёт {{ '{:,}'.format(writer.text|length).replace(',', ' ') }} симв., критику — {{ '{:,}'.format(critic.text|length).replace(',', ' ') }} (лимит {{ '{:,}'.format(limit).replace(',', ' ') }} на каждого)</span>
-  {% if waiting %}<b class="hint" style="color:var(--bad)" title="у этих файлов выжимки нет, она устарела или не получилась — нажми «Сжать правила» либо напиши выжимку сам (колонка «выжимка»)">{{ waiting }}</b>{% endif %}
-  {% if writer.cut or critic.cut %}<b class="hint" style="color:var(--bad)" title="выжимки одной роли вместе длиннее лимита: файлы с конца списка в задание не попадают — они помечены в таблице. Сократи выжимки или отдай часть файлов только писателю либо только критику">не влезло в лимит файлов: писателю — {{ writer.cut|length }}, критику — {{ critic.cut|length }}</b>{% endif %}
+  <span class="hint" title="Столько символов правил получит каждый при следующем запуске.{{ ' Часть файлов не влезла в лимит — файлы с конца списка отброшены.' if writer.truncated or critic.truncated }}">писателю уйдёт {{ '{:,}'.format(writer.text|length).replace(',', ' ') }} симв., критику — {{ '{:,}'.format(critic.text|length).replace(',', ' ') }} (лимит {{ '{:,}'.format(limit).replace(',', ' ') }} на каждого)</span>
+  {% if waiting %}<b class="hint" style="color:var(--bad)" title="У этих файлов выжимки нет, она устарела или не получилась. Нажми «Сжать правила» либо напиши выжимку сам (колонка «выжимка»).">{{ waiting }}</b>{% endif %}
+  {% if writer.cut or critic.cut %}<b class="hint" style="color:var(--bad)" title="Выжимки вместе длиннее лимита: файлы с конца списка в задание не попадают — они помечены в таблице. Сократи выжимки или отдай часть файлов только писателю либо только критику.">не влезло в лимит файлов: писателю — {{ writer.cut|length }}, критику — {{ critic.cut|length }}</b>{% endif %}
 </div>
 <p class="hint" style="max-width:920px; margin:0 0 10px">
   {% if run.status == 'running' and run.stale %}<b style="color:var(--bad)">Сжатие оборвалось: процесс не отвечает.</b> Собранное до обрыва сохранено — запусти «Сжать правила» ещё раз.
@@ -59,8 +59,8 @@
 {% if guides %}
 <table>
   <thead><tr><th>файл</th><th class="num">размер</th>
-    <th title="кто получает правила этого файла: назначает машина при сжатии, поменять можно здесь">кому</th>
-    <th title="короткая рабочая версия файла — в задание идёт она, а не сам файл">выжимка</th><th></th></tr></thead>
+    <th title="Кто получает правила этого файла. Назначает машина при сжатии, поменять можно здесь.">кому</th>
+    <th title="Короткая рабочая версия файла. В задание идёт она, а не сам файл.">выжимка</th><th></th></tr></thead>
   <tbody>
   {% for g in guides %}
     {% set by_me = g.role_by == 'operator' %}
@@ -76,7 +76,7 @@
         </select></form></td>
       <td>{% set href = '/guides/digest/' ~ (g.rel|urlencode) %}
           {% if g.state == 'ok' %}<span class="led {{ 'led-warn' if g.cut else 'led-ok' }}"></span><a href="{{ href }}" title="посмотреть и поправить выжимку{{ ' · ' ~ g.note if g.note }}{{ ' · последняя пересборка не удалась: ' ~ g.last_error if g.last_error }}">{{ g.digest_chars }} симв.</a>
-            {% if g.cut %}<span class="hint" style="color:var(--bad)" title="выжимки этой роли вместе длиннее лимита — этот файл в задание не попадает. Сократи выжимки или отдай часть файлов только писателю либо только критику">не влез в лимит{% if g.role == 'both' %}: {{ 'обоим' if g.cut|length == 2 else roles[g.cut[0]] }}{% endif %}</span>{% endif %}
+            {% if g.cut %}<span class="hint" style="color:var(--bad)" title="Выжимки вместе длиннее лимита — этот файл в задание не попадает. Сократи выжимки или отдай часть файлов только писателю либо только критику.">не влез в лимит{% if g.role == 'both' %}: {{ 'обоим' if g.cut|length == 2 else roles[g.cut[0]] }}{% endif %}</span>{% endif %}
           {% elif g.role == 'skip' and by_me %}<span class="led led-off"></span><a href="{{ href }}" title="выжимки нет: файл помечен «не использовать», машина его не сжимает">нет</a>
           {% elif g.state == 'stale' %}<span class="led led-warn"></span><a href="{{ href }}" style="color:var(--bad)" title="файл изменился после сжатия: выжимка снята с прежнего текста и в задание не идёт — нажми «Сжать правила»">устарела</a>
           {% elif g.state == 'error' %}<span class="led led-bad"></span><a href="{{ href }}" style="color:var(--bad)" title="{{ g.error }}">ошибка</a>
@@ -85,7 +85,7 @@
       <td><form class="inline" method="post" action="/guides/delete"
                 onsubmit="return confirm('Удалить {{ g.rel }}?')">
         <input type="hidden" name="rel" value="{{ g.rel }}">
-        <button class="btn-sm btn-bad" title="удалить файл правил вместе с его выжимкой">✕ удалить</button></form></td>
+        <button class="btn-sm btn-bad" title="Удалить файл правил вместе с его выжимкой.">✕ Удалить</button></form></td>
     </tr>
   {% endfor %}
   </tbody>

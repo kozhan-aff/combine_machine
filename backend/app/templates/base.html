@@ -434,7 +434,7 @@
   <span style="flex:1">Нет связи: {{ _alert.down|join(', ') }}
         · проверено {{ _alert.checked_at.strftime('%H:%M') }} UTC</span>
   <form method="post" action="/diag/refresh" style="display:inline">
-    <button class="btn-sm" title="Прогнать диагностику ещё раз (до 20 секунд)">↻ перепроверить</button>
+    <button class="btn-sm" title="Проверить все сервисы ещё раз — до 20 секунд">↻ Проверить связь</button>
   </form>
   <button type="button" class="btn-sm" title="Скрыть до конца сессии браузера"
           onclick="sessionStorage.setItem('diagDismiss', this.closest('#diag-alert').dataset.sig); this.closest('#diag-alert').remove()">×</button>
@@ -459,9 +459,10 @@
 // человеком; done -> успех, ДАЖЕ при done==total==0. Плюс stale: running-строка, чей процесс
 // умер (контейнер убили) — показываем «оборвалась», НЕ рисуем живой бар.
 // Данные приходят из фида (имена доменов) — только textContent, никогда innerHTML.
-const JOB_RU = {discovery:'Поиск дропов', score:'Запуск проверки',
-                recheck:'Перепроверка занятости', sweep:'Свип автопилота',
-                cf_sync:'Синхронизация Cloudflare', domain_lists:'Списки чистоты', domain_ranks:'Ранги доменов', generate:'Генерация контента', edit:'Вычитка текстов', research:'Досье конкурентов', guides_digest:'Выжимка правил'};
+// Имя задачи = имя кнопки, которой её запускают (одно действие — одно название везде).
+const JOB_RU = {discovery:'Найти домены', score:'Проверить домены',
+                recheck:'Проверить, не заняты ли', sweep:'Проход автопилота',
+                cf_sync:'Обновить из Cloudflare', domain_lists:'Списки чистоты', domain_ranks:'Ранги доменов', generate:'Написать тексты', edit:'Вычитка', research:'Изучить конкурентов', guides_digest:'Сжать правила'};
 // Скорость/ETA — чисто по данным, что уже в ответе (started_at + done/total), без похода в БД.
 // Бэкенд всегда пишет UTC, но SQLite (герметичный харнесс/локальный запуск) отдаёт datetime
 // БЕЗ смещения — Date.parse() без 'Z'/офсета трактует такую строку как ЛОКАЛЬНОЕ время браузера,
@@ -510,7 +511,8 @@ function jobCard(j){
     const f = document.createElement('form');
     f.method = 'post'; f.action = '/run/' + j.name + '/cancel';
     const b = document.createElement('button');
-    b.className = 'btn-sm btn-bad'; b.textContent = '✕ Отменить';
+    b.className = 'btn-sm btn-bad'; b.textContent = '✕ Остановить';
+    b.title = 'Остановить задачу. Уже сделанное сохранится.';
     f.appendChild(b); head.appendChild(f);
   }
   el.appendChild(head);
@@ -559,17 +561,15 @@ function jobCard(j){
     // который _run_waves перезаписывает после каждой волны (services/scoring.py).
     const wf = document.createElement('div'); wf.className = 'job-waterfall';
     wf.textContent = j.message;
-    wf.title = 'Сколько доменов пережило каждую волну целиком (не путь одного домена): ' +
-               'воронка идёт дёшево->дорого волнами на весь пакет сразу, не по одному домену.';
+    wf.title = 'Сколько доменов осталось после каждого шага проверки.';
     el.appendChild(wf);
   }
   if (j.status === 'running' && !j.stale && j.tally){
     const t = j.tally;
     const info = document.createElement('div'); info.className = 'job-tally hint';
-    info.textContent = t.total + ' обработано: ' + t.before_wayback + ' до Wayback (дёшево), '
-                      + t.reached_wayback + ' дошли до Wayback';
-    info.title = 'Живая раскладка исхода ЭТОГО прогона по ПРИЧИНЕ отказа (дополняет строку ' +
-                 'волн выше, которая считает по СТАДИИ).';
+    info.textContent = t.total + ' проверено: ' + t.before_wayback + ' отсеяны быстро, '
+                      + t.reached_wayback + ' дошли до проверки истории';
+    info.title = 'Сколько доменов отсеяли дешёвые шаги и сколько дошло до архива (Wayback).';
     el.appendChild(info);
   }
   const bar = document.createElement('div'); bar.className = 'job-bar';

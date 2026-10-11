@@ -357,7 +357,7 @@ class NameSiloClient:
                                     f"(domain={got!r}, order_amount={reply.get('order_amount')!r})")
         warns = []
         if code == 301:
-            warns.append("301: NS не приняты, взяты дефолтные NameSilo — выполни changeNameServers и сверь")
+            warns.append("301: NS не приняты, взяты стандартные NameSilo — выполни changeNameServers и сверь")
         if code == 302:
             warns.append("302: контакт с ошибкой, WHOIS на профиле по умолчанию")
         return {"order_id": "", "domain": d, "order_amount": amount, "currency": CURRENCY, "code": code,
