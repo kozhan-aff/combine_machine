@@ -951,7 +951,7 @@ def test_queue_auction_row_has_ceiling_field_and_honest_confirm(client, monkeypa
         did = d.id
     oid = acquisition.create_order(did)
     html = client.get("/queue").text
-    assert 'name="bid_rub"' in html and 'min="20.0"' in html and "потолок" in html
+    assert 'name="bid_rub"' in html and 'min="20.0"' in html and "✓ Ставка до (USD)" in html
     assert "Цена фиксированная" not in html
     r = client.post(f"/queue/{oid}/confirm", data={"bid_rub": "40"}, follow_redirects=False)
     assert r.status_code == 303

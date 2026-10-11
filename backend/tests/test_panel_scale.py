@@ -44,7 +44,7 @@ def test_inbox_is_paged_but_counters_cover_everything(client, monkeypatch):
     p3 = client.get("/domains?page=3").text
     assert len(set(_names(p1))) == 10 and len(set(_names(p3))) == 5
     assert "25 доменов · страница 1 из 3" in p1
-    assert 'class="v">25</div><div class="k">на решении' in p1     # шапка — по всему инбоксу
+    assert 'class="v">25</div><div class="k">ждут решения' in p1     # шапка — по всему инбоксу
 
 
 def test_responses_are_gzipped(client):

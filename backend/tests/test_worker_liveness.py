@@ -41,9 +41,10 @@ def test_diag_and_dashboard_show_worker_state(client, monkeypatch):
     monkeypatch.setattr(diag_cache, "get", lambda: ([], None))
     assert "воркер: нет сигнала" in client.get("/diag").text
     heartbeat.beat(False)
-    for url in ("/diag", "/"):
+    # Пульт уже говорит «фоновый процесс» (проход по подписям, часть 1); /diag — часть 2
+    for url, alive in (("/diag", "воркер: жив"), ("/", "фоновый процесс: работает")):
         html = client.get(url).text
-        assert "воркер: жив" in html and "автопилот выключен" in html, url
+        assert alive in html and "автопилот выключен" in html, url
     with db.SessionLocal() as s:
         r = s.query(JobRun).filter_by(name="worker").one()
         r.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)

@@ -168,7 +168,7 @@ def test_blind_reason_tells_the_truth_about_archive_age():
                score_breakdown={"errors": ["whois:RuntimeError"], "history_evidence": [],
                                 "age_source": "wayback"})
     msg = scoring.blind_reason(d)
-    assert "архив" in msg and "занятость" in msg, msg
+    assert "из архива" in msg and "свободен ли домен, НЕ проверено" in msg, msg
     assert "не применялся" not in msg, msg      # ложь, от которой и чинили
     assert scoring.bulk_ok(d) is False          # и в пакет одобрения не идёт
 
@@ -179,9 +179,9 @@ def test_blind_reason_names_whois_and_ahrefs():
     Здесь возраста не дал НИКТО (age_source пуст) — текст про непроверенный возраст правдив."""
     d = Domain(domain="mute.ru", wayback_checked=True, prior_flags=dict(_CLEAN_FLAGS),
                score_breakdown={"errors": ["whois:RuntimeError"], "history_evidence": []})
-    # «занятость» есть только в whois-ветке _BLIND_RU (в общей ветке возраста её нет) — так
-    # закреплён ключ "whois", а не просто «возраста нет»
-    assert "занятость" in scoring.blind_reason(d)
+    # «свободен ли домен» есть только в whois-ветке _BLIND_RU (в общей ветке возраста её нет) —
+    # так закреплён ключ "whois", а не просто «возраста нет»
+    assert "свободен ли домен" in scoring.blind_reason(d)
     assert scoring.bulk_ok(d) is False          # и в пакет одобрения не идёт
 
     # возраст дан (10 лет): исключать домен должна именно пометка Ahrefs, а не пустой возраст
@@ -267,7 +267,7 @@ def test_funnel_whois_down_domain_is_not_auto_approved():
         assert d.age_years == 16.0                          # возраст ЕСТЬ — он из архива
         assert d.score_breakdown["age_source"] == "wayback"
         msg = scoring.blind_reason(d)                       # пометка «вслепую» в инбоксе
-        assert "архив" in msg and "занятость" in msg, msg
+        assert "из архива" in msg and "свободен ли домен, НЕ проверено" in msg, msg
         assert scoring.bulk_ok(d) is False                  # из пакетного одобрения исключён
 
 

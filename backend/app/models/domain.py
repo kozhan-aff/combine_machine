@@ -128,7 +128,7 @@ class AcquisitionOrder(Base):
     cost: Mapped[float | None] = mapped_column(Numeric)
     cost_currency: Mapped[str | None] = mapped_column(String(8))     # валюта cost: RUB / USD …
     confirmed_by_human: Mapped[bool] = mapped_column(Boolean, default=False)  # HARD GATE
-    # КОГДА человек поднял гейт. Подтверждение протухает (config.ACQ_CONFIRM_TTL_HOURS): «↻ повторить»
+    # КОГДА человек поднял гейт. Подтверждение протухает (config.ACQ_CONFIRM_TTL_HOURS): «↻ Повторить»
     # через неделю не должен платить по решению, принятому по тогдашней цене (S3-07). NULL при
     # confirmed_by_human=true = подтверждение старого кода -> считается просроченным.
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

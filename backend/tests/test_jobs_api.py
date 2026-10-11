@@ -51,7 +51,7 @@ def test_live_includes_funnel_tally_for_score_job(client):
         # ревью 2026-07-20: без low_score здесь счётчик "решено дёшево" завышался бы).
         assert t["reached_wayback"] == 4      # 2 scored + 1 history_dirty + 1 low_score
         assert t["before_wayback"] == 4        # остальное — до Wayback не дошло
-        assert t["by_reason"]["мало доноров"] == 3     # reject_ru("low_rd")
+        assert t["by_reason"]["мало ссылающихся сайтов"] == 3     # reject_ru("low_rd")
 
 
 def test_live_tally_absent_before_any_row_and_for_non_funnel_jobs(client):

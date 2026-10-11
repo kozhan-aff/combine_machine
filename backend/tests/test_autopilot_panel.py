@@ -68,7 +68,7 @@ def test_dashboard_shows_autopilot_strip(client):
     autonomy.update_autonomy(autopilot_on=True)
     html = client.get("/").text
     assert "✈ Автопилот: вкл" in html          # бейдж мастера в полоске
-    assert "последний свип" in html and "ждёт тебя" in html
+    assert "последний проход" in html and "ждёт тебя" in html
 
 
 def test_domains_filter_chips_localized(client):

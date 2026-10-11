@@ -211,7 +211,7 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
     from app.services import orchestrator, research
     keys = [s[0] for s in orchestrator.STAGES]
     assert keys.index("research") == keys.index("generate") - 1 and keys.index("research") > keys.index("provision")
-    assert orchestrator.STAGE_RU["research"] == "досье"
+    assert orchestrator.STAGE_RU["research"] == "изучить конкурентов"
     sid = _content_site()
     calls = []
     monkeypatch.setattr(research, "build_dossier", lambda s, force=False: calls.append(s) or {"status": "done", "rows": 4, "warnings": []})
@@ -220,7 +220,7 @@ def test_research_stage_sits_before_generate_and_picks_sites_without_fresh_dossi
     monkeypatch.setattr(research, "build_dossier", lambda s, force=False: {"status": "empty", "rows": 0, "reason": "пусто", "warnings": []})
     done, errs, extra = orchestrator._stage_research(cap=5)
     assert done == 0 and extra.get("research_empty") == 1 and "пусто" in errs[0]
-    assert orchestrator.COUNT_RU["research_empty"] == "досье пустое"
+    assert orchestrator.COUNT_RU["research_empty"] == "конкуренты не найдены"
 
 
 def test_stage_research_skips_recently_empty_site(monkeypatch):
@@ -328,7 +328,7 @@ def test_edit_stage_sits_between_generate_and_publish():
     assert (flag, cap) == ("auto_edit", "cap_generate")
     assert orch.STAGE_RU["edit"] == "вычитка"
     assert orch.COUNT_RU["edit_failed"] == "вычитка: замечания"
-    assert orch.COUNT_RU["generate_no_dossier"] == "нет досье"
+    assert orch.COUNT_RU["generate_no_dossier"] == "нет разбора конкурентов"
     assert orch.COUNT_RU["generate_empty"] == "тексты не написаны"
 
 
@@ -847,7 +847,7 @@ def test_sweep_skips_a_stage_switched_off_while_the_previous_one_ran(monkeypatch
     chips = _chips()
     assert chips["generate"] == "done" and chips["publish"] == "skip"      # как выключенная с самого начала
     assert chips["score"] == "skip"
-    assert "выключены по ходу: публикация" in jobs.last("sweep")["message"]
+    assert "выключены по ходу: опубликовать" in jobs.last("sweep")["message"]
 
 
 def test_sweep_takes_caps_from_the_fresh_read(monkeypatch):

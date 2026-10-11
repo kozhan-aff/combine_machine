@@ -260,7 +260,7 @@ def test_edit_refusals_and_busy(client, monkeypatch):
 
 def test_edit_job_is_known_to_the_registry_routes(client):
     assert client.post("/run/edit/cancel", follow_redirects=False).status_code != 404
-    assert "edit:\'Вычитка текстов\'" in client.get("/autopilot").text
+    assert "edit:\'Вычитка\'" in client.get("/autopilot").text
 
 
 def test_dashboard_lists_the_edit_job_among_last_runs(client):
@@ -270,7 +270,7 @@ def test_dashboard_lists_the_edit_job_among_last_runs(client):
                      updated_at=NOW, finished_at=NOW))
         s.commit()
     html = client.get("/").text
-    assert "<b style=\"min-width:190px\">Вычитка текстов</b>" in html and "вычитано 3, одобрено 2" in html
+    assert "<b style=\"min-width:190px\">Вычитка</b>" in html and "вычитано 3, одобрено 2" in html
 
 
 # --- карточка сайта ---
@@ -564,5 +564,5 @@ def test_autopilot_journal_names_the_new_counters(client):
                           errors=[]))
         s.commit()
     html = client.get("/autopilot").text
-    for label in ("вычитка:2", "вычитка: замечания:1", "нет досье:1", "тексты не написаны:1"):
+    for label in ("вычитка:2", "вычитка: замечания:1", "нет разбора конкурентов:1", "тексты не написаны:1"):
         assert label in html

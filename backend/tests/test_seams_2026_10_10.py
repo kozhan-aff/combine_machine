@@ -275,7 +275,7 @@ def test_queue_row_shows_registrar_name_and_fixed_price(client, monkeypatch):
     acquisition.create_order(_approved("one.com"))
     html = client.get("/queue").text
     assert "NameSilo" in html and "регистрация · фикс. цена" in html
-    assert "✓ купить за 2.79 USD" in html and 'name="max_price" value="2.79"' in html
+    assert "✓ Купить за 2.79 USD" in html and 'name="max_price" value="2.79"' in html
 
 
 def test_queue_row_without_quote_keeps_manual_ceiling(client, monkeypatch):
@@ -285,7 +285,7 @@ def test_queue_row_without_quote_keeps_manual_ceiling(client, monkeypatch):
     update_settings(zone_channels={"com": "registrar"})
     acquisition.create_order(_approved("one.com"))
     html = client.get("/queue").text
-    assert "недоступен для регистрации" in html and "✓ купить не дороже" in html
+    assert "недоступен для регистрации" in html and "✓ Купить не дороже" in html
 
 
 def test_offer_promo_terms_required_only_with_promo(client):

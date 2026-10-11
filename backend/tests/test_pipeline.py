@@ -123,7 +123,7 @@ def test_run_score_double_start_and_jobs_live(client, monkeypatch):
     assert r1.status_code == 303 and r1.headers["location"] == "/domains"
     # джоб гарантированно жив (гейт не отпущен) -> двойной старт отклонён с err-флэшем
     r2 = client.post("/run/score", data={"n": "3"}, follow_redirects=False)
-    assert r2.status_code == 303 and "Проверка уже идёт" in unquote(r2.headers["location"])
+    assert r2.status_code == 303 and "«Проверить домены» уже идёт" in unquote(r2.headers["location"])
     # spawn() возвращает 303 ДО того, как фоновый поток дописал строку в job_run (гонка
     # своего процесса, см. _INFLIGHT в jobs.py) — дождаться появления живой строки.
     for _ in range(50):
@@ -256,7 +256,7 @@ def test_queue_panel_actions(client, monkeypatch):
     with db.SessionLocal() as s:
         oid = s.execute(select(AcquisitionOrder.id)).scalar_one()
     r = client.get("/queue")
-    assert r.status_code == 200 and "q-panel.ru" in r.text and "подтвердить выкуп" in r.text
+    assert r.status_code == 200 and "q-panel.ru" in r.text and "✓ Купить</button>" in r.text
     assert 'name="bid_rub"' in r.text and "190 ₽" in r.text     # селектор ставки отрисован
     assert "пополни счёт" in r.text                              # баланс 0 ₽ виден ДО заказа
     # execute до подтверждения -> err-flash (гейт)
@@ -314,7 +314,7 @@ def test_panel_screens_render(client, monkeypatch):
 
     r = client.get("/domains")               # M1: тулбар + контекстные действия
     assert r.status_code == 200
-    assert "Поиск дропов" in r.text and "set-status" in r.text and "make-site" not in r.text
+    assert "↻ Найти домены" in r.text and "set-status" in r.text and "make-site" not in r.text
     r = client.get("/domains/pool?status=purchased")
     assert f"/sites/{site_id}" in r.text     # purchased с сайтом -> ссылка на карточку
 

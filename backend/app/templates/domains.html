@@ -1,112 +1,101 @@
 {% extends "base.html" %}
-{% block title %}Домены · M1{% endblock %}
+{% block title %}Домены{% endblock %}
 {% block content %}
 
-<h2><span class="idx">02</span> Домены · M1
-  <span class="hint">поиск дропов → проверка → твоё решение → покупка руками</span></h2>
+<h2><span class="idx">◆</span> Домены
+  <span class="hint">найти → проверить → решить → купить</span></h2>
 
 {# ---- воронка: клик по «отклонено» открывает разбор причин (Task 7) ---- #}
 <div class="funnel" style="margin-bottom:14px">
-  <div class="fgroup"><div class="fg-h">M1 · Добыча</div>
+  <div class="fgroup"><div class="fg-h">Домены</div>
     <div class="fg-cells">
-      <a class="fcell" href="/offers" title="офферы — вход машины"><div class="v">{{ offers_active }}</div><div class="k">офферы</div></a>
-      <a class="fcell" href="/domains/pool?status=discovered" title="найдены источниками или добавлены списком, ещё не оценены"><div class="v">{{ counts.get('discovered', 0) }}</div><div class="k">найдено</div></a>
-      <span class="fcell {{ 'gate' if inbox_total }}" title="ждут твоего решения — список ниже (все языки)"><div class="v">{{ inbox_total }}</div><div class="k">на решении</div></span>
-      <span class="fcell" title="одобрены — можно ставить в очередь выкупа"><div class="v">{{ ready|length }}</div><div class="k">одобрено</div></span>
-      <a class="fcell" href="/domains/pool?status=purchased" title="куплены — дальше создать сайт"><div class="v">{{ counts.get('purchased', 0) }}</div><div class="k">куплено</div></a>
+      <a class="fcell" href="/offers" title="Офферы, под которые ищем домены."><div class="v">{{ offers_active }}</div><div class="k">офферы</div></a>
+      <a class="fcell" href="/domains/pool?status=discovered" title="Найдены или добавлены списком, ещё не проверены."><div class="v">{{ counts.get('discovered', 0) }}</div><div class="k">найдено</div></a>
+      <span class="fcell {{ 'gate' if inbox_total }}" title="Проверены и ждут твоего решения — список ниже (все языки)."><div class="v">{{ inbox_total }}</div><div class="k">ждут решения</div></span>
+      <span class="fcell" title="Одобрены — можно ставить к покупке."><div class="v">{{ ready|length }}</div><div class="k">одобрено</div></span>
+      <a class="fcell" href="/domains/pool?status=purchased" title="Куплены — дальше создать сайт."><div class="v">{{ counts.get('purchased', 0) }}</div><div class="k">куплено</div></a>
       {# type="button" обязателен: без него это submit, и первая же обёртка в <form> отправит её #}
       <button type="button" class="fcell" onclick="document.getElementById('why').showModal()"
-              title="разобрать, почему домены не прошли воронку">
+              title="Посмотреть, почему домены отклонены.">
         <div class="v" style="color:var(--bad)">{{ counts.get('rejected', 0) }}</div>
         <div class="k">отклонено</div></button>
     </div></div>
 </div>
 
-{# ---- действия: три станции схлопнуты в одну карточку (макет 02) ---- #}
+{# ---- действия: три станции схлопнуты в одну карточку (макет 02). Пояснение каждой кнопки —
+     в её title: общая раскрывашка «что делают эти три действия» убрана (проход по подписям). ---- #}
 <div class="card" style="margin-bottom:14px">
   <div class="row">
     <form class="inline" method="post" action="/run/discovery">
-      <button class="btn btn-acc" title="забрать свежие дропы из включённых источников">↻ Найти дропы</button></form>
+      <button class="btn btn-acc" title="Собрать свежие домены из включённых источников. Ничего не проверяет и не покупает.">↻ Найти домены</button></form>
     <span class="sep"></span>
     <form class="inline" method="post" action="/run/score" style="display:flex; gap:8px; align-items:center">
-      <label class="f">оценить <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
-      <button class="btn btn-acc" title="прогнать N найденных доменов через 6 волн: зоны/бренды → доступность (RDAP/whois) → риск (Web Risk) → ссылки (Ahrefs) → история и тема (Wayback + LLM) → анкоры финалистов. ТОЛЬКО отсюда домены попадают «на решение»">▶ Оценить домены</button>
+      <label class="f">сколько <input type="number" name="n" value="5" min="1" max="50" style="width:64px"></label>
+      <button class="btn btn-acc" title="Проверить столько найденных доменов: зона, не занят ли, чёрные списки, ссылки, история. Годные придут к тебе на решение.">▶ Проверить домены</button>
     </form>
     <form class="inline" method="post" action="/run/score">
       <input type="hidden" name="n" value="100000">
-      <button class="btn" title="оценить весь пул найденных; капы whois:43, Ahrefs W4/W6 и пол units — на /settings. При тысячах доменов это часы">весь пул</button></form>
+      <button class="btn" title="Проверить все найденные домены. Лимиты платных проверок — в Настройках. Тысячи доменов — это часы.">Проверить все</button></form>
     <span class="sep"></span>
     <form class="inline" method="post" action="/run/recheck">
       <input type="hidden" name="n" value="200">
-      <button class="btn" title="whois по УЖЕ оценённым донорам: не выкупил ли их кто-то. Пока инбокс пуст — проверять нечего">⟳ Перепроверить занятость</button></form>
-    {% if stale %}<span class="hint" style="color:var(--acc2)">{{ stale }} не сверялись 3+ дня</span>{% endif %}
-    <a class="hint" href="/domains/pool" style="margin-left:auto">полный реестр — все домены →</a>
+      <button class="btn" title="Проверить по whois уже отобранные домены: не купил ли их кто-то другой. Денег не тратит.">⟳ Проверить, не заняты ли</button></form>
+    {% if stale %}<span class="hint" style="color:var(--acc2)">{{ stale }} не проверялись 3+ дня</span>{% endif %}
+    <a class="hint" href="/domains/pool" style="margin-left:auto" title="Все домены во всех статусах, с причинами отказа.">Весь список →</a>
   </div>
 
   {# итог последнего прогона КАЖДОЙ задачи — не только падения. Пустой прогон («проверять
      нечего») обязан быть виден: молчаливое 0/0 за 41 мс неотличимо от сломанной кнопки —
      ровно на этом оператор решил, что перепроверка не работает (дебаг 2026-07-13). #}
-  {% for key, ru in [('discovery','Поиск дропов'), ('score','Оценка'), ('recheck','Перепроверка')] %}
+  {% for key, ru in [('discovery','Найти домены'), ('score','Проверить домены'), ('recheck','Проверить, не заняты ли')] %}
     {% set r = last_runs.get(key) %}
     {% if r and r.status == 'failed' %}
-      <div class="hint" style="color:var(--bad)">⚠ {{ ru }} упала: {{ r.error }}</div>
+      <div class="hint" style="color:var(--bad)">⚠ «{{ ru }}» — ошибка: {{ r.error }}</div>
     {% elif r and r.status == 'cancelled' %}
       {# остановленную человеком нельзя рисовать галочкой: она НЕ доделала работу #}
-      <div class="hint" style="color:var(--acc2)">⦸ {{ ru }} остановлена: {{ r.done }} из {{ r.total }}</div>
+      <div class="hint" style="color:var(--acc2)">⦸ «{{ ru }}» — остановлено: {{ r.done }} из {{ r.total }}</div>
     {% elif r and r.message %}
-      <div class="hint">✓ {{ ru }}: {{ r.message }}</div>
+      <div class="hint">✓ «{{ ru }}»: {{ r.message }}</div>
     {% endif %}
   {% endfor %}
   {% if not last_runs.get('score') and counts.get('discovered') %}
-    <div class="hint" style="color:var(--acc)">▶ Найдено {{ counts['discovered'] }} доменов, но воронка не запускалась
-      ни разу — они не попадут «на решение», пока не нажать «Оценить домены».</div>
+    <div class="hint" style="color:var(--acc)">▶ Найдено {{ counts['discovered'] }} доменов, но их ещё ни разу не
+      проверяли — нажми «Проверить домены», и годные придут к тебе на решение.</div>
   {% endif %}
-  <details class="what"><summary>что делают эти три действия</summary>
-    <div class="what-body">
-      <b>Поиск дропов</b> забирает освобождающиеся домены из включённых источников
-      (см. <a href="/settings">/settings</a>), режет чужие зоны и спам-дропы по бесплатному DR
-      Ahrefs ещё на входе и складывает остальное как <b>найдено</b>. Ничего не оценивает и не покупает.<br>
-      <b>Оценка</b> гоняет их по шести волнам дёшево→дорого: зоны/бренды → доступность (RDAP/whois) →
-      риск (Web Risk) → ссылки (Ahrefs) → история и тема прошлого сайта (Wayback + LLM) → анкоры
-      финалистов. Машина сама не одобряет ничего: проверенные приходят <b>к тебе на решение</b>,
-      грязные и слабые — <b>отклонено</b>.<br>
-      <b>Перепроверка занятости</b> сверяет whois'ом уже отобранных доноров: список протухает —
-      домен, одобренный неделю назад, мог зарегистрировать кто-то другой. Денег не тратит.
-    </div></details>
 </div>
 
 {# карточки идущих задач рисует поллер из base.html #}
 <div id="machine"></div>
 
-{# ---- ИНБОКС ---- #}
+{# ---- ЖДУТ РЕШЕНИЯ ---- #}
 <h2><span class="idx">◉</span> Ждёт твоего решения
   <span class="hint">{{ inbox_n }} доменов{% if pages > 1 %} · страница {{ page }} из {{ pages }}{% endif %}</span>
-  {% if urgent %}<span class="badge b-scored" title="дедлайн дропа на носу — решай сегодня">⌛ через {{ urgent_days }} дня дроп: {{ urgent }}</span>{% endif %}
-  <span class="hint" style="margin-left:auto">сортировка по срочности дропа, а не по score</span>
+  {% if urgent %}<span class="badge b-scored" title="Дроп совсем скоро — реши сегодня.">⌛ через {{ urgent_days }} дня дроп: {{ urgent }}</span>{% endif %}
+  <span class="hint" style="margin-left:auto">сначала те, у кого дроп раньше</span>
 </h2>
 
 {# фильтр по языку прошлого сайта — ДО ветки пустого инбокса: иначе при пустом результате
    переключатель исчезает и вернуться некуда #}
 {% if langs %}<div class="chips">
-  <a class="chip {{ 'on' if not f_lang }}" href="/domains" title="все языки прошлого сайта">все языки</a>
+  <a class="chip {{ 'on' if not f_lang }}" href="/domains" title="Показать домены с любым языком прошлого сайта.">все языки</a>
   {% for l in langs %}<a class="chip {{ 'on' if f_lang == l }}" href="/domains?lang={{ l }}"
-     title="только домены, чей прошлый сайт был на языке {{ l }}">{{ l }}</a>{% endfor %}
+     title="Только домены, чей прошлый сайт был на языке {{ l }}.">{{ l }}</a>{% endfor %}
 </div>{% endif %}
 
 {% if inbox %}
 {% if f_lang %}
 <div class="card" style="margin-bottom:12px"><span class="hint" style="color:var(--acc2)">
-  пакетное одобрение скрыто: выбран язык {{ f_lang }}, а пакет взял бы и домены других языков —
+  одобрить пакетом нельзя, пока выбран язык {{ f_lang }}: пакет взял бы и домены других языков —
   <a href="/domains">все языки</a></span></div>
 {% else %}
 <div class="card" style="margin-bottom:12px">
   <form method="post" action="/domains/bulk-approve" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
-    <label class="f">Одобрить все со score ≥
+    <label class="f">Одобрить все с оценкой от
       <input type="number" id="bulk-score" name="min_score" value="{{ '%.2f'|format(bulk_default) }}" step="0.05" min="0" max="1" style="width:80px"></label>
-    <button class="btn btn-acc" title="перевести подходящие домены в approved — это твоё решение, деньги не тратятся">✓ Одобрить пакет</button>
+    <button class="btn btn-acc" title="Одобрить разом все подходящие домены. Деньги не тратятся.">✓ Одобрить пакет</button>
     <span class="hint">попадёт <b id="bulk-n">…</b> доменов</span>
     <span class="hint" style="color:var(--acc2); margin-left:auto"
-          title="«вслепую», анкоры не проверены, прошлая тема далека от VPN, EMD — только кнопкой в строке">⚠ непроверенные, далёкие по теме и EMD в пакет не попадают</span>
+          title="Не до конца проверенные, с далёкой от VPN прошлой темой и домены из ключевых слов (EMD) одобряются только кнопкой в строке.">⚠ непроверенные и спорные в пакет не попадают</span>
   </form>
 </div>
 <script>
@@ -123,8 +112,8 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 
 <div class="wrap">
 {# атрибуция DR (лицензия Ahrefs) — одной подписью над таблицей, как в реестре: в каждой строке она
-   удлиняла nowrap-ячейку, и на 1024px «✗ отклонить» уезжала за край (финальное ревью) #}
-<div class="hint" style="margin-bottom:6px">DR — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
+   удлиняла nowrap-ячейку, и на 1024px «✗ Отклонить» уезжала за край (финальное ревью) #}
+<div class="hint" style="margin-bottom:6px">рейтинг Ahrefs — <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a></div>
 <table>
   <tbody>
   {% for d, blind, urgent, hist, evidence, ok, note in inbox %}
@@ -138,19 +127,19 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
              (pending delete ≤5 сут., redemption ≤35) — это оценка, а не дата из источника #}
           {% if d.source == 'list' %}
             <div class="hint" style="font-size:10px; letter-spacing:.08em"
-                 title="по статусу RDAP: pending delete ≤5 сут., redemption ≤35 — реальный дроп может быть РАНЬШЕ">ОЦЕНКА ДРОПА</div>
+                 title="Дата примерная — по статусу домена в реестре. Настоящий дроп может быть раньше.">ДРОП, ПРИМЕРНО</div>
           {% else %}
             <div class="hint" style="font-size:10px; letter-spacing:.08em"
-                 title="дата дропа из источника (DropCatch/Nominet/registry.mx)">СРОК ДРОПА</div>
+                 title="Дата дропа из источника.">ДАТА ДРОПА</div>
           {% endif %}
           <div style="font-weight:700; {{ 'color:var(--acc2)' if urgent else 'color:var(--mut)' }}">
             {{ d.acquire_deadline.strftime('%d.%m') }}</div>
           {# окно дропа закрыто — домен уже не купить. Без метки его одобряют и идут покупать
              покойника: перепроверка вынесет ему not_acquirable, но позже и молча. #}
           {% if d.id in expired_ids %}
-            <div class="hint" style="color:var(--bad)" title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</div>
+            <div class="hint" style="color:var(--bad)" title="Дроп прошёл, а домен занят: его продлили или купил кто-то другой.">дроп прошёл</div>
           {% endif %}
-        {% else %}<span class="hint">— без дедлайна</span>{% endif %}
+        {% else %}<span class="hint">— без даты дропа</span>{% endif %}
       </td>
       {# white-space:normal — ячейка домена переносится: глобальный th,td{nowrap} растягивал
          таблицу шире контейнера, и кнопки справа уезжали за край на 1024px #}
@@ -158,28 +147,28 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         <span class="src-badge {{ 'src-bid' if d.lane=='bid' else 'src-free' }}"
               title="источник: {{ d.source|source_ru or '—' }}">{{ d.source|source_badge }}</span>{{ d.domain }}
         <a href="https://web.archive.org/web/*/{{ d.domain }}" target="_blank" rel="noopener"
-           title="посмотреть историю домена глазами" style="opacity:.6">⌛</a>
+           title="Открыть историю домена в Wayback." style="opacity:.6">⌛</a>
         <div class="hint">
-          score <b>{{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</b> ·
-          <span title="Domain Rating by Ahrefs">DR <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b></span> ·
-          RD <b>{{ d.referring_domains if d.referring_domains is not none else '—' }}</b> ·
-          {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }} лет
+          оценка <b>{{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</b> ·
+          <span title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг Ahrefs <b>{{ '%.0f'|format(d.dr|float) if d.dr is not none else '—' }}</b></span> ·
+          <span title="Сколько сайтов ссылается на домен (RD).">ссылающихся сайтов <b>{{ d.referring_domains if d.referring_domains is not none else '—' }}</b></span> ·
+          {{ '%.0f'|format(d.age_years|float) if d.age_years is not none else '—' }}&nbsp;лет
           {% if d.market_lang %}· язык <b>{{ d.market_lang }}</b>{% endif %}
         </div>
         {# тема прошлого сайта (W5, LLM) — инвариант 4: человек видит, чем домен был #}
         {% set bd = d.score_breakdown or {} %}
         {% if bd.get('emd') %}
-          <div class="hint" style="color:var(--acc2)" title="новорег под ключ: ни ссылок, ни истории — скору не из чего складываться">EMD — решение за тобой</div>
+          <div class="hint" style="color:var(--acc2)" title="Новый домен под ключевые слова (EMD): ни ссылок, ни истории — оценивать нечего.">домен из ключевых слов — реши сам</div>
         {% elif d.topic %}
-          <div class="hint" title="тема прошлого сайта по снимкам Wayback (LLM): {{ d.topic }}. Политика Google «expired domain abuse»: далёкая от VPN прошлая тема — риск">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
+          <div class="hint" title="Тема прошлого сайта: {{ d.topic }}. Чем она дальше от VPN, тем выше риск санкций Google.">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
         {% elif bd.get('topic_unknown') %}
           <div class="hint">тема не определена</div>
         {% endif %}
         {% if d.id in far_ids %}
-          <div class="hint" style="color:var(--acc2)" title="близость прошлой темы к VPN ниже 30%: такой домен одобряют только руками, глядя на тему — пакет его не берёт">⚠ прошлая тема далека от VPN</div>
+          <div class="hint" style="color:var(--acc2)" title="Близость к VPN ниже 30%. В пакет не идёт — одобряй сам, глядя на тему.">⚠ прошлая тема далека от VPN</div>
         {% endif %}
         {% if d.id in list_hit_cats %}
-          <div class="hint" style="color:var(--acc2)" title="домен числится в списках UT1 / blocklistproject. Мягкий сигнал: пакет такой домен не берёт, решаешь ты — посмотри, что за сайт там был">⚠ в списках чистоты: {{ list_hit_cats[d.id]|join(', ') }}</div>
+          <div class="hint" style="color:var(--acc2)" title="Домен есть в списках казино/adult. В пакет не идёт — посмотри, что там был за сайт.">⚠ в списках чистоты: {{ list_hit_cats[d.id]|join(', ') }}</div>
         {% endif %}
         {# «история чистая» — заявление о ФАКТЕ, а не отсутствие ошибок: его вправе нести только
            домен, для которого пакетное одобрение реально сработает. `ok` — это bulk_ok(d),
@@ -189,20 +178,20 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.id in dirty_by_id %}
           {# ГРЯЗЬ ГЛАВНЕЕ ВСЕГО ОСТАЛЬНОГО в этой строке: РКН-домен с чистым Wayback иначе нёс бы
              подпись «история не подтверждена» — правдивую и совершенно не о том. Причина названа
-             (история / спам-анкоры / Web Risk / бренд / зона; легаси — РКН), а «✓ одобрить» ниже снята. #}
+             (история / спам-анкоры / Web Risk / бренд / зона; легаси — РКН), а «✓ Одобрить» ниже снята. #}
           <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
             <span class="hint" style="color:var(--bad)"
-                  title="объективный признак (грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ; легаси v1 — реестр РКН, Safe Browsing) — не наш порог, ослабить его на /settings нечем. Портфель держится на чистой истории: такой домен не одобряем и не покупаем.">выкуп запрещён — грязь</span></div>
+                  title="Причина — факт о домене (история, спам-ссылки, чёрные списки, чужой бренд, зона), а не наш порог. Такие не одобряем и не покупаем.">покупать нельзя — грязный</span></div>
         {% elif blind %}
-          <div class="blind" title="машина не смогла проверить этот сигнал — одобрять вслепую нельзя">
+          <div class="blind" title="Эту проверку машина сделать не смогла. В пакет домен не идёт — реши сам или проверь заново.">
             ⚠ {{ blind }}
             <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-              <button class="btn-sm" title="прогнать проверки для этого домена заново">▶ перепроверить</button></form>
+              <button class="btn-sm" title="Проверить этот домен заново.">▶ Проверить</button></form>
           </div>
         {% elif hist == 'dirty' %}
           <div class="hint" style="color:var(--bad)">история грязная — смотри снимки</div>
         {# зона вне белого списка (R2-19): ни «история чистая», ни кнопки — одобрение закрыто политикой #}
-        {% elif d.id in closed_ids %}<div class="hint" style="color:var(--acc2)">зона не в белом списке — в пакет не идёт, одобрить нельзя</div>
+        {% elif d.id in closed_ids %}<div class="hint" style="color:var(--acc2)">зоны нет в списке — одобрить нельзя</div>
         {% elif ok %}<div class="hint" style="color:var(--ok)">история чистая</div>
         {# история проверена и чиста, но пакет домен не берёт: далёкая тема или EMD (без балла) —
            причина названа строкой выше. «не подтверждена» здесь было бы неправдой. #}
@@ -210,7 +199,7 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
           <span class="hint" style="color:var(--acc2)">· в пакет не идёт — решай сам</span></div>
         {# EMD-новорег (R2-14): пустой архив — норма, а не «история НЕ проверена» #}
         {% elif d.id in newreg_ids %}<div class="hint"
-             title="Wayback не дал ни одного снимка (или ни один не открылся). Для EMD-новорега это норма: прошлого сайта нет. Пакет EMD не берёт — решаешь сам">архив пуст — новорег</div>
+             title="В Wayback нет снимков. Для нового домена из ключевых слов это нормально: прошлого сайта не было.">архив пуст — домен новый</div>
         {% else %}<div class="hint" style="color:var(--acc2)">история не подтверждена</div>{% endif %}
         {# Пометка о СВЕЖЕСТИ вердикта — информационная, пакет она не блокирует (scoring.history_note):
            вердикт держится на реальных прошлых уликах, но сегодняшний отказ архива куратор обязан
@@ -220,16 +209,16 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
            ошибается; куратор перепроверяет его глазами, а не верит подписи над ним. #}
         {% if evidence %}
           <details class="evi">
-            <summary title="эти снимки Wayback машина прочитала и классифицировала">снимки, по которым судили — {{ evidence|length }}</summary>
+            <summary title="Снимки Wayback, которые машина прочитала. Открой и проверь сам.">снимки, по которым судили — {{ evidence|length }}</summary>
             <ul class="evi-list">
               {% for e in evidence %}
                 <li><span class="when">{{ e.when }}</span>
-                  <a href="{{ e.link }}" target="_blank" rel="noopener" title="открыть снимок в Wayback">{{ e.url }}</a>
+                  <a href="{{ e.link }}" target="_blank" rel="noopener" title="Открыть снимок в Wayback.">{{ e.url }}</a>
                   {# «чисто» вправе носить только снимок, который БЫЛО ЧЕМ прочитать: у
                      редирект-заглушки/frameset/SPA видимого текста нет вовсе, и подпись «чисто»
                      под ней — то самое ложное «проверено» (ревью Задачи 3). #}
                   {% if e.cats %}<span class="cat">{{ e.cats }}</span>
-                  {% elif e.unread %}<span class="hint" title="на снимке нет видимого текста (редирект-заглушка, frameset или SPA) — классифицировать было нечего">без текста — не читан</span>
+                  {% elif e.unread %}<span class="hint" title="На снимке нет текста (заглушка или пустая страница) — читать было нечего.">без текста — не читан</span>
                   {% else %}<span class="hint">чисто</span>{% endif %}</li>
               {% endfor %}
             </ul>
@@ -238,23 +227,23 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
       </td>
       <td style="width:220px; text-align:right">
         {% if d.id in dirty_by_id %}
-          {# «✓ одобрить» здесь вела бы в гарантированный отказ политики (services/transitions):
+          {# «✓ Одобрить» здесь вела бы в гарантированный отказ политики (services/transitions):
              approved — это статус НА ПУТИ К ДЕНЬГАМ, и грязь туда не пускают. Тот же запрет, что
              у витрины выкупа и реестра, — правило одно, экраны разные. Честный путь назад —
              перепроверка: реабилитацию даёт машина по новым уликам, а не кнопка. #}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+            <button class="btn-sm" title="Проверить домен заново. Если проверки покажут, что он чист, отметка снимется сама.">▶ Проверить</button></form>
         {% elif d.id in closed_ids %}
           {# R2-19: зона вне белого списка — политика (transitions.zone_closed) в approved не пустит #}
-          <span class="hint" title="зоны нет в белом списке зон (/settings): v2 не судит и не выкупает такие домены. Добавишь зону в список — кнопка вернётся">зона не в белом списке</span>
+          <span class="hint" title="Этой зоны нет в списке «Зоны, которые берём» (Настройки). Добавишь зону — кнопка вернётся.">зоны нет в списке</span>
         {% else %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="approved">
-            <button class="btn-sm btn-ok" title="домен годен — пойдёт в очередь выкупа">✓ одобрить</button></form>
+            <button class="btn-sm btn-ok" title="Домен годен — появится ниже, в готовых к покупке.">✓ Одобрить</button></form>
         {% endif %}
         <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
           <input type="hidden" name="status" value="rejected">
-          <button class="btn-sm btn-bad" title="домен не годится — убрать из воронки">✗ отклонить</button></form>
+          <button class="btn-sm btn-bad" title="Домен не годится — убрать из списка.">✗ Отклонить</button></form>
       </td>
     </tr>
   {% endfor %}
@@ -273,18 +262,18 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 {% else %}
 <div class="card empty" style="text-align:center">
   <div style="font-size:15px; font-weight:700; margin-bottom:6px">Решать нечего</div>
-  <div class="hint" style="margin-bottom:14px">Все оценённые домены разобраны. Запусти проверку —
-    воронка отскорит свежие дропы, и спорные вернутся сюда на твоё решение.</div>
+  <div class="hint" style="margin-bottom:14px">Все проверенные домены разобраны. Нажми «Проверить домены» —
+    годные придут сюда на твоё решение.</div>
   <form class="inline" method="post" action="/run/score">
     <input type="hidden" name="n" value="5">
-    <button class="btn btn-acc">▶ Оценить домены</button></form>
+    <button class="btn btn-acc" title="Проверить 5 найденных доменов. Годные придут сюда на решение.">▶ Проверить домены</button></form>
   <form class="inline" method="post" action="/run/discovery">
-    <button class="btn">↻ Найти дропы</button></form>
+    <button class="btn" title="Собрать свежие домены из включённых источников.">↻ Найти домены</button></form>
 </div>
 {% endif %}
 
-{# ---- ГОТОВЫ К ВЫКУПУ ---- #}
-<h2><span class="idx">→</span> Готовы к выкупу <span class="hint">{{ ready|length }} · мост в M2</span></h2>
+{# ---- ГОТОВЫ К ПОКУПКЕ ---- #}
+<h2><span class="idx">→</span> Готовы к покупке <span class="hint">одобрено: {{ ready|length }}</span></h2>
 {% if ready %}
 <div class="wrap">
 <table>
@@ -292,10 +281,10 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
   <tbody>
   {% for d in ready %}
     <tr>
-      <td class="dom">{{ d.domain }} <span class="hint">score {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span>
+      <td class="dom">{{ d.domain }} <span class="hint">оценка {{ '%.2f'|format(d.score|float) if d.score is not none else '—' }}</span>
         {# тема прошлого сайта — и здесь, откуда идут покупать (инвариант 4) #}
         {% if d.topic %}<div class="hint" title="{{ d.topic }}">тема: {{ d.topic|truncate(48) }} · близость к VPN <b>{{ '%.0f'|format((d.topical_relevance or 0)|float * 100) }}%</b></div>
-        {% elif (d.score_breakdown or {}).get('emd') %}<div class="hint">EMD — новорег под ключ</div>{% endif %}
+        {% elif (d.score_breakdown or {}).get('emd') %}<div class="hint" title="Новый домен под ключевые слова (EMD).">домен из ключевых слов</div>{% endif %}
         {% if d.id in far_ids %}<div class="hint" style="color:var(--acc2)">⚠ прошлая тема далека от VPN</div>{% endif %}
         {% if d.id in list_hit_cats %}<div class="hint" style="color:var(--acc2)">⚠ в списках чистоты: {{ list_hit_cats[d.id]|join(', ') }}</div>{% endif %}
         {# ГРЯЗЬ — прямо в строке, с которой идут покупать. Отмытый домен (approved с живым
@@ -304,33 +293,33 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
         {% if d.id in dirty_by_id %}
           <div><span class="flag">{{ dirty_by_id[d.id] }}</span>
             <span class="hint" style="color:var(--bad)"
-                  title="домен был отклонён воронкой по объективному признаку (грязная история, спам-анкоры, угроза Web Risk/Spamhaus, чужой VPN-бренд, флаг источника, зона вне белого списка или архив РФ; легаси v1 — реестр РКН, Safe Browsing). Портфель держится на чистой истории — такой домен не покупаем. Вернуть его в оборот может только перепроверка, если проверки скажут, что он чист.">выкуп запрещён — грязь</span></div>
+                  title="Домен отклонён по факту о нём (история, спам-ссылки, чёрные списки, чужой бренд, зона). Вернуть его может только повторная проверка.">покупать нельзя — грязный</span></div>
         {% endif %}</td>
       <td class="num">{{ '%.0f'|format(d.acquire_price|float) if d.acquire_price is not none else '—' }}</td>
       <td class="num">{{ d.acquire_deadline.strftime('%d.%m') if d.acquire_deadline else '—' }}
         {# отсюда ИДУТ ПОКУПАТЬ — метка «окно закрыто» тут дороже всего #}
         {% if d.id in expired_ids %}<br><span class="hint" style="color:var(--bad)"
-          title="дроп прошёл, домен занят — его продлили или перехватили">окно закрыто</span>{% endif %}</td>
+          title="Дроп прошёл, а домен занят: его продлили или купил кто-то другой.">дроп прошёл</span>{% endif %}</td>
       <td>
         {% if d.id in dirty_by_id %}
           {# денежных кнопок у грязи нет вовсе: сервисы её и так отвергнут (services/transitions),
              но кнопка, ведущая в гарантированный отказ, — это ложное предложение купить. #}
           <form class="inline" method="post" action="/domains/{{ d.id }}/score">
-            <button class="btn-sm" title="прогнать домен по воронке заново — единственный честный путь назад: если проверки скажут «чист», машина сама снимет отметку">▶ перепроверить</button></form>
+            <button class="btn-sm" title="Проверить домен заново. Если проверки покажут, что он чист, отметка снимется сама.">▶ Проверить</button></form>
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="rejected">
-            <button class="btn-sm btn-bad" title="убрать из витрины выкупа">✗ отклонить</button></form>
+            <button class="btn-sm btn-bad" title="Убрать из готовых к покупке.">✗ Отклонить</button></form>
         {% else %}
           <form class="inline" method="post" action="/domains/{{ d.id }}/queue" style="display:flex; gap:8px; align-items:center">
-            <select name="provider" title="куда отправлять заказ: авто — канал по таблице зон (/settings); backorder — ставка на перехват (ценные дропы), optimizator — фиксированная цена (свободные чистые)">
+            <select name="provider" title="У кого покупать. Авто — по зоне домена (Настройки); backorder — ставка на перехват; optimizator — фиксированная цена.">
               <option value="" selected>авто (по зоне)</option>
               <option value="backorder">backorder</option>
               <option value="optimizator">optimizator</option>
             </select>
-            <button class="btn-sm btn-acc" title="заявка → подтверждение человеком → отправка провайдеру">＋ в очередь выкупа</button></form>
+            <button class="btn-sm btn-acc" title="Поставить к покупке. Деньги спишутся только после твоего «Купить» на экране «Покупка».">＋ К покупке</button></form>
           <form class="inline" method="post" action="/domains/{{ d.id }}/set-status">
             <input type="hidden" name="status" value="purchased">
-            <button class="btn-sm btn-buy" title="я уже купил домен руками — система деньги не тратит">🛒 купил руками</button></form>
+            <button class="btn-sm btn-buy" title="Отметить, что домен ты уже купил сам. Машина денег не тратит.">🛒 Уже купил сам</button></form>
         {% endif %}
       </td>
     </tr>
@@ -339,33 +328,33 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
 </table>
 </div>
 {% else %}
-<div class="card empty">Одобренных доменов нет — они появятся здесь после твоего решения в инбоксе.</div>
+<div class="card empty">Одобренных доменов нет — они появятся здесь, когда ты одобришь домены выше.</div>
 {% endif %}
 
 {# thr — режет порог (крутится на /settings); dirt — грязь (не трогать, в оборот не вернуть);
-   taken — нельзя: занят, чужая зона, чужой бренд, архив РФ. Легаси v1 (rkn, safebrowsing) — грязь. #}
-{% set RU = {'low_rd': ('Мало доноров', 'thr'), 'too_young': ('Молодой домен', 'thr'),
-             'low_score': ('Низкий скор', 'thr'), 'history_dirty': ('Грязная история', 'dirt'),
-             'blacklist': ('Блэклист / Web Risk', 'dirt'), 'spam_anchors': ('Спам-анкоры', 'dirt'),
-             'feed_flag': ('Флаг источника', 'dirt'), 'rkn': ('РКН (v1)', 'dirt'),
-             'safebrowsing': ('Safe Browsing (v1)', 'dirt'), 'list_hit': ('В списке чистоты', 'dirt'),
-             'not_acquirable': ('Занят', 'taken'), 'tld_closed': ('Зона не наша', 'taken'),
-             'trademark': ('Чужой бренд', 'taken'), 'legacy_ru': ('РФ (архив v1)', 'taken')} %}
+   taken — нельзя: занят, чужая зона, чужой бренд, архив РФ. Легаси v1 (rkn, safebrowsing) — грязь.
+   Здесь ТОЛЬКО природа причины (цвет полосы): подпись — из одного словаря, фильтр reject_ru. #}
+{% set KIND = {'low_rd': 'thr', 'too_young': 'thr', 'low_score': 'thr',
+               'history_dirty': 'dirt', 'blacklist': 'dirt', 'spam_anchors': 'dirt',
+               'feed_flag': 'dirt', 'rkn': 'dirt', 'safebrowsing': 'dirt', 'list_hit': 'dirt',
+               'not_acquirable': 'taken', 'tld_closed': 'taken', 'trademark': 'taken',
+               'legacy_ru': 'taken'} %}
 <dialog id="why" class="modal">
   <form method="dialog" style="display:flex; align-items:start">
     <div style="flex:1">
-      <h3 style="margin:0">Отклонено — разбор причин</h3>
-      <div class="hint">почему домены не прошли воронку · всего
+      <h3 style="margin:0">Почему отклонено</h3>
+      <div class="hint">всего отклонено
         <b style="color:var(--bad)">{{ reasons_total }}</b></div>
     </div>
-    <button class="btn-sm" title="закрыть">×</button>
+    <button class="btn-sm" title="Закрыть.">×</button>
   </form>
   <div class="why-grid">
     {% for code, n in reasons.items()|sort(attribute='1', reverse=true) %}
-      {# фолбэк на (code or 'без причины'), а не на голый code: у старых строк reject_reason
-         бывает NULL, и RU.get(None, (None, ...)) отрендерил бы оператору слово «None» #}
-      {% set ru, kind = RU.get(code, (code or 'без причины', 'taken')) %}
-      <div class="why-nm">{{ ru }} <code>{{ code or '—' }}</code></div>
+      {# фолбэк «без причины»: у старых строк reject_reason бывает NULL (reject_ru вернёт ""),
+         и без него оператор увидел бы пустую строку или слово «None». Код причины — в title:
+         по нему ищут в логах, на экране ему делать нечего. #}
+      {% set ru, kind = (code|reject_ru or 'без причины'), KIND.get(code, 'taken') %}
+      <div class="why-nm" title="код причины: {{ code or '—' }}">{{ ru }}</div>
       <div class="why-bar"><i class="k-{{ kind }}"
            style="width:{{ (n / reasons_total * 100)|round|int if reasons_total else 0 }}%"></i></div>
       <div class="num"><b>{{ n }}</b>
@@ -373,11 +362,11 @@ bs.addEventListener('input', bulkPreview); bulkPreview();
     {% endfor %}
   </div>
   <div class="why-foot">
-    <span><i class="sw k-thr"></i> режет порог — <b>{{ reasons_thr }}</b>
-      ({{ (reasons_thr / reasons_total * 100)|round|int if reasons_total else 0 }}%): можно ослабить</span>
-    <span><i class="sw k-dirt"></i> грязь — не трогать</span>
-    <span><i class="sw k-taken"></i> нельзя — занят, чужая зона, бренд или архив РФ</span>
-    <a class="btn btn-acc btn-sm" href="/settings" style="margin-left:auto">⚙ настроить пороги →</a>
+    <span><i class="sw k-thr"></i> не прошли порог — <b>{{ reasons_thr }}</b>
+      ({{ (reasons_thr / reasons_total * 100)|round|int if reasons_total else 0 }}%): порог можно ослабить</span>
+    <span><i class="sw k-dirt"></i> грязные — не вернуть</span>
+    <span><i class="sw k-taken"></i> купить нельзя — занят, чужая зона или бренд</span>
+    <a class="btn btn-acc btn-sm" href="/settings" style="margin-left:auto" title="Открыть Настройки: пороги отбора доменов.">⚙ Настроить пороги →</a>
   </div>
 </dialog>
 

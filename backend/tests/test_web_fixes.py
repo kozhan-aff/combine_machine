@@ -231,7 +231,8 @@ def test_domains_localized_labels(client, sqlite_db):
     # локализацию от совпадения со старой прозой).
     assert 'b-approved">одобрен' in html and 'b-rejected">отклонён' in html
     assert '<span class="hint">ставка</span>' in html                    # лейн-ячейка по-русски
-    assert "нельзя купить <code>not_acquirable</code>" in html           # reject: фраза + код
+    # reject: на экране фраза, код — в подсказке (по нему ищут в логах)
+    assert 'title="причина отказа, код: not_acquirable">занят</span>' in html
     assert 'b-approved">approved' not in html                            # сырое значение НЕ в тексте бейджа
 
 

@@ -190,7 +190,7 @@ def test_blacklist_none_downgrades_via_funnel(monkeypatch):
     assert wb.calls == 1                                    # blacklist:unavailable не блокирует T3
     with db.SessionLocal() as s:
         d = s.get(Domain, did)
-        assert scoring.blind_reason(d) == "блэклист НЕ проверен" and scoring.bulk_ok(d) is False
+        assert scoring.blind_reason(d) == "чёрные списки НЕ проверены" and scoring.bulk_ok(d) is False
 
 
 def test_history_dirty_rejects_after_wayback():
@@ -564,7 +564,7 @@ def test_empty_score_run_explains_why(sqlite_db, monkeypatch):
     monkeypatch.setattr(scoring, "_make_clients", lambda: {})
     assert scoring.score_pending(limit=50) == 0
     msg = jobs.last("score")["message"]
-    assert "оценивать нечего" in msg and "ждут своего дропа" in msg
+    assert "проверять нечего" in msg and "ждут своего дропа" in msg
 
 
 def test_drop_day_domain_outranks_the_cooldown_pool(sqlite_db, monkeypatch):
@@ -677,4 +677,4 @@ def test_wayback_down_is_explained_in_job_message(monkeypatch):
     monkeypatch.setattr(jobs, "report", lambda run, **kw: msgs.append(kw.get("message")))
     states = [SimpleNamespace(alive=True, unresolved_why=None) for _ in range(3)]
     scoring._run_waves(states, {}, {}, None, None, object(), notes=[])
-    assert any(m and "archive.org недоступен — 3 доменов ждут следующего прогона" in m for m in msgs)
+    assert any(m and "archive.org недоступен — 3 доменов ждут следующей проверки" in m for m in msgs)

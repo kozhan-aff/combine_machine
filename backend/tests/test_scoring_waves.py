@@ -427,7 +427,7 @@ def test_run_waves_shrinks_pool_across_stages_and_writes_wave_history():
     survived = [s for s in states if s.alive]
     assert 0 < len(survived) < 10          # реально сжалось, не всё выжило и не всё умерло
     last = jobs.last("score")
-    assert "доступность" in last["message"] and ("->" in last["message"] or "→" in last["message"])
+    assert "не занят ли" in last["message"] and ("->" in last["message"] or "→" in last["message"])
     # мини-полоски на чипах (2026-07-21): before/after написаны на КАЖДУЮ стадию, не только
     # в текстовый waterfall — jobCard() их и рисует.
     by_key = {s["key"]: s for s in last["stages"]}

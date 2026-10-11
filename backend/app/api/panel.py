@@ -36,8 +36,10 @@ from app.services import cf_sync, diag_cache, locales
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 from app.services.labels import (status_ru as _status_ru, reject_ru as _reject_ru,
                                  lane_ru as _lane_ru, index_ru as _index_ru,
+                                 site_status_ru as _site_status_ru,
                                  source_ru as _source_ru, source_badge as _source_badge)
 templates.env.filters["status_ru"] = _status_ru
+templates.env.filters["site_status_ru"] = _site_status_ru   # у сайта `published` — «опубликован», не «на сайте»
 templates.env.filters["source_ru"] = _source_ru
 templates.env.filters["source_badge"] = _source_badge
 templates.env.filters["reject_ru"] = _reject_ru
@@ -95,28 +97,28 @@ def _next_steps(db: Session) -> list[dict]:
     offers_active = db.scalar(select(func.count()).select_from(Offer).where(Offer.active.is_(True))) or 0
     steps = []
     if not offers_active:
-        steps.append({"href": "/offers", "text": "Добавь оффер — это вход машины: без него контенту не на что ссылаться."})
+        steps.append({"href": "/offers", "text": "Добавь оффер: без него текстам не на что ссылаться."})
     if dc.get("discovered"):
-        steps.append({"href": "/domains/pool?status=discovered", "text": f"{dc['discovered']} доменов ждут скоринга — запусти ▶ Score (лучшие по RD пойдут первыми)."})
+        steps.append({"href": "/domains/pool?status=discovered", "text": f"{dc['discovered']} доменов найдено и не проверено — нажми «Проверить домены»."})
     if dc.get("scored"):
-        steps.append({"href": "/domains", "text": f"{dc['scored']} отскорено — просмотри и реши ✓ approve / ✗ reject."})
+        steps.append({"href": "/domains", "text": f"{dc['scored']} доменов ждут решения — одобри или отклони."})
     if dc.get("approved"):
-        steps.append({"href": "/domains", "text": f"{dc['approved']} одобрено — купи домен руками у провайдера, потом отметь 🛒 куплен."})
+        steps.append({"href": "/domains", "text": f"{dc['approved']} одобрено — нажми «К покупке» или купи сам и отметь «Уже купил сам»."})
     purchased_no_site = db.execute(
         select(Domain).where(Domain.status == "purchased")
         .where(~Domain.id.in_(select(Site.domain_id)))).scalars().all()
     if purchased_no_site:
-        steps.append({"href": "/domains/pool?status=purchased", "text": f"{len(purchased_no_site)} купленных без сайта — нажми «создать сайт»."})
+        steps.append({"href": "/domains/pool?status=purchased", "text": f"{len(purchased_no_site)} купленных без сайта — нажми «Создать сайт»."})
     for s in db.execute(select(Site).where(Site.status == "provisioning")).scalars().all():
-        steps.append({"href": f"/sites/{s.id}", "text": f"Сайт #{s.id}: запусти Provision (Cloudflare + aaPanel)."})
+        steps.append({"href": f"/sites/{s.id}", "text": f"Сайт #{s.id}: нажми «Поднять сайт»."})
     for s in db.execute(select(Site).where(Site.status == "content")).scalars().all():
         n_pages = db.scalar(select(func.count()).select_from(Page).where(Page.site_id == s.id)) or 0
         if not n_pages:
-            steps.append({"href": f"/sites/{s.id}", "text": f"Сайт #{s.id}: сгенерируй черновики (M4, ~1–2 мин)."})
+            steps.append({"href": f"/sites/{s.id}", "text": f"Сайт #{s.id}: нажми «Написать тексты»."})
     if pc.get("draft"):
-        steps.append({"href": "/", "text": f"{pc['draft']} черновиков ждут редактуры — открой страницу, вычитай, сохрани как edited (гейт)."})
+        steps.append({"href": "/", "text": f"{pc['draft']} черновиков ждут вычитки — открой страницу, вычитай и нажми «Одобрить»."})
     if pc.get("edited"):
-        steps.append({"href": "/", "text": f"{pc['edited']} отредактировано — публикуй сайт (M5)."})
+        steps.append({"href": "/", "text": f"{pc['edited']} страниц вычитано — нажми «Опубликовать» в карточке сайта."})
     if pc.get("published"):
         # Три РАЗНЫХ состояния, и валить их в одно «ещё не в индексе» — врать: «не спросили»,
         # «спросили и не выяснили» и «спросили, в индексе нет» требуют разных действий оператора.
@@ -127,13 +129,13 @@ def _next_steps(db: Session) -> list[dict]:
         blind = _idx(Page.index_status == "unknown", Page.index_checked_at.isnot(None))
         missing = _idx(Page.index_status == "not_indexed")
         if never:
-            steps.append({"href": "/", "text": f"{never} опубликованных страниц ещё не проверялись на индексацию — запусти «индексация» (site:)."})
+            steps.append({"href": "/", "text": f"{never} страниц на сайте ещё не проверялись в поиске — нажми «Проверить индексацию» в карточке сайта."})
         if blind:
-            steps.append({"href": "/diag", "text": f"{blind} страниц проверить не удалось: движки SearXNG не ответили (CAPTCHA/лимит). Это про поисковик, а не про сайт — почини SearXNG и повтори проверку."})
+            steps.append({"href": "/diag", "text": f"{blind} страниц проверить не удалось: поиск (SearXNG) не ответил. Это про поисковик, а не про сайт — нажми «Проверить связь» и повтори."})
         if missing:
-            steps.append({"href": "/", "text": f"{missing} опубликованных страниц нет в индексе — попадание занимает дни, проверяй периодически."})
+            steps.append({"href": "/", "text": f"{missing} страниц на сайте ещё нет в поиске — на это уходят дни, проверяй время от времени."})
     if not steps:
-        steps.append({"href": "/domains", "text": "Очередь пуста: запусти ↻ Discovery за свежими дропами."})
+        steps.append({"href": "/domains", "text": "Дел нет: нажми «Найти домены» — соберём свежие дропы."})
     return steps
 
 
@@ -343,7 +345,7 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
                    history_evidence(d), _bulk_eligible(d, allow), history_note(d)) for d in inbox],
         "inbox_total": inbox_total, "inbox_n": inbox_n, "page": page, "pages": pages,
         "page_size": INBOX_PAGE, "langs": langs, "f_lang": lang or "",
-        # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к выкупу»
+        # прошлая тема далека от VPN (инвариант 4) — пометка в инбоксе и в «Готовы к покупке»
         "far_ids": {d.id for d in inbox + ready if topic_far(d)},
         # попадание в списки чистоты UT1/blocklistproject (мягкий сигнал): id -> категории
         "list_hit_cats": {d.id: list_hits(d) for d in inbox + ready if list_hits(d)},
@@ -351,7 +353,7 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
         "newreg_ids": {d.id for d in inbox if emd_newreg(d)},
         # Р2: «пакет от скора» по умолчанию = «порог сильного кандидата» из /settings
         "bulk_default": settings["approve_at"],
-        # зона вне белого списка: «✓ одобрить» политика отвергнет (R2-19) — строка рисует «зона не в
+        # зона вне белого списка: «✓ Одобрить» политика отвергнет (R2-19) — строка рисует «зона не в
         # белом списке» вместо кнопки и не пишет «история чистая» (тот же zone_closed, что у политики)
         "closed_ids": {d.id for d in inbox + ready if zone_closed(d, allow)},
         # окно дропа закрыто — купить уже нельзя. Домен уехал вниз и не «срочный», но выглядит
@@ -359,16 +361,16 @@ def domains_view(request: Request, lang: str | None = None, page: int = 1,
         # покойника. Множеством, а не флагом в кортеже, — нужно и в «готовы к выкупу».
         "expired_ids": {d.id for d in inbox + ready if _expired(d, now)},
         "ready": ready,
-        # ГРЯЗЬ НА ВИТРИНЕ ВЫКУПА. «Готовы к выкупу» — экран, с которого ИДУТ ТРАТИТЬ ДЕНЬГИ, и
+        # ГРЯЗЬ НА ВИТРИНЕ ВЫКУПА. «Готовы к покупке» — экран, с которого ИДУТ ТРАТИТЬ ДЕНЬГИ, и
         # до этого фикса отмытый РКН-домен (approved + reject_reason='rkn') стоял здесь без
         # единой метки (аудит F13). Сервисы его теперь не пустят ни в очередь, ни в «купил
         # руками» — но оператор обязан УВИДЕТЬ причину, а не упереться в отказ на клике.
         # Причина — по-русски, из того же словаря, что и везде (labels.reject_ru).
         #
-        # ИНБОКС (`scored`) — тоже: `bulk_ok` грязь из пакета исключает, но кнопка «✓ одобрить»
+        # ИНБОКС (`scored`) — тоже: `bulk_ok` грязь из пакета исключает, но кнопка «✓ Одобрить»
         # у такой строки оставалась и вела в ГАРАНТИРОВАННЫЙ отказ политики (ревью Задачи 6,
         # Minor 6). Кнопка, которая не может сработать, — то же ложное предложение, что и
-        # «↩ вернуть в approved» для РКН-домена в реестре.
+        # «↩ Вернуть в одобренные» для РКН-домена в реестре.
         "dirty_by_id": {d.id: _reject_ru(r) for d in inbox + ready
                         if (r := dirty_reason(d)) is not None},
         "counts": counts, "total": sum(counts.values()),
@@ -416,7 +418,7 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
         "active": "domains", "rows": rows, "page": page, "pages": pages, "matched": matched, "counts": counts, "total": sum(counts.values()),
         "site_by_domain": dict(db.execute(select(Site.domain_id, Site.id)).all()),
         # какие строки грязные — решает ПОЛИТИКА, а не шаблон по списку кодов: реестр рисует
-        # кнопки действий, и «↩ вернуть в approved» для РКН-домена (аудит F9) была именно тут.
+        # кнопки действий, и «↩ Вернуть в одобренные» для РКН-домена (аудит F9) была именно тут.
         # Jinja не имеет права переизобретать этот предикат — разъедется молча.
         "dirty_by_id": {d.id: _reject_ru(r) for d in rows if (r := dirty_reason(d)) is not None},
         # зона вне белого списка (R2-19): тот же предикат, что у политики, — кнопку «↩ вернуть в
@@ -434,7 +436,7 @@ def domains_pool_view(request: Request, status: str | None = None, min_score: fl
 def _bulk_eligible(d, allow) -> bool:
     """Годен ли scored-домен к пакетному одобрению: зона в белом списке И `bulk_ok`. ОДИН предикат
     для пакета (_bulk_candidates) и для строки инбокса (domains_view): строка подписывает «история
-    чистая» и рисует «✓ одобрить» именно по нему, иначе домен вне белого списка (оператор сузил
+    чистая» и рисует «✓ Одобрить» именно по нему, иначе домен вне белого списка (оператор сузил
     allowlist после скоринга) получал бы кнопку, которую политика гарантированно отвергнет."""
     from app.services.scoring import bulk_ok
     from app.services.transitions import zone_closed
@@ -511,10 +513,10 @@ def bulk_approve_action(min_score: str = Form(""), db: Session = Depends(get_ses
     db.commit()
     msg = f"Одобрено пакетом: {approved}"
     if skipped:
-        msg += (f" · пропущено (не все проверки пройдены, тема далека от VPN, EMD или зона вне "
-                f"белого списка): {skipped} — их реши руками в строке")
+        msg += (f" · пропущено (не всё проверено, тема далека от VPN, домен из ключевых слов или "
+                f"зона не из списка): {skipped} — реши по ним сам в строке")
     if denied:
-        return _back("/domains", err=f"{msg} · политика отвергла {len(denied)}: {denied[0]}")
+        return _back("/domains", err=f"{msg} · не одобрено {len(denied)}: {denied[0]}")
     return _back("/domains", msg=msg)
 
 
@@ -857,7 +859,7 @@ def queue_view(request: Request):
             for z in {o["zone"] for o in orders if o["zone"]}:   # None — сетки нет и не будет
                 grids[z] = c.tariffs(z)
         except Exception as e:  # noqa: BLE001
-            bo_err = f"сетка тарифов: {type(e).__name__}: {e}"[:200]
+            bo_err = f"ставки не загрузились: {type(e).__name__}: {e}"[:200]
         try:
             balance = c.balance()
         except Exception as e:  # noqa: BLE001 — баланс информационный, подтверждать не мешает
@@ -991,7 +993,7 @@ def run_discovery_action(request: Request):
     from app.services import discovery, jobs
     ok = jobs.spawn("discovery", discovery.run_discovery)
     # запущено — баннера НЕТ: прогресс показывает карточка задачи (спека §8)
-    return _back_here(request, err=None if ok else jobs.busy_msg("Поиск дропов уже идёт"))
+    return _back_here(request, err=None if ok else jobs.busy_msg("«Найти домены» уже идёт"))
 
 
 @router.post("/domains/add-list")
@@ -1000,14 +1002,14 @@ def domains_add_list(domains: str = Form("")):
     r = discovery.add_list(domains)
     cut = f", сверх {discovery._LIST_MAX} за раз отброшено {r['cut']}" if r["cut"] else ""
     return _back("/domains/pool", msg=f"Добавлено {r['added']}, уже были {r['known']}, "
-                                      f"не домены {r['bad']}{cut} — новые оценятся при «Оценить домены»")
+                                      f"не домены {r['bad']}{cut} — новые проверит «Проверить домены»")
 
 
 @router.post("/run/score")
 def run_score_action(request: Request, n: int = Form(5)):
     from app.services import jobs, scoring
     ok = jobs.spawn("score", lambda: scoring.score_pending(limit=n))
-    return _back_here(request, err=None if ok else jobs.busy_msg("Проверка уже идёт"))
+    return _back_here(request, err=None if ok else jobs.busy_msg("«Проверить домены» уже идёт"))
 
 
 @router.post("/run/recheck")
@@ -1015,7 +1017,7 @@ def run_recheck_action(request: Request, n: int = Form(200)):
     """Перепроверить whois'ом отобранных доноров: не выкупили ли их. Денег не тратит."""
     from app.services import jobs, scoring
     ok = jobs.spawn("recheck", lambda: scoring.recheck_acquirability(limit=n))
-    return _back_here(request, err=None if ok else jobs.busy_msg("Перепроверка уже идёт"))
+    return _back_here(request, err=None if ok else jobs.busy_msg("«Проверить, не заняты ли» уже идёт"))
 
 
 @router.post("/settings/lists/refresh")
@@ -1166,29 +1168,33 @@ def score_one_action(domain_id: int):
             # не бросает и в errors не пишет, и панель заявляла бы «домен занят» о факте, который
             # никто не устанавливал. Ровно ту ложь и правим.
             return _back("/domains", msg=f"{name}: " + {
-                "waiting": "домен ещё занят — дроп не наступил. Воронка вернётся к нему "
+                "waiting": "домен ещё занят — дроп не наступил. Проверим его снова "
                            "в день дропа (без даты — в течение суток)",
-                "whois_failed": "whois не ответил (A-Parser) — домен остался в поиске, "
-                                "попробуйте позже",
-                "whois_unclear": "whois ответил, но ответ не разобран (формат TLD?) — "
-                                 "домен остался в поиске, занятость НЕ установлена",
-                "taken_undated": "домен занят, но дата его дропа неизвестна — вернёмся к нему "
-                                 "по расписанию (раз в сутки), вдруг освободится",
-                "budget": "исчерпан бюджет whois на прогон (см. max_whois_per_run в /settings) — "
-                          "домен остался в поиске",
-                "ahrefs_failed": "Ahrefs не ответил (ссылочный профиль) — домен остался в поиске, "
-                                 "оценится следующим прогоном",
-                "units_floor": "остаток units Ahrefs неизвестен или ниже пола (см. /settings) — "
-                               "платные волны пропущены, домен остался в поиске",
-                "ahrefs_missing": "Ahrefs не вернул данных по домену — домен остался в поиске, "
-                                  "оценится следующим прогоном",
-                "ahrefs_no_key": "ключ Ahrefs (AHREFS_API_KEY в .env) не задан — платные волны "
-                                 "пропущены, домен остался в поиске",
-            }.get(out.get("why"), "приобретаемость не определена — домен остался в поиске"))
-        return _back("/domains", msg=f"скор: {out.get('domain', domain_id)} -> "
-                                     f"{out.get('status')} ({out.get('score')})")
+                "whois_failed": "whois не ответил — домен остался в найденных, "
+                                "попробуй позже",
+                "whois_unclear": "whois ответил непонятно — домен остался в найденных, "
+                                 "свободен ли он, НЕ установлено",
+                "taken_undated": "домен занят, а дата дропа неизвестна — проверим снова "
+                                 "через сутки, вдруг освободится",
+                "budget": "лимит проверок whois исчерпан (см. Настройки) — "
+                          "домен остался в найденных",
+                "ahrefs_failed": "Ahrefs не ответил — домен остался в найденных, "
+                                 "проверим в следующий раз",
+                "units_floor": "остаток units Ahrefs неизвестен или ниже минимума (см. Настройки) — "
+                               "домен остался в найденных",
+                "ahrefs_missing": "Ahrefs не дал данных по домену — домен остался в найденных, "
+                                  "проверим в следующий раз",
+                "ahrefs_no_key": "ключ Ahrefs не задан (см. «Ключи и доступы») — "
+                                 "домен остался в найденных",
+            }.get(out.get("why"), "не удалось понять, свободен ли домен — он остался в найденных"))
+        # статус и причину — словами из общего словаря, а не сырыми ключами
+        res = _status_ru(out.get("status"))
+        if out.get("reject_reason"):
+            res += f" ({_reject_ru(out['reject_reason'])})"
+        return _back("/domains", msg=f"{out.get('domain', domain_id)} проверен: {res}, "
+                                     f"оценка {out.get('score')}")
     except Exception as e:  # noqa: BLE001
-        return _back("/domains", err=f"score #{domain_id}: {e}")
+        return _back("/domains", err=f"проверка домена #{domain_id}: {e}")
 
 
 @router.post("/domains/{domain_id}/set-status")
@@ -1198,12 +1204,12 @@ def set_status_action(domain_id: int, status: str = Form(...), db: Session = Dep
 
     `_MANUAL_STATUSES` — это whitelist КНОПОК (какие цели вообще есть у панели). Сам переход
     судит политика (services/transitions): она смотрит ИСХОДНЫЙ статус и грязь. Раньше здесь
-    не было ничего, кроме whitelist'а целей, — и «↩ вернуть в approved» отмывала РКН-домен
+    не было ничего, кроме whitelist'а целей, — и «↩ Вернуть в одобренные» отмывала РКН-домен
     одним кликом (аудит F9).
     """
     from app.services import transitions
     if status not in _MANUAL_STATUSES:
-        return _back("/domains", err=f"недопустимая цель перехода: {status!r}")
+        return _back("/domains", err=f"так изменить статус нельзя: {status!r}")
     d = db.get(Domain, domain_id)
     if d is None:
         return _back("/domains", err=f"домен #{domain_id} не найден")
@@ -1220,8 +1226,8 @@ def set_status_action(domain_id: int, status: str = Form(...), db: Session = Dep
 def refresh_prices_action():
     from app.services.pricing import refresh_backorder_prices
     n = refresh_backorder_prices()
-    return _back("/domains", msg=f"Цены бэкордера обновлены: {n} доменов"
-                 if n else "Цена бэкордера недоступна (тариф не прочитан)")
+    return _back("/domains", msg=f"Цены backorder обновлены: {n} доменов"
+                 if n else "Цена backorder недоступна (тариф не прочитан)")
 
 
 @router.post("/domains/{domain_id}/make-site")
@@ -1229,7 +1235,7 @@ def make_site_action(domain_id: int):
     from app.services import provisioning
     try:
         sid = provisioning.create_site_for(domain_id)
-        return _back(f"/sites/{sid}", msg="Сайт создан. Дальше: привяжи оффер и запусти Provision.")
+        return _back(f"/sites/{sid}", msg="Сайт создан. Дальше: привяжи оффер и нажми «Поднять сайт».")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"создание сайта: {e}")
 
@@ -1240,9 +1246,9 @@ def queue_add_action(domain_id: int, provider: str = Form("")):
     from app.services import acquisition
     try:
         oid = acquisition.create_order(domain_id, provider or None)
-        return _back("/queue", msg=f"Домен в очереди выкупа (заказ #{oid}). Подтверди — тогда уйдёт провайдеру.")
+        return _back("/queue", msg=f"Домен поставлен к покупке (заказ #{oid}). Деньги спишутся только после твоего «Купить».")
     except Exception as e:  # noqa: BLE001
-        return _back("/domains", err=f"в очередь: {e}")
+        return _back("/domains", err=f"к покупке: {e}")
 
 
 @router.post("/queue/{order_id}/confirm")
@@ -1256,8 +1262,8 @@ def queue_confirm_action(order_id: int, bid_rub: float = Form(0)):
         elif cur in (None, "RUB"):
             tail = f", ставка {bid:.0f} ₽"
         else:      # аукцион NameSilo: полное списание (потолок + продление) в валюте котировки
-            tail = f", к списанию до {bid:.2f} {cur} (потолок + продление)"
-        return _back("/queue", msg=f"Заказ #{order_id} подтверждён человеком (гейт открыт){tail}. Можно отправлять.")
+            tail = f", к списанию до {bid:.2f} {cur} (ставка + год продления)"
+        return _back("/queue", msg=f"Заказ #{order_id} подтверждён{tail}. Теперь нажми «Отправить заказ».")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
 
@@ -1270,36 +1276,36 @@ def queue_buy_action(order_id: int, max_price: float = Form(...)):
 
     СУММА ВИДНА ЧЕЛОВЕКУ ДО СПИСАНИЯ: оператор задаёт потолок `max_price` (валюта регистратора, USD).
     confirm_order замораживает котировку регистратора; выше потолка — НЕ отправляем, заказ остаётся
-    подтверждённым с видимой ценой (строка /queue), дальше решает человек («▶ отправить» или снять).
+    подтверждённым с видимой ценой (строка /queue), дальше решает человек («▶ Отправить заказ» или снять).
     Любой отказ confirm — заказ остаётся как был; отказ execute — обычный failed с причиной."""
     from app.services import acquisition
     if not max_price or max_price <= 0:
-        return _back("/queue", err="укажи потолок цены (USD) — без него в один клик не покупаем")
+        return _back("/queue", err="укажи, не дороже скольки покупать (USD) — без этого не покупаем")
     try:
         r = acquisition.confirm_order(order_id)
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"подтверждение: {e}")
     cost, cur = r.get("bid_rub"), r.get("currency")
     if cost is None:
-        return _back("/queue", err=f"заказ #{order_id} подтверждён, но цену регистратор не назвал — отправка "
-                                   "в один клик отменена; смотри строку заказа")
+        return _back("/queue", err=f"заказ #{order_id} подтверждён, но регистратор не назвал цену — "
+                                   "заказ не отправлен; смотри строку заказа")
     if float(cost) > max_price:
-        return _back("/queue", err=f"заказ #{order_id}: цена регистратора {float(cost):.2f} {cur or ''} выше потолка "
-                                   f"{max_price:.2f} — НЕ отправлен. Цена заморожена в заказе: отправь кнопкой "
-                                   "«▶ отправить», если согласен, или сними заявку")
+        return _back("/queue", err=f"заказ #{order_id}: цена регистратора {float(cost):.2f} {cur or ''} выше твоего предела "
+                                   f"{max_price:.2f} — НЕ отправлен. Цена записана в заказе: нажми "
+                                   "«Отправить заказ», если согласен, или «Отменить»")
     try:
         x = acquisition.execute_confirmed_order(order_id)
     except Exception as e:  # noqa: BLE001
-        return _back("/queue", err=f"заказ #{order_id} подтверждён, но отправка упала: {e} — «↻ повторить»")
+        return _back("/queue", err=f"заказ #{order_id} подтверждён, но отправка упала: {e} — нажми «Повторить»")
     if x.get("error"):
         return _back("/queue", err=f"заказ #{order_id} подтверждён, отправка: {x['error']}")
     paid = f" ({float(cost):.2f} {cur})" if cur else f" ({float(cost):.2f})"
     if x.get("status") == "caught":
-        site = f" карточка сайта #{x['site_id']} создана" if x.get("site_id") else " карточку сайта создай кнопкой"
-        return _back("/queue", msg=f"Домен куплен{paid}: заказ #{order_id} — purchased,{site}. "
-                                   "Дальше — Provision на карточке сайта (NS в Cloudflare запишем сами).")
-    return _back("/queue", msg=f"Заказ #{order_id} подтверждён и отправлен{paid} — статус {x.get('status')}. "
-                               "Итог проверь «↻ обновить статусы».")
+        site = f" сайт #{x['site_id']} создан" if x.get("site_id") else " сайт создай кнопкой «Создать сайт»"
+        return _back("/queue", msg=f"Домен куплен{paid}: заказ #{order_id},{site}. "
+                                   "Дальше — «Поднять сайт» в карточке сайта.")
+    return _back("/queue", msg=f"Заказ #{order_id} подтверждён и отправлен{paid} — "
+                               f"статус: {_status_ru(x.get('status'))}. Итог покажет «Обновить статусы».")
 
 
 @router.post("/queue/{order_id}/execute")
@@ -1314,10 +1320,10 @@ def queue_execute_action(order_id: int):
         # paynow=on списывает с баланса: при 0 ₽ заказ создастся, но повиснет «Не оплачен» и
         # домен НЕ будет перехвачен. Сказать это сразу, а не оставлять узнавать через поллинг.
         note = (r.get("result") or {}).get("note") or ""
-        return _back("/queue", msg=f"Заказ #{order_id} отправлен провайдеру — статус "
-                                   f"{r.get('status')}.{' ' + note if note else ''} "
-                                   "Проверь «↻ обновить статусы»: при нулевом балансе заказ "
-                                   "повиснет «Не оплачен» и домен не перехватят.")
+        return _back("/queue", msg=f"Заказ #{order_id} отправлен — статус: "
+                                   f"{_status_ru(r.get('status'))}.{' ' + note if note else ''} "
+                                   "Нажми «Обновить статусы»: при нулевом балансе заказ "
+                                   "останется «Не оплачен» и домен не купят.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отправка: {e}")
 
@@ -1334,8 +1340,8 @@ def queue_poll_action():
         # `checked` — сколько НАШИХ строк провайдер вообще знает, и конфликтные среди них: они
         # тоже нашлись, просто не поехали. Поэтому «из них», а не отдельным слагаемым — иначе
         # дубль считался бы дважды и разбивка не сходилась с итогом (ревью Задачи 7, минор 4).
-        dup = (f" · дублей не поднято {r['conflicts']} (у домена уже есть открытый заказ — "
-               f"смотри пометку в очереди)") if r.get("conflicts") else ""
+        dup = (f" · дублей {r['conflicts']} (у домена уже есть открытый заказ — "
+               f"смотри пометку в строке)") if r.get("conflicts") else ""
         # «из них» цеплялось к «в полёте», а дубль как раз НЕ в полёте — он в `checked` (ревью
         # Задачи 7, раунд 3). Оговорку двигаем к тому числу, в которое дубль реально входит.
         checked = (f"наших заказов {r['checked']}"
@@ -1343,21 +1349,20 @@ def queue_poll_action():
         # Застрявшие отправки (F11) — ради них сверку и жмут, когда строка висит в «отправляется».
         # `lost` в `checked` не входит (провайдер про такой заказ НЕ знает — сверять было не с чем),
         # `sending` тоже (её не трогали) — потому оба отдельными слагаемыми, а не «из них».
-        stuck = (f" · застрявших отправок разобрано {r['lost']} (провайдер про них не знает — "
-                 f"заказа нет, деньги не ушли; можно повторить или снять)") if r.get("lost") else ""
-        live = (f" · отправок в полёте {r['sending']} — не трогали: их прямо сейчас шлёт провайдеру "
-                f"живая отправка, вердикт за неё выносить нельзя") if r.get("sending") else ""
+        stuck = (f" · оборванных отправок {r['lost']} (провайдер про них не знает — "
+                 f"заказа нет, деньги не ушли; можно повторить или отменить)") if r.get("lost") else ""
+        live = (f" · отправляется прямо сейчас {r['sending']} — их не трогали") if r.get("sending") else ""
         # Сбой ОДНОГО провайдера (капча backorder, таймаут) не прячем за «сверено»: он назван в ответе (S3-04)
         errs = r.get("errors") or {}
         bad = "".join(f" · {name}: {msg}" for name, msg in errs.items())
-        text = (f"Сверено с провайдером: {checked} · "
-                f"поймано {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
-                f"в полёте {r.get('pending', 0)}{dup}{stuck}{live}.")
+        text = (f"Статусы обновлены: {checked} · "
+                f"получено {r.get('caught', 0)} · не вышло {r.get('failed', 0)} · "
+                f"ещё ждём {r.get('pending', 0)}{dup}{stuck}{live}.")
         if errs:
-            return _back("/queue", err=f"Сверка прошла не полностью{bad}. {text}")
+            return _back("/queue", err=f"Статусы обновлены не полностью{bad}. {text}")
         return _back("/queue", msg=text)
     except Exception as e:  # noqa: BLE001
-        return _back("/queue", err=f"опрос статусов: {e}")
+        return _back("/queue", err=f"обновление статусов: {e}")
 
 
 @router.post("/queue/{order_id}/caught")
@@ -1366,10 +1371,10 @@ def queue_caught_action(order_id: int):
     try:
         r = acquisition.mark_caught(order_id)
         if r.get("site_id"):
-            return _back(f"/sites/{r['site_id']}", msg=f"Заказ #{order_id}: домен куплен (purchased), карточка сайта создана — запусти Provision.")
-        return _back("/queue", msg=f"Заказ #{order_id}: домен помечен пойманным (purchased) — можно создавать сайт.")
+            return _back(f"/sites/{r['site_id']}", msg=f"Заказ #{order_id}: домен куплен, сайт создан — нажми «Поднять сайт».")
+        return _back("/queue", msg=f"Заказ #{order_id}: домен куплен — можно создавать сайт.")
     except Exception as e:  # noqa: BLE001
-        return _back("/queue", err=f"поймать: {e}")
+        return _back("/queue", err=f"домен получен: {e}")
 
 
 @router.post("/queue/{order_id}/cancel")
@@ -1383,8 +1388,8 @@ def queue_cancel_action(order_id: int):
         if r.get("error"):
             return _back("/queue", err=f"отмена заказа #{order_id}: {r['error']}")
         if r.get("status") != "cancelled":
-            return _back("/queue", err=f"заказ #{order_id}: {r.get('note') or 'снять нельзя'}")
-        return _back("/queue", msg=f"Заказ #{order_id} снят — {r.get('note') or 'домен не тронут'}.")
+            return _back("/queue", err=f"заказ #{order_id}: {r.get('note') or 'отменить нельзя'}")
+        return _back("/queue", msg=f"Заказ #{order_id} отменён — {r.get('note') or 'домен не тронут'}.")
     except Exception as e:  # noqa: BLE001
         return _back("/queue", err=f"отмена: {e}")
 

@@ -25,8 +25,9 @@ def test_inbox_shows_lang_topic_dr_attribution_and_emd(client):
          score_breakdown={"emd": True, "errors": []})
     html = client.get("/domains").text
     assert "polski-blog.com" in html and "VPN and privacy blog" in html and "близость к VPN <b>80%</b>" in html
-    assert "Domain Rating by Ahrefs" in html and "EMD — решение за тобой" in html
-    assert 'title="источник: Nominet">uk</span>' in html and 'title="источник: EMD">emd</span>' in html
+    assert "Domain Rating by Ahrefs" in html and "домен из ключевых слов — реши сам" in html
+    assert 'title="источник: Nominet">uk</span>' in html
+    assert 'title="источник: из ключевых слов (EMD)">emd</span>' in html
 
 
 def test_inbox_lang_filter_hides_bulk_and_counts_before_filter(client):
@@ -38,8 +39,8 @@ def test_inbox_lang_filter_hides_bulk_and_counts_before_filter(client):
          score_breakdown=CHECKED)
     html = client.get("/domains?lang=pl").text
     assert "pl-site.com" in html and "es-site.com" not in html
-    assert 'action="/domains/bulk-approve"' not in html and "пакетное одобрение скрыто" in html
-    assert '<div class="v">2</div><div class="k">на решении</div>' in html
+    assert 'action="/domains/bulk-approve"' not in html and "одобрить пакетом нельзя" in html
+    assert '<div class="v">2</div><div class="k">ждут решения</div>' in html
     assert 'class="chip on" href="/domains?lang=pl"' in html
     assert 'action="/domains/bulk-approve"' in client.get("/domains").text
 
@@ -75,7 +76,7 @@ def test_far_topic_is_marked_and_clean_history_still_named_clean(client):
     assert "прошлая тема далека от VPN" in html
     assert "история чистая" in html and "история не подтверждена" not in html
     assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 0, "skipped": 1}
-    ready = html[html.index("Готовы к выкупу"):]
+    ready = html[html.index("Готовы к покупке"):]
     assert "тема: VPN deals" in ready
 
 
@@ -89,7 +90,8 @@ def test_reject_legend_groups_v2_codes(client):
     for code, kind in (("spam_anchors", "dirt"), ("safebrowsing", "dirt"), ("rkn", "dirt"),
                        ("tld_closed", "taken"), ("trademark", "taken"), ("legacy_ru", "taken"),
                        ("low_rd", "thr")):
-        assert re.search(rf'<code>{code}</code></div>\s*<div class="why-bar"><i class="k-{kind}"', html), code
+        # код причины — в подсказке строки (на экране — фраза из общего словаря)
+        assert re.search(rf'title="код причины: {code}">[^<]+</div>\s*<div class="why-bar"><i class="k-{kind}"', html), code
     assert "Низкий DR" not in html
 
 
@@ -122,7 +124,7 @@ def test_emd_with_empty_archive_is_newreg_not_blind(client):
     _add(domain="mejorvpn.com", source="emd", status="scored", score=None, market_lang="es",
          score_breakdown={"emd": True, "errors": [], "sampled": 0, "history_evidence": []})
     html = client.get("/domains").text
-    assert "архив пуст — новорег" in html
+    assert "архив пуст — домен новый" in html
     assert "история НЕ проверена" not in html and "возраст НЕ проверен" not in html
     down = Domain(domain="vpngratis.com", score_breakdown={"emd": True, "errors": ["wayback:ReadTimeout"],
                                                           "sampled": 0})
@@ -142,12 +144,12 @@ def test_bulk_skips_domains_outside_the_zone_allowlist(client):
     html = client.get("/domains").text
     rows = {m.group(1): m.group(0) for m in
             re.finditer(r"<tr[^>]*>(?:(?!</tr>).)*?(v1-left\.ru|fresh\.com).*?</tr>", html, re.S)}
-    assert "история чистая" not in rows["v1-left.ru"] and "✓ одобрить" not in rows["v1-left.ru"]
-    assert "зона не в белом списке" in rows["v1-left.ru"]
-    assert "✓ одобрить" in rows["fresh.com"] and "история чистая" in rows["fresh.com"]
+    assert "история чистая" not in rows["v1-left.ru"] and "✓ Одобрить</button>" not in rows["v1-left.ru"]
+    assert "зоны нет в списке" in rows["v1-left.ru"]
+    assert "✓ Одобрить</button>" in rows["fresh.com"] and "история чистая" in rows["fresh.com"]
     # и в реестре scored-строка закрытой зоны не получает «✓ одобрить»
     pool = client.get("/domains/pool?status=scored").text
-    assert "зона не в белом списке" in pool and pool.count("✓ одобрить") == 1
+    assert "зоны нет в списке" in pool and pool.count("✓ Одобрить</button>") == 1
     update_settings(tld_allowlist=["com", "ru"])
     assert client.get("/domains/bulk-preview?min_score=0.5").json() == {"n": 2, "skipped": 0}
 
@@ -158,8 +160,8 @@ def test_pool_does_not_offer_return_for_closed_zone(client):
     сработать, — ложное предложение. Причина названа, перескор остаётся."""
     _add(domain="weak.ru", status="rejected", reject_reason="low_score", score=0.3)
     html = client.get("/domains/pool?status=rejected").text
-    assert "↩ вернуть в approved" not in html and "зона не в белом списке" in html
-    assert "▶ перепроверить" in html
+    assert "↩ Вернуть в одобренные" not in html and "зоны нет в списке — не вернуть" in html
+    assert "▶ Проверить</button>" in html
 
 
 def test_source_badges_are_explicit_in_inbox_and_pool(client):
@@ -181,7 +183,7 @@ def test_emd_score_none_renders_dash_in_inbox_and_pool(client):
     _add(domain="mejorvpn.com", source="emd", status="scored", score=None, market_lang="es",
          score_breakdown={"emd": True, "errors": []})
     inbox = client.get("/domains")
-    assert inbox.status_code == 200 and "score <b>—</b>" in inbox.text
+    assert inbox.status_code == 200 and "оценка <b>—</b>" in inbox.text
     pool = client.get("/domains/pool")
     assert pool.status_code == 200 and "mejorvpn.com" in pool.text
 
@@ -189,9 +191,10 @@ def test_emd_score_none_renders_dash_in_inbox_and_pool(client):
 def test_dr_is_attributed_to_ahrefs_in_inbox_and_pool(client):
     """Лицензия Ahrefs: везде, где показан DR, рядом подпись «Domain Rating by Ahrefs»."""
     _add(domain="drsite.com", source="nominet", status="scored", score=0.6, dr=33, score_breakdown=CHECKED)
-    assert "DR <b>33</b>" in client.get("/domains").text
+    assert "рейтинг Ahrefs <b>33</b>" in client.get("/domains").text
     pool = client.get("/domains/pool").text
-    assert '<td class="num">33</td>' in pool and 'title="Domain Rating by Ahrefs">DR</th>' in pool
+    assert '<td class="num">33</td>' in pool
+    assert 'title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг<br>Ahrefs</th>' in pool
     assert ">Domain Rating by Ahrefs</a>" in pool
 
 
@@ -240,7 +243,7 @@ def test_long_topic_is_truncated_with_full_text_in_title(client):
     _add(domain="longtopic.com", source="nominet", status="scored", score=0.6, topic=topic,
          topical_relevance=0.8, score_breakdown=CHECKED)
     html = client.get("/domains").text
-    assert f"{topic}. Политика" in html                 # полная тема — в title
+    assert f'title="Тема прошлого сайта: {topic}. ' in html     # полная тема — в title
     assert "тема: очень длинная тема прошлого сайта" in html and "..." in html.split("тема: ", 1)[1][:80]
     assert f"тема: {topic}" not in html
 
@@ -253,12 +256,12 @@ def test_list_source_deadline_is_labelled_as_estimate(client):
     _add(domain="manual-est.com", source="list", status="scored", score=0.6, acquire_deadline=soon,
          score_breakdown=CHECKED)
     html = client.get("/domains").text
-    assert "ОЦЕНКА ДРОПА" in html and "СРОК ДРОПА" not in html
-    assert "реальный дроп может быть РАНЬШЕ" in html
+    assert "ДРОП, ПРИМЕРНО" in html and "ДАТА ДРОПА" not in html
+    assert "Настоящий дроп может быть раньше" in html
     _add(domain="feed.com", source="nominet", status="scored", score=0.6, acquire_deadline=soon,
          score_breakdown=CHECKED)
     html = client.get("/domains").text
-    assert html.count("ОЦЕНКА ДРОПА") == 1 and html.count("СРОК ДРОПА") == 1
+    assert html.count("ДРОП, ПРИМЕРНО") == 1 and html.count("ДАТА ДРОПА") == 1
 
 
 def test_bulk_preview_empty_or_garbage_threshold_falls_back_to_approve_at(client):
@@ -292,8 +295,9 @@ def test_inbox_row_wraps_and_dr_attribution_sits_above_the_table(client):
          score_breakdown=CHECKED)
     _add(domain="wrap-b.com", source="nominet", status="scored", score=0.5, dr=12, score_breakdown=CHECKED)
     html = client.get("/domains").text
-    inbox = html[html.index("Ждёт твоего решения"):html.index("Готовы к выкупу")]
+    inbox = html[html.index("Ждёт твоего решения"):html.index("Готовы к покупке")]
     assert inbox.count(">Domain Rating by Ahrefs</a>") == 1                 # одна подпись, не в каждой строке
     assert inbox.index(">Domain Rating by Ahrefs</a>") < inbox.index("<table>")   # и она над таблицей
-    assert '<span title="Domain Rating by Ahrefs">DR <b>33</b></span>' in inbox
+    assert ('<span title="Рейтинг домена по Ahrefs (DR, Domain Rating by Ahrefs).">рейтинг Ahrefs <b>33</b></span>'
+            in inbox)
     assert inbox.count('<td class="dom" style="white-space:normal">') == 2  # строки переносятся

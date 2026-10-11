@@ -239,4 +239,4 @@ def test_run_score_during_pull_names_git_as_the_reason(client):
     finally:
         deploy._LOCK.release()
     loc = unquote_plus(r.headers["location"])
-    assert "обновление из git" in loc and "уже идёт" not in loc
+    assert "обновление программы" in loc and "уже идёт" not in loc
