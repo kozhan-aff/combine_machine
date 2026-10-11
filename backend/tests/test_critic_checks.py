@@ -210,10 +210,10 @@ def test_text_without_letters_is_flagged():
 # ── объём ────────────────────────────────────────────────────────────────────
 
 def test_volume_bounds_per_kind():
-    """Жёсткие границы — 40 % нижнего ориентира … 150 % верхнего: ориентир объёма не цель (правила оператора
+    """Жёсткие границы — 30 % нижнего ориентира … 150 % верхнего: ориентир объёма не цель (правила оператора
     запрещают добивать текст), бракуется только явный недобор и перебор."""
     from app.services.page_doc import WORDS_HARD
-    assert WORDS_HARD == {"review": (600, 3300), "comparison": (480, 2700), "howto": (360, 2100)}
+    assert WORDS_HARD == {"review": (450, 3300), "comparison": (360, 2700), "howto": (270, 2100)}
     for kind, (lo, hi) in WORDS_HARD.items():
         soft = f"(ориентир {WORDS[kind][0]}–{WORDS[kind][1]})"
         assert only(check(words(lo), kind=kind), "объём") == []
