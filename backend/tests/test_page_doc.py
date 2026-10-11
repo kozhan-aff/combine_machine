@@ -355,3 +355,12 @@ def test_labels_exist_in_all_languages():
                                                  "Минусы", "Пошагово", "Вопросы и ответы"]
     assert [TEXTS["en"][k] for k in LABELS] == ["Score", "Best for", "Not for", "Pros", "Cons",
                                                  "Step by step", "FAQ"]
+
+
+def test_verdict_score_is_optional_and_not_rendered_when_absent():
+    """Оценка без методики — «число без опоры»: схема её не требует, рендер без неё не печатает «N/10»."""
+    doc = _doc(verdict={"score": None, "summary": "Вывод.", "for_whom": "A", "not_for_whom": "B"})
+    html = page_doc.render_blocks(doc, "review", "ru")
+    assert "/10" not in html and "Оценка" not in html and "<p>Вывод.</p>" in html
+    doc = _doc(verdict={"summary": "Вывод.", "for_whom": "A", "not_for_whom": "B"})
+    assert doc.verdict.score is None

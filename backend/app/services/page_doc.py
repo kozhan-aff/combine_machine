@@ -14,6 +14,10 @@ from app.services.locales import t
 
 # границы объёма по типу страницы, слов; выход за них — замечание критика, не отказ разбора
 WORDS = {"review": (1500, 2200), "comparison": (1200, 1800), "howto": (900, 1400)}
+# WORDS — ориентир для писателя, а не цель: правила оператора прямо запрещают добивать объём («P3: целью не
+# ставятся»), а у малого бренда фактов на 1500 слов нет (живой прогон 2026-10-11: обзор Durev VPN — 805 слов).
+# Критик отбраковывает только явный недобор и перебор: 40 % нижнего ориентира … 150 % верхнего.
+WORDS_HARD = {k: (lo * 2 // 5, hi * 3 // 2) for k, (lo, hi) in WORDS.items()}
 
 _MAX_ERRORS, _MAX_ERROR_LEN = 5, 600
 # знаков ответа писателя: длиннее — не страница (страница на 2200 слов — 20–30 тысяч), а разбор по «{» на
@@ -83,7 +87,9 @@ class Meta(_Model):
 
 
 class Verdict(_Model):
-    score: float = Field(ge=1, le=10)
+    # оценка необязательна: число без методологии оценки — «число без опоры» по правилам оператора; живой
+    # критик (2026-10-11) требовал убрать «6/10» с каждой страницы, а схема заставляла писателя его ставить
+    score: float | None = Field(default=None, ge=1, le=10)
     summary: str = Field(min_length=1)
     for_whom: str = Field(min_length=1)
     not_for_whom: str = Field(min_length=1)
@@ -213,7 +219,8 @@ def render_blocks(doc: PageDoc, kind: str, lang: str) -> str:
     out = []
     if doc.verdict:
         v = doc.verdict
-        out += [f"<p><strong>{_e(t(lang, 'lbl_score'))}: {v.score:g}/10.</strong> {_e(v.summary)}</p>",
+        head = f"<strong>{_e(t(lang, 'lbl_score'))}: {v.score:g}/10.</strong> " if v.score is not None else ""
+        out += [f"<p>{head}{_e(v.summary)}</p>",
                 f"<p><strong>{_e(t(lang, 'lbl_for'))}:</strong> {_e(v.for_whom)}</p>",
                 f"<p><strong>{_e(t(lang, 'lbl_not_for'))}:</strong> {_e(v.not_for_whom)}</p>"]
     for key, items in (("lbl_pros", doc.pros), ("lbl_cons", doc.cons)):

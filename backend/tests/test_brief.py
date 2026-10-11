@@ -454,7 +454,7 @@ def test_field_caps_keep_brief_under_limit():
     # гигантский блок фактов бренда режется с многоточием — требование объёма остаётся в тексте
     txt = _text(b, vertical="Бренд. " + "в" * 25_000)
     lo, hi = WORDS["review"]
-    assert len(txt) <= brief.MAX_CHARS and "## Объём" in txt and f"От {lo} до {hi} слов" in txt
+    assert len(txt) <= brief.MAX_CHARS and "## Объём" in txt and f"Ориентир — от {lo} до {hi} слов" in txt
     assert "в" * 5000 + "…" in txt and "в" * 6001 not in txt
     assert "[3] Серверы; Цена" in txt
     # гигантский заголовок и гигантский блок фактов разом: напоминание — последняя строка, блок данных цел

@@ -34,7 +34,7 @@
     {% if n.get('note') %}
       <span class="hint" title="критик сам одобряет только текст, собранный из проверенной структуры страницы (в правленом вручную может стоять то, чего он не видит — адрес ссылки, картинка), прочитанный со всеми правилами письма и не отклонённый им раньше">{{ n.get('note') }}</span>
     {% endif %}
-    {% for label, items in (('проверки кодом', n.get('code')), ('редактор-модель', n.get('model'))) if items %}
+    {% for label, items in (('проверки кодом', n.get('code')), ('редактор-модель', n.get('model')), ('пожелания (публикации не мешают)', n.get('advice'))) if items %}
       <div class="hint" style="margin:8px 0 0">{{ label }}:</div>
       <ul class="hint" style="margin:2px 0 0">
         {% for issue in items %}
