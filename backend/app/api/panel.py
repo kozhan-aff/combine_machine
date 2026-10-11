@@ -545,7 +545,7 @@ def diag_refresh(request: Request):
     # выбрасываем прежние flash-параметры: иначе старый ?err= подавит «перепроверено», а повторные клики пухнут URL
     q = urlencode([(k, v) for k, v in parse_qsl(p.query) if k not in ("msg", "err")])
     back = urlunsplit((p.scheme, p.netloc, p.path or "/", q, ""))
-    return _back(back, msg="Статусы внешних инструментов перепроверены")
+    return _back(back, msg="Связь проверена заново")
 
 
 def _require_cf_write(request: Request) -> None:
@@ -701,7 +701,7 @@ def guides_delete_action(rel: str = Form("")):
 
 def _keys_page(request: Request, form_err: str | None = None, draft: dict | None = None,
                status_code: int = 200):
-    """Экран «Ключи и сервисы». В шаблон уходят только маски секретов (api_keys.describe);
+    """Экран «Ключи и доступы». В шаблон уходят только маски секретов (api_keys.describe);
     `draft` — введённое НЕ-секретное (при ошибке валидации форма не теряет адреса/модели)."""
     from app.services import api_keys
     return templates.TemplateResponse(request, "settings_keys.html", {
@@ -723,8 +723,8 @@ def _keys_save(request: Request, updates: dict, resets: set):
     # а плоская LAN-панель без Basic-auth пустила бы к ним любого в сети. Раньше любого разбора формы.
     if not (settings.PANEL_USER and settings.PANEL_PASS):
         return _keys_page(request, status_code=403,
-                          form_err="Не сохранено ничего: задайте PANEL_USER и PANEL_PASS в .env — без "
-                                   "Basic-auth менять ключи из панели нельзя (панель открыта всей сети).")
+                          form_err="Не сохранено ничего: задай PANEL_USER и PANEL_PASS в .env — без "
+                                   "пароля на панель менять ключи нельзя (панель открыта всей сети).")
     try:
         res = api_keys.save(updates, resets)
     except ValueError as e:                    # текст ValueError — наш, без значений
@@ -738,7 +738,7 @@ def _keys_save(request: Request, updates: dict, resets: set):
     if res["changed"]:
         parts.append("Сохранено: " + ", ".join(res["changed"]))
     if res["reset"]:
-        parts.append("Сброшено к .env: " + ", ".join(res["reset"]))
+        parts.append("Возвращено из .env: " + ", ".join(res["reset"]))
     return _back("/settings/keys", msg=" · ".join(parts))
 
 
@@ -1053,7 +1053,7 @@ def cloudflare_sync(request: Request):
             with SessionLocal() as db:
                 cf_sync.sync_all(db, report=lambda **kw: jobs.report(rid, **kw), run=rid)
     ok = jobs.spawn("cf_sync", _job)
-    return _back_here(request, err=None if ok else jobs.busy_msg("Синхронизация уже идёт"))
+    return _back_here(request, err=None if ok else jobs.busy_msg("«Обновить из Cloudflare» уже идёт"))
 
 
 @router.post("/run/{job}/cancel")
@@ -1246,7 +1246,7 @@ def queue_add_action(domain_id: int, provider: str = Form("")):
     from app.services import acquisition
     try:
         oid = acquisition.create_order(domain_id, provider or None)
-        return _back("/queue", msg=f"Домен поставлен к покупке (заказ #{oid}). Деньги спишутся только после твоего «Купить».")
+        return _back("/queue", msg=f"Домен поставлен к покупке (заказ #{oid}). Деньги спишутся только после твоего подтверждения.")
     except Exception as e:  # noqa: BLE001
         return _back("/domains", err=f"к покупке: {e}")
 
@@ -1460,7 +1460,7 @@ def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depe
     from app.services.content import is_safe_url
     url = reserve_offer_url.strip()
     if url and not is_safe_url(url):
-        return _back("/offers", err="резервный URL: разрешены только http/https")
+        return _back("/offers", err="резервный адрес: разрешены только http/https")
     row = db.get(OfferSettings, 1)
     if row is None:
         row = OfferSettings(id=1)
@@ -1473,8 +1473,8 @@ def offer_reserve_url_save(reserve_offer_url: str = Form(""), db: Session = Depe
         # коммит бьётся о PK — дружелюбный редирект вместо голого 500, как у всех
         # прочих write-роутов этого файла.
         db.rollback()
-        return _back("/offers", err="Резервный URL уже сохранён — обнови страницу")
-    return _back("/offers", msg="Резервный URL сохранён" if url else "Резервный URL очищен")
+        return _back("/offers", err="Резервный адрес уже сохранён — обнови страницу")
+    return _back("/offers", msg="Резервный адрес сохранён" if url else "Резервный адрес убран")
 
 
 @router.post("/sites/{site_id}/attach-offer")
@@ -1486,7 +1486,7 @@ def attach_offer_action(site_id: int, offer_id: int = Form(...), db: Session = D
     if site is None or offer is None:
         return _back(f"/sites/{site_id}" if site else "/", err="сайт или оффер не найден")
     if not offer.active:
-        return _back(f"/sites/{site_id}", err=f"оффер «{offer.brand}» выключен — привяжи активный")
+        return _back(f"/sites/{site_id}", err=f"оффер «{offer.brand}» выключен — привяжи включённый")
     site.offer_id = offer_id
     exists = db.execute(select(SiteOffer).where(
         SiteOffer.site_id == site_id, SiteOffer.offer_id == offer_id)).scalar_one_or_none()
@@ -1520,21 +1520,21 @@ def provision_action(site_id: int, request: Request):
         if r.get("status") == "awaiting_ns":
             return _back(f"/sites/{site_id}", msg=f"Зона создана, ждёт NS: {r.get('hint', '')}")
         if r.get("status") == "error":
-            return _back(f"/sites/{site_id}", err=r.get("error", "provision error"))
+            return _back(f"/sites/{site_id}", err=r.get("error", "сайт не поднялся"))
         if r.get("ssl_error"):
             # Зелёный баннер «готов» поверх упавшего SSL/настроек зоны — ровно то враньё, от
             # которого лечим машину. Vhost поднят (потому не `error`), но HTTPS под вопросом:
             # говорим об этом красным и оставляем след на карточке (site.ssl_error).
             return _back(f"/sites/{site_id}", err=(
-                "Provision прошёл (зона + vhost + A-записи), но SSL/настройки зоны Cloudflare встали "
-                f"не полностью: {r['ssl_error']}. Почини причину и нажми Provision ещё раз (идемпотентно)."))
-        tls = {"origin_ca": "свой Origin-сертификат, Cloudflare strict",
-               "ok": "origin отвечает по HTTPS, Cloudflare full"}.get(
-            r.get("origin_https"), "HTTPS на origin нет — Cloudflare flexible")
+                "Сайт поднят, но HTTPS в Cloudflare настроился не полностью: "
+                f"{r['ssl_error']}. Исправь причину и нажми «Поднять заново» — это безопасно."))
+        tls = {"origin_ca": "свой сертификат на сервере, Cloudflare в режиме strict",
+               "ok": "сервер отвечает по HTTPS, Cloudflare в режиме full"}.get(
+            r.get("origin_https"), "на сервере HTTPS нет — Cloudflare в режиме flexible")
         warn = f" ⚠ {'; '.join(r['warnings'])}." if r.get("warnings") else ""
-        return _back(f"/sites/{site_id}", msg=f"Provision готов: vhost + DNS (apex и www) + проверка origin. SSL: {tls}. Дальше — генерация.{warn}")
+        return _back(f"/sites/{site_id}", msg=f"Сайт поднят: домен заведён в Cloudflare и на сервере, проверка пройдена. HTTPS: {tls}. Дальше — «Изучить конкурентов».{warn}")
     except Exception as e:  # noqa: BLE001 — нет кредов CF/aaPanel и т.п.
-        return _back(f"/sites/{site_id}", err=f"provision: {e}")
+        return _back(f"/sites/{site_id}", err=f"поднять сайт: {e}")
 
 
 def _writer_refusal(db: Session, site_id: int) -> RedirectResponse | None:
@@ -1545,15 +1545,15 @@ def _writer_refusal(db: Session, site_id: int) -> RedirectResponse | None:
     if site is None:
         return _back("/", err=f"сайт #{site_id} не найден")
     if content.status_refusal(site):
-        return _back(f"/sites/{site_id}", err=f"генерация: {content.status_refusal(site)}")
+        return _back(f"/sites/{site_id}", err=f"написать тексты: {content.status_refusal(site)}")
     has_offer = content.site_offer(db, site) is not None or db.scalar(
         select(Page.id).where(Page.site_id == site_id, Page.offer_id.is_not(None)).limit(1))
     if not has_offer:
-        return _back(f"/sites/{site_id}", err="Оффер не привязан (или выключен): привяжи активный "
-                     "оффер на шаге «Оффер привязан» — без него страницы получились бы про чужой бренд.")
+        return _back(f"/sites/{site_id}", err="Оффер не привязан или выключен: привяжи включённый "
+                     "оффер на шаге 2 — без него страницы получились бы про чужой бренд.")
     if not research.has_dossier(db, site_id):
         # спека 2026-10-10 §4.5: темы, факты и цифры писатель берёт из досье — без него только выдумывать
-        return _back(f"/sites/{site_id}", err="Сначала собери досье конкурентов (шаг 3½): без него писать не по чему.")
+        return _back(f"/sites/{site_id}", err="Сначала изучи конкурентов (шаг 4): без этого писать не по чему.")
     return None
 
 
@@ -1568,9 +1568,9 @@ def generate_action(site_id: int, lang: str = Form(""), db: Session = Depends(ge
         return refusal
     ok = jobs.spawn("generate", lambda: content.generate_site(site_id, lang=lang or None))
     if not ok:
-        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Генерация уже идёт — дождись её на Пульте"))
-    return _back(f"/sites/{site_id}", msg="Генерация запущена в фоне: прогресс по страницам — на Пульте. "
-                 "Дальше — редактура (гейт: publish берёт только edited).")
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Тексты уже пишутся — дождись на Пульте"))
+    return _back(f"/sites/{site_id}", msg="Тексты пишутся в фоне: ход — на Пульте. "
+                 "Дальше — вычитка: публикуются только одобренные страницы.")
 
 
 @router.post("/sites/{site_id}/rewrite")
@@ -1617,11 +1617,11 @@ def research_action(site_id: int, force: str = Form(""), db: Session = Depends(g
     if site is None:
         return _back("/", err=f"сайт #{site_id} не найден")
     if content_site_offer(db, site) is None:
-        return _back(f"/sites/{site_id}", err="досье: оффер не привязан (или выключен) — не по чему искать конкурентов")
+        return _back(f"/sites/{site_id}", err="изучить конкурентов: оффер не привязан или выключен — искать не по чему")
     ok = jobs.spawn("research", lambda: research.build_dossier(site_id, force=bool(force)))
     if not ok:
-        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Сейчас уже идёт сборка досье (возможно, другого сайта) — дождись на Пульте"))
-    return _back(f"/sites/{site_id}", msg="Досье собирается в фоне: 4 запроса × до 5 страниц; прогресс — на Пульте.")
+        return _back(f"/sites/{site_id}", err=jobs.busy_msg("Конкурентов уже изучают (возможно, для другого сайта) — дождись на Пульте"))
+    return _back(f"/sites/{site_id}", msg="Конкурентов изучаем в фоне: 4 запроса, до 5 страниц на каждый. Ход — на Пульте.")
 
 
 @router.post("/pages/{page_id}/save")
@@ -1638,7 +1638,7 @@ def page_save_action(page_id: int, body: str = Form(""), seen: str = Form(""),
     try:
         # ЧЕЛОВЕК прошёл гейт: draft -> edited (+ sanitize)
         content.mark_edited(page_id, body, seen_fp=seen or None)
-        return _back(f"/sites/{sid}", msg="Страница сохранена как edited — можно публиковать.")
+        return _back(f"/sites/{sid}", msg="Страница одобрена — можно публиковать.")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
@@ -1651,7 +1651,7 @@ def page_draft_action(page_id: int, body: str = Form(""), seen: str = Form(""),
     from app.services import content
     try:
         content.save_draft(page_id, body, seen_fp=seen or None)
-        return _back(f"/pages/{page_id}", msg="Черновик сохранён (не одобрен — публикация его не возьмёт).")
+        return _back(f"/pages/{page_id}", msg="Сохранено. Страница остаётся черновиком: на сайт не попадёт, пока не одобришь.")
     except Exception as e:  # noqa: BLE001
         return _back(f"/pages/{page_id}", err=f"сохранение: {e}")
 
@@ -1690,9 +1690,9 @@ def publish_action(site_id: int):
         r = publish.publish_site(site_id)
         if r.get("status") == "no_edited_pages":
             return _back(f"/sites/{site_id}",
-                         err="Гейт редактуры: нет страниц в статусе edited — сначала вычитай черновики.")
+                         err="Публиковать нечего: вычитанных страниц нет — сначала вычитай черновики.")
         if r.get("status") == "not_provisioned":
-            return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт не провиженен')}.")
+            return _back(f"/sites/{site_id}", err=f"Публикация отложена: {r.get('hint', 'сайт ещё не поднят')}.")
         warn = (" ⚠ " + "; ".join(r["warnings"])) if r.get("warnings") else ""
         # причина отказа — как есть: файл страницы, переписанной во время публикации, на сайт лёг
         problems = [f"{k}: {v}" for k, v in (r.get("failed") or {}).items()] + \
@@ -1700,7 +1700,7 @@ def publish_action(site_id: int):
         if r.get("status") in ("partial", "failed"):
             done = f"Опубликовано: {', '.join(r.get('pages', [])) or 'ничего'}. " if r.get("pages") else ""
             return _back(f"/sites/{site_id}", err=f"{done}Не опубликовано — {'; '.join(problems)}. "
-                         f"Повтор безопасен (идемпотентно).{warn}")
+                         f"Повторить можно — это безопасно.{warn}")
         return _back(f"/sites/{site_id}", msg=f"Опубликовано и проверено на домене: {', '.join(r.get('pages', []))}.{warn}")
     except Exception as e:  # noqa: BLE001
         return _back(f"/sites/{site_id}", err=f"публикация: {e}")
@@ -1733,7 +1733,7 @@ def _pull_banner(r: dict):
 
     r["ok"] честно отражает и git, и алембик (F22/F23/F29): упавшая миграция — красный
     err=, НЕ зелёный msg=, даже если код при этом обновился (git pull сам прошёл)."""
-    rebuild = " · нужна пересборка образа: docker compose up -d --build" if r.get("needs_rebuild") else ""
+    rebuild = " · нужно пересобрать контейнеры: docker compose up -d --build" if r.get("needs_rebuild") else ""
     if r.get("compose_hint"):
         rebuild += f" · {r['compose_hint']}"         # состав контейнеров сменился — текст даёт deploy
     if not r.get("ok"):
@@ -1744,10 +1744,10 @@ def _pull_banner(r: dict):
         # код и схема БД разъехались, это не успешный деплой.
         subj = r.get("subject", "")
         transition = f"{r['old']}→{r['new']}" if r["old"] != r["new"] else r["new"]
-        warn = r.get("alembic_warn") or "код обновлён, миграция не выполнена"
-        return _back("/diag", err=f"Код обновлён ({transition} «{subj}»), но МИГРАЦИЯ "
-                                   f"ПРОВАЛИЛАСЬ: {warn}{rebuild}")
-    verb = "Принудительно обновлено" if r.get("forced") else "Обновлено"
+        warn = r.get("alembic_warn") or "обновление базы не выполнено"
+        return _back("/diag", err=f"Программа обновлена ({transition} «{subj}»), но БАЗА "
+                                   f"НЕ ОБНОВИЛАСЬ: {warn}{rebuild}")
+    verb = "Обновлено принудительно" if r.get("forced") else "Обновлено"
     subj = r.get("subject", "")
     if r["old"] == r["new"]:
         return _back("/diag", msg=f"Уже свежая версия: {r['new']} «{subj}»{rebuild}")
@@ -1773,7 +1773,7 @@ def check_updates_action():
     import subprocess
     from app.services.version import current_version
     if not settings.GITHUB_TOKEN:
-        return _back("/diag", err="GITHUB_TOKEN не задан — нечем проверить удалёнку")
+        return _back("/diag", err="токен GitHub (GITHUB_TOKEN) не задан — проверить обновления нечем")
     # тот же паттерн, что и /admin/pull: токен НЕ в argv, а через http.extraheader в env git.
     basic = _b64.b64encode(f"x-access-token:{settings.GITHUB_TOKEN}".encode()).decode()
     git_env = {
@@ -1791,16 +1791,16 @@ def check_updates_action():
         if r.returncode != 0 or not remote:
             # как в /admin/pull: детали в баннер, но токен никогда не светим
             detail = (r.stderr or "").strip().replace(settings.GITHUB_TOKEN, "***")[:200]
-            return _back("/diag", err="не удалось прочитать удалёнку" + (f": {detail}" if detail else ""))
+            return _back("/diag", err="не удалось узнать последнюю версию" + (f": {detail}" if detail else ""))
         if not cur:
             # current_version() упал (git в контейнере недоступен) — пустая cur делает
             # remote.startswith(cur) тривиально True для ЛЮБОГО remote: без этой ветки
             # мы бы соврали «актуально», хотя текущую версию не смогли определить вовсе.
             return _back("/diag", err="не удалось определить текущую версию (git в контейнере недоступен)")
         same = remote.startswith(cur) or cur.startswith(remote)
-        return _back("/diag", msg=f"Текущая {cur} — {'актуально' if same else 'доступна новее ' + remote}")
+        return _back("/diag", msg=f"Версия {cur} — {'свежая' if same else 'есть новее: ' + remote}")
     except Exception as e:  # noqa: BLE001
-        return _back("/diag", err=f"check-updates: {type(e).__name__}")
+        return _back("/diag", err=f"проверка обновлений: {type(e).__name__}")
 
 
 @router.post("/settings/save")
@@ -1871,8 +1871,8 @@ def settings_save(request: Request, db: Session = Depends(get_session),
                  "tld_allowlist": tld_allowlist if v2_lists else None,
                  "brand_tokens": brand_tokens if v2_lists else None}
         return _settings_page(request, db, emd_draft=emd_sets, status_code=400, draft=draft,
-                              form_err=f"Не сохранено ничего: {e}. Наборы EMD — JSON-список, "
-                                       "пример — в «зачем это» у станции EMD.")
+                              form_err=f"Не сохранено ничего: {e}. Наборы ключевых слов — список в "
+                                       "формате JSON, пример — под этим полем.")
     return _back("/settings", msg="Настройки сохранены")
 
 
@@ -1880,7 +1880,7 @@ def settings_save(request: Request, db: Session = Depends(get_session),
 def settings_reset():
     from app.services import settings as st
     st.reset_settings()
-    return _back("/settings", msg="Настройки сброшены к дефолтам")
+    return _back("/settings", msg="Стандартные настройки возвращены")
 
 
 @router.post("/autopilot/settings")
@@ -1911,4 +1911,4 @@ def autopilot_run_action(request: Request):
     from app.services import jobs, orchestrator
     ok = jobs.spawn("sweep", lambda: orchestrator.run_sweep(trigger="manual",
                                                             respect_master=False))
-    return _back_here(request, err=None if ok else jobs.busy_msg("Свип уже идёт"))
+    return _back_here(request, err=None if ok else jobs.busy_msg("Проход уже идёт"))

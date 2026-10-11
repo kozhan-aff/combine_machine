@@ -178,7 +178,7 @@ def test_sweep_status_is_completed_with_errors_when_an_entity_fails(monkeypatch)
     out = orch.run_sweep(trigger="cron")
 
     assert out["status"] == "completed_with_errors"     # НЕ "done" — сущность упала
-    assert out["errors"] and f"domain#{did}" in out["errors"][0] and "aaPanel недоступен" in out["errors"][0]
+    assert out["errors"] and f"домен #{did}" in out["errors"][0] and "aaPanel недоступен" in out["errors"][0]
     assert out["counts"]["provision"] == 0               # никакой лжи об успехе
 
 

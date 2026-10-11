@@ -66,7 +66,7 @@ class AaPanelBlocked(RuntimeError):
 
 
 def _fingerprint() -> str:
-    """Отпечаток адреса+ключа: сменил ключ/URL на «Ключи и сервисы» — пауза по старым снимается."""
+    """Отпечаток адреса+ключа: сменил ключ/URL на «Ключи и доступы» — пауза по старым снимается."""
     return _md5(f"{settings.AAPANEL_URL}|{settings.AAPANEL_API_KEY}")
 
 
@@ -179,7 +179,7 @@ def _tunnel_host_ok(host: str) -> bool:
 class AaPanelClient(BaseClient):
     def __init__(self):
         if not settings.AAPANEL_URL:
-            raise RuntimeError("AAPANEL_URL не задан — укажи адрес панели в .env / «Ключи и сервисы»")
+            raise RuntimeError("AAPANEL_URL не задан — укажи адрес панели в .env / «Ключи и доступы»")
         # BaseClient.__init__ не зовём: он открыл бы лишний httpx.Client, который сразу
         # пришлось бы закрывать (S5-11) — нужен только base_url, клиент ставим ниже сами.
         self.base_url = settings.AAPANEL_URL.rstrip("/")

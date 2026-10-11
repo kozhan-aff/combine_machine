@@ -256,7 +256,7 @@ def test_queue_panel_actions(client, monkeypatch):
     with db.SessionLocal() as s:
         oid = s.execute(select(AcquisitionOrder.id)).scalar_one()
     r = client.get("/queue")
-    assert r.status_code == 200 and "q-panel.ru" in r.text and "✓ Купить</button>" in r.text
+    assert r.status_code == 200 and "q-panel.ru" in r.text and "✓ Подтвердить ставку</button>" in r.text
     assert 'name="bid_rub"' in r.text and "190 ₽" in r.text     # селектор ставки отрисован
     assert "пополни счёт" in r.text                              # баланс 0 ₽ виден ДО заказа
     # execute до подтверждения -> err-flash (гейт)
@@ -323,14 +323,14 @@ def test_panel_screens_render(client, monkeypatch):
 
     r = client.get(f"/sites/{site_id}")      # карточка: чеклист этапов
     assert r.status_code == 200
-    assert "Provision" in r.text and "Редактура" in r.text and "publish" in r.text
+    assert "3 · Поднять сайт" in r.text and "6 · Вычитка" in r.text and "7 · Публикация" in r.text
 
     with db.SessionLocal() as s:
         from app.models.site import Page
         from sqlalchemy import select
         pid = s.execute(select(Page.id).limit(1)).scalar_one()
     r = client.get(f"/pages/{pid}")          # редактор
-    assert r.status_code == 200 and "EDITED" in r.text
+    assert r.status_code == 200 and "✓ Одобрить</button>" in r.text
 
     # form-действия панели: сохранение страницы через гейт + привязка оффера
     r = client.post(f"/pages/{pid}/save", data={"body": "<h2>ок</h2><p>Достаточно длинный текст страницы для гейта.</p><script>x</script>"},

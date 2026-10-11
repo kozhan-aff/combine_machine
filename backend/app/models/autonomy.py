@@ -17,7 +17,7 @@ class AutonomySettings(Base):
     __tablename__ = "autonomy_settings"
 
     id: Mapped[int] = mapped_column(primary_key=True)                 # всегда 1
-    autopilot_on: Mapped[bool] = mapped_column(Boolean, default=False)      # мастер-выключатель
+    autopilot_on: Mapped[bool] = mapped_column(Boolean, default=False)      # главный выключатель
     sweep_interval_min: Mapped[int] = mapped_column(Integer, default=60)    # throttle между авто-свипами
 
     auto_discovery: Mapped[bool] = mapped_column(Boolean, default=False)

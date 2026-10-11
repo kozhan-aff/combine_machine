@@ -146,7 +146,7 @@ def test_foreign_ssl_vhost_answering_200_is_not_confirmed_https(monkeypatch, ori
     cf, _ = _env(monkeypatch, _CF(ssl="full"))
     out = provisioning.provision(_seed())
     assert _site(1).origin_https == "none" and out["ssl_mode"] == "flexible" and cf.mode == "flexible"
-    assert "чужой/дефолтный vhost" in out["ssl_error"]
+    assert "сервер отдаёт чужой сайт или заглушку" in out["ssl_error"]
     assert "ssl:full" not in cf.steps and "ssl:strict" not in cf.steps
 
 
@@ -180,7 +180,7 @@ def test_default_vhost_answering_200_does_not_pass_verify(monkeypatch, origin_pr
     origin_probe.marker_http = False
     _env(monkeypatch)
     out = provisioning.provision(_seed())
-    assert out["status"] == "error" and out["step"] == "verify" and "маркера нашего vhost нет" in out["error"]
+    assert out["status"] == "error" and out["step"] == "verify" and "нашего проверочного файла нет" in out["error"]
     assert _site(1).status == "provisioning"
 
 
@@ -232,7 +232,7 @@ def test_origin_ca_installed_but_https_silent_is_demoted(monkeypatch, origin_pro
     # на момент пробы флаг уже 'origin_ca' (установили) — но проба не прошла
     out = provisioning.provision(_seed())
     assert _site(1).origin_https == "none" and out["ssl_mode"] == "flexible"
-    assert "HTTPS на origin не отвечает" in out["ssl_error"]
+    assert "сервер по HTTPS не отвечает" in out["ssl_error"]
 
 
 def test_ssl_mode_failure_is_reported(monkeypatch):
@@ -311,7 +311,7 @@ def test_www_dns_skipped_while_alias_unconfirmed(monkeypatch, origin_probe):
     out = provisioning.provision(_seed())
     assert out["status"] == "provisioned" and out["www"] is False
     assert ("ex.com", IP, True) in cf.records and "a:www.ex.com" not in cf.steps
-    assert any("A-запись www НЕ создана" in w for w in out["warnings"])
+    assert any("запись www НЕ создана" in w for w in out["warnings"])
 
 
 def test_dns_goes_after_vhost_and_never_without_it(monkeypatch):
@@ -387,11 +387,11 @@ def test_card_shows_ns_to_set_and_origin_state(client):
         site.status, site.origin_https, site.provision_step = "content", "none", "done"
         s.commit()
     html = client.get(f"/sites/{sid}").text
-    assert "Cloudflare flexible" in html
+    assert "Cloudflare в режиме flexible" in html
     with db.SessionLocal() as s:
         s.get(Site, sid).origin_https = "origin_ca"
         s.commit()
-    assert "Cloudflare strict" in client.get(f"/sites/{sid}").text
+    assert "Cloudflare в режиме strict" in client.get(f"/sites/{sid}").text
 
 
 # --- гард открытого origin (S5-14) ---------------------------------------------------------------
@@ -399,7 +399,7 @@ def test_card_shows_ns_to_set_and_origin_state(client):
 def test_default_vhost_page_on_unknown_host_warns(monkeypatch, origin_probe):
     _env(monkeypatch)
     out = provisioning.provision(_seed())                 # фикстура origin_probe: http=200 на любой Host
-    assert "неизвестный Host" in out["warnings"][0]
+    assert "на чужой адрес (стандартная заглушка aaPanel)" in out["warnings"][0]
     unknown = [r for r in origin_probe.requests if r.headers["host"].endswith(".invalid")]
     assert unknown and unknown[0].url.host == IP
 
@@ -428,4 +428,4 @@ def test_delete_file_failure_keeps_provisioned_with_warning(monkeypatch, origin_
     _env(monkeypatch, panel=_BadDelete())
     out = provisioning.provision(_seed())
     assert out["status"] == "provisioned"
-    assert any("не удалён из docroot" in w for w in out["warnings"])
+    assert any("не удалён из папки сайта" in w for w in out["warnings"])

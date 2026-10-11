@@ -113,7 +113,7 @@ def test_autopilot_score_stage_says_the_human_approves(client):
     """R2-5 + Р2: стадия «Проверка» автопилота не обещает «сильные и чистые уйдут в approved» —
     машина ставит максимум scored, одобряет человек."""
     html = client.get("/autopilot").text
-    assert "уйдут в approved" not in html and "придут к тебе на решение" in html
+    assert "уйдут в одобренные" not in html and "Прошедшие ждут твоего решения — одобряешь ты" in html
 
 
 def test_emd_with_empty_archive_is_newreg_not_blind(client):

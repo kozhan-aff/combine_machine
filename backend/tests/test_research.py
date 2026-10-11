@@ -331,7 +331,7 @@ def test_cancel_between_urls_stops_fetching_and_keeps_old_dossier(wire, monkeypa
     ap = FakeAP(["https://a.com/1", "https://b.com/1"], {"https://a.com/1": LONG, "https://b.com/1": LONG})
     wire(ap)
     monkeypatch.setattr(jobs, "cancelled", lambda run: bool(ap.fetched))       # флаг встал после первой страницы
-    assert "отменена" in research.build_dossier(sid, force=True)["reason"]
+    assert "остановлено" in research.build_dossier(sid, force=True)["reason"]
     assert ap.fetched == ["https://a.com/1"] and jobs.last("research")["status"] == "cancelled"
     with db.SessionLocal() as s:
         assert {r.url for r in research.dossier(s, sid)} == {"https://old.com/1"}
@@ -351,7 +351,7 @@ def test_build_dossier_stamps_research_checked_at(wire, monkeypatch):
     _checked_at(sid, old)
     with monkeypatch.context() as m:                       # отмена: отметка «проверяли» не двигается
         m.setattr(jobs, "cancelled", lambda run: True)
-        assert "отменена" in research.build_dossier(sid)["reason"]
+        assert "остановлено" in research.build_dossier(sid)["reason"]
     assert _checked_at(sid) == old
     assert research.build_dossier(sid)["status"] == "done" and _checked_at(sid) > old      # с источниками
     _checked_at(sid, old)

@@ -12,6 +12,7 @@ import hashlib
 import nh3
 
 from app.services import page_doc
+from app.services.labels import site_status_ru
 from app.services.locales import LANG_NAMES, norm_lang, resolve_lang, t
 
 # Русская редакция раскрытия — для обратной совместимости; страницы берут текст по своему языку
@@ -332,8 +333,8 @@ def status_refusal(site) -> str | None:
     только provisioning и больше его не доводил, а publish потом выкладывал файлы без зоны и
     vhost'а), а published откатывался назад."""
     if site.status not in GENERATE_STATUSES:
-        return (f"сайт #{site.id} в статусе «{site.status}»: сначала provision — "
-                "контент пишется для готовой инфраструктуры")
+        return (f"сайт #{site.id} ещё не поднят (сейчас: {site_status_ru(site.status)}) — "
+                "сначала «Поднять сайт»")
     return None
 
 
@@ -446,7 +447,7 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
     # собирают его); ветка жива для API/скриптов и тестов старого пути. Переписывать по старому промпту
     # нечем — существующие страницы остаются как есть, и это сказано словами, а не молчаливым нулём.
     if rewrite:
-        jobs.report(run, message="досье конкурентов нет — существующие страницы не переписаны (сначала собери досье)")
+        jobs.report(run, message="конкурентов ещё не изучали — страницы не переписаны (сначала «Изучить конкурентов»)")
 
     # опц. карта тем от топ-конкурента (best-effort: осечка -> None, генерация идёт без неё)
     competitor = None
@@ -484,8 +485,8 @@ def _generate_site(site_id, lang, vertical_data, use_competitor, run, rewrite=Fa
                 # Остальное допишет победивший прогон; наши уже закоммиченные страницы валидны.
                 db.rollback()
                 raise ValueError(
-                    f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
-                    f"генерация пропущена, дубли не заводим") from None
+                    f"страницы сайта #{site_id} прямо сейчас пишет другой запуск — "
+                    f"этот пропущен, дубли не заводим") from None
         created += 1
     jobs.report(run, done=len(todo), total=len(todo), current="")
     return created
@@ -507,7 +508,7 @@ def _batch_message(written: int, total: int, *, down: bool, not_started: int, ha
     длинным: чего не взяла короткая, достаётся длинной."""
     notes = [f"написано {written} из {total}"]
     if down:
-        notes.append(f"модель недоступна — прогон остановлен, не начато страниц: {not_started}")
+        notes.append(f"модель недоступна — запуск остановлен, не начато страниц: {not_started}")
     if hand_edited:
         notes.append(f"не тронуты, правлены вручную: {hand_edited}")
     if truncated:
@@ -610,8 +611,8 @@ def _write_site(site_id: int, run, rows: list, existing_pages: list, rewrite: bo
                         raise
                     # uq_page_per_path: гонка двух процессов на вставке одного пути — см. старый путь выше
                     raise ValueError(
-                        f"страницы сайта #{site_id} прямо сейчас создаёт другой прогон — "
-                        f"генерация пропущена, дубли не заводим") from None
+                        f"страницы сайта #{site_id} прямо сейчас пишет другой запуск — "
+                        f"этот пропущен, дубли не заводим") from None
             written += 1
         if not down:
             jobs.report(run, done=len(todo), total=len(todo), current="")
@@ -672,7 +673,7 @@ def rewrite_page(page_id: int, issues: list[str], overwrite_manual: bool = False
             return out(f"путь «{page.url_path}» не из структуры сайта — тип страницы неизвестен")
         rows = research.dossier(db, page.site_id)
         if not rows:
-            return out("у сайта нет досье конкурентов — сначала собери его")
+            return out("конкурентов этого сайта ещё не изучали — сначала «Изучить конкурентов»")
         lang, seen_body, offer_id = page.lang, page.body, offer.id
         brand, country, promo = offer.brand, offer.country, (offer.promo_code, offer.promo_terms)
         db.expunge_all()                     # строки досье нужны после закрытия сессии

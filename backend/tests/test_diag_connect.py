@@ -123,7 +123,7 @@ def test_pause_expires_and_panel_is_asked_again():
 
 
 def test_changing_the_key_lifts_the_pause(monkeypatch):
-    """Оператор сменил api_sk на «Ключи и сервисы» — ждать 15 минут по старому ключу бессмысленно."""
+    """Оператор сменил api_sk на «Ключи и доступы» — ждать 15 минут по старому ключу бессмысленно."""
     with pytest.raises(RuntimeError):
         _client(_Panel(GetTaskCount=KEY_FAIL)).ping()
     assert aapanel.blocked_reason()

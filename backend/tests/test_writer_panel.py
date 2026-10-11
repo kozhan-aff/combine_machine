@@ -17,8 +17,8 @@ from app.models.site import Page, Site
 from app.services import autonomy, content, content_critic, jobs, page_doc
 
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
-CONFIRM = ("Переписать тексты сайта? Опубликованные страницы останутся на сайте в прежнем виде, "
-           "пока не опубликуешь новые. Одобренные, но ещё не опубликованные страницы тоже вернутся в черновики.")
+CONFIRM = ("Переписать тексты сайта? Все страницы вернутся в черновики. На сайте останется прежняя версия, "
+           "пока не опубликуешь новую.")
 SENT = "Durev VPN работает стабильно, подключается быстро и помогает спокойно смотреть любимые сериалы в поездках. "
 
 
@@ -101,7 +101,7 @@ def test_generate_refused_without_dossier(client, monkeypatch):
     sid = _site(dossier=False)
     calls, seen = _spawned(monkeypatch), _writer(monkeypatch)
     loc = _flash(client.post(f"/sites/{sid}/generate", data={"lang": ""}, follow_redirects=False))
-    assert "err=" in loc and "Сначала собери досье конкурентов (шаг 3½): без него писать не по чему" in loc
+    assert "err=" in loc and "Сначала изучи конкурентов (шаг 4): без этого писать не по чему" in loc
     assert calls == [] and seen == []
 
 
@@ -117,7 +117,7 @@ def test_generate_refusals_keep_their_order(client, monkeypatch):
     """Статус и оффер отвечают раньше досье: чинить их надо первыми, досье без оффера и не собрать."""
     calls = _spawned(monkeypatch)
     early = _site(dossier=False, status="provisioning")
-    assert "сначала provision" in _flash(client.post(f"/sites/{early}/generate", follow_redirects=False))
+    assert "сначала «Поднять сайт»" in _flash(client.post(f"/sites/{early}/generate", follow_redirects=False))
     with db.SessionLocal() as s:
         s.get(Site, early).status = "content"
         s.get(Site, early).offer_id = None
@@ -150,7 +150,7 @@ def test_rewrite_refusals(client, monkeypatch):
     calls, seen = _spawned(monkeypatch), _writer(monkeypatch)
     assert "не найден" in _flash(client.post("/sites/999/rewrite", follow_redirects=False))
     no_dossier = _site(dossier=False)
-    assert "Сначала собери досье конкурентов" in _flash(
+    assert "Сначала изучи конкурентов (шаг 4)" in _flash(
         client.post(f"/sites/{no_dossier}/rewrite", follow_redirects=False))
     with db.SessionLocal() as s:
         s.add(SiteResearch(site_id=no_dossier, kind="review", query="q", rank=1, url="https://c.example/1"))
@@ -160,7 +160,7 @@ def test_rewrite_refusals(client, monkeypatch):
     with db.SessionLocal() as s:
         s.get(Site, no_dossier).status = "provisioning"
         s.commit()
-    assert "сначала provision" in _flash(client.post(f"/sites/{no_dossier}/rewrite", follow_redirects=False))
+    assert "сначала «Поднять сайт»" in _flash(client.post(f"/sites/{no_dossier}/rewrite", follow_redirects=False))
     assert calls == [] and seen == []
 
 
@@ -285,23 +285,23 @@ def test_card_buttons_and_their_states(client):
     form = _tag(html, f'action="/sites/{sid}/rewrite"')
     assert CONFIRM in form.replace("&#39;", "'")
     assert 'class="row"' in form and "display:flex" not in form      # разметка — существующим классом
-    assert "вычитка: ты или критик" in html and "только человек" not in html
+    assert "6 · Вычитка <small>ты или критик</small>" in html and "только человек" not in html
     box = _tag(html, 'name="overwrite_manual"')
     assert "checked" not in box and "и правленные вручную" in html
-    assert "страницы, которые ты правил руками, обычно не трогаются" in html
+    assert "Страницы, которые ты правил сам, обычно не трогаются." in html
     assert f'action="/sites/{sid}/edit"' in html
     critic = _button(html, "✓ Вычитать критиком")
     assert "disabled" not in critic and "покажет вердикт — одобряешь ты" in critic
     autonomy.update_autonomy(auto_edit=True)
-    assert "прошедшие проверку страницы одобрит сам" in _button(client.get(f"/sites/{sid}").text, "✓ Вычитать критиком")
+    assert "прошедшие проверку одобрит сам" in _button(client.get(f"/sites/{sid}").text, "✓ Вычитать критиком")
 
 
 def test_card_blocks_writing_until_dossier_is_there(client):
     sid = _site(dossier=False)
     html = client.get(f"/sites/{sid}").text
     write = _button(html, "▶ Написать тексты")
-    assert "disabled" in write and "сначала собери досье" in write
-    assert "Без досье тексты не пишутся" in html and "пишется вслепую" not in html
+    assert "disabled" in write and "Сначала шаг 4: изучи конкурентов." in write
+    assert "Без этого тексты не пишутся" in html and "пишется вслепую" not in html
     assert "✎ Переписать тексты" not in html and "disabled" in _button(html, "✓ Вычитать критиком")   # страниц нет
 
 
@@ -321,13 +321,13 @@ def test_card_shows_critic_verdict_per_page(client):
     _judged(sid, "/vs", {"pass": False, "issues": ["мало конкретики про скорость", "нет цены"], "round": 1})
     _page(sid, "/setup")
     html = client.get(f"/sites/{sid}").text
-    assert "<th>критик</th>" in html
+    assert ">критик</th>" in html
     rows = {path: _critic_td(row) for path, row in _rows(html).items()}
     assert "led-ok" in rows["/"] and ">прошла</td>" in rows["/"]
     assert ">2 замеч.</td>" in rows["/vs"] and "led-todo" in rows["/vs"]
     assert "мало конкретики про скорость; нет цены" in rows["/vs"] and "переписана по замечаниям: 1 из 2" in rows["/vs"]
     assert rows["/setup"] == '<td><span class="hint">—</span></td>'
-    assert "вычитано (человеком или критиком)" in html
+    assert "вычитано — уйдёт при публикации" in html
 
 
 def test_card_critic_cell_keeps_long_lists_in_the_tooltip(client):
@@ -424,7 +424,7 @@ def test_editor_badge_tells_failed_check_from_remarks(client):
     pid = _judged(sid, "/", {"pass": False, "issues": ["критик не ответил: ReadTimeout"], "code": [],
                              "model": ["критик не ответил: ReadTimeout"], "error": "ReadTimeout"})
     html = client.get(f"/pages/{pid}").text
-    badge = _tag(html, "вычитка не состоялась: ReadTimeout")
+    badge = _tag(html, "Вычитка не состоялась: ReadTimeout")
     assert "критик: не проверена" in html and "критик: замечания" not in html and "b-warn" in badge
 
 
@@ -432,10 +432,10 @@ def test_editor_pass_tooltip_mentions_draft_only_for_a_draft(client):
     body = "<p>" + SENT * 4 + "</p>"
     pid = _judged(_site(), "/", {"pass": True, "issues": [], "code": [], "model": []}, body=body)
     html = client.get(f"/pages/{pid}").text
-    assert "критик: pass" in html and "остаётся черновиком, пока её не одобрят" in html
+    assert "критик: прошла" in html and "остаётся черновиком, пока её не одобрят" in html
     content.mark_edited(pid)
     html = client.get(f"/pages/{pid}").text
-    assert "критик: pass" in html and "остаётся черновиком, пока её не одобрят" not in html
+    assert "критик: прошла" in html and "остаётся черновиком, пока её не одобрят" not in html
 
 
 def test_card_marks_rewritten_page_that_is_still_live(client):
@@ -449,7 +449,7 @@ def test_card_marks_rewritten_page_that_is_still_live(client):
     assert re.search(r'<div class="hint"[^>]*>на сайте прежняя версия</div>', rows["/"])    # отдельной строкой
     assert "на сайте прежняя версия" not in rows["/vs"]
     check = _button(html, "▶ Проверить индексацию")
-    assert "disabled" not in check and "нечего проверять" not in check
+    assert "disabled" not in check and "Проверять нечего" not in check
 
 
 def test_card_index_button_stays_off_for_a_site_never_published(client):
@@ -470,8 +470,8 @@ def test_publish_flash_reports_page_failure_in_its_own_words(client, monkeypatch
 # --- карточка сайта: действующий оффер ---
 
 def _offer_step(html: str) -> str:
-    """Шаг «2 · Оффер привязан» карточки."""
-    return html[html.index("2 · Оффер привязан"):html.index("3 · Provision")]
+    """Шаг «2 · Оффер» карточки."""
+    return html[html.index("2 · Оффер <small>"):html.index("3 · Поднять сайт")]
 
 
 def test_card_names_the_offer_the_site_writes_about(client):
@@ -494,7 +494,7 @@ def test_card_shows_site_offer_even_without_a_link_row(client):
     """Оффер записан прямо в сайт (Site.offer_id), строки привязки нет: шаг сделан, а не «выбери бренд»."""
     step = _offer_step(client.get(f"/sites/{_site()}").text)
     assert "Пишем про:" in step and "Durev VPN" in step and "ещё привязаны" not in step
-    assert "led-ok" in step and "Выбери, какой бренд" not in step and "написаны под" not in step
+    assert "led-ok" in step and "Выбери бренд" not in step and "написаны под" not in step
 
 
 def test_card_tells_when_pages_were_written_for_another_offer(client):
@@ -540,12 +540,13 @@ def test_autopilot_auto_edit_is_live_and_auto_design_still_locked(client):
     assert "disabled" not in _tag(html, 'name="auto_edit"') and "checked" not in _tag(html, 'name="auto_edit"')
     assert html.count('name="auto_edit"') == 1
     assert "disabled" in _tag(html, 'name="auto_design"')
-    assert "критик сам одобряет тексты" in html and "Стадия · Вычитка" in html
+    assert "критик сам одобряет тексты" in html and '<div class="plate">Вычитка — ' in html
     assert "редактура всегда за тобой" not in html
     assert "деньги тратятся только после твоего подтверждения; тексты одобряешь ты или критик — если включишь" in html
     assert "включится с планом Б" not in html
     # стадия стоит на своём месте конвейера: после черновиков, перед публикацией
-    assert html.index("Стадия · Черновики") < html.index("Стадия · Вычитка") < html.index("Стадия · Публикация")
+    plate = '<div class="plate">'
+    assert html.index(plate + "Написать тексты — ") < html.index(plate + "Вычитка — ") < html.index(plate + "Опубликовать — ")
 
 
 def test_autopilot_saves_auto_edit_and_shows_it_checked(client):

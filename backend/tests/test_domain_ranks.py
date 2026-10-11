@@ -512,7 +512,7 @@ def test_settings_page_shows_ranks_block_states_and_attribution(client):
     _add("mid.com")
     domain_ranks.refresh(_Fake())
     html = client.get("/settings").text
-    assert "cc: <b>1</b>" in html and "последняя загрузка" in html
+    assert "Common Crawl: <b>1</b>" in html and "последняя загрузка: <b>готово</b>" in html
 
 
 def test_ranks_refresh_button_spawns_domain_ranks_job(client, monkeypatch):

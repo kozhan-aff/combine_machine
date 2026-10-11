@@ -59,7 +59,7 @@ def test_zone_table_has_dns_cert_columns_and_ssl_value(client):
                                                status="active"))
         db.commit()
     r = client.get("/settings/cloudflare")
-    assert ">DNS<" in r.text and ">cert<" in r.text
+    assert ">DNS<" in r.text and ">сертификат<" in r.text
     assert "cols.ru" in r.text and "active" in r.text  # SSL-значение видно
 
 

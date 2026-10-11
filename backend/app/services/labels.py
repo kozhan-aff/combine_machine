@@ -58,6 +58,14 @@ INDEX_RU = {
 }
 
 
+# Имена фоновых задач — те же, что на кнопках и на карточке задачи (`JOB_RU` в base.html: карточку
+# рисует скрипт, поэтому словарь там свой; равенство двух словарей сторожит test_plain_labels).
+JOB_RU = {"discovery": "Найти домены", "score": "Проверить домены", "recheck": "Проверить, не заняты ли",
+          "sweep": "Проход автопилота", "cf_sync": "Обновить из Cloudflare", "domain_lists": "Списки чистоты",
+          "domain_ranks": "Ранги доменов", "generate": "Написать тексты", "edit": "Вычитка",
+          "research": "Изучить конкурентов", "guides_digest": "Сжать правила"}
+
+
 def status_ru(v):
     return STATUS_RU.get(v, v) if v else ""
 

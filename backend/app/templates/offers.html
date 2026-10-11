@@ -2,14 +2,14 @@
 {% block title %}Офферы{% endblock %}
 {% block content %}
 
-<h2><span class="idx">01</span> Офферы
-  <span class="hint">вход машины: активный оффер подставляется в генерацию контента и в публикацию</span></h2>
+<h2><span class="idx">★</span> Офферы
+  <span class="hint">что рекламируем: про включённый оффер пишутся тексты, его ссылка встаёт на страницы</span></h2>
 
 <div class="wrap" style="margin-bottom:8px">
 {% if rows %}
 <table>
   <thead><tr>
-    <th>#</th><th>бренд</th><th>промокод</th><th>ссылка</th><th>гео</th><th>язык</th>
+    <th>#</th><th>бренд</th><th>промокод</th><th>ссылка</th><th title="Страна читателей.">гео</th><th>язык</th>
     <th>статус</th><th>действие</th>
   </tr></thead>
   <tbody>
@@ -18,29 +18,29 @@
       <td class="num hint">{{ o.id }}</td>
       <td class="dom">{{ o.brand }}</td>
       <td>{{ o.promo_code or '—' }}
-        {% if o.promo_code %}<div class="hint" style="max-width:240px">{{ o.promo_terms or '⚠ условия не заданы — допиши в «изменить»' }}</div>{% endif %}</td>
+        {% if o.promo_code %}<div class="hint" style="max-width:240px">{{ o.promo_terms or '⚠ условия не заданы — допиши в «Изменить»' }}</div>{% endif %}</td>
       <td class="hint" style="max-width:340px; overflow:hidden; text-overflow:ellipsis">{{ o.affiliate_link }}</td>
       <td>{{ o.country or '—' }}</td>
       <td>{{ o.language or '—' }}</td>
-      <td>{% if o.active %}<span class="badge b-approved" title="подставляется в новые генерации и публикации">активен</span>
-          {% else %}<span class="badge b-default" title="не используется машиной, пока не включишь">выключен</span>{% endif %}</td>
+      <td>{% if o.active %}<span class="badge b-approved" title="Про него пишутся новые тексты, его ссылка встаёт на страницы.">включён</span>
+          {% else %}<span class="badge b-default" title="Машина его не использует, пока не включишь.">выключен</span>{% endif %}</td>
       <td>
         <form class="inline" method="post" action="/offers/{{ o.id }}/toggle">
           {% if o.active %}
-          <button class="btn-sm" title="скрыть оффер от машины: перестанет подставляться в новые страницы; уже опубликованное не изменится">⏻ выключить</button>
+          <button class="btn-sm" title="Машина перестанет использовать оффер в новых страницах. Уже опубликованное не изменится.">⏻ Выключить</button>
           {% else %}
-          <button class="btn-sm btn-ok" title="снова разрешить машине использовать этот оффер в генерации и публикации">⏻ включить</button>
+          <button class="btn-sm btn-ok" title="Снова разрешить машине писать про этот оффер и ставить его ссылку.">⏻ Включить</button>
           {% endif %}
         </form>
         <details>
-          <summary class="hint" title="поменять ссылку, промокод и его условия; бренд, гео и язык не меняются — под них уже написаны страницы">изменить</summary>
+          <summary class="hint" title="Поменять ссылку, промокод и его условия. Бренд, гео и язык не меняются — под них уже написаны страницы.">Изменить</summary>
           <form method="post" action="/offers/{{ o.id }}/update" style="display:flex; flex-direction:column; gap:6px; margin-top:6px">
             <input name="affiliate_link" required value="{{ o.affiliate_link }}" title="партнёрская ссылка" style="width:300px">
             <input name="promo_code" value="{{ o.promo_code or '' }}" placeholder="промокод (необязательно)" style="width:300px"
                    oninput="this.form.promo_terms.required=!!this.value.trim(); this.form.promo_terms.hidden=!this.value.trim()">
             <input name="promo_terms" value="{{ o.promo_terms or '' }}" placeholder="что даёт промокод: -65% на 2 года" style="width:300px"
                    {{ 'required' if o.promo_code else 'hidden' }}>
-            <button class="btn-sm" title="сохранить; на сайтах изменится при следующей публикации">сохранить</button>
+            <button class="btn-sm" title="Сохранить. На сайтах изменится при следующей публикации.">Сохранить</button>
           </form>
         </details>
       </td>
@@ -52,19 +52,21 @@
 <div class="empty">Офферов нет — добавь первый: без него контенту не на что ссылаться.</div>
 {% endif %}
 </div>
-<p class="hint" style="margin:0 0 22px">«активен» = машина подставляет этот оффер в новые страницы.
-  Выключение не трогает уже опубликованное — только останавливает использование дальше.</p>
+<p class="hint" style="margin:0 0 22px">«включён» — машина пишет про этот оффер и ставит его ссылку в новые страницы.
+  Выключение не трогает уже опубликованное.</p>
 
 <div class="station" style="max-width:920px">
-  <div class="plate">＋ Новый оффер — добавить бренд в машину <span class="mod">вход конвейера</span></div>
-  <div class="what">Оффер = что рекламируем и куда ведём. <b>Бренд</b> задаёт тему всего контента сайта;
-    <b>ссылка</b> встаёт в страницы как кнопка перехода (с <code>rel="sponsored nofollow"</code> и
-    обязательным disclosure); <b>промокод</b> (необязателен) печатается рядом со ссылкой вместе с
-    <b>условиями</b> — что он даёт; по условиям же пишется текст, сам бонусов машина не выдумывает; <b>гео/язык</b> помечают,
-    какому сайту оффер подходит — один домен = одно гео/один язык (чистый footprint).</div>
+  <div class="plate">＋ Новый оффер</div>
+  <div class="what hint">Оффер — что рекламируем и куда ведём: бренд, партнёрская ссылка и промокод.</div>
+  <details class="what"><summary>подробнее</summary>
+    <div class="what-body"><b>Бренд</b> задаёт тему текстов сайта. <b>Ссылка</b> встаёт на страницы кнопкой
+    перехода — с пометкой о партнёрской ссылке (<code>rel="sponsored nofollow"</code>). <b>Промокод</b>
+    необязателен: он печатается рядом со ссылкой вместе с <b>условиями</b>, и текст пишется по этим условиям —
+    бонусов машина не выдумывает. <b>Гео и язык</b> показывают, какому сайту оффер подходит: один домен —
+    одна страна и один язык.</div></details>
   <div class="go">
     <form method="post" action="/offers/create" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
-      <label class="f">бренд * <span class="note">тема контента: «обзор {бренда}», «как настроить …»</span>
+      <label class="f">бренд * <span class="note">тема текстов: «обзор {бренда}», «как настроить …»</span>
         <input name="brand" required placeholder="NordVPN" style="width:160px"></label>
       <label class="f">партнёрская ссылка * <span class="note">куда ведут кнопки на страницах</span>
         <input name="affiliate_link" required placeholder="https://…/?aff=…" style="width:300px"></label>
@@ -73,28 +75,28 @@
                oninput="var t=this.form.promo_terms; t.required=!!this.value.trim(); t.closest('label').hidden=!this.value.trim()"></label>
       <label class="f" hidden>условия промокода * <span class="note">что он даёт: по этому пишется текст и подпись у кнопки</span>
         <input name="promo_terms" placeholder="-65% на 2 года + 3 месяца бесплатно" style="width:300px"></label>
-      <label class="f">гео <span class="note">страна аудитории</span>
+      <label class="f">гео <span class="note">страна читателей</span>
         <input name="country" placeholder="RU" maxlength="8" style="width:64px"></label>
-      <label class="f">язык <span class="note">язык контента</span>
+      <label class="f">язык <span class="note">язык текстов</span>
         <input name="language" placeholder="ru" maxlength="8" style="width:64px"></label>
-      <button class="btn-acc" title="сохранить оффер: сразу станет активным и доступным сайтам">＋ Добавить оффер</button>
+      <button class="btn-acc" title="Сохранить оффер. Он сразу включён и доступен сайтам.">＋ Добавить оффер</button>
     </form>
   </div>
 </div>
 
 <div class="station" style="max-width:920px">
-  <div class="plate">⛑ Резервный URL — страховка на случай выключенного оффера <span class="mod">публикация</span></div>
-  <div class="what">Если оффер, под который писалась страница, потом выключили — публикация НЕ
-    блокируется (offer_id зафиксирован как факт истории, не переоценивается), но ссылка на кнопке
-    будет мёртвой. Задай сюда общий URL (напр. сводное сравнение VPN) — при СЛЕДУЮЩЕЙ публикации
-    такой страницы кнопка поведёт туда вместо мёртвой ссылки. Бренд/промокод в тексте не меняются.
-    Пусто = сегодняшнее поведение (мёртвая ссылка остаётся как есть). Уже опубликованные страницы
-    эта настройка не чинит — republish делает оператор вручную.</div>
+  <div class="plate">⛑ Резервный адрес — куда вести, если оффер выключили</div>
+  <div class="what hint">Страница с выключенным оффером при следующей публикации поведёт сюда, а не на нерабочую ссылку.</div>
+  <details class="what"><summary>подробнее</summary>
+    <div class="what-body">Выключенный оффер публикации не мешает, но ссылка на кнопке перестаёт работать.
+    Задай общий адрес — например, сводное сравнение VPN: при следующей публикации кнопка поведёт туда.
+    Бренд и промокод в тексте не меняются. Пустое поле — ссылка остаётся как есть. Уже опубликованные
+    страницы сами не исправятся: опубликуй их ещё раз.</div></details>
   <div class="go">
     <form method="post" action="/offers/reserve-url" style="display:flex; gap:14px; align-items:end; flex-wrap:wrap">
-      <label class="f">резервный URL <span class="note">http/https, пусто — очистить</span>
+      <label class="f">резервный адрес <span class="note">http/https, пусто — очистить</span>
         <input name="reserve_offer_url" placeholder="https://…" value="{{ reserve_offer_url or '' }}" style="width:340px"></label>
-      <button class="btn-sm" title="сохранить (пусто — очистить, вернуться к сегодняшнему поведению)">сохранить</button>
+      <button class="btn-sm" title="Сохранить. Пустое поле — убрать резервный адрес.">Сохранить</button>
     </form>
   </div>
 </div>

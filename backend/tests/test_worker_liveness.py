@@ -39,17 +39,16 @@ def test_heartbeat_row_is_invisible_to_job_registry():
 def test_diag_and_dashboard_show_worker_state(client, monkeypatch):
     from app.services import diag_cache
     monkeypatch.setattr(diag_cache, "get", lambda: ([], None))
-    assert "воркер: нет сигнала" in client.get("/diag").text
+    assert "фоновый процесс: нет сигнала" in client.get("/diag").text
     heartbeat.beat(False)
-    # Пульт уже говорит «фоновый процесс» (проход по подписям, часть 1); /diag — часть 2
-    for url, alive in (("/diag", "воркер: жив"), ("/", "фоновый процесс: работает")):
+    for url, alive in (("/diag", "фоновый процесс: работает"), ("/", "фоновый процесс: работает")):
         html = client.get(url).text
         assert alive in html and "автопилот выключен" in html, url
     with db.SessionLocal() as s:
         r = s.query(JobRun).filter_by(name="worker").one()
         r.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
         s.commit()
-    assert "воркер: НЕ отвечает уже 10 мин" in client.get("/diag").text
+    assert "фоновый процесс: не отвечает уже 10 мин" in client.get("/diag").text
 
 
 def test_scheduler_heartbeat_job_beats_with_autopilot_flag():

@@ -57,7 +57,7 @@ def test_check_updates_failure_surfaces_scrubbed_stderr(client, monkeypatch):
         ["a1b2c3d"],
         lsremote=_R(128, "", f"fatal: Authentication failed using token {tok}")))
     loc = _flash(client.post("/admin/check-updates", follow_redirects=False))
-    assert "не удалось прочитать удалёнку: fatal: Authentication failed" in loc
+    assert "не удалось узнать последнюю версию: fatal: Authentication failed" in loc
     assert tok not in loc
 
 

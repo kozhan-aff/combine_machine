@@ -319,7 +319,7 @@ def test_review_page_without_dossier_never_passes(monkeypatch):
     _llm(monkeypatch)
     pid = _seed_page(dossier=False)
     out = content_critic.review_page(pid)
-    assert out["pass"] is False and out["code"] == ["нет досье конкурентов — копирование и числа не проверить"]
+    assert out["pass"] is False and out["code"] == ["конкурентов не изучали — копирование и числа не проверить"]
     assert out["remarks"] == [] and _page(pid).critic_notes["retry"] is True
 
 

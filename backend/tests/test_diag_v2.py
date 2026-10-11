@@ -103,7 +103,7 @@ def test_critical_flags_follow_the_real_spec():
     for k in ("aparser", "llm", "db"):
         assert crit[k] is True, k
     role = {s[0]: s[2] for s in diagnostics._spec()}["wayback"]
-    assert "воронка может стоять" in role
+    assert "без неё проверка может стоять" in role
 
 
 def test_registry_mx_ping_uses_head_not_full_csv(monkeypatch):

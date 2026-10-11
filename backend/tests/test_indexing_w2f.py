@@ -414,7 +414,7 @@ def test_stage_surfaces_gsc_fallback(gsc_on, monkeypatch):
     sid = _site()
     done, errs, counts = orch._stage_check_index(5)
     assert done == 1 and counts.get("gsc_fallback") == 1
-    assert any(f"site#{sid}" in e and "GSC" in e for e in errs)
+    assert any(f"сайт #{sid}" in e and "GSC" in e for e in errs)
     assert "gsc_fallback" in orch.COUNT_RU
 
 

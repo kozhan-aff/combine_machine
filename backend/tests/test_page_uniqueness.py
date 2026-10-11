@@ -92,7 +92,7 @@ def test_generate_site_loses_the_generation_race(sqlite_db, monkeypatch):
 
     monkeypatch.setattr(LlmClient, "complete", racing_complete)
 
-    with pytest.raises(ValueError, match="другой прогон"):
+    with pytest.raises(ValueError, match="другой запуск"):
         content.generate_site(sid)
 
     pages = _pages(sid)

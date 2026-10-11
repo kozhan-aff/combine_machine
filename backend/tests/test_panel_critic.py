@@ -73,7 +73,7 @@ def test_critique_route_never_approves_even_on_pass(client, monkeypatch, auto_ed
     assert r.status_code == 200
     p = _page(pid)
     assert p.critic_notes["pass"] is True and p.status == "draft"
-    assert "замечаний нет" in r.text
+    assert "Замечаний нет" in r.text and "критик: прошла" in r.text
 
 
 def _seed_writer_page(domain="writer.xyz") -> int:
@@ -151,7 +151,7 @@ def test_editor_form_carries_the_fingerprint_of_what_it_shows(client):
 @pytest.mark.parametrize("action", ["save", "draft"])
 def test_stale_editor_form_is_refused(client, action):
     """Оператор держит редактор открытым, писатель переписывает страницу, оператор жмёт «Одобрить» /
-    «Сохранить черновик»: отказ с понятными словами, строка не тронута."""
+    «Сохранить» (черновиком): отказ с понятными словами, строка не тронута."""
     pid = _seed_writer_page()
     opened = client.get(f"/pages/{pid}").text
     old_body = _page(pid).body
@@ -236,7 +236,7 @@ def test_page_edit_view_shows_groups_round_and_score(client):
 def test_page_edit_view_shows_pass(client):
     pid = _seed_page()
     html = _show(client, pid, 0.9, {"pass": True, "issues": [], "code": [], "model": [], "round": 0})
-    assert "критик: pass" in html and "90/100" in html and "критик: замечания" not in html
+    assert "критик: прошла" in html and "90/100" in html and "критик: замечания" not in html
     assert "одобряет человек" not in html
 
 
@@ -244,7 +244,7 @@ def test_page_edit_view_shows_manual_note(client):
     pid = _seed_page()
     note = "одобряет человек: текст правился вручную или написан старым способом"
     html = _show(client, pid, 0.9, {"pass": True, "issues": [], "code": [], "model": [], "round": 0, "note": note})
-    assert "критик: pass" in html and note in html
+    assert "критик: прошла" in html and note in html
 
 
 def test_page_edit_view_shows_closed_failure_without_score(client):
@@ -262,11 +262,11 @@ def test_page_edit_view_hides_verdict_of_another_text(client):
     уже нет, — вместо вердикта сказано, что он устарел."""
     pid = _seed_page()
     notes = {"pass": True, "issues": [], "code": [], "model": [], "round": 0}
-    assert "критик: pass" in _show(client, pid, 0.9, notes)
+    assert "критик: прошла" in _show(client, pid, 0.9, notes)
     content.save_draft(pid, BODY + "<p>Правка оператора после вычитки.</p>")
     html = client.get(f"/pages/{pid}").text
     assert "текст изменён после вычитки — вердикт устарел" in html
-    assert "критик: pass" not in html and "90/100" not in html
+    assert "критик: прошла" not in html and "90/100" not in html
     # и отрицательный вердикт к чужому тексту не показываем
     html = _show(client, pid, 0.2, {"pass": False, "issues": ["вода"], "code": [], "model": ["вода"], "round": 1,
                                     "fp": "0" * 16}, fresh=False)
@@ -277,7 +277,7 @@ def test_route_verdict_is_shown_as_fresh(client, monkeypatch):
     _answer(monkeypatch, **{"pass": True, "score": 95, "issues": []})
     pid = _seed_page()
     r = client.post(f"/pages/{pid}/critique")
-    assert "критик: pass" in r.text and "вердикт устарел" not in r.text
+    assert "критик: прошла" in r.text and "вердикт устарел" not in r.text
 
 
 def test_page_edit_view_shows_old_format_notes(client):
@@ -285,8 +285,8 @@ def test_page_edit_view_shows_old_format_notes(client):
     устаревшим, «pass» не рисуется; без заметок вовсе — «вердикта нет»."""
     pid = _seed_page()
     html = _show(client, pid, 0.45, {"issues": ["слабое вступление"]}, fresh=False)
-    assert "вердикт устарел" in html and "критик: pass" not in html
+    assert "вердикт устарел" in html and "критик: прошла" not in html
     html = _show(client, pid, 0.9, None)                 # прежний критик не ответил: заметок нет вовсе
-    assert "критик: pass" not in html and "критик: замечания" not in html and "вердикта нет" in html
+    assert "критик: прошла" not in html and "критик: замечания" not in html and "вердикта нет" in html
     never_reviewed = client.get(f"/pages/{_seed_page(domain='fresh.xyz')}").text    # страницу не вычитывали вовсе
     assert "вердикт" not in never_reviewed.split("Вычитать")[1].split("</form>")[0]

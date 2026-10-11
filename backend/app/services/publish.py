@@ -6,6 +6,8 @@ monitoring: GSC URL Inspection -> SearXNG `site:` как вспомогател�
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, unquote
 
+from app.services.labels import site_status_ru
+
 
 def _norm_path(path: str | None) -> str:
     """Канон пути для сравнения «та же ли это страница».
@@ -89,7 +91,7 @@ def _verify_live(domain: str, url_path: str, build_id: str) -> str | None:
     if status != 200:
         return f"HTTP {status}"
     if f"content='{build_id}'" not in text and f'content="{build_id}"' not in text:
-        return "отдаётся не записанная версия (заглушка панели, старый кэш или не тот docroot)"
+        return "отдаётся не записанная версия (заглушка панели, старый кэш или не та папка сайта)"
     return None
 
 
@@ -132,7 +134,7 @@ def publish_site(site_id: int) -> dict:
             Page.site_id == site_id, Page.status == "edited")).scalars().all()
         if not pages:
             return {"status": "no_edited_pages",
-                    "hint": "гейт: публикуются только страницы в статусе 'edited'"}
+                    "hint": "публикуются только вычитанные страницы"}
         # Любая попытка (в т.ч. отказ до записи) — отметка для ротации стадии publish в оркестраторе
         _attempt = datetime.now(timezone.utc)
         for p in pages:
@@ -146,8 +148,8 @@ def publish_site(site_id: int) -> dict:
         if (site.status not in PUBLISH_STATUSES or not site.aapanel_site_name or not site.doc_root):
             db.commit()
             return {"status": "not_provisioned",
-                    "hint": f"сайт в статусе «{site.status}», vhost "
-                            f"{'есть' if site.aapanel_site_name else 'не создан'} — сначала provision"}
+                    "hint": f"сайт ещё не поднят ({site_status_ru(site.status)}"
+                            f"{'' if site.aapanel_site_name else ', на сервере его нет'}) — сначала «Поднять сайт»"}
 
         # F26 (аудит 2026-07-14): «текущий активный оффер сайта» НЕ пересчитывается при каждой
         # публикации — он мог смениться с момента генерации. Fallback — ИСКЛЮЧИТЕЛЬНО для
@@ -241,7 +243,7 @@ def publish_site(site_id: int) -> dict:
             # тело — публикуем его). От настройки expire_on_commit это не зависит: читаем явно.
             db.refresh(p)
             if p.status != "edited":
-                failed[p.url_path] = ("страница изменилась до записи файла — в этом прогоне не выложена, "
+                failed[p.url_path] = ("страница изменилась до записи файла — сейчас не выложена, "
                                       "вычитай и опубликуй её ещё раз")
                 continue
             body = p.body                        # ровно это тело уходит в файл — по нему и ставим отметку

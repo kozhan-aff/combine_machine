@@ -264,7 +264,7 @@ def test_queue_shows_dirt_and_hides_confirm(client):
         s.commit()
     html = client.get("/queue").text
     assert "покупать нельзя" in html and "реестр РКН" in html
-    assert "✓ Купить" not in html and 'name="bid_rub"' not in html   # селектор ставки не предлагается
+    assert "✓ Подтвердить ставку" not in html and "✓ Купить" not in html and 'name="bid_rub"' not in html   # селектор ставки не предлагается
 
 
 def test_pool_offers_rescore_instead_of_return_for_dirt(client):

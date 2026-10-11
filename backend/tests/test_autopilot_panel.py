@@ -8,8 +8,8 @@ from app.services import autonomy
 def test_autopilot_renders(client):
     r = client.get("/autopilot")
     assert r.status_code == 200
-    assert "Мастер-выключатель" in r.text     # станция мастера (не сайдбар — контент экрана)
-    assert "на курацию" in r.text             # блок «ждёт тебя»
+    assert "Главный выключатель" in r.text    # станция выключателя (не сайдбар — контент экрана)
+    assert "решить по доменам" in r.text      # блок «ждёт тебя»
 
 
 def test_autopilot_settings_save(client):

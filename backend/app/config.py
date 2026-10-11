@@ -1,6 +1,6 @@
 """Application settings loaded from environment (.env).
 
-Поверх .env — переопределения из панели («Ключи и сервисы», таблица secret_override): чтение
+Поверх .env — переопределения из панели («Ключи и доступы», таблица secret_override): чтение
 `settings.<KEY>` для ключей из белого списка (services/api_keys.py) сначала смотрит их, потом
 .env. Рестарт не нужен, backend и worker (разные процессы) видят правку в пределах TTL кэша.
 Любой сбой БД/нет таблицы -> молча значение из .env.
@@ -9,7 +9,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Эти поля НИКОГДА не переопределяются из панели (запереть себя / сломать подключение к БД;
-# GITHUB_REPO — смена репо + «Обновить из git» = чужой код на боксе).
+# GITHUB_REPO — смена репо + «Обновить программу» = чужой код на боксе).
 # Белый список разрешённых — в services/api_keys.py; здесь только быстрый отсев до обращения к нему.
 NOT_EDITABLE = frozenset({"DATABASE_URL", "APP_ENV", "PANEL_USER", "PANEL_PASS",
                           "CLOUDFLARE_SECRETS_DIR", "GITHUB_REPO"})
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     AAPANEL_CA_BUNDLE: str = ""
     # Режим «через SSH-туннель» (сайдкар aapanel-tunnel в docker-compose, профиль tunnel): панель
     # видит запросы с 127.0.0.1 VPS, whitelist по публичному IP бокса не нужен. Значение с экрана
-    # «Ключи и сервисы» приходит строкой ("true"/"false") — разбирает integrations.aapanel.tunnel_mode().
+    # «Ключи и доступы» приходит строкой ("true"/"false") — разбирает integrations.aapanel.tunnel_mode().
     AAPANEL_TUNNEL: str = ""
     VPS_ORIGIN_IP: str = ""
     # M3: выпускать Cloudflare Origin CA на каждый домен и ставить его в aaPanel (SetSSL), чтобы
@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     CC_GRAPH_BASE_URL: str = "https://data.commoncrawl.org/projects/hyperlinkgraph"
     MAJESTIC_URL: str = "https://downloads.majestic.com/majestic_million.csv"
 
-    # self-update (кнопка «Обновить из git» в панели). Токен — fine-grained PAT,
+    # self-update (кнопка «Обновить программу» в панели). Токен — fine-grained PAT,
     # read-only Contents; тянем по HTTPS, чтобы не монтировать SSH-ключ в контейнер.
     GITHUB_REPO: str = "kozhan-aff/combine_machine"
     GITHUB_TOKEN: str = ""

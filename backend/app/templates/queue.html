@@ -5,10 +5,10 @@
 {% set _b = {'pending_confirm':'b-scored','ordering':'b-purchasing','ordered':'b-purchased','caught':'b-live','failed':'b-rejected','cancelled':'b-default'} %}
 
 <h2><span class="idx">¤</span> Покупка
-  <span class="hint">домен к покупке → твоё «Купить» → заказ у провайдера</span></h2>
+  <span class="hint">домен к покупке → твоё подтверждение → заказ у провайдера</span></h2>
 
 <p class="hint" style="margin:0 0 16px; max-width:820px">
-  <b style="color:var(--ink)">Деньги тратятся только после твоего клика «Купить».</b> Сама машина не покупает.
+  <b style="color:var(--ink)">Деньги тратятся только после твоего клика — «Купить» или «Отправить заказ».</b> Сама машина не покупает.
   {% if n_pending %}<br><b style="color:var(--acc2)">{{ n_pending }} заказов ждут твоего подтверждения.</b>{% endif %}
 </p>
 
@@ -112,11 +112,11 @@
           {# последний чекпойнт перед деньгами — подписываем его ФАКТИЧЕСКОЙ суммой из селекта,
              а не общей фразой: тиры доходят до миллионов, промах ценой в ноль недопустим #}
           <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
-                onsubmit="return confirm('Купить {{ o.domain }} через backorder со ставкой ' + this.bid_rub.options[this.bid_rub.selectedIndex].text + '? Сумма спишется с баланса, когда заказ уйдёт провайдеру.')">
+                onsubmit="return confirm('Подтвердить ставку ' + this.bid_rub.options[this.bid_rub.selectedIndex].text + ' на {{ o.domain }} через backorder? Деньги спишутся, когда нажмёшь «Отправить заказ».')">
             <select name="bid_rub" title="Ставка backorder: чем выше, тем больше регистраторов ловят домен и тем выше шанс его получить.">
               {% for t in grid %}<option value="{{ t.price }}">{{ '%.0f'|format(t.price) }} ₽</option>{% endfor %}
             </select>
-            <button class="btn-sm btn-buy" title="Подтвердить покупку по выбранной ставке. Заказ уйдёт провайдеру следующей кнопкой — «Отправить заказ».">✓ Купить</button></form>
+            <button class="btn-sm btn-buy" title="Подтвердить выбранную ставку. Заказ уйдёт провайдеру следующей кнопкой — «Отправить заказ».">✓ Подтвердить ставку</button></form>
           {% elif o.zone is none %}
             <span class="hint" style="color:var(--bad)">backorder покупает только .RU/.РФ — эту зону не возьмёт</span>
           {% else %}
@@ -134,7 +134,7 @@
           {% elif o.provider == 'registrar' %}
           {# регистратор (NameSilo): цена фиксирована у регистратора, регистрация синхронная. Один клик =
              подтверждение (денежный гейт, человек нажал только что) + отправка; при успехе домен сразу
-             purchased и заведена карточка сайта. Отдельное «✓ подтвердить» остаётся ниже для тех, кто
+             purchased и заведена карточка сайта. Отдельное «✓ Зафиксировать цену» остаётся ниже для тех, кто
              хочет сначала увидеть замороженную цену. #}
           {% if q and q.amount %}
           {# цена известна: кнопка подписана ФАКТИЧЕСКОЙ суммой; она же уходит потолком — если регистратор
@@ -160,8 +160,8 @@
              здесь было бы бессмысленным выбором. Точную сумму узнаёт и замораживает confirm_order
              (у провайдера), панель на этом шаге её ещё не знает. #}
           <form class="inline" method="post" action="/queue/{{ o.id }}/confirm"
-                onsubmit="return confirm('Купить {{ o.domain }} через {{ o.provider }}? Цена фиксированная — сумму узнаем у провайдера прямо сейчас и спишем с баланса.')">
-            <button class="btn-sm btn-buy" title="Цена фиксированная: точную сумму узнаем у провайдера и запишем в заказ. Заказ уйдёт следующей кнопкой — «Отправить заказ».">✓ Купить</button></form>
+                onsubmit="return confirm('Зафиксировать цену {{ o.domain }} через {{ o.provider }}? Сумму узнаем у провайдера сейчас и запишем в заказ. Деньги спишутся, когда нажмёшь «Отправить заказ».')">
+            <button class="btn-sm btn-buy" title="Цена фиксированная: узнаем точную сумму у провайдера и запишем в заказ. Заказ уйдёт следующей кнопкой — «Отправить заказ».">✓ Зафиксировать цену</button></form>
           {% endif %}
         {% elif o.status == 'pending_confirm' and o.confirmed %}
           <form class="inline" method="post" action="/queue/{{ o.id }}/execute">

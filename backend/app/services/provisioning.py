@@ -113,7 +113,7 @@ def probe_origin(ip: str, domain: str, *, https: bool) -> tuple[bool, str]:
     return r.status_code < 500, f"HTTP {r.status_code}"
 
 
-NOT_OURS = "маркера нашего vhost нет"   # ответ есть, но это не наш сайт (дефолтный/чужой vhost)
+NOT_OURS = "нашего проверочного файла нет"   # ответ есть, но это не наш сайт (дефолтный/чужой vhost)
 
 
 def _new_nonce() -> str:
@@ -159,8 +159,8 @@ def origin_exposure_warning(ip: str) -> str | None:
     docs/v2/origin-hardening-runbook.md), а не на каждом сайте."""
     ok, detail = probe_origin(ip, f"unlisted-{secrets.token_hex(4)}.invalid", https=False)
     if ok and detail.startswith("HTTP 2"):
-        return (f"origin {ip} отвечает {detail} на неизвестный Host (дефолтная заглушка aaPanel) — "
-                "сделай default-vhost 444 и файрвол 80/443 только для Cloudflare (runbook origin-hardening)")
+        return (f"сервер {ip} отвечает {detail} на чужой адрес (стандартная заглушка aaPanel) — "
+                "закрой её и открой порты 80/443 только для Cloudflare (инструкция origin-hardening)")
     return None
 
 
@@ -301,7 +301,7 @@ def provision(site_id: int) -> dict:
                 db.commit()
                 waited = _hours(site.ns_waiting_since)
                 ns = ", ".join(zone.get("name_servers") or [])
-                hint = f"пропиши у регистратора NS Cloudflare: {ns} — дальше провижн сам заметит активацию"
+                hint = f"пропиши у регистратора NS Cloudflare: {ns} — дальше машина сама заметит, что зона заработала"
                 if ns_note:
                     hint = f"{ns_note}; NS Cloudflare: {ns}"
                 if waited >= NS_STALE_AFTER.total_seconds() // 3600:
@@ -364,8 +364,8 @@ def provision(site_id: int) -> dict:
                 warnings.append(f"AddDomain {www}: {type(e).__name__}: {e}"[:200])
             www_ok, www_detail = probe_marker(ip, www, https=False, name=mname, nonce=nonce)
         if not www_ok:
-            warnings.append(f"{www} не обслуживается vhost'ом на origin ({www_detail}) — A-запись www НЕ "
-                            "создана; добавь домен-алиас в aaPanel и повтори провижн")
+            warnings.append(f"{www} на сервере не отвечает ({www_detail}) — запись www НЕ "
+                            "создана; добавь этот адрес к сайту в aaPanel и нажми «Поднять заново»")
 
         # 4. origin TLS: (опц.) наш Origin CA -> проба HTTPS по IP -> origin_https.
         site.provision_step = "origin_tls"
@@ -384,10 +384,10 @@ def provision(site_id: int) -> dict:
                 site.origin_https = "ok"      # HTTPS наш, но сертификат не Origin CA -> full, не strict
         else:
             if site.origin_https == "origin_ca":
-                problems.append(f"Origin CA установлен, но HTTPS на origin не отвечает ({https_detail})")
+                problems.append(f"сертификат Origin CA установлен, но сервер по HTTPS не отвечает ({https_detail})")
             elif NOT_OURS in https_detail:
-                problems.append(f"HTTPS на origin отдаёт чужой/дефолтный vhost ({https_detail}) — CF "
-                                "остаётся во flexible")
+                problems.append(f"по HTTPS сервер отдаёт чужой сайт или заглушку ({https_detail}) — Cloudflare "
+                                "остаётся в режиме flexible")
             site.origin_https = "none"
         db.commit()
 
@@ -421,8 +421,8 @@ def provision(site_id: int) -> dict:
         if not http_ok:
             db.commit()
             return {"status": "error", "domain": domain, "step": "verify",
-                    "error": f"наш vhost не отвечает по HTTP на origin {ip} с Host={domain}: {http_detail} — "
-                             "сайт не объявлен готовым, повтор провижна безопасен"}
+                    "error": f"сайт {domain} не отвечает на сервере {ip}: {http_detail} — "
+                             "готовым он не считается; «Поднять заново» нажимать безопасно"}
 
         # Проба прошла — маркер больше не нужен: публичный файл с nonce в docroot боевого сайта
         # (отпечаток) удаляем. Best-effort: сбой удаления не роняет провижн (имя стабильно,
@@ -430,7 +430,7 @@ def provision(site_id: int) -> dict:
         try:
             ap.delete_file(f"{root.rstrip('/')}/{mname}")
         except Exception as e:  # noqa: BLE001
-            warnings.append(f"маркер {mname} не удалён из docroot: {type(e).__name__}: {e}"[:200])
+            warnings.append(f"проверочный файл {mname} не удалён из папки сайта: {type(e).__name__}: {e}"[:200])
 
         site.provision_step = "done"
         if site.status == "provisioning":     # published/monitoring НЕ откатываем в content (S6-12)

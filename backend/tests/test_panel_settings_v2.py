@@ -18,7 +18,7 @@ def test_settings_page_shows_v2_fields_and_dr_attribution(client):
                  "max_deep_per_run", "units_floor", "spam_anchor_max", "dropcatch", "nominet", "w_topical_fit"):
         assert f'name="{name}"' in html, name
     assert "Domain Rating by Ahrefs" in html and "max_ahrefs_per_run" not in html
-    assert "Порог сильного кандидата" in html and "авто-одобрение" not in html     # Р2
+    assert "Оценка, с которой домен сильный" in html and "авто-одобрение" not in html     # Р2
 
 
 def test_settings_save_v2_fields(client):
@@ -85,10 +85,10 @@ def test_units_left_comes_from_diag_cache_without_calling_ahrefs(client, monkeyp
     monkeypatch.setattr(settings, "AHREFS_API_KEY", "k")
     monkeypatch.setattr(AhrefsClient, "units_left", _no_network)
     monkeypatch.setattr(diag_cache, "_checks", None)
-    assert "осталось units в месяце: <b>—</b>" in client.get("/settings").text
+    assert "осталось единиц в месяце: <b>—</b>" in client.get("/settings").text
     monkeypatch.setattr(diag_cache, "_checks", [{"key": "ahrefs", "label": "Ahrefs API", "status": "ok",
                                                  "value": 1234567}])
-    assert "осталось units в месяце: <b>1 234 567</b>" in client.get("/settings").text
+    assert "осталось единиц в месяце: <b>1 234 567</b>" in client.get("/settings").text
 
 
 def test_ahrefs_diag_records_units_left(monkeypatch):
@@ -148,7 +148,7 @@ def test_brand_tokens_hint_one_brand_one_token(client):
     ложно отклонял бы домены — подсказка под полем говорит писать бренд слитно."""
     html = client.get("/settings").text
     # фраза есть ТОЛЬКО в подсказке (слово privateinternetaccess рендерится и в textarea из дефолтов)
-    assert "один бренд — один токен" in html and "стал бы тремя токенами" in html
+    assert "один бренд — одно слово" in html and "стал бы тремя словами" in html
 
 
 def test_error_rerender_keeps_all_operator_input(client):
